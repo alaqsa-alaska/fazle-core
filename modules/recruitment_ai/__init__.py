@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Optional
 
-from app import ollama as ai
+from app import llm as ai
 from app.database import fetch_all, fetch_one
 
 log = logging.getLogger("fazle.recruitment_ai")

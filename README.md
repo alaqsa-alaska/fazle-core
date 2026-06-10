@@ -1,7 +1,7 @@
 # Fazle Core — Single Source of Truth
 
-**Last Updated:** 2026-06-04
-**Status:** Production Healthy — iamazim.com company website deployed (2026-06-04)
+**Last Updated:** 2026-06-10
+**Status:** Production Healthy — GitHub Models (gpt-4o-mini) integrated as primary AI provider (2026-06-10)
 
 This README is the single authoritative reference for the Fazle Core production stack.
 All other documentation, archived notes, and prior READMEs must be considered stale.
@@ -41,7 +41,29 @@ Bridges run as **systemd services** (not Docker containers).
 Active auto-reply sources: `bridge1,bridge2` (set via `AUTO_REPLY_SOURCES` in `.env`).
 Meta ingestion is present but not in `AUTO_REPLY_SOURCES` — Meta messages are received but do not trigger auto-reply.
 
-### AI Layer (Ollama)
+### AI Layer — Dual Provider (GitHub Models + Ollama)
+
+**Primary:** GitHub Models (cloud, gpt-4o-mini) — **Active**
+**Fallback:** Ollama (local, qwen2.5:3b) — automatic if GitHub Models fails
+
+#### GitHub Models (Primary)
+
+| Item | Value |
+|---|---|
+| Provider | GitHub Models OpenAI-compatible API |
+| Endpoint | `https://models.github.ai/inference` |
+| Model | `openai/gpt-4o-mini` (set via `GITHUB_MODEL_NAME` in `.env`) |
+| Token rotation | `GITHUB_TOKEN`, `GITHUB_TOKEN_2`, `GITHUB_TOKEN_3` (round-robin) |
+| Rate limit | 15 RPM / 1000 TPM (free tier) — semaphore-serialized |
+| Client module | `app/github_models.py` |
+| Learning memory | `llm_learning_memory` DB table (every reply stored) |
+
+**To switch primary AI provider to Ollama**, update `.env`:
+```env
+PRIMARY_AI_PROVIDER=ollama
+```
+
+#### Ollama (Fallback / Secondary)
 
 | Item | Value |
 |---|---|
@@ -51,8 +73,7 @@ Meta ingestion is present but not in `AUTO_REPLY_SOURCES` — Meta messages are 
 | Port (internal) | `11434` |
 | Compose file | `/home/azim/ai-call-platform/ai-infra/docker-compose.yaml` |
 | Active model | `qwen2.5:3b` (set via `OLLAMA_MODEL` in `.env`) |
-| Available models | `qwen2.5:3b` (1.9 GB), `qwen3:14b` (~9.3 GB) |
-| Healthcheck | `ollama list` — interval 30s, timeout 20s, retries 5, start_period 120s |
+| Available models | `qwen2.5:3b` (1.9 GB), `qwen3:8b` |
 | `OLLAMA_URL` in `.env` | `http://172.22.0.7:11434` |
 
 > The host shell does not have `ollama` in PATH. Use `docker exec ollama ollama list` to inspect models.
@@ -64,13 +85,6 @@ docker network connect al-aqsa_openwebui-bridge ollama
 curl -N -X POST http://172.22.0.7:11434/api/pull -H "Content-Type: application/json" -d '{"model":"<name>","stream":true}'
 docker network disconnect al-aqsa_openwebui-bridge ollama
 ```
-
-**To switch fazle-core WhatsApp reply model**, update `/home/azim/core/.env`:
-```env
-OLLAMA_MODEL=qwen3:14b
-```
-Then restart: `sudo systemctl restart fazle-core.service`
-> Do not switch to `qwen3:14b` in production until load testing confirms reply latency under 8 seconds.
 
 ---
 
@@ -133,9 +147,18 @@ Inbound message flow:
 6. Draft gate (finance, advance, release-slip → always draft)
 7. Send via bridge client or save as draft
 
+### Unified LLM Interface (`app/llm.py`)
+
+All AI reply calls go through `app/llm.py` which:
+1. Tries GitHub Models first (if `PRIMARY_AI_PROVIDER=github_models`)
+2. Falls back to Ollama automatically on any error
+3. Stores every reply in `llm_learning_memory` table for Ollama training
+
+`message_router` and `recruitment_ai` import this as `from app import llm as ai`.
+
 ### Recruitment Reply Brain
 
-- Uses `qwen2.5:3b` via Ollama
+- Uses GitHub Models gpt-4o-mini (primary) → Ollama qwen2.5:3b (fallback)
 - Approved facts from `fazle_knowledge_base` rows in `recruitment` and `vessel_duty`
 - Conversation memory from read-only `wbom_whatsapp_messages` history
 - Module: `modules/recruitment_ai`
@@ -173,7 +196,7 @@ Topics covered: all 9 job positions (duties, salary, career path), vessel/escort
 
 ## Current Critical Configuration Flags
 
-These are the verified live values in `/home/azim/core/.env` as of 2026-05-31:
+These are the verified live values in `/home/azim/core/.env` as of 2026-06-10:
 
 ```
 AUTO_REPLY_ENABLED=true
@@ -191,10 +214,15 @@ AI_SAFE_MODE=false
 REVIEWED_REPLY_MEMORY_ENABLED=true
 SCHEDULER_ENABLED=true
 GAP_SCAN_ENABLED=true
+PRIMARY_AI_PROVIDER=github_models
+GITHUB_MODEL_NAME=openai/gpt-4o-mini
+DRAFT_CREATION_ENABLED=true
 ```
 
-**DRAFT_CREATION_ENABLED:** Not explicitly set in `.env` — defaults to `false` in `app/config.py`.
-**Accepted risk:** When outbound send fails and draft creation is disabled, the processed message is silently discarded with no draft saved and no retry. This is an owner-accepted operational risk while the system is stable. Re-evaluate if bridge instability returns.
+**New in v1.1.0 (2026-06-10):**
+- `PRIMARY_AI_PROVIDER=github_models` — GitHub Models gpt-4o-mini is now the primary AI
+- `DRAFT_CREATION_ENABLED=true` — Drafts are created for admin review
+- `GITHUB_TOKEN` / `GITHUB_TOKEN_2` / `GITHUB_TOKEN_3` — round-robin token rotation
 
 ---
 

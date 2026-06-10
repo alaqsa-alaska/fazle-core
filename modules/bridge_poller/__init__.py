@@ -572,6 +572,17 @@ _PROMPT_INJECTION_PATTERNS: tuple = (
     "ignore your", "disregard instructions", "override instructions",
 )
 
+# ── PATCHES 4+5: Outbound safety patterns ──────────────────────────────────────
+_OUTBOUND_POISON: tuple = (
+    "এআই-এর বিশ্লেষণ", "এআই-এর ইনটেন্ট",
+    "| :--- |", "chain_of_thought", "Intent)",
+    "প্রার্থীর মেসেজ", "প্রার্থীর সম্ভাব্য প্রশ্ন",
+    "Semantic Analysis", "Tokenization",
+    "RAG pipeline", "LLM pipeline", "prompt template",
+    "OCR raw", "reasoning_trace",
+    "বিশ্লেষণ (Intent)", "[1] ", "[2] ",
+)
+
 
 def _record_loop_reply(phone: str) -> None:
     """Track a sent reply timestamp for loop detection (STEP 7)."""
@@ -916,220 +927,10 @@ async def _poll_bridge(config: dict):
                         )
                         # fall through to legacy path below — no 'continue'
 
-                # Cooldown check — don't spam the same person
-                if not await _can_reply(phone):
-                    log.debug(f"[{bridge_name}] Cooldown active for {phone}, skipping reply")
-                    continue
-
-                # Part I: keyword flood — same word repeated too many times
-                if _check_keyword_flood(phone, text):
-                    log.warning(f"[KW_FLOOD] suppressed reply bridge={bridge_name} phone={phone}")
-                    continue
-
-                # Classify intent for draft storage (process_message re-classifies internally)
-                msg_intent = classify_intent(text)
-                if msg_intent in ("unknown", "greeting"):
-                    try:
-                        if _is_recruit_trigger(text) or _looks_like_recruit_followup(text) or await _get_recruit_session(phone):
-                            msg_intent = "recruitment"
-                    except Exception as _recruit_intent_err:
-                        log.debug(f"[P17-RECRUIT] intent override check failed {phone}: {_recruit_intent_err}")
-
-                # STEP 8: Prompt injection defense — quarantine before LLM routing
-                _injection_pattern = _detect_prompt_injection(text)
-                if _injection_pattern:
-                    log.warning(
-                        f"[PROMPT_INJECTION] bridge={bridge_name} phone={phone} "
-                        f"pattern={_injection_pattern!r} — quarantined, not routed to LLM"
-                    )
-                    await _save_draft(
-                        bridge_name, phone,
-                        f"⛔ Quarantined (prompt injection detected).\n"
-                        f"Pattern: {_injection_pattern!r}\nOriginal: {text[:200]!r}",
-                        msg_intent,
-                    )
-                    continue
-
-                # Full routing — admin commands, recruitment, escort, payment, KB, AI
-                reply, admin_note = await process_message(phone, text, bridge_name)
-
-                if reply:
-                    # P17-FIX-2: recruit_gate — recruitment intake bypasses SAFE MODE
-                    _recruit_gate = False
-                    if not _settings.auto_reply_enabled and _settings.recruitment_autoreply_enabled:
-                        _admin_set = {
-                            _settings.admin_meta_number,
-                            _settings.admin_bridge1_number,
-                            _settings.admin_bridge2_number,
-                            *_settings.admin_number_list,
-                        }
-                        if phone not in _admin_set:
-                            if _is_recruit_trigger(text):
-                                _recruit_gate = True
-                                log.info(f"[P17-RECRUIT] [{bridge_name}] recruit_gate=TRIGGER phone={phone}")
-                            else:
-                                try:
-                                    if await _get_recruit_session(phone):
-                                        _recruit_gate = True
-                                        log.info(f"[P17-RECRUIT] [{bridge_name}] recruit_gate=SESSION phone={phone}")
-                                except Exception as _e:
-                                    log.debug(f"[P17-RECRUIT] session check failed {phone}: {_e}")
-
-                    if _settings.auto_reply_enabled or _recruit_gate:
-                        # Phase 4.5: advance-request text guard — force draft for
-                        # actual money requests regardless of intent classification.
-                        if any(phrase in text.lower() for phrase in _ADVANCE_REQUEST_PHRASES):
-                            log.info(
-                                "[ADVANCE_REQUEST_DRAFT] phone=%s intent=%r → advance"
-                                " request phrase → forced draft",
-                                phone, msg_intent,
-                            )
-                            await _save_draft(bridge_name, phone, reply, msg_intent)
-                            continue
-                        # Part H: financial/high-risk intents always go to draft —
-                        # TASK 3: bypass for explicitly safe intents (salary_query,
-                        # payment_due, advance_request, recruitment).
-                        # employee_salary_complaint / legal_issue / payment_issue remain drafts.
-                        _financial_hit = any(
-                            fi in msg_intent.lower() for fi in _FINANCIAL_DRAFT_INTENTS
-                        )
-                        if _financial_hit and not _is_safe_autosend_intent(msg_intent, id_role):
-                            log.info(
-                                "[FINANCIAL_DRAFT] phone=%s intent=%r → forced draft",
-                                phone, msg_intent,
-                            )
-                            await _save_draft(bridge_name, phone, reply, msg_intent)
-                            continue
-                        # Phase 4.5: complaint-phrase override — if text contains dispute/complaint
-                        # language AND intent is financial, force draft even for safe-autosend intents.
-                        # Protects: "বেতন পাইনি", "পেমেন্ট সমস্যা", "অ্যাডভান্স পাইনি", etc.
-                        if _financial_hit and any(
-                            phrase in text.lower() for phrase in _COMPLAINT_PHRASES
-                        ):
-                            log.info(
-                                "[COMPLAINT_DRAFT] phone=%s intent=%r → complaint phrase detected"
-                                " → forced draft (protected)",
-                                phone, msg_intent,
-                            )
-                            await _save_draft(bridge_name, phone, reply, msg_intent)
-                            continue
-                        if _financial_hit:
-                            log.info(
-                                "[SAFE_AUTOSEND] phone=%s intent=%r → bypassing financial draft gate",
-                                phone, msg_intent,
-                            )
-                        draft_gate = _is_draft_always(phone, id_role, id_name)
-                        # TASK 3: safe intents override the draft-always role/name gate
-                        if draft_gate and _is_safe_autosend_intent(msg_intent, id_role):
-                            log.info(
-                                "[SAFE_AUTOSEND] phone=%s intent=%r role=%s"
-                                " → overriding draft-always gate",
-                                phone, msg_intent, id_role,
-                            )
-                            draft_gate = False
-                        # STEP 6: admin_review_only contacts are always drafted
-                        if not draft_gate:
-                            _contact_risk = _settings.contact_risk_map.get(phone, "")
-                            if _contact_risk == "admin_review_only":
-                                draft_gate = True
-                                log.info(f"[RISK_LEVEL] {phone} risk=admin_review_only → forced draft")
-                            elif _contact_risk == "monitored":
-                                log.info(f"[RISK_LEVEL] {phone} risk=monitored — reply allowed with extra logging")
-                        if draft_gate:
-                            log.info(
-                                f"[DRAFT-GATE] {phone} name={id_name!r} role={id_role} "
-                                f"→ draft (prefix/role/phone match)"
-                            )
-                            await _save_draft(bridge_name, phone, reply, msg_intent)
-                        else:
-                            # STEP 7: Loop detection — prevent autoreply storms
-                            if _check_loop_detect(phone):
-                                log.warning(
-                                    f"[LOOP_DETECT] autoreply paused for {phone} "
-                                    f"bridge={bridge_name} — saving as draft"
-                                )
-                                await _save_draft(bridge_name, phone, reply, msg_intent)
-                                continue
-
-                            # ── PATCHES 4+5 + STEPS 3+4+5: Outbound safety firewall ──
-                            # PATCH 5: extended high-risk content blocklist
-                            _OUTBOUND_POISON = (
-                                "এআই-এর বিশ্লেষণ", "এআই-এর ইনটেন্ট",
-                                "| :--- |", "chain_of_thought", "Intent)",
-                                "প্রার্থীর মেসেজ", "প্রার্থীর সম্ভাব্য প্রশ্ন",
-                                "Semantic Analysis", "Tokenization",
-                                "RAG pipeline", "LLM pipeline", "prompt template",
-                                "OCR raw", "reasoning_trace",
-                                "বিশ্লেষণ (Intent)", "[1] ", "[2] ",
-                            )
-                            _poison_hit = next(
-                                (p for p in _OUTBOUND_POISON if p in reply), None
-                            )
-                            if _poison_hit:
-                                _block_reason = f"POISON:{_poison_hit!r}"
-                                log.error(
-                                    f"[OUTBOUND_SANITIZER_BLOCK] bridge={bridge_name} "
-                                    f"phone={phone} pattern={_poison_hit!r} — analysis "
-                                    f"text blocked, saving draft"
-                                )
-                                await _save_draft(bridge_name, phone, reply, msg_intent)
-                                await _record_safety_incident(bridge_name, phone, _block_reason, reply)
-                                await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
-                                continue
-
-                            # PATCH 4: length + markdown table + numbered sections guard
-                            _reply_len = len(reply)
-                            _has_table = reply.count(" | ") >= 2 or ":---" in reply
-                            _is_long = _reply_len > 400
-                            _has_headings = reply.count("\n#") >= 2
-                            if _is_long or _has_table or _has_headings:
-                                _block_reason = f"STRUCT:len={_reply_len},table={_has_table},headings={_has_headings}"
-                                log.warning(
-                                    f"[OUTBOUND_LENGTH_GUARD] bridge={bridge_name} "
-                                    f"phone={phone} len={_reply_len} "
-                                    f"table={_has_table} headings={_has_headings} "
-                                    f"— suspicious reply, saving draft for review"
-                                )
-                                await _save_draft(bridge_name, phone, reply, msg_intent)
-                                await _record_safety_incident(bridge_name, phone, _block_reason, reply)
-                                await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
-                                continue
-
-                            # STEP 5: AI_SAFE_MODE — force uncertain/large replies to draft
-                            if _settings.ai_safe_mode:
-                                _safe_reason = None
-                                if len(reply) > 200:
-                                    _safe_reason = f"SAFE_MODE:LONG({len(reply)}chars)"
-                                elif (id_conf or 0) < 50:
-                                    _safe_reason = f"SAFE_MODE:LOW_CONF({id_conf})"
-                                elif msg_intent in ("unknown", "unclear", ""):
-                                    _safe_reason = f"SAFE_MODE:UNCERTAIN_INTENT({msg_intent!r})"
-                                if _safe_reason:
-                                    log.warning(
-                                        f"[AI_SAFE_MODE] {_safe_reason} "
-                                        f"bridge={bridge_name} phone={phone}"
-                                    )
-                                    await _save_draft(bridge_name, phone, reply, msg_intent)
-                                    continue
-
-                            bridge = get_bridge()
-                            sent = await bridge.send(phone, reply)
-                            if sent:
-                                await _record_reply(phone)
-                                await _save_message(bridge_name, phone, reply, "outbound",
-                                                    identity_role=id_role, identity_confidence=id_conf,
-                                                    workflow=msg_intent)
-                                log.info(f"[{bridge_name}] Replied to {phone}")
-                            else:
-                                log.warning(f"[{bridge_name}] Send failed to {phone}")
-                    else:
-                        log.warning(
-                            f"SAFE MODE: reply suppressed for {phone} ({bridge_name}). Saving draft."
-                        )
-                        await _save_draft(bridge_name, phone, reply, msg_intent)
-
-                if admin_note and _settings.auto_reply_enabled:
-                    await _notify_admin_bridge(admin_note)
+                await process_bridge_inbound(
+                    bridge_name, phone, text,
+                    id_role=id_role, id_conf=id_conf, id_name=id_name,
+                )
 
             if bridge_name == "bridge1":
                 log.info(
@@ -1386,3 +1187,196 @@ async def _alert_admin_safety_block(
         "bridge": "bridge2",
     })
     log.info(f"[SAFETY_ALERT] admin alerted reason={reason} recipient={phone}")
+
+
+# ── Shared inbound processing pipeline ────────────────────────────────────────
+
+async def process_bridge_inbound(
+    bridge_name: str,
+    phone: str,
+    text: str,
+    *,
+    id_role: str = "unknown",
+    id_conf: int = 0,
+    id_name: str = "",
+) -> None:
+    """Unified bridge inbound processing pipeline.
+
+    Called by both _poll_bridge() and the webhook handler in main.py after
+    inbound save and identity detection.  Contains all safety gates so both
+    entry paths behave identically.
+
+    Does NOT save the inbound message — callers must do that beforehand.
+    """
+    # 1. Cooldown
+    if not await _can_reply(phone):
+        log.debug("[%s] cooldown active for %s", bridge_name, phone)
+        return
+
+    # 2. Keyword flood
+    if _check_keyword_flood(phone, text):
+        log.warning("[KW_FLOOD] suppressed reply bridge=%s phone=%s", bridge_name, phone)
+        return
+
+    # 3. Intent classification (router re-classifies internally; this copy drives draft gates)
+    msg_intent = classify_intent(text)
+    if msg_intent in ("unknown", "greeting"):
+        try:
+            if _is_recruit_trigger(text) or _looks_like_recruit_followup(text) or await _get_recruit_session(phone):
+                msg_intent = "recruitment"
+        except Exception as _e:
+            log.debug("[P17-RECRUIT] intent override check failed %s: %s", phone, _e)
+
+    # 4. Prompt injection defense
+    _inj = _detect_prompt_injection(text)
+    if _inj:
+        log.warning(
+            "[PROMPT_INJECTION] bridge=%s phone=%s pattern=%r — quarantined",
+            bridge_name, phone, _inj,
+        )
+        await _save_draft(
+            bridge_name, phone,
+            f"⛔ Quarantined (prompt injection detected).\nPattern: {_inj!r}\nOriginal: {text[:200]!r}",
+            msg_intent,
+        )
+        return
+
+    # 5. Full routing
+    reply, admin_note = await process_message(phone, text, bridge_name)
+
+    if reply:
+        # P17-FIX-2: recruit_gate — recruitment intake bypasses SAFE MODE
+        _recruit_gate = False
+        if not _settings.auto_reply_enabled and _settings.recruitment_autoreply_enabled:
+            _admin_set = {
+                _settings.admin_meta_number,
+                _settings.admin_bridge1_number,
+                _settings.admin_bridge2_number,
+                *_settings.admin_number_list,
+            }
+            if phone not in _admin_set:
+                if _is_recruit_trigger(text):
+                    _recruit_gate = True
+                    log.info("[P17-RECRUIT] [%s] recruit_gate=TRIGGER phone=%s", bridge_name, phone)
+                else:
+                    try:
+                        if await _get_recruit_session(phone):
+                            _recruit_gate = True
+                            log.info("[P17-RECRUIT] [%s] recruit_gate=SESSION phone=%s", bridge_name, phone)
+                    except Exception as _e:
+                        log.debug("[P17-RECRUIT] session check failed %s: %s", phone, _e)
+
+        if _settings.auto_reply_enabled or _recruit_gate:
+            # Phase 4.5: advance request phrase guard
+            if any(phrase in text.lower() for phrase in _ADVANCE_REQUEST_PHRASES):
+                log.info("[ADVANCE_REQUEST_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
+                await _save_draft(bridge_name, phone, reply, msg_intent)
+                return
+
+            # Part H: financial intent draft gate
+            _financial_hit = any(fi in msg_intent.lower() for fi in _FINANCIAL_DRAFT_INTENTS)
+            if _financial_hit and not _is_safe_autosend_intent(msg_intent, id_role):
+                log.info("[FINANCIAL_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
+                await _save_draft(bridge_name, phone, reply, msg_intent)
+                return
+
+            # Phase 4.5: complaint-phrase override
+            if _financial_hit and any(phrase in text.lower() for phrase in _COMPLAINT_PHRASES):
+                log.info(
+                    "[COMPLAINT_DRAFT] phone=%s intent=%r → complaint phrase → forced draft",
+                    phone, msg_intent,
+                )
+                await _save_draft(bridge_name, phone, reply, msg_intent)
+                return
+
+            if _financial_hit:
+                log.info("[SAFE_AUTOSEND] phone=%s intent=%r → bypassing financial draft gate", phone, msg_intent)
+
+            # DRAFT_ALWAYS gate (phone, role, name, prefix)
+            draft_gate = _is_draft_always(phone, id_role, id_name)
+            if draft_gate and _is_safe_autosend_intent(msg_intent, id_role):
+                log.info(
+                    "[SAFE_AUTOSEND] phone=%s intent=%r role=%s → overriding draft-always gate",
+                    phone, msg_intent, id_role,
+                )
+                draft_gate = False
+
+            # STEP 6: risk level gate
+            if not draft_gate:
+                _contact_risk = _settings.contact_risk_map.get(phone, "")
+                if _contact_risk == "admin_review_only":
+                    draft_gate = True
+                    log.info("[RISK_LEVEL] %s risk=admin_review_only → forced draft", phone)
+                elif _contact_risk == "monitored":
+                    log.info("[RISK_LEVEL] %s risk=monitored — reply allowed with extra logging", phone)
+
+            if draft_gate:
+                log.info("[DRAFT-GATE] %s name=%r role=%s → draft", phone, id_name, id_role)
+                await _save_draft(bridge_name, phone, reply, msg_intent)
+            else:
+                # STEP 7: loop detection
+                if _check_loop_detect(phone):
+                    log.warning("[LOOP_DETECT] autoreply paused for %s bridge=%s", phone, bridge_name)
+                    await _save_draft(bridge_name, phone, reply, msg_intent)
+                    return
+
+                # Outbound poison block
+                _poison_hit = next((p for p in _OUTBOUND_POISON if p in reply), None)
+                if _poison_hit:
+                    _block_reason = f"POISON:{_poison_hit!r}"
+                    log.error(
+                        "[OUTBOUND_SANITIZER_BLOCK] bridge=%s phone=%s pattern=%r",
+                        bridge_name, phone, _poison_hit,
+                    )
+                    await _save_draft(bridge_name, phone, reply, msg_intent)
+                    await _record_safety_incident(bridge_name, phone, _block_reason, reply)
+                    await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
+                    return
+
+                # Length/structure guard
+                _reply_len = len(reply)
+                _has_table = reply.count(" | ") >= 2 or ":---" in reply
+                _is_long = _reply_len > 400
+                _has_headings = reply.count("\n#") >= 2
+                if _is_long or _has_table or _has_headings:
+                    _block_reason = f"STRUCT:len={_reply_len},table={_has_table},headings={_has_headings}"
+                    log.warning(
+                        "[OUTBOUND_LENGTH_GUARD] bridge=%s phone=%s len=%d table=%s headings=%s",
+                        bridge_name, phone, _reply_len, _has_table, _has_headings,
+                    )
+                    await _save_draft(bridge_name, phone, reply, msg_intent)
+                    await _record_safety_incident(bridge_name, phone, _block_reason, reply)
+                    await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
+                    return
+
+                # AI_SAFE_MODE
+                if _settings.ai_safe_mode:
+                    _safe_reason = None
+                    if len(reply) > 200:
+                        _safe_reason = f"SAFE_MODE:LONG({len(reply)}chars)"
+                    elif (id_conf or 0) < 50:
+                        _safe_reason = f"SAFE_MODE:LOW_CONF({id_conf})"
+                    elif msg_intent in ("unknown", "unclear", ""):
+                        _safe_reason = f"SAFE_MODE:UNCERTAIN_INTENT({msg_intent!r})"
+                    if _safe_reason:
+                        log.warning("[AI_SAFE_MODE] %s bridge=%s phone=%s", _safe_reason, bridge_name, phone)
+                        await _save_draft(bridge_name, phone, reply, msg_intent)
+                        return
+
+                # Send
+                bridge = get_bridge1() if bridge_name == "bridge1" else get_bridge2()
+                sent = await bridge.send(phone, reply)
+                if sent:
+                    await _record_reply(phone)
+                    await _save_message(bridge_name, phone, reply, "outbound",
+                                        identity_role=id_role, identity_confidence=id_conf,
+                                        workflow=msg_intent)
+                    log.info("[%s] Replied to %s", bridge_name, phone)
+                else:
+                    log.warning("[%s] Send failed to %s", bridge_name, phone)
+        else:
+            log.warning("SAFE MODE: reply suppressed for %s (%s). Saving draft.", phone, bridge_name)
+            await _save_draft(bridge_name, phone, reply, msg_intent)
+
+    if admin_note and _settings.auto_reply_enabled:
+        await _notify_admin_bridge(admin_note)

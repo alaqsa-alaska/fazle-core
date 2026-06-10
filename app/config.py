@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:3b"
 
+    # GitHub Models (OpenAI-compatible — https://models.github.ai/inference)
+    github_token: str = ""
+    github_token_2: str = ""
+    github_token_3: str = ""
+    github_model_name: str = "openai/gpt-4o-mini"
+    github_model_endpoint: str = "https://models.github.ai/inference"
+    primary_ai_provider: str = "github_models"   # "github_models" | "ollama"
+
     # Bridges
     bridge1_url: str = "http://localhost:8080"
     bridge1_number: str = ""

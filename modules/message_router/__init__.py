@@ -28,6 +28,7 @@ from shared.draft_reply import create_draft_reply
 from modules.intent import classify
 from modules.identity_brain import detect_identity
 from modules.number_identity import normalize_phone as get_phone_variants
+from app import llm as ai
 from modules.payroll_logic import get_payroll_summary, format_payroll_context
 from modules.escort import (
     handle_escort_client_message,

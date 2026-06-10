@@ -440,9 +440,10 @@ def _probe_mem() -> dict:
 
 
 async def _build_health(deep: bool = False) -> dict:
-    db_p, ollama_p, ob_p, hb1_p, hb2_p = await asyncio.gather(
+    db_p, ollama_p, llm_p, ob_p, hb1_p, hb2_p = await asyncio.gather(
         _probe_db(),
         _safe_ollama(),
+        _safe_llm(),
         _probe_outbound(),
         _probe_heartbeat("bridge_poller:bridge1"),
         _probe_heartbeat("bridge_poller:bridge2"),
@@ -463,6 +464,7 @@ async def _build_health(deep: bool = False) -> dict:
         "disk": disk_p,
         "mem": mem_p,
         "ollama": ollama_p,
+        "llm": llm_p,
     }
     statuses = [p.get("status", "ok") for p in probes.values()]
     if "critical" in statuses:
@@ -491,6 +493,14 @@ async def _safe_ollama() -> dict:
             s.setdefault("status", "ok")
             return s
         return {"status": "ok", "raw": str(s)[:200]}
+    except Exception as e:
+        return {"status": "degraded", "error": str(e)[:200]}
+
+
+async def _safe_llm() -> dict:
+    try:
+        from app.llm import check_health as _llm_health
+        return await _llm_health()
     except Exception as e:
         return {"status": "degraded", "error": str(e)[:200]}
 
@@ -1058,8 +1068,20 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         log.info(f"[{source.upper()}] from={sender_clean} text={text[:60]!r}")
 
+        # Detect identity before saving so DB record has role/confidence metadata
         try:
-            await _save_message(source, sender_clean, text, direction="inbound")
+            from modules.identity_brain import detect_identity as _detect_id
+            _identity = await _detect_id(sender_clean, text)
+            _id_role = _identity["identity_role"]
+            _id_conf = _identity["identity_confidence"]
+            _id_name = (_identity.get("display_name") or "").strip()
+        except Exception as _id_err:
+            log.debug(f"[{source.upper()}] identity detection failed: {_id_err}")
+            _id_role, _id_conf, _id_name = "unknown", 0, ""
+
+        try:
+            await _save_message(source, sender_clean, text, direction="inbound",
+                                identity_role=_id_role, identity_confidence=_id_conf)
         except Exception as _save_err:
             if msg_id and pre_marked:
                 try:
@@ -1098,34 +1120,12 @@ async def _handle_bridge_event(payload: dict, source: str):
             log.debug(f"[{source.upper()}] sync-only, skipping reply/draft for {sender_clean}")
             continue
 
-        reply, send_to_admin = await _process_message(sender_clean, text, source)
-
-        if reply:
-            recruit_gate = (not settings.auto_reply_enabled
-                            and await _should_recruitment_autoreply(sender_clean, text))
-            if settings.auto_reply_enabled or recruit_gate:
-                if await _force_draft_by_saved_contact_name(sender_clean):
-                    log.info(f"[{source.upper()}] forced draft by saved contact name policy for {sender_clean}")
-                    intent = classify(text)
-                    await _save_draft(source, sender_clean, reply, intent)
-                    continue
-                if recruit_gate:
-                    log.info(f"[RECRUIT-AUTOREPLY] sending to {sender_clean} ({source}) despite SAFE MODE")
-                bridge = get_bridge1() if source == "bridge1" else get_bridge2()
-                log.info(f"[DIRECT_BRIDGE_SEND_START] source={source} sender={sender_clean} body={reply[:60]!r}")
-                ok = await bridge.send(sender, reply)
-                if ok:
-                    log.info(f"[DIRECT_BRIDGE_SEND_SUCCESS] source={source} sender={sender_clean}")
-                else:
-                    log.error(f"[DIRECT_BRIDGE_SEND_FAIL] source={source} sender={sender_clean}")
-                await _save_message(source, sender_clean, reply, direction="outbound")
-            else:
-                log.warning(f"SAFE MODE: reply suppressed for {sender_clean} ({source}).")
-                intent = classify(text)
-                await _save_draft(source, sender_clean, reply, intent)
-
-        if send_to_admin:
-            await _notify_admin(send_to_admin)
+        # Full production pipeline — identical to bridge_poller path
+        from modules.bridge_poller import process_bridge_inbound
+        await process_bridge_inbound(
+            source, sender_clean, text,
+            id_role=_id_role, id_conf=_id_conf, id_name=_id_name,
+        )
 
 
 # ── Unified message processor — delegates to modules.message_router ────────────
@@ -1419,15 +1419,24 @@ async def _send_fb_comment_reply(comment_id: str, text: str) -> bool:
         return False
 
 
-async def _save_message(source: str, sender: str, text: str, direction: str):
+async def _save_message(
+    source: str,
+    sender: str,
+    text: str,
+    direction: str,
+    identity_role: str = "",
+    identity_confidence: int = 0,
+):
     try:
         await execute(
             """
             INSERT INTO wbom_whatsapp_messages
-                (sender_number, message_body, message_type, direction, platform, is_processed, contact_identifier)
-            VALUES ($1, $2, 'text', $3, $4, true, $1)
+                (sender_number, message_body, message_type, direction, platform, is_processed, contact_identifier,
+                 identity_role, identity_confidence)
+            VALUES ($1, $2, 'text', $3, $4, true, $1, $5, $6)
             """,
             sender, text, direction, source,
+            identity_role or None, identity_confidence or None,
         )
     except Exception as e:
         log.warning(f"Message save error: {e}")
