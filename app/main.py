@@ -28,7 +28,7 @@ from app.config import get_settings
 from app.database import init_db, close_db, fetch_one, fetch_all, fetch_val, execute
 from app.bridge import get_bridge1, get_bridge2
 from app.logging_setup import setup_logging
-from app import ollama as ai
+from app import llm as ai
 from modules.intent import classify
 from modules.bridge_poller import start_pollers
 from modules.escort_slip_extractor import extract_escort_slip, test_report as escort_test_report
@@ -1127,6 +1127,18 @@ async def _handle_bridge_event(payload: dict, source: str):
             id_role=_id_role, id_conf=_id_conf, id_name=_id_name,
         )
 
+        # Background: extract structured facts from inbound message
+        try:
+            from modules.memory_extractor import extract_and_save_memory
+            asyncio.create_task(
+                extract_and_save_memory(
+                    phone=sender_clean,
+                    conversation=[{"role": "user", "content": text}],
+                )
+            )
+        except Exception as _me_err:
+            log.debug("[memory_extractor] task spawn failed: %s", _me_err)
+
 
 # ── Unified message processor — delegates to modules.message_router ────────────
 
@@ -2137,6 +2149,167 @@ async def chat_message(request: Request):
         "top_score": top_score,
         "fallback": True,
     }
+
+
+# ── User Management APIs ──────────────────────────────────────────────────────
+
+@app.get("/api/users/search", dependencies=[Depends(require_api_key)])
+async def api_users_search(q: str, limit: int = 10):
+    """Search user_profiles by canonical phone or name."""
+    from modules.phone_normalizer import normalize_phone
+    limit = max(1, min(limit, 100))
+    canonical = normalize_phone(q)
+    if canonical:
+        rows = await fetch_all(
+            "SELECT * FROM user_profiles WHERE phone_canonical = $1",
+            canonical,
+        )
+    else:
+        pattern = f"%{q}%"
+        rows = await fetch_all(
+            "SELECT * FROM user_profiles WHERE name ILIKE $1 OR phone_canonical LIKE $2 LIMIT $3",
+            pattern, pattern, limit,
+        )
+    return {"users": rows, "count": len(rows)}
+
+
+@app.get("/api/users/{phone}", dependencies=[Depends(require_api_key)])
+async def api_get_user(phone: str):
+    """Return full user context (profile + memories) for a phone number."""
+    from modules.phone_normalizer import normalize_phone
+    from modules.role_classifier import get_user_context
+    canonical = normalize_phone(phone) or phone
+    return await get_user_context(canonical)
+
+
+@app.put("/api/users/{phone}", dependencies=[Depends(require_api_key)])
+async def api_update_user(phone: str, data: dict):
+    """Upsert a user_profiles row."""
+    from modules.phone_normalizer import normalize_phone
+    canonical = normalize_phone(phone) or phone
+    await execute(
+        """INSERT INTO user_profiles
+               (phone_canonical, phone_raw, name, role, relationship_type, notes)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (phone_canonical) DO UPDATE SET
+               name              = COALESCE(EXCLUDED.name, user_profiles.name),
+               role              = COALESCE(EXCLUDED.role, user_profiles.role),
+               relationship_type = COALESCE(EXCLUDED.relationship_type, user_profiles.relationship_type),
+               notes             = COALESCE(EXCLUDED.notes, user_profiles.notes),
+               updated_at        = NOW()""",
+        canonical,
+        phone if phone != canonical else None,
+        data.get("name"),
+        data.get("role", "unknown"),
+        data.get("relationship_type"),
+        data.get("notes"),
+    )
+    return {"status": "updated", "phone": canonical}
+
+
+@app.post("/api/users/{phone}/memory", dependencies=[Depends(require_api_key)])
+async def api_add_user_memory(phone: str, data: dict):
+    """Manually add a fact to user_memory."""
+    from modules.phone_normalizer import normalize_phone
+    from modules.memory_extractor import _ensure_profile
+    canonical = normalize_phone(phone) or phone
+    memory_type = (data.get("type") or data.get("memory_type") or "conversation_fact")[:50]
+    content = (data.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content required")
+    await _ensure_profile(canonical)
+    await execute(
+        """INSERT INTO user_memory (phone_canonical, memory_type, content, source)
+           VALUES ($1, $2, $3, 'admin')""",
+        canonical, memory_type, content[:2000],
+    )
+    return {"status": "saved", "phone": canonical, "type": memory_type}
+
+
+# ── Memory Review APIs ────────────────────────────────────────────────────────
+
+@app.get("/api/memory/pending", dependencies=[Depends(require_api_key)])
+async def api_memory_pending(limit: int = 50):
+    """LLM replies pending KB promotion review."""
+    limit = max(1, min(limit, 200))
+    rows = await fetch_all(
+        """SELECT id, provider, model, trigger_text, reply_text, intent,
+                  role, source, is_fallback, created_at
+           FROM llm_learning_memory
+           WHERE promoted_to_kb = FALSE AND dismissed = FALSE
+           ORDER BY created_at DESC
+           LIMIT $1""",
+        limit,
+    )
+    return {"memories": rows, "count": len(rows)}
+
+
+@app.post("/api/memory/{memory_id}/promote", dependencies=[Depends(require_api_key)])
+async def api_memory_promote(memory_id: int, data: dict = {}):
+    """Promote an LLM reply to the knowledge base."""
+    row = await fetch_one(
+        "SELECT * FROM llm_learning_memory WHERE id = $1",
+        memory_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="memory not found")
+
+    edited = (data.get("content") or "").strip()
+    kb_text = edited or f"প্রশ্ন: {row['trigger_text']}\nউত্তর: {row['reply_text']}"
+    category = (data.get("category") or "conversation")[:50]
+
+    await execute(
+        """INSERT INTO fazle_knowledge_base
+               (category, key, trigger_keywords, reply_text, confidence, is_active)
+           VALUES ($1, $2, '', $3, 0.9, true)
+           ON CONFLICT DO NOTHING""",
+        category,
+        f"llm_promoted_{memory_id}",
+        kb_text[:2000],
+    )
+    await execute(
+        "UPDATE llm_learning_memory SET promoted_to_kb = TRUE, promoted_at = NOW() WHERE id = $1",
+        memory_id,
+    )
+    return {"status": "promoted", "memory_id": memory_id, "category": category}
+
+
+@app.post("/api/memory/{memory_id}/dismiss", dependencies=[Depends(require_api_key)])
+async def api_memory_dismiss(memory_id: int):
+    """Dismiss an LLM reply from the review queue."""
+    result = await execute(
+        "UPDATE llm_learning_memory SET dismissed = TRUE WHERE id = $1",
+        memory_id,
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="memory not found")
+    return {"status": "dismissed", "memory_id": memory_id}
+
+
+# ── LLM Usage Stats ───────────────────────────────────────────────────────────
+
+@app.get("/api/stats/llm", dependencies=[Depends(require_api_key)])
+async def api_llm_stats():
+    """GitHub Models + Ollama usage stats from llm_learning_memory."""
+    try:
+        rows = await fetch_all(
+            """SELECT
+                   provider,
+                   COUNT(*)                                                      AS total,
+                   COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 day') AS today,
+                   COUNT(*) FILTER (WHERE is_fallback = TRUE)                   AS fallback_total
+               FROM llm_learning_memory
+               GROUP BY provider
+               ORDER BY total DESC"""
+        )
+        return {
+            "providers": rows,
+            "note": "GitHub Models free tier: 15 RPM",
+            "ts": time.time(),
+        }
+    except Exception as e:
+        log.warning("[api/stats/llm] query failed: %s", e)
+        return {"providers": [], "error": str(e), "ts": time.time()}
 
 
 # ── Batch 22 — Observability endpoints ────────────────────────────────────────

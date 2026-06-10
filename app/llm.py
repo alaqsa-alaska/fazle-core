@@ -198,6 +198,62 @@ async def generate_recruitment_reply(
     return _FALLBACK_REPLY
 
 
+async def generate_chat_reply(
+    question: str,
+    context: str,
+    history: list[dict],
+    model: str | None = None,
+) -> Optional[str]:
+    """
+    Unified Chat Lab reply router. GitHub Models → Ollama fallback.
+    """
+    settings = get_settings()
+    provider = settings.primary_ai_provider
+
+    if provider == "github_models":
+        try:
+            from app import github_models
+            reply = await github_models.generate_chat_reply(
+                question=question,
+                context=context,
+                history=history,
+                model=model,
+            )
+            if reply:
+                return reply
+            log.warning("[llm] github_models chat reply empty, falling back to ollama")
+        except Exception as e:
+            log.warning("[llm] github_models chat reply failed, falling back to ollama: %s", e)
+
+    try:
+        from app import ollama
+        return await ollama.generate_chat_reply(
+            question=question,
+            context=context,
+            history=history,
+            model=model,
+        )
+    except Exception as e:
+        log.error("[llm] ollama chat reply also failed: %s", e)
+    return None
+
+
+async def check_ollama_health() -> dict:
+    """Pass-through so callers using `llm as ai` still work."""
+    from app import ollama
+    return await ollama.check_ollama_health()
+
+
+async def generate_rag_answer(
+    question: str,
+    context: str,
+    model: str | None = None,
+) -> Optional[str]:
+    """Pass-through so callers using `llm as ai` still work."""
+    from app import ollama
+    return await ollama.generate_rag_answer(question=question, context=context, model=model)
+
+
 async def check_health() -> dict:
     """Health check for both providers."""
     settings = get_settings()

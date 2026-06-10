@@ -202,6 +202,99 @@ async def generate_recruitment_reply(
     return None
 
 
+async def generate_structured_response(
+    prompt: str,
+    model: str | None = None,
+) -> Optional[str]:
+    """
+    Call GitHub Models with an arbitrary prompt and return the raw text.
+    Intended for structured-output tasks (JSON extraction, classification).
+    Returns None on failure.
+    """
+    settings = get_settings()
+    use_model = model or settings.github_model_name
+    t0 = time.monotonic()
+    async with _github_sem:
+        try:
+            client = _make_client()
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=use_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                    temperature=0.1,
+                ),
+                timeout=30.0,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            asyncio.create_task(_log_llm("generate_structured_response", use_model, prompt[:200], raw, latency_ms))
+            return raw
+        except (RateLimitError, APIError) as e:
+            log.warning("[github_models] structured response rate/API error: %s", e)
+        except Exception as e:
+            log.error("[github_models] structured response error: %s: %s", type(e).__name__, e)
+    return None
+
+
+async def generate_chat_reply(
+    question: str,
+    context: str,
+    history: list[dict],
+    model: str | None = None,
+) -> Optional[str]:
+    """
+    Chat Lab reply via GitHub Models.
+    Matches ollama.generate_chat_reply() signature exactly.
+    Returns None on failure so llm.py can fall back to Ollama.
+    """
+    settings = get_settings()
+    use_model = model or settings.github_model_name
+
+    system_content = (
+        "তুমি ফজলে — আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেডের AI সহকারী (Admin Chat Lab)।\n\n"
+        "নিয়ম:\n"
+        "- বাংলায় উত্তর দাও (প্রশ্ন ইংরেজিতে হলে ইংরেজিতে)\n"
+        "- সর্বোচ্চ ৪-৫ বাক্য; সরাসরি ও তথ্যবহুল হও\n"
+        "- কোনো markdown, table বা internal label দেবে না\n"
+        "- শুধুমাত্র দেওয়া তথ্য ও context ব্যবহার করো; অনুমান করো না"
+    )
+    if context and context.strip():
+        system_content += f"\n\nজ্ঞানভাণ্ডার থেকে তথ্য:\n{context}"
+
+    messages: list[dict] = [{"role": "system", "content": system_content}]
+    for h in history[-6:]:
+        role = h.get("role", "user")
+        content = h.get("content", "")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": str(content)[:300]})
+    messages.append({"role": "user", "content": question[:400]})
+
+    t0 = time.monotonic()
+    async with _github_sem:
+        try:
+            client = _make_client()
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=use_model,
+                    messages=messages,
+                    max_tokens=200,
+                    temperature=0.3,
+                ),
+                timeout=30.0,
+            )
+            reply_text = (resp.choices[0].message.content or "").strip()
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            asyncio.create_task(_log_llm("generate_chat_reply", use_model, question, reply_text, latency_ms))
+            log.info("[github_models] generate_chat_reply OK latency=%dms", latency_ms)
+            return reply_text
+        except (RateLimitError, APIError) as e:
+            log.warning("[github_models] generate_chat_reply rate/API error: %s", e)
+        except Exception as e:
+            log.error("[github_models] generate_chat_reply error: %s: %s", type(e).__name__, e)
+    return None
+
+
 async def check_health() -> dict:
     """Verify GitHub Models token and endpoint are reachable."""
     settings = get_settings()

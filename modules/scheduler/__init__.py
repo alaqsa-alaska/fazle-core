@@ -8,6 +8,8 @@ APScheduler async scheduler with cron-style jobs:
 - stale_escort_reminder (daily 09:00)
 - payment_reconciliation (hourly)
 - backup_staleness_alert (daily 03:00)
+- daily_memory_review  (09:00 Asia/Dhaka)  ← Phase 6
+- rag_rebuild          (18:00 Asia/Dhaka)  ← Phase 6
 
 Each job records a row in fazle_scheduled_jobs and updates the
 'scheduler' service heartbeat.
@@ -344,6 +346,90 @@ async def job_combined_draft_cleanup() -> dict:
     return results
 
 
+# ── Phase 6: Continuous Learning Loop ─────────────────────────────────────────
+
+async def job_daily_memory_review() -> dict:
+    """
+    09:00 daily — scan the last 24 h of inbound WhatsApp messages, extract
+    structured facts via GitHub Models, and persist them to user_memory.
+
+    Uses a 4-second inter-call sleep to stay within the GitHub Models free-tier
+    rate limit of 15 RPM.  Limited to 50 unique senders per run to cap latency.
+    """
+    rows = await fetch_all(
+        """SELECT DISTINCT ON (sender_number) sender_number
+           FROM wbom_whatsapp_messages
+           WHERE direction = 'inbound'
+             AND sender_number IS NOT NULL
+             AND created_at > NOW() - INTERVAL '24 hours'
+           LIMIT 50"""
+    )
+    if not rows:
+        return {"status": "ok", "processed": 0}
+
+    processed = 0
+    skipped = 0
+
+    for row in rows:
+        phone = (row.get("sender_number") or "").strip()
+        if not phone:
+            continue
+
+        # Last 6 messages (3 turns) for this sender, oldest-first
+        msgs = await fetch_all(
+            """SELECT message_body, direction
+               FROM wbom_whatsapp_messages
+               WHERE sender_number = $1
+               ORDER BY created_at DESC
+               LIMIT 6""",
+            phone,
+        )
+        if not msgs:
+            skipped += 1
+            continue
+
+        conversation = [
+            {
+                "role": "user" if m["direction"] == "inbound" else "assistant",
+                "content": (m["message_body"] or "")[:400],
+            }
+            for m in reversed(msgs)
+            if m.get("message_body")
+        ]
+        if not conversation:
+            skipped += 1
+            continue
+
+        try:
+            from modules.memory_extractor import extract_and_save_memory
+            await extract_and_save_memory(phone=phone, conversation=conversation)
+            processed += 1
+        except Exception as e:
+            log.warning("[scheduler:daily_memory_review] %s failed: %s", phone, e)
+            skipped += 1
+
+        # 15 RPM free-tier rate limit → 4 s between calls
+        await asyncio.sleep(4)
+
+    log.info("[scheduler] daily_memory_review: processed=%d skipped=%d", processed, skipped)
+    return {"status": "ok", "processed": processed, "skipped": skipped}
+
+
+async def job_rag_rebuild() -> dict:
+    """
+    18:00 daily — rebuild the BM25 RAG index so knowledge added throughout
+    the day (promoted memories, new KB uploads) is queryable by evening.
+    """
+    try:
+        from modules import rag
+        stats = await rag.build_index()
+        log.info("[scheduler] rag_rebuild done: %s", stats)
+        return {"status": "ok", "stats": stats}
+    except Exception as e:
+        log.warning("[scheduler] rag_rebuild failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
 # ── Lifespan API ──────────────────────────────────────────────────────────────
 def start_scheduler() -> Optional[AsyncIOScheduler]:
     global _scheduler
@@ -360,6 +446,8 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     register_job("payment_reconciliation", job_payment_reconciliation)
     register_job("backup_staleness_alert", job_backup_staleness)
     register_job("combined_draft_cleanup", job_combined_draft_cleanup)
+    register_job("daily_memory_review", job_daily_memory_review)
+    register_job("rag_rebuild", job_rag_rebuild)
 
     # Batch 17 — daily admin digest
     try:
@@ -408,6 +496,16 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     _scheduler.add_job(_wrap("combined_draft_cleanup", job_combined_draft_cleanup),
                        IntervalTrigger(hours=1),
                        id="combined_draft_cleanup", replace_existing=True)
+
+    # Phase 6 — Continuous Learning Loop
+    memory_review_hour = int(os.getenv("MEMORY_REVIEW_HOUR", "9"))
+    rag_rebuild_hour   = int(os.getenv("RAG_REBUILD_HOUR", "18"))
+    _scheduler.add_job(_wrap("daily_memory_review", job_daily_memory_review),
+                       CronTrigger(hour=memory_review_hour, minute=0),
+                       id="daily_memory_review", replace_existing=True)
+    _scheduler.add_job(_wrap("rag_rebuild", job_rag_rebuild),
+                       CronTrigger(hour=rag_rebuild_hour, minute=0),
+                       id="rag_rebuild", replace_existing=True)
 
     # Shared processing-lock cleanup (Phase 1 unification)
     try:

@@ -1,7 +1,7 @@
 # Fazle Core — Single Source of Truth
 
 **Last Updated:** 2026-06-10
-**Status:** Production Healthy — GitHub Models (gpt-4o-mini) integrated as primary AI provider (2026-06-10)
+**Status:** Production Healthy — v1.2.0 — Continuous Learning Loop + User Context Engine deployed (2026-06-10)
 
 This README is the single authoritative reference for the Fazle Core production stack.
 All other documentation, archived notes, and prior READMEs must be considered stale.
@@ -132,6 +132,9 @@ docker network disconnect al-aqsa_openwebui-bridge ollama
 | `escort_roster` | `/escort-roster` | Escort roster management |
 | `contact_sync` | internal | Employee/contact identity management |
 | `fazle_agent` | `fazle-agent.service` | System agent (dry-run mode) |
+| `phone_normalizer` | `modules/phone_normalizer/` | BD phone → 8801XXXXXXXXX canonical form *(v1.2.0)* |
+| `role_classifier` | `modules/role_classifier/` | Per-contact role context + memory loader *(v1.2.0)* |
+| `memory_extractor` | `modules/memory_extractor/` | GitHub Models structured fact extraction → `user_memory` *(v1.2.0)* |
 
 ---
 
@@ -140,12 +143,14 @@ docker network disconnect al-aqsa_openwebui-bridge ollama
 Inbound message flow:
 
 1. Inbound message arrives from bridge SQLite or Meta webhook
-2. Identity detection (admin / employee / candidate / unknown)
-3. Intent classification
-4. Business routing (recruitment, payroll, escort, office, general)
-5. Knowledge base lookup → reviewed reply memory → Ollama generation → fallback
-6. Draft gate (finance, advance, release-slip → always draft)
-7. Send via bridge client or save as draft
+2. Phone normalisation → `8801XXXXXXXXX` canonical form
+3. Identity detection (admin / employee / candidate / unknown)
+4. Intent classification
+5. Business routing (recruitment, payroll, escort, office, general)
+6. Knowledge base lookup → reviewed reply memory → Ollama generation → fallback
+7. Draft gate (finance, advance, release-slip → always draft)
+8. Send via bridge client or save as draft
+9. **Background (async):** `memory_extractor` sends conversation to GitHub Models → structured facts saved to `user_memory` *(v1.2.0)*
 
 ### Unified LLM Interface (`app/llm.py`)
 
@@ -154,7 +159,9 @@ All AI reply calls go through `app/llm.py` which:
 2. Falls back to Ollama automatically on any error
 3. Stores every reply in `llm_learning_memory` table for Ollama training
 
-`message_router` and `recruitment_ai` import this as `from app import llm as ai`.
+`message_router`, `recruitment_ai`, and `main.py` import this as `from app import llm as ai`.
+
+Exposed functions (v1.2.0): `generate_reply`, `generate_recruitment_reply`, `generate_chat_reply`, `generate_rag_answer`, `classify_intent_llm`, `check_ollama_health`, `check_health`.
 
 ### Recruitment Reply Brain
 
@@ -223,6 +230,10 @@ DRAFT_CREATION_ENABLED=true
 - `PRIMARY_AI_PROVIDER=github_models` — GitHub Models gpt-4o-mini is now the primary AI
 - `DRAFT_CREATION_ENABLED=true` — Drafts are created for admin review
 - `GITHUB_TOKEN` / `GITHUB_TOKEN_2` / `GITHUB_TOKEN_3` — round-robin token rotation
+
+**New in v1.2.0 (2026-06-10) — optional, have defaults:**
+- `MEMORY_REVIEW_HOUR=9` — hour (Asia/Dhaka) for daily memory review job
+- `RAG_REBUILD_HOUR=18` — hour (Asia/Dhaka) for evening BM25 index rebuild
 
 ---
 
@@ -315,7 +326,8 @@ cd /home/azim/fazle-diagnostic-agent
 
 - [ ] Remove 10 stale nginx `.bak` files from `/etc/nginx/sites-available/` (requires `sudo rm` from terminal).
 - [ ] Monitor `llm_fallback_total` counter for 48 hours after Ollama fix. If elevated, investigate model load time.
-- [ ] Remove stale `/home/azim/bridges/bridge1/store/` after 2026-06-07 confirmation.
+- [x] ~~Remove stale `/home/azim/bridges/bridge1/store/` after 2026-06-07 confirmation.~~ — done 2026-06-09
+- [ ] Dashboard: add User Management tab, Memory Review tab (Phase 4 frontend — HTML/JS).
 
 ### Medium Priority — within 30 days
 
@@ -323,6 +335,8 @@ cd /home/azim/fazle-diagnostic-agent
 - [ ] Load test `qwen3:14b` under simulated message burst. Create a rollback procedure before switching `OLLAMA_MODEL`.
 - [ ] Add Grafana alert for: bridge polling lag > 5 minutes, Ollama (unhealthy) state, outbound DLQ > 0.
 - [ ] Fix host port binding for Ollama (`127.0.0.1:11434`) — currently null; container only reachable via docker network IP.
+- [ ] Add unique constraint on `user_memory (phone_canonical, memory_type, content)` to prevent duplicate fact accumulation from daily memory review re-runs.
+- [ ] Integrate `get_user_context` + `build_context_for_llm` into `modules/message_router` for role-aware WhatsApp replies.
 
 ### Long-term Upgrades
 
@@ -369,6 +383,101 @@ grep -E "AUTO_REPLY|OLLAMA|BRIDGE|DRAFT|OUTBOUND" /home/azim/core/.env
 
 # Nginx
 sudo nginx -t
+```
+
+---
+
+## Database Tables — v1.2.0 Additions
+
+| Table | Migration | Purpose |
+|---|---|---|
+| `user_profiles` | 016 | Per-contact profile: canonical phone, name, role, relationship_type, notes |
+| `user_memory` | 016 | Structured facts extracted per contact (work_info, personal_info, pending_matter…) |
+| `role_reply_styles` | 016 | Per-role tone/length/template config (for future use) |
+| `phone_normalization_log` | 016 | Audit log of raw→canonical phone conversions |
+| `llm_learning_memory.promoted_to_kb` | 017 | Boolean — marks reviewed replies promoted to KB |
+| `llm_learning_memory.dismissed` | 017 | Boolean — hides dismissed replies from Memory Review queue |
+
+Apply with:
+```bash
+export DB="postgresql://postgres:<pass>@172.20.0.3:5432/postgres"
+docker exec -i ai-postgres psql "$DB" < db/migrations/016_user_profiles_memory.sql
+docker exec -i ai-postgres psql "$DB" < db/migrations/017_memory_promotion.sql
+```
+
+---
+
+## Scheduled Jobs — Complete Reference
+
+| Job | Schedule | Purpose |
+|---|---|---|
+| `daily_payroll_compute` | 02:00 | Auto-compute payroll for current month |
+| `daily_admin_digest` | 08:00 | Send daily summary to admin |
+| `daily_memory_review` | 09:00 | GitHub Models extracts facts from last 24h conversations → `user_memory` |
+| `stale_escort_reminder` | 09:00 | Alert admin for escort programs Active >30 days |
+| `rag_rebuild` | 18:00 | Rebuild BM25 RAG index (picks up new KB entries from the day) |
+| `backup_staleness_alert` | 03:00 | Alert if newest backup is older than 48h |
+| `dlq_alert` | every 15 min | Alert if outbound DLQ > 0 |
+| `payment_reconciliation` | every 1h | Re-match unresolved staging payments |
+| `combined_draft_cleanup` | every 1h | Expire stale escort + payment drafts (>24h) |
+
+Override hours via `.env`: `MEMORY_REVIEW_HOUR=9`, `RAG_REBUILD_HOUR=18`.
+
+---
+
+## New API Endpoints — v1.2.0
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/users/search?q=` | Search user_profiles by phone or name |
+| GET | `/api/users/{phone}` | Full profile + memories for a contact |
+| PUT | `/api/users/{phone}` | Upsert contact profile (role, name, notes) |
+| POST | `/api/users/{phone}/memory` | Manually add a fact to user_memory |
+| GET | `/api/memory/pending` | LLM replies awaiting KB promotion review |
+| POST | `/api/memory/{id}/promote` | Promote an LLM reply to fazle_knowledge_base |
+| POST | `/api/memory/{id}/dismiss` | Dismiss a reply from the review queue |
+| GET | `/api/stats/llm` | GitHub Models + Ollama usage stats |
+
+All require `X-Internal-Key` header.
+
+---
+
+## CHANGES — 2026-06-10 (v1.2.0)
+
+### v1.2.0 — Continuous Learning Loop + User Context Engine
+
+**Bug fixed (critical — carried from v1.1.0):**
+- `app/llm.py` — `check_ollama_health()` and `generate_rag_answer()` were missing after `main.py` switched to `from app import llm as ai`. Both functions now present as pass-throughs. Without this fix the `/health`, `/chat/models`, and `/rag/answer` endpoints would throw `AttributeError`.
+
+**New modules:**
+- `modules/phone_normalizer/` — Bangladeshi phone number normalisation (`+880…`, `0…`, `1…` → `8801XXXXXXXXX`)
+- `modules/role_classifier/` — Per-contact role context loader from `user_profiles` + `user_memory`
+- `modules/memory_extractor/` — GitHub Models structured JSON extraction from conversations → `user_memory`
+
+**Updated files:**
+- `app/github_models.py` — added `generate_structured_response()` (raw text, for JSON extraction) and `generate_chat_reply()` (Chat Lab)
+- `app/llm.py` — added `generate_chat_reply()` router, `check_ollama_health()`, `generate_rag_answer()` pass-throughs
+- `app/main.py` — background memory extraction in bridge event handler; Phase 5 User Management + Memory Review + LLM Stats APIs
+- `modules/scheduler/__init__.py` — `daily_memory_review` (09:00) and `rag_rebuild` (18:00) jobs registered
+
+**New migrations:**
+- `016_user_profiles_memory.sql` — `user_profiles`, `user_memory`, `role_reply_styles`, `phone_normalization_log` ✅ Applied
+- `017_memory_promotion.sql` — `promoted_to_kb`, `promoted_at`, `dismissed` on `llm_learning_memory` ✅ Applied
+
+**Health check after restart (2026-06-10):**
+```json
+{
+  "status": "ok",
+  "probes": {
+    "db": { "status": "ok" },
+    "ollama": { "status": "ok", "models": ["qwen3:8b", "qwen2.5:3b"] },
+    "llm": {
+      "primary_provider": "github_models",
+      "github_models": { "status": "ok", "model": "openai/gpt-4o-mini" },
+      "ollama": { "status": "ok", "active_model": "qwen2.5:3b" }
+    }
+  }
+}
 ```
 
 ---
