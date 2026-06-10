@@ -24,6 +24,7 @@ from typing import Optional
 
 from app.config import get_settings
 from app.database import fetch_one, fetch_all, execute
+from shared.draft_reply import create_draft_reply
 from modules.intent import classify
 from modules.identity_brain import detect_identity
 from modules.number_identity import normalize_phone as get_phone_variants
@@ -64,7 +65,7 @@ log = logging.getLogger("fazle.router")
 _ESCORT_ROLES = frozenset({"escort_client", "client_escort_buyer", "vip_client", "repeat_client"})
 
 # TASK 1: Name tokens that trigger silent-skip (no reply, no draft, no queue)
-_SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client")
+_SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office")
 
 # Phase 4.5 / 6E: Intents cleared for auto-send (recruitment + employee info + office location).
 # Financial complaints are protected by the complaint-phrase guard in bridge_poller.
@@ -120,6 +121,21 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
                     return True, f"display_name contains '{token}' ({contact['display_name']!r})"
     except Exception as _e:
         log.debug("[SILENT_SKIP] contact lookup error for %s: %s", sender, _e)
+
+    # blocked role — admin dashboard থেকে block করা নম্বর
+    try:
+        for v in _phone_variants(sender):
+            _role_row = await fetch_one(
+                "SELECT role FROM fazle_contact_roles"
+                " WHERE phone = $1 AND is_active = true"
+                " ORDER BY priority DESC LIMIT 1",
+                v,
+            )
+            if _role_row and _role_row.get("role") == "blocked":
+                return True, f"phone blocked by admin ({sender})"
+    except Exception as _be:
+        log.debug("[SILENT_SKIP] blocked role check error for %s: %s", sender, _be)
+
     return False, ""
 
 
@@ -273,7 +289,7 @@ async def process_message(
         if kb_reply:
             return kb_reply, None
         db_ctx = await get_contact_context(sender)
-        reply = await ai.generate_reply(text, intent, db_ctx, role=role_str)
+        reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
         return reply, None
 
     # ── 7. CANDIDATE — recruitment funnel ─────────────────────────────────────
@@ -346,11 +362,14 @@ async def process_message(
                             "Admin-কে যোগাযোগ করুন।"), None
 
         if intent in ("employee_salary_complaint", "legal_issue", "payment_issue"):
-            await execute(
-                "INSERT INTO fazle_draft_replies"
-                " (source, recipient, reply_text, intent, draft_only, draft_type)"
-                " VALUES ($1, $2, $3, $4, true, 'complaint')",
-                source, sender, f"[{intent}] {text}", intent,
+            await create_draft_reply(
+                sender=sender,
+                bridge=source,
+                draft_text=f"[{intent}] {text}",
+                role="employee",
+                intent=intent,
+                context='{"draft_type": "complaint"}',
+                source_module="message_router",
             )
             log.warning("[COMPLAINT_DRAFT] intent=%s sender=%s emp_id=%s", intent, sender, emp_id)
             return "আপনার বার্তা পেয়েছি। দায়িত্বশীল ব্যক্তি শীঘ্রই যোগাযোগ করবেন।", None
@@ -361,7 +380,7 @@ async def process_message(
         if intent in ("salary_query", "payment_due") and emp_id:
             payroll = await get_payroll_summary(emp_id)
             db_ctx = format_payroll_context(payroll)
-            reply = await ai.generate_reply(text, intent, db_ctx, role=role_str)
+            reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
             return reply, None
 
     # ── 11. ADVANCE/PAYMENT REQUEST (any role not already handled) ───────────
@@ -380,12 +399,12 @@ async def process_message(
             return office_reply, None
         # Hardcoded fallback if KB unavailable
         return (
-            "📍 আমাদের অফিস:\n"
+            "আমাদের অফিস:\n"
             "আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেড\n"
             "আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, খোকনের বিল্ডিং (২য় তলা)\n"
             "পাহাড়তলী, চট্টগ্রাম সিটি কর্পোরেশন\n\n"
-            "🕘 সকাল ৯টা – বিকাল ৫টা (শুক্রবার বন্ধ)\n"
-            "📲 WhatsApp: 01958 122322"
+            "সকাল ৯টা – বিকাল ৫টা (শুক্রবার বন্ধ)\n"
+            "WhatsApp: 01958 122322"
         ), None
 
     # ── 13. KNOWLEDGE BASE (all roles, all other intents) ─────────────────────
@@ -414,7 +433,7 @@ async def process_message(
 
     # ── 15. AI FALLBACK ────────────────────────────────────────────────────────
     db_ctx = await get_contact_context(sender)
-    reply = await ai.generate_reply(text, intent, db_ctx, role=role_str)
+    reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
     return reply, None
 
 

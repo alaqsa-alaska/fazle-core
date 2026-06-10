@@ -34,6 +34,7 @@ import re
 from typing import Optional
 
 from app.database import fetch_one, fetch_val, execute
+from shared.draft_reply import create_draft_reply
 
 log = logging.getLogger("fazle.verification")
 
@@ -101,14 +102,22 @@ async def _create_session(phone: str, source: str, ctx: dict, first_step: str) -
         from app.error_log import record_error
         await record_error("employee_verification.cleanup", _e)
 
-    session_id = await fetch_val(
-        """INSERT INTO fazle_draft_replies
-               (source, recipient, reply_text, intent, draft_only, status, created_at)
-           VALUES ($1, $2, $3, 'verification', true, $4, NOW())
-           RETURNING id""",
-        source, phone, json.dumps(ctx, ensure_ascii=False), first_step,
+    session_id = await create_draft_reply(
+        sender=phone,
+        bridge=source,
+        draft_text=json.dumps(ctx, ensure_ascii=False),
+        role="employee",
+        intent="verification",
+        source_module="employee_verification",
     )
-    return session_id or 0
+    if not session_id:
+        return 0
+    # create_draft_reply sets status='pending'; set the first verification step
+    await execute(
+        "UPDATE fazle_draft_replies SET status = $1 WHERE id = $2",
+        first_step, session_id,
+    )
+    return session_id
 
 
 async def _advance_session(session_id: int, new_step: str, updated_ctx: Optional[dict] = None):

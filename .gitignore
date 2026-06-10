@@ -63,3 +63,19 @@ yarn-error.log*
 *.bak
 *.orig
 *.bak.*
+
+# Reports (private contact/employee data)
+reports/
+
+# Local infra / GitHub Models integration
+github-models/
+
+# Internal audit / planning documents
+audit-*.md
+consolidation-plan*.md
+RECRUITMENT_BOT_COORDINATION.md
+
+# Backup files
+backups/
+cleanup-log*.txt
+cleanup-post-state.json

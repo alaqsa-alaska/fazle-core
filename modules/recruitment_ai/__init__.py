@@ -198,6 +198,7 @@ async def generate_recruitment_reply(
         kb_context=kb_context,
         history=history,
         contact_context=full_contact_context,
+        source=source,
     )
     reply = clean_recruitment_reply(reply)
     if not reply:

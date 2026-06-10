@@ -18,7 +18,17 @@ Adjustments per owner review (Batch 25):
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
+
+_EMOJI_RE = re.compile(
+    r'[\U0001F300-\U0001F9FF\U0001FA00-\U0001FA9F☀-➿]+'
+)
+
+
+def strip_reply_emoji(text: str) -> str:
+    """Remove emoji from LLM-generated reply text before saving or sending."""
+    return _EMOJI_RE.sub('', text).strip()
 
 # Exact LLM fallback string emitted by app/ollama.py when generation fails.
 # Match must be EXACT (after .strip()) — never a substring/LIKE — so that a
@@ -67,6 +77,10 @@ def check_draft_quality(reply_text: Optional[str]) -> tuple[bool, Optional[str]]
     if reply_text is None:
         return False, "empty"
     text = reply_text.strip()
+    if not text:
+        return False, "empty"
+
+    text = strip_reply_emoji(text)
     if not text:
         return False, "empty"
 

@@ -19,6 +19,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from app.database import execute, fetch_one, fetch_val
+from shared.draft_reply import create_draft_reply
 
 log = logging.getLogger("fazle.attendance_parser")
 
@@ -241,17 +242,15 @@ async def create_attendance_draft(
         }
 
     # ── Save draft ─────────────────────────────────────────────────────────────
-    try:
-        draft_id = await fetch_val(
-            """INSERT INTO fazle_draft_replies
-                   (source, recipient, reply_text, intent, draft_type, meta, draft_only, status, created_at)
-               VALUES ($1, $2, $3, 'attendance', 'attendance', $4::jsonb, true, 'pending', NOW())
-               RETURNING id""",
-            source, sender_phone, draft_body, json.dumps(meta, ensure_ascii=False),
-        )
-    except Exception as e:
-        log.error(f"[attendance_parser] draft save error: {e}")
-        draft_id = None
+    draft_id = await create_draft_reply(
+        sender=sender_phone,
+        bridge=source,
+        draft_text=draft_body,
+        role="employee",
+        intent="attendance",
+        context=json.dumps(meta, ensure_ascii=False),
+        source_module="attendance_parser",
+    )
 
     admin_msg = (
         f"📋 নতুন হাজিরা ড্রাফট #{draft_id}:\n\n"

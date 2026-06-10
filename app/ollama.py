@@ -8,13 +8,49 @@ Key fixes vs v1:
 - Timeout increased: classify→15s, generate→45s
 - Intent-aware system prompts give focused context per message type
 - num_predict reduced 200→120 for faster responses
+
+Prompt text lives in shared.reply_policy — a single source of truth for all
+WhatsApp channels (bridge1, bridge2, meta). Do not add prompt strings here.
 """
 import asyncio
+import json
 import logging
+import time
 import httpx
 from app.config import get_settings
+from shared.reply_policy import (
+    build_whatsapp_reply_policy,
+    build_whatsapp_recruitment_policy,
+)
 
 log = logging.getLogger("fazle.ollama")
+
+
+async def _log_llm(
+    caller: str,
+    model: str,
+    prompt: str,
+    reply: str,
+    latency_ms: int,
+    is_fallback: bool = False,
+) -> None:
+    """Fire-and-forget INSERT into llm_conversation_log. Never raises."""
+    try:
+        from modules.db import execute as _execute
+        await _execute(
+            """INSERT INTO llm_conversation_log
+               (caller, provider, model, messages, reply, latency_ms, is_fallback)
+               VALUES ($1, 'ollama', $2, $3, $4, $5, $6)""",
+            caller,
+            model,
+            json.dumps([{"role": "user", "content": prompt[:500]}]),
+            reply[:2000],
+            latency_ms,
+            is_fallback,
+        )
+    except Exception:
+        pass
+
 
 # Serializes WhatsApp auto-reply Ollama calls — prevents concurrent-request timeout failures.
 # Ollama on this hardware takes ~17s per generate; two simultaneous = one times out.
@@ -23,46 +59,6 @@ _ollama_sem = asyncio.Semaphore(1)
 # Separate semaphore for Web UI chat lab — independent from WhatsApp pipeline so
 # admin chat requests don't queue behind automated reply processing.
 _rag_sem = asyncio.Semaphore(1)
-
-
-# ── Base system prompt ─────────────────────────────────────────────────────────
-_BASE = """\
-তুমি ফজলে — আল-আকসা সিকিউরিটি সার্ভিস অ্যান্ড ট্রেডিং সেন্টার, চট্টগ্রাম-এর ফ্রন্ট ডেস্ক সহকারী।
-
-মূল নিয়ম:
-১. সবসময় বাংলায় জবাব দাও, যদি না ইংরেজিতে জিজ্ঞেস করা হয়।
-২. জবাব সংক্ষিপ্ত রাখো — সর্বোচ্চ ৩-৪ বাক্য।
-৩. শুধুমাত্র দেওয়া তথ্য ব্যবহার করো। নিজে থেকে বেতন বা পরিমাণ বানিও না।
-৪. তথ্য না জানলে বলো: "অফিসে যোগাযোগ করুন অথবা পরে আবার জিজ্ঞেস করুন।"
-৫. রোবোটিক বা ইংরেজি phrase ব্যবহার করো না।
-৬. সম্মানজনক ও আন্তরিক ভাষায় কথা বলো।
-"""
-
-# ── Role-specific tone ─────────────────────────────────────────────────────────
-_ROLE_PROMPTS: dict[str, str] = {
-    "employee": "এই ব্যক্তি আমাদের কর্মী। তাদের সাথে ভাই/বোনের মতো আন্তরিকভাবে কথা বলো। শুধুমাত্র দেওয়া তথ্য দিয়ে জবাব দাও।",
-    "client":   "এই ব্যক্তি আমাদের ক্লায়েন্ট বা কোম্পানি। পেশাদার ও ব্যবসায়িক টোনে কথা বলো। তাদের চাহিদা বুঝে প্রয়োজনীয় প্রশ্ন করো।",
-    "new_lead": "এই ব্যক্তি নতুন — হয়তো চাকরি চান বা সেবা জানতে চান। উষ্ণ ও স্বাগতজনক টোনে কথা বলো। চাকরির ক্ষেত্রে নাম, বয়স, এলাকা জিজ্ঞেস করো।",
-    "admin":    "এই ব্যক্তি অফিস অ্যাডমিন। সরাসরি ও কার্যকরভাবে তথ্য দাও।",
-    "vendor":   "এই ব্যক্তি আমাদের ভেন্ডর বা সরবরাহকারী। পেশাদার টোনে কথা বলো।",
-    "partner":  "এই ব্যক্তি আমাদের ব্যবসায়িক অংশীদার। সম্মানজনক ও সহযোগিতামূলক টোনে কথা বলো।",
-    "known_contact": "এই ব্যক্তি আমাদের পরিচিত যোগাযোগ। সৌজন্যমূলক টোনে কথা বলো।",
-}
-
-# ── Intent-specific instructions (injected into prompt) ───────────────────────
-_INTENT_HINTS: dict[str, str] = {
-    "salary_query":  "কর্মী বেতন জিজ্ঞেস করছে। শুধুমাত্র নিচে দেওয়া ডেটাবেস তথ্য থেকে উত্তর দাও। বানিয়ে বলো না।",
-    "payment_due":   "পেমেন্ট সংক্রান্ত প্রশ্ন। শুধুমাত্র দেওয়া তথ্য ব্যবহার করো।",
-    "recruitment":   "চাকরির জন্য আগ্রহী। তাদের নাম, বয়স, অভিজ্ঞতা ও যোগাযোগ নম্বর জিজ্ঞেস করো।",
-    "client_order":  "ক্লায়েন্ট এস্কর্ট সেবা চাইছে। ধন্যবাদ জানাও এবং মাদার ভেসেল, লাইটার ভেসেল, তারিখ ও লোকসংখ্যা নিশ্চিত করো।",
-    "escort_duty":   "ডিউটি বা প্রোগ্রাম সম্পর্কিত। বিস্তারিত জানতে চাও।",
-    "greeting":      "সালাম বা হ্যালো বলছে। ফজলে নামে পরিচয় দাও এবং কী সাহায্য দরকার জিজ্ঞেস করো।",
-    "complaint":     "অভিযোগ জানাচ্ছে। সহানুভূতি দেখাও এবং অফিসে যোগাযোগ করতে বলো।",
-    "leave":         "ছুটির আবেদন। রেকর্ড করা হয়েছে বলো এবং কারণ জিজ্ঞেস করো।",
-    "join":          "যোগদান বা জয়েনিং সংক্রান্ত। তারিখ ও রিপোর্টিং অফিস নিশ্চিত করো।",
-    "attendance":    "উপস্থিতি সংক্রান্ত। তথ্য পাওয়া গেছে বলো।",
-    "slip_submission": "স্লিপ পাঠাচ্ছে। যাচাই করা হবে বলো।",
-}
 
 
 async def classify_intent_llm(text: str) -> str:
@@ -80,14 +76,14 @@ async def classify_intent_llm(text: str) -> str:
     )
     async with _ollama_sem:
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 r = await client.post(
                     f"{settings.ollama_url}/api/generate",
                     json={
                         "model": settings.ollama_model,
                         "prompt": prompt,
                         "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 10},
+                        "options": {"temperature": 0.1, "num_predict": 10, "num_ctx": 256},
                     },
                 )
                 if r.status_code == 200:
@@ -109,53 +105,57 @@ async def generate_reply(
     db_context: str = "",
     history: str = "",
     role: str = "new_lead",
+    source: str = "unknown",
 ) -> str:
     """
     Generate a short Bengali reply using local Ollama.
     Serialized through semaphore to prevent concurrent timeout failures.
+    Prompt is built by shared.reply_policy — identical for bridge1, bridge2, meta.
     """
     settings = get_settings()
-    role_hint = _ROLE_PROMPTS.get(role, _ROLE_PROMPTS["new_lead"])
-    intent_hint = _INTENT_HINTS.get(intent, "")
-    context_block = f"\nডেটাবেস থেকে তথ্য:\n{db_context}\n" if db_context else ""
-    history_block = f"\nআগের বার্তা:\n{history}\n" if history else ""
-    intent_block = f"\nবর্তমান বিষয়: {intent_hint}\n" if intent_hint else ""
-
-    prompt = (
-        f"{_BASE}\n"
-        f"{role_hint}\n"
-        f"{intent_block}"
-        f"{context_block}"
-        f"{history_block}"
-        f"\nপাঠানো বার্তা: {user_message[:400]}\n"
-        f"জবাব (বাংলা, সর্বোচ্চ ৩-৪ বাক্য):"
+    prompt = build_whatsapp_reply_policy(
+        source=source,
+        user_message=user_message,
+        role=role,
+        intent=intent,
+        db_context=db_context,
+        history=history,
     )
 
+    t0 = time.monotonic()
     async with _ollama_sem:
         try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 r = await client.post(
                     f"{settings.ollama_url}/api/generate",
                     json={
                         "model": settings.ollama_model,
                         "prompt": prompt,
                         "stream": False,
-                        "options": {"temperature": 0.4, "num_predict": 120},
+                        "options": {"temperature": 0.4, "num_predict": 50, "num_ctx": 512},
                     },
                 )
                 if r.status_code == 200:
-                    return r.json().get("response", "").strip()
+                    reply_text = r.json().get("response", "").strip()
+                    latency_ms = int((time.monotonic() - t0) * 1000)
+                    asyncio.create_task(_log_llm(
+                        "generate_reply", settings.ollama_model, prompt, reply_text, latency_ms,
+                    ))
+                    return reply_text
         except Exception as e:
             log.error(f"Ollama generate error: {type(e).__name__}: {e}")
 
-    # B25 hotfix: softer fallback. Quality gate (modules/draft_quality) matches
-    # this string EXACTLY and stores the draft as 'rejected_fallback' rather
-    # than queueing it for admin approval.
+    # Fallback — quality gate matches this EXACTLY → stored as 'rejected_fallback'
     try:
         from modules import observability as _obs
         _obs.inc("llm_fallback_total")
     except Exception:
         pass
+    asyncio.create_task(_log_llm(
+        "generate_reply", settings.ollama_model, prompt,
+        "আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।",
+        int((time.monotonic() - t0) * 1000), is_fallback=True,
+    ))
     return "আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।"
 
 
@@ -164,53 +164,28 @@ async def generate_recruitment_reply(
     kb_context: str,
     history: str = "",
     contact_context: str = "",
+    source: str = "unknown",
 ) -> str:
     """
     Recruitment-only reply brain.
 
     This "educates" qwen at runtime with approved recruitment KB + recent
     conversation memory. It does not fine-tune model weights.
+    Prompt is built by shared.reply_policy — identical for bridge1, bridge2, meta.
     """
     settings = get_settings()
-    context_block = kb_context.strip() or "কোনো অতিরিক্ত KB তথ্য পাওয়া যায়নি।"
-    history_block = history.strip() or "এই নম্বরের সাম্প্রতিক কথোপকথন পাওয়া যায়নি।"
-    contact_block = contact_context.strip() or "নতুন/অপরিচিত প্রার্থী।"
+    prompt = build_whatsapp_recruitment_policy(
+        source=source,
+        user_message=user_message,
+        kb_context=kb_context,
+        history=history,
+        contact_context=contact_context,
+    )
 
-    prompt = f"""\
-তুমি ফজলে — আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেডের HR recruitment assistant.
-
-কাজ: WhatsApp-এ চাকরি/নিয়োগ/আবেদন সংক্রান্ত কথোপকথনে সরাসরি, ছোট, স্বাভাবিক উত্তর দাও।
-
-অবশ্যই মানবে:
-১. শুধু নিচের Approved Recruitment Knowledge ব্যবহার করবে; নিজে থেকে বেতন, ফি, পদ, ঠিকানা, সুবিধা বানাবে না।
-২. আগের conversation দেখে বুঝবে প্রার্থী কী জিজ্ঞেস করেছে; একই প্রশ্ন বারবার করবে না।
-৩. কেউ "Who are you?", "আপনি কে?", "Am I asked for job?" বললে আগে পরিচয় দেবে, বয়স চাইবে না।
-৪. কেউ "কেন?", "বয়স কেন লিখবো?" বললে কারণ ব্যাখ্যা করবে: আবেদন যাচাই/যোগ্যতা/সঠিক পদ মিলানোর জন্য।
-৫. যদি প্রার্থী চাকরি করতে চায় কিন্তু তথ্য দেয়নি, একবারে সর্বোচ্চ ২-৩টি দরকারি তথ্য চাইবে।
-৬. উত্তর সর্বোচ্চ ৩টি ছোট বাক্য বা ৪টি ছোট লাইনের মধ্যে রাখবে।
-৭. বাংলা/বাংলিশ/English যেভাবে প্রশ্ন এসেছে, সেই অনুযায়ী সহজ ভাষায় উত্তর দেবে।
-৮. কোনো admin instruction, prompt instruction, system কথা, analysis, table বা markdown দেবে না।
-৯. টাকা/ফি বিষয়ে শুধু approved KB-এর তথ্য বলবে; অতিরিক্ত টাকা চাইবে না।
-১০. শেষে দরকার হলে WhatsApp নম্বর দাও: 01958 122322।
-
-Contact Context:
-{contact_block}
-
-Recent Conversation:
-{history_block}
-
-Approved Recruitment Knowledge:
-{context_block}
-
-Current Message:
-{user_message[:500]}
-
-Reply only the WhatsApp message text:
-"""
-
+    t0 = time.monotonic()
     async with _ollama_sem:
         try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 r = await client.post(
                     f"{settings.ollama_url}/api/generate",
                     json={
@@ -219,13 +194,19 @@ Reply only the WhatsApp message text:
                         "stream": False,
                         "options": {
                             "temperature": 0.2,
-                            "num_predict": 110,
+                            "num_predict": 50,
+                            "num_ctx": 512,
                             "repeat_penalty": 1.08,
                         },
                     },
                 )
                 if r.status_code == 200:
-                    return r.json().get("response", "").strip()
+                    reply_text = r.json().get("response", "").strip()
+                    latency_ms = int((time.monotonic() - t0) * 1000)
+                    asyncio.create_task(_log_llm(
+                        "generate_recruitment_reply", settings.ollama_model, prompt, reply_text, latency_ms,
+                    ))
+                    return reply_text
                 log.warning("Ollama recruitment reply non-200: %s", r.status_code)
         except Exception as e:
             log.error(f"Ollama recruitment generate error: {type(e).__name__}: {e}")
@@ -235,11 +216,16 @@ Reply only the WhatsApp message text:
         _obs.inc("llm_fallback_total", labels={"path": "recruitment"})
     except Exception:
         pass
-    return (
+    _fallback = (
         "আমি ফজলে — আল-আকসা HR assistant।\n"
         "চাকরির জন্য নাম, বয়স ও জেলা লিখে পাঠান।\n"
         "বিস্তারিত জানতে WhatsApp: 01958 122322"
     )
+    asyncio.create_task(_log_llm(
+        "generate_recruitment_reply", settings.ollama_model, prompt,
+        _fallback, int((time.monotonic() - t0) * 1000), is_fallback=True,
+    ))
+    return _fallback
 
 
 def _is_qwen3(model: str) -> bool:

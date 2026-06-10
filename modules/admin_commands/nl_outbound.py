@@ -20,11 +20,13 @@ Topic-templated message generation (no LLM):
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Optional
 
 from app.database import execute, fetch_val
+from shared.draft_reply import create_draft_reply
 from .nl_router import extract_phone
 
 log = logging.getLogger("fazle.admin_nl_send")
@@ -140,27 +142,26 @@ async def intent_outbound_preview(text: str, admin_phone: str) -> str:
     topic, message = _generate_message(text, phone)
     recipient = phone + "@s.whatsapp.net"
 
-    try:
-        # Decide source bridge based on which admin sent the request.
-        # bridge2 (8801880446111) is the OPS number; default for admin sends.
-        source = "bridge2"
-        draft_id = await fetch_val(
-            """
-            INSERT INTO fazle_draft_replies
-                (source, recipient, reply_text, intent, draft_only, status,
-                 admin_phone, draft_type, created_at, meta)
-            VALUES ($1::text, $2::text, $3::text, $4::text, true, 'pending',
-                    $5::text, 'admin_initiated', NOW(),
-                    jsonb_build_object('origin', 'admin_nl', 'topic', $6::text,
-                                       'requested_by', $5::text))
-            RETURNING id
-            """,
-            source, recipient, message, "admin_send",
-            admin_phone, topic,
-        )
-    except Exception as e:
-        log.exception(f"[admin_nl_send] insert failed: {e}")
-        return f"⚠️ ড্রাফট তৈরি ব্যর্থ: {e}"
+    # Decide source bridge based on which admin sent the request.
+    # bridge2 (8801880446111) is the OPS number; default for admin sends.
+    source = "bridge2"
+    draft_id = await create_draft_reply(
+        sender=recipient,
+        bridge=source,
+        draft_text=message,
+        role="admin",
+        intent="admin_send",
+        context=json.dumps({
+            "origin": "admin_nl",
+            "topic": topic,
+            "admin_phone": admin_phone,
+            "draft_type": "admin_initiated",
+        }),
+        source_module="nl_outbound",
+    )
+    if not draft_id:
+        log.error("[admin_nl_send] insert failed: create_draft_reply returned None")
+        return "⚠️ ড্রাফট তৈরি ব্যর্থ"
 
     try:
         from modules import observability as _obs

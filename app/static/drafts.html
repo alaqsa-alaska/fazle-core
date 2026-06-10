@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Draft Messages — Fazle Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #f0f2f5;
+    color: #1a1a1a;
+  }
+
+  /* Login overlay */
+  #loginOverlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999;
+  }
+  #loginOverlay.hidden { display: none; }
+  .login-box {
+    background: white; border-radius: 12px;
+    padding: 32px 28px; width: 340px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    text-align: center;
+  }
+  .login-box h2 { margin-bottom: 6px; font-size: 1.2rem; }
+  .login-box p  { color: #5f6368; font-size: 0.85rem; margin-bottom: 20px; }
+  .login-box input {
+    width: 100%; padding: 10px 14px;
+    border: 1px solid #dadce0; border-radius: 6px;
+    font-size: 1rem; margin-bottom: 12px; outline: none;
+  }
+  .login-box input:focus { border-color: #1a73e8; }
+  .login-box button {
+    width: 100%; padding: 10px;
+    background: #1a73e8; color: white;
+    border: none; border-radius: 6px;
+    font-size: 1rem; cursor: pointer; font-weight: 600;
+  }
+  .login-box button:hover { background: #1557b0; }
+  #loginError {
+    color: #c5221f; font-size: 0.85rem;
+    margin-top: 8px; display: none;
+  }
+
+  .topbar {
+    background: #1a73e8; color: white;
+    padding: 14px 24px;
+    display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 100;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  .topbar h1 { font-size: 1.2rem; font-weight: 600; }
+  .topbar a {
+    color: rgba(255,255,255,0.85);
+    text-decoration: none; font-size: 0.9rem;
+  }
+  .topbar a:hover { color: white; }
+  .refresh-btn {
+    margin-left: auto;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 6px; padding: 6px 14px;
+    cursor: pointer; font-size: 0.85rem; color: white;
+  }
+  .refresh-btn:hover { background: rgba(255,255,255,0.25); }
+
+  .stats-bar {
+    background: white; padding: 12px 24px;
+    display: flex; gap: 20px; flex-wrap: wrap;
+    border-bottom: 1px solid #e0e0e0; font-size: 0.85rem;
+  }
+  .stat-item { display: flex; align-items: center; gap: 6px; }
+  .stat-badge {
+    background: #e8f0fe; color: #1a73e8;
+    padding: 2px 8px; border-radius: 12px;
+    font-weight: 700; font-size: 0.9rem;
+  }
+  .stat-badge.pending  { background: #fff3e0; color: #e65100; }
+  .stat-badge.rejected { background: #fce8e6; color: #c5221f; }
+  .stat-badge.sent     { background: #e6f4ea; color: #137333; }
+
+  .filter-bar {
+    padding: 12px 24px; background: white;
+    border-bottom: 1px solid #e0e0e0;
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  }
+  .filter-bar select, .filter-bar input {
+    padding: 7px 12px; border: 1px solid #dadce0;
+    border-radius: 6px; font-size: 0.9rem; outline: none;
+  }
+  .filter-bar select:focus,
+  .filter-bar input:focus { border-color: #1a73e8; }
+
+  .btn {
+    padding: 5px 12px; border: none; border-radius: 5px;
+    cursor: pointer; font-size: 0.79rem; font-weight: 500;
+    transition: opacity 0.15s; white-space: nowrap;
+  }
+  .btn:hover { opacity: 0.82; }
+  .btn-success { background: #137333; color: white; }
+  .btn-primary { background: #1a73e8; color: white; }
+  .btn-warning { background: #e65100; color: white; }
+  .btn-danger  { background: #c5221f; color: white; }
+  .btn-dark    { background: #3c4043; color: white; }
+
+  .container { padding: 20px 24px; }
+  .table-wrap {
+    background: white; border-radius: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    overflow-x: auto;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+  th {
+    background: #f8f9fa; padding: 11px 14px;
+    text-align: left; font-weight: 600; color: #5f6368;
+    border-bottom: 2px solid #e0e0e0; white-space: nowrap;
+  }
+  td {
+    padding: 10px 14px; border-bottom: 1px solid #f1f3f4;
+    vertical-align: top;
+  }
+  tr:hover td { background: #fafafa; }
+  tr:last-child td { border-bottom: none; }
+
+  .reply-body {
+    max-width: 320px; white-space: pre-wrap;
+    word-break: break-word; font-size: 0.84rem;
+    line-height: 1.45; color: #202124;
+  }
+  .phone-cell {
+    font-family: monospace; font-size: 0.83rem;
+    color: #1a73e8; font-weight: 600;
+  }
+  .contact-name { font-size: 0.76rem; color: #5f6368; margin-top: 2px; }
+  .role-badge {
+    display: inline-block; padding: 2px 7px;
+    border-radius: 10px; font-size: 0.74rem; font-weight: 600;
+    background: #e8f0fe; color: #1a73e8;
+  }
+  .intent-text { font-size: 0.74rem; color: #5f6368; margin-top: 3px; }
+  .status-badge {
+    display: inline-block; padding: 3px 9px;
+    border-radius: 10px; font-size: 0.77rem; font-weight: 600;
+  }
+  .status-pending         { background:#fff3e0; color:#e65100; }
+  .status-pending_selfie  { background:#fff3e0; color:#e65100; }
+  .status-edited          { background:#e8f0fe; color:#1a73e8; }
+  .status-approved        { background:#e6f4ea; color:#137333; }
+  .status-deleted         { background:#f1f3f4; color:#5f6368; }
+  .status-rejected_fallback { background:#fce8e6; color:#c5221f; }
+  .status-expired         { background:#f1f3f4; color:#5f6368; }
+
+  .actions { display:flex; gap:4px; flex-wrap:wrap; }
+  .time-cell { font-size:0.77rem; color:#5f6368; white-space:nowrap; }
+  .id-cell   { font-size:0.78rem; color:#9aa0a6; }
+  #rowCount  { color:#5f6368; font-size:0.84rem; }
+
+  .empty-state { text-align:center; padding:60px 20px; color:#5f6368; }
+  .loading     { text-align:center; padding:40px;    color:#5f6368; }
+
+  /* Edit Modal */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5); z-index: 1000;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.active { display: flex; }
+  .modal {
+    background: white; border-radius: 12px;
+    padding: 24px; width: 90%; max-width: 560px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+  }
+  .modal h3 { margin-bottom: 6px; }
+  .modal .meta { font-size:0.82rem; color:#5f6368; margin-bottom:12px; }
+  .modal textarea {
+    width: 100%; height: 150px; padding: 10px;
+    border: 1px solid #dadce0; border-radius: 6px;
+    font-size: 0.9rem; resize: vertical;
+    margin-bottom: 10px; font-family: inherit;
+  }
+  .modal input[type=text] {
+    width: 100%; padding: 8px 10px;
+    border: 1px solid #dadce0; border-radius: 6px;
+    font-size: 0.85rem; margin-bottom: 14px; outline: none;
+  }
+  .modal-actions { display:flex; gap:10px; justify-content:flex-end; }
+
+  /* Toast */
+  .toast {
+    position:fixed; bottom:24px; right:24px;
+    background:#202124; color:white;
+    padding:12px 20px; border-radius:8px;
+    font-size:0.9rem; z-index:2000;
+    opacity:0; transform:translateY(20px);
+    transition:all 0.3s; pointer-events:none;
+  }
+  .toast.show    { opacity:1; transform:translateY(0); }
+  .toast.success { background:#137333; }
+  .toast.error   { background:#c5221f; }
+</style>
+</head>
+<body>
+
+<!-- Login Overlay -->
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>Draft Dashboard</h2>
+    <p>Access Key দিয়ে প্রবেশ করুন</p>
+    <input type="password" id="loginKey"
+           placeholder="Access Key..."
+           onkeydown="if(event.key==='Enter') doLogin()" />
+    <button onclick="doLogin()">প্রবেশ করুন</button>
+    <div id="loginError">Access Key ভুল — আবার চেষ্টা করুন</div>
+  </div>
+</div>
+
+<!-- Main UI -->
+<div id="mainUI" style="display:none">
+
+<div class="topbar">
+  <h1>Draft Messages</h1>
+  <a href="/">Dashboard</a>
+  <a href="/payroll">Payroll</a>
+  <a href="/escort-roster">Escort Roster</a>
+  <button class="refresh-btn" onclick="loadDrafts()">&#8635; Refresh</button>
+</div>
+
+<div class="stats-bar" id="statsBar">
+  <span class="stat-item">লোড হচ্ছে...</span>
+</div>
+
+<div class="filter-bar">
+  <select id="filterStatus" onchange="loadDrafts()">
+    <option value="pending,pending_selfie,edited">Pending + Edited</option>
+    <option value="pending">Pending</option>
+    <option value="pending_selfie">Selfie Pending</option>
+    <option value="edited">Edited</option>
+    <option value="approved">Approved</option>
+    <option value="deleted">Deleted</option>
+    <option value="rejected_fallback">Fallback Rejected</option>
+    <option value="rejected">Rejected</option>
+    <option value="expired">Expired</option>
+  </select>
+  <input type="text" id="filterSearch"
+         placeholder="নম্বর / নাম / message..."
+         oninput="filterTable()" />
+  <span id="rowCount"></span>
+</div>
+
+<div class="container">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>প্রাপক</th>
+          <th>Draft Message</th>
+          <th>Role / Intent</th>
+          <th>Status</th>
+          <th>সময়</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="draftBody">
+        <tr><td colspan="7" class="loading">লোড হচ্ছে...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+</div><!-- /mainUI -->
+
+<!-- Edit Modal -->
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <h3>Draft সম্পাদনা</h3>
+    <div class="meta" id="editMeta"></div>
+    <textarea id="editBody" placeholder="নতুন message লিখুন..."></textarea>
+    <input type="text" id="editNote" placeholder="Admin note (optional)" />
+    <div class="modal-actions">
+      <button class="btn btn-dark" onclick="closeModal()">বাতিল</button>
+      <button class="btn btn-warning" onclick="saveEdit()">সংরক্ষণ করুন</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let API_KEY = localStorage.getItem('drafts_api_key') || '';
+let allDrafts = [];
+let currentEditId = null;
+
+// ── Auth ──────────────────────────────────────────────────────────────
+function doLogin() {
+  const key = document.getElementById('loginKey').value.trim();
+  if (!key) return;
+  fetch('/api/drafts/stats', { headers: { 'X-Internal-Key': key } })
+    .then(r => {
+      if (r.ok) {
+        API_KEY = key;
+        localStorage.setItem('drafts_api_key', API_KEY);
+        document.getElementById('loginOverlay').classList.add('hidden');
+        document.getElementById('mainUI').style.display = '';
+        loadDrafts();
+      } else {
+        document.getElementById('loginError').style.display = 'block';
+      }
+    })
+    .catch(() => {
+      document.getElementById('loginError').style.display = 'block';
+    });
+}
+
+// Auto-login if key stored
+if (API_KEY) {
+  fetch('/api/drafts/stats', { headers: { 'X-Internal-Key': API_KEY } })
+    .then(r => {
+      if (r.ok) {
+        document.getElementById('loginOverlay').classList.add('hidden');
+        document.getElementById('mainUI').style.display = '';
+        loadDrafts();
+      } else {
+        API_KEY = '';
+        localStorage.removeItem('drafts_api_key');
+      }
+    });
+}
+
+// ── Load ──────────────────────────────────────────────────────────────
+async function loadDrafts() {
+  const status = document.getElementById('filterStatus').value;
+  document.getElementById('draftBody').innerHTML =
+    '<tr><td colspan="7" class="loading">লোড হচ্ছে...</td></tr>';
+  try {
+    const [dr, sr] = await Promise.all([
+      fetch('/api/drafts?status=' + encodeURIComponent(status) + '&limit=200',
+            { headers: { 'X-Internal-Key': API_KEY } }),
+      fetch('/api/drafts/stats',
+            { headers: { 'X-Internal-Key': API_KEY } }),
+    ]);
+    if (!dr.ok) { showToast('Auth error', 'error'); return; }
+    const dd = await dr.json();
+    const sd = await sr.json();
+    allDrafts = dd.drafts || [];
+    renderStats(sd.stats || []);
+    renderTable(allDrafts);
+  } catch(e) {
+    document.getElementById('draftBody').innerHTML =
+      '<tr><td colspan="7" class="empty-state">লোড ব্যর্থ: ' + e.message + '</td></tr>';
+  }
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────
+function renderStats(stats) {
+  const labels = {
+    pending:'Pending', pending_selfie:'Selfie', edited:'Edited',
+    approved:'Approved', sent:'Sent', deleted:'Deleted',
+    rejected_fallback:'Fallback', rejected:'Rejected', expired:'Expired'
+  };
+  const cls = {
+    pending:'pending', pending_selfie:'pending',
+    sent:'sent', approved:'sent',
+    rejected_fallback:'rejected', rejected:'rejected',
+  };
+  document.getElementById('statsBar').innerHTML =
+    stats.map(function(s) {
+      return '<span class="stat-item">' +
+        '<span class="stat-badge ' + (cls[s.status]||'') + '">' + s.n + '</span> ' +
+        (labels[s.status]||s.status) + '</span>';
+    }).join('');
+}
+
+// ── Table ─────────────────────────────────────────────────────────────
+function renderTable(drafts) {
+  const tbody = document.getElementById('draftBody');
+  if (!drafts.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">কোনো draft নেই</td></tr>';
+    document.getElementById('rowCount').textContent = '';
+    return;
+  }
+  document.getElementById('rowCount').textContent = drafts.length + ' টি draft';
+  tbody.innerHTML = drafts.map(function(d) {
+    return '<tr id="row-' + d.id + '">' +
+      '<td class="id-cell">' + d.id + '</td>' +
+      '<td>' +
+        '<div class="phone-cell">' + fmtPhone(d.recipient) + '</div>' +
+        '<div class="contact-name">' + esc(d.contact_name || '—') + '</div>' +
+      '</td>' +
+      '<td><div class="reply-body">' + esc(d.reply_text || '') + '</div></td>' +
+      '<td>' +
+        '<span class="role-badge">' + esc(d.role_detected || '?') + '</span>' +
+        '<div class="intent-text">' + esc(d.intent || '') +
+          (d.draft_type ? ' &middot; ' + esc(d.draft_type) : '') + '</div>' +
+      '</td>' +
+      '<td><span class="status-badge status-' + d.status + '">' + d.status + '</span></td>' +
+      '<td class="time-cell">' + fmtTime(d.created_at) + '</td>' +
+      '<td><div class="actions">' + actionBtns(d) + '</div></td>' +
+    '</tr>';
+  }).join('');
+}
+
+function actionBtns(d) {
+  if (['pending','pending_selfie','edited'].indexOf(d.status) >= 0) {
+    return '<button class="btn btn-success" onclick="approveDraft(' + d.id + ')">Approve</button> ' +
+           '<button class="btn btn-primary" onclick="openEdit(' + d.id + ')">Edit</button> ' +
+           '<button class="btn btn-warning" onclick="deleteDraft(' + d.id + ')">Delete</button> ' +
+           '<button class="btn btn-danger"  onclick="blockNum(' + d.id + ',\'' + escAttr(d.recipient) + '\')">Block</button>';
+  }
+  return '<span style="color:#9aa0a6;font-size:0.8rem;">' + d.status + '</span>';
+}
+
+// ── Filter ────────────────────────────────────────────────────────────
+function filterTable() {
+  var q = document.getElementById('filterSearch').value.toLowerCase();
+  renderTable(!q ? allDrafts : allDrafts.filter(function(d) {
+    return (d.recipient||'').indexOf(q) >= 0 ||
+           (d.contact_name||'').toLowerCase().indexOf(q) >= 0 ||
+           (d.reply_text||'').toLowerCase().indexOf(q) >= 0;
+  }));
+}
+
+// ── Actions ───────────────────────────────────────────────────────────
+async function approveDraft(id) {
+  if (!confirm('এই draft approve করবেন?')) return;
+  var r = await api('/api/drafts/' + id + '/approve', {});
+  if (r.ok) { showToast('Approved!', 'success'); removeRow(id); }
+}
+
+async function deleteDraft(id) {
+  if (!confirm('এই draft মুছে দেবেন?')) return;
+  var r = await api('/api/drafts/' + id + '/delete', {});
+  if (r.ok) { showToast('মুছে ফেলা হয়েছে', 'success'); removeRow(id); }
+}
+
+async function blockNum(id, phone) {
+  var reason = prompt(phone + ' block করবেন?\nকারণ লিখুন (Enter = admin_block):');
+  if (reason === null) return;
+  var r = await api('/api/drafts/' + id + '/block', { reason: reason || 'admin_block' });
+  if (r.ok) { showToast(phone + ' blocked', 'success'); setTimeout(loadDrafts, 600); }
+}
+
+function openEdit(id) {
+  var d = allDrafts.filter(function(x) { return x.id === id; })[0];
+  if (!d) return;
+  currentEditId = id;
+  document.getElementById('editMeta').textContent =
+    'ID:' + id + ' | ' + fmtPhone(d.recipient) + (d.contact_name ? ' | ' + d.contact_name : '');
+  document.getElementById('editBody').value = d.reply_text || '';
+  document.getElementById('editNote').value = '';
+  document.getElementById('editModal').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('editModal').classList.remove('active');
+  currentEditId = null;
+}
+
+async function saveEdit() {
+  var body = document.getElementById('editBody').value.trim();
+  var note = document.getElementById('editNote').value.trim();
+  if (!body) { showToast('Message লিখুন', 'error'); return; }
+  var r = await api('/api/drafts/' + currentEditId + '/edit',
+    { new_body: body, admin_note: note });
+  if (r.ok) { closeModal(); showToast('সম্পাদিত হয়েছে', 'success'); setTimeout(loadDrafts, 300); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+async function api(url, body) {
+  try {
+    var r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Key': API_KEY },
+      body: JSON.stringify(body),
+    });
+    var data = await r.json();
+    if (!r.ok) { showToast(data.detail || 'Error', 'error'); return { ok: false }; }
+    return { ok: true, data: data };
+  } catch(e) {
+    showToast('Network error: ' + e.message, 'error');
+    return { ok: false };
+  }
+}
+
+function removeRow(id) {
+  var row = document.getElementById('row-' + id);
+  if (row) {
+    row.style.transition = 'opacity 0.3s';
+    row.style.opacity = '0';
+    setTimeout(function() { row.remove(); }, 300);
+  }
+  allDrafts = allDrafts.filter(function(d) { return d.id !== id; });
+  document.getElementById('rowCount').textContent = allDrafts.length + ' টি draft';
+}
+
+function fmtPhone(p) {
+  if (!p) return '—';
+  return (p.startsWith('880') && p.length === 13) ? '0' + p.slice(3) : p;
+}
+
+function fmtTime(ts) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function esc(s) {
+  return String(s || '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) {
+  return String(s || '').replace(/'/g, "\\'").replace(/\n/g, ' ');
+}
+
+function showToast(msg, type) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (type || '');
+  setTimeout(function() { t.className = 'toast'; }, 3200);
+}
+
+// Auto-refresh every 60s
+setInterval(loadDrafts, 60000);
+</script>
+</body>
+</html>

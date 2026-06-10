@@ -41,6 +41,8 @@ from shared.queue import record_heartbeat
 from modules.fazle_payroll_engine import start_fpe, stop_fpe
 from modules.fazle_payroll_engine.routes import router as fpe_router
 from modules.escort_roster.routes import router as escort_roster_router
+from modules.drafts.routes import router as drafts_router
+from modules.kb_upload.routes import router as kb_upload_router
 from modules.admin_employees import router as admin_employees_router
 from modules.admin_transactions import router as admin_transactions_router
 from modules.social_auto_reply import ingest_social_event, start_social_auto_reply, stop_social_auto_reply
@@ -267,6 +269,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Fazle Core", version="1.0.0", lifespan=lifespan)
 app.include_router(fpe_router)
 app.include_router(escort_roster_router)
+app.include_router(drafts_router)
+app.include_router(kb_upload_router)
 app.include_router(admin_employees_router)   # Phase 18B — Admin Employee CRUD
 app.include_router(admin_transactions_router) # Phase 19 — Admin Transaction CRUD
 app.include_router(social_auto_reply_router)  # Backend social auto-reply queue/admin API
@@ -969,6 +973,10 @@ async def _handle_fb_comment(value: dict):
         log.debug(f"[FB-COMMENT] sync-only, skipping reply for {comment_id}")
         return
 
+    if not settings.auto_reply_enabled:
+        log.info(f"[FB-COMMENT] SAFE MODE: reply suppressed for comment_id={comment_id}")
+        return
+
     # Use a standard recruitment invite reply for page comments
     recruit_reply = (
         f"ধন্যবাদ আপনার মন্তব্যের জন্য! আমাদের সিকিউরিটি গার্ড পদে আবেদন করতে "
@@ -1259,6 +1267,18 @@ async def escort_roster_spa():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "escort-roster.html"))
 
 
+@app.get("/drafts", response_class=HTMLResponse)
+async def drafts_spa():
+    """Draft Messages dashboard SPA."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "drafts.html"))
+
+
+@app.get("/kb", response_class=HTMLResponse)
+async def kb_spa():
+    """Knowledge Base management SPA."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "kb.html"))
+
+
 @app.get("/dashboard/legacy", response_class=HTMLResponse)
 async def dashboard_legacy():
     try:
@@ -1442,8 +1462,9 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
     except Exception as e:
         log.warning(f"[draft] duplicate check error: {e}")
     # B25 hotfix: quality gate — reject path leaks / LLM fallbacks before queueing.
-    from modules.draft_quality import check_draft_quality
+    from modules.draft_quality import check_draft_quality, strip_reply_emoji
     from modules import observability as _obs
+    reply_body = strip_reply_emoji(reply_body) if reply_body else reply_body
     ok, reason = check_draft_quality(reply_body)
     if not ok:
         _obs.inc("drafts_rejected_total", labels={"reason": reason or "unknown", "source": source})

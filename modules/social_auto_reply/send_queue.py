@@ -55,6 +55,8 @@ async def enqueue_reply(
 
 
 async def sweep_once(limit: int = 5) -> dict:
+    if not get_settings().auto_reply_enabled:
+        return {"picked": 0, "sent": 0, "failed": 0, "blocked": 0}
     pool = get_pool()
     sent = failed = blocked = picked = 0
     async with pool.acquire() as conn:

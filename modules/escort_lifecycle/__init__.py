@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from app.database import fetch_one, fetch_all, execute, fetch_val
+from shared.draft_reply import create_draft_reply
 from modules.payment_workflow import create_escort_payment_draft
 
 log = logging.getLogger("fazle.escort_lifecycle")
@@ -612,27 +613,24 @@ async def handle_ocr_release_slip(
         draft += f"\nDB match (verify): {db_match}"
 
     # Save to draft_replies for admin queue (READ-ONLY DB lookup, NO financial write)
-    try:
-        await execute(
-            """INSERT INTO fazle_draft_replies
-               (source, recipient, reply_text, intent, draft_only, status,
-                draft_type, meta)
-               VALUES ($1, $2, $3, 'release_slip_ocr', true, 'pending',
-                       'release_slip', $4::jsonb)""",
-            source,
-            phone,
-            draft,
-            json.dumps({
-                "ocr_employee": escort,
-                "missing_fields": missing,
-                "incomplete": bool(missing),
-                "db_match": db_match,
-                "confidence_score": ocr_result.get("confidence_score", 0),
-            }),
-        )
+    draft_id = await create_draft_reply(
+        sender=phone,
+        bridge=source,
+        draft_text=draft,
+        role="employee",
+        intent="release_slip_ocr",
+        context=json.dumps({
+            "ocr_employee": escort,
+            "missing_fields": missing,
+            "incomplete": bool(missing),
+            "db_match": db_match,
+            "confidence_score": ocr_result.get("confidence_score", 0),
+            "draft_type": "release_slip",
+        }),
+        source_module="escort_lifecycle",
+    )
+    if draft_id:
         log.info(f"[release-ocr] draft saved to DB for employee={escort} missing={missing}")
-    except Exception as _db_err:
-        log.error(f"[release-ocr] failed to save draft to DB: {_db_err}")
 
     log.info(f"[release-ocr] admin draft built for employee={escort}")
     return draft

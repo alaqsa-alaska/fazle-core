@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Knowledge Base — Fazle Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f0f2f5; }
+
+  #loginOverlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 9999;
+  }
+  #loginOverlay.hidden { display: none; }
+  .login-box {
+    background: white; border-radius: 12px; padding: 32px 28px;
+    width: 340px; box-shadow: 0 8px 32px rgba(0,0,0,0.3); text-align: center;
+  }
+  .login-box h2 { margin-bottom: 20px; }
+  .login-box input {
+    width: 100%; padding: 10px; border: 1px solid #dadce0;
+    border-radius: 6px; font-size: 1rem; margin-bottom: 12px;
+  }
+  .login-box button {
+    width: 100%; padding: 10px; background: #1a73e8; color: white;
+    border: none; border-radius: 6px; font-size: 1rem; cursor: pointer;
+  }
+  #loginError { color:#c5221f; font-size:0.85rem; margin-top:8px; display:none; }
+
+  .topbar {
+    background: #0d47a1; color: white; padding: 14px 24px;
+    display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 100;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  .topbar h1 { font-size: 1.2rem; }
+  .topbar a { color: rgba(255,255,255,0.85); text-decoration: none; font-size: 0.9rem; }
+  .topbar a:hover { color: white; }
+
+  .container { padding: 20px 24px; max-width: 900px; margin: auto; }
+
+  .upload-box {
+    background: white; border-radius: 12px; padding: 28px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1); margin-bottom: 24px;
+  }
+  .upload-box h2 { font-size: 1.1rem; margin-bottom: 16px; color: #1a1a1a; }
+
+  .drop-zone {
+    border: 2px dashed #dadce0; border-radius: 10px;
+    padding: 40px 20px; text-align: center; color: #5f6368;
+    cursor: pointer; transition: all 0.2s; margin-bottom: 16px;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: #1a73e8; background: #e8f0fe; color: #1a73e8;
+  }
+  .drop-zone .icon { font-size: 2.5rem; margin-bottom: 8px; }
+  .drop-zone p { font-size: 0.9rem; }
+
+  .form-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .form-row label { font-size: 0.85rem; color: #5f6368; display: block; margin-bottom: 4px; }
+  .form-row input, .form-row select {
+    padding: 8px 12px; border: 1px solid #dadce0; border-radius: 6px;
+    font-size: 0.9rem; flex: 1; min-width: 150px;
+  }
+
+  .btn {
+    padding: 10px 24px; border: none; border-radius: 6px;
+    cursor: pointer; font-size: 0.9rem; font-weight: 600; transition: all 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: #1a73e8; color: white; }
+  .btn-danger  { background: #c5221f; color: white; }
+  .btn-sm { padding: 5px 12px; font-size: 0.8rem; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .progress {
+    height: 4px; background: #e0e0e0; border-radius: 2px;
+    margin: 12px 0; display: none; overflow: hidden;
+  }
+  .progress.active { display: block; }
+  .progress-bar {
+    height: 100%; background: #1a73e8; border-radius: 2px;
+    animation: loading 1.5s infinite ease-in-out;
+  }
+  @keyframes loading { 0%{width:10%} 50%{width:70%} 100%{width:95%} }
+
+  .result-box {
+    background: #e6f4ea; border: 1px solid #34a853; border-radius: 8px;
+    padding: 14px 18px; margin-top: 12px; display: none; font-size: 0.9rem;
+    line-height: 1.6;
+  }
+  .result-box.error { background: #fce8e6; border-color: #ea4335; }
+
+  .stats-bar {
+    background: white; border-radius: 10px; padding: 16px 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1); margin-bottom: 24px;
+  }
+  .stats-bar h3 { font-size: 1rem; margin-bottom: 10px; }
+  .stat-grid { display: flex; gap: 12px; flex-wrap: wrap; }
+  .stat-card {
+    background: #f8f9fa; border-radius: 8px; padding: 10px 16px;
+    min-width: 120px; text-align: center;
+  }
+  .stat-card .num { font-size: 1.4rem; font-weight: 700; color: #1a73e8; }
+  .stat-card .label { font-size: 0.75rem; color: #5f6368; margin-top: 2px; }
+
+  .entries-box {
+    background: white; border-radius: 10px; padding: 16px 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+  }
+  .entries-box h3 { font-size: 1rem; margin-bottom: 12px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th { background:#f8f9fa; padding:10px; text-align:left; font-weight:600; color:#5f6368; }
+  td { padding:10px; border-bottom:1px solid #f1f3f4; vertical-align:top; }
+  tr:hover td { background:#fafafa; }
+
+  .toast {
+    position:fixed; bottom:24px; right:24px;
+    background:#202124; color:white; padding:12px 20px;
+    border-radius:8px; z-index:2000; opacity:0; transform:translateY(20px);
+    transition:all 0.3s; pointer-events:none;
+  }
+  .toast.show { opacity:1; transform:translateY(0); }
+  .toast.success { background:#137333; }
+  .toast.error { background:#c5221f; }
+</style>
+</head>
+<body>
+
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>Knowledge Base</h2>
+    <input type="password" id="loginKey" placeholder="Access Key..."
+           onkeydown="if(event.key==='Enter') doLogin()" />
+    <button onclick="doLogin()">Login</button>
+    <div id="loginError">Access Key ভুল</div>
+  </div>
+</div>
+
+<div id="mainUI" style="display:none">
+
+<div class="topbar">
+  <h1>Knowledge Base</h1>
+  <a href="/">Dashboard</a>
+  <a href="/drafts">Drafts</a>
+  <a href="/payroll">Payroll</a>
+  <a href="/escort-roster">Escort</a>
+</div>
+
+<div class="container">
+
+  <div class="upload-box">
+    <h2>Upload File to Knowledge Base</h2>
+
+    <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+      <div class="icon">&#8593;</div>
+      <p>Click or drag PDF, DOCX, TXT file here</p>
+      <p style="font-size:0.78rem;color:#9aa0a6;margin-top:4px;">Max 10MB &bull; PDF, DOCX, TXT, MD, CSV</p>
+    </div>
+    <input type="file" id="fileInput" accept=".pdf,.docx,.doc,.txt,.text,.md,.csv"
+           style="display:none" onchange="fileSelected(this)" />
+
+    <div id="fileName" style="font-size:0.85rem;color:#1a73e8;margin-bottom:10px;"></div>
+
+    <div class="form-row">
+      <div>
+        <label>Category</label>
+        <select id="category">
+          <option value="uploaded">uploaded (general)</option>
+          <option value="recruitment">recruitment</option>
+          <option value="business">business</option>
+          <option value="personal">personal</option>
+          <option value="vessel_duty">vessel_duty</option>
+          <option value="conversation">conversation</option>
+          <option value="policy">policy</option>
+        </select>
+      </div>
+      <div>
+        <label>Subcategory (optional)</label>
+        <input type="text" id="subcategory" placeholder="e.g. salary_rules" />
+      </div>
+      <div>
+        <label>Tags (comma separated)</label>
+        <input type="text" id="tags" placeholder="e.g. salary,rules,guard" />
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="uploadBtn" onclick="doUpload()" disabled>
+      Upload to KB
+    </button>
+
+    <div class="progress" id="progressBar"><div class="progress-bar"></div></div>
+    <div class="result-box" id="resultBox"></div>
+  </div>
+
+  <div class="stats-bar">
+    <h3>KB Statistics</h3>
+    <div class="stat-grid" id="statsGrid">Loading...</div>
+  </div>
+
+  <div class="entries-box">
+    <h3>Recent Entries &nbsp;
+      <select id="catFilter" onchange="loadEntries()"
+              style="margin-left:4px;padding:4px 8px;font-size:0.85rem;border:1px solid #dadce0;border-radius:4px;">
+        <option value="">All categories</option>
+        <option value="uploaded">uploaded</option>
+        <option value="recruitment">recruitment</option>
+        <option value="business">business</option>
+        <option value="conversation">conversation</option>
+        <option value="personal">personal</option>
+        <option value="policy">policy</option>
+      </select>
+    </h3>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Category</th>
+          <th>Key</th>
+          <th>Content Preview</th>
+          <th>Active</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="entriesBody"><tr><td colspan="6" style="text-align:center;color:#5f6368;">Loading...</td></tr></tbody>
+    </table>
+  </div>
+
+</div></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let API_KEY = localStorage.getItem('kb_api_key') || '';
+let selectedFile = null;
+
+function doLogin() {
+  const key = document.getElementById('loginKey').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  fetch('/admin/kb/stats', { headers: { 'X-Internal-Key': API_KEY } })
+    .then(r => {
+      if (r.ok) {
+        localStorage.setItem('kb_api_key', API_KEY);
+        document.getElementById('loginOverlay').classList.add('hidden');
+        document.getElementById('mainUI').style.display = '';
+        loadStats(); loadEntries();
+      } else {
+        document.getElementById('loginError').style.display = 'block';
+      }
+    })
+    .catch(() => { document.getElementById('loginError').style.display = 'block'; });
+}
+
+if (API_KEY) {
+  fetch('/admin/kb/stats', { headers: { 'X-Internal-Key': API_KEY } })
+    .then(r => {
+      if (r.ok) {
+        document.getElementById('loginOverlay').classList.add('hidden');
+        document.getElementById('mainUI').style.display = '';
+        loadStats(); loadEntries();
+      }
+    })
+    .catch(() => {});
+}
+
+const dz = document.getElementById('dropZone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('dragover');
+  if (e.dataTransfer.files.length) {
+    document.getElementById('fileInput').files = e.dataTransfer.files;
+    fileSelected(document.getElementById('fileInput'));
+  }
+});
+
+function fileSelected(input) {
+  selectedFile = input.files[0];
+  if (selectedFile) {
+    document.getElementById('fileName').textContent =
+      selectedFile.name + ' (' + (selectedFile.size / 1024).toFixed(1) + ' KB)';
+    document.getElementById('uploadBtn').disabled = false;
+  }
+}
+
+async function doUpload() {
+  if (!selectedFile) return;
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true; btn.textContent = 'Uploading...';
+  document.getElementById('progressBar').classList.add('active');
+  document.getElementById('resultBox').style.display = 'none';
+
+  const fd = new FormData();
+  fd.append('file', selectedFile);
+  fd.append('category', document.getElementById('category').value);
+  fd.append('subcategory', document.getElementById('subcategory').value);
+  fd.append('tags', document.getElementById('tags').value);
+
+  try {
+    const r = await fetch('/admin/kb/upload', {
+      method: 'POST',
+      headers: { 'X-Internal-Key': API_KEY },
+      body: fd,
+    });
+    const data = await r.json();
+    const box = document.getElementById('resultBox');
+    if (r.ok) {
+      box.className = 'result-box';
+      box.innerHTML =
+        'Upload successful!<br>' +
+        'File: ' + data.filename + '<br>' +
+        'Total chars: ' + data.total_chars.toLocaleString() + '<br>' +
+        'Chunks: ' + data.total_chunks + '<br>' +
+        'Inserted: ' + data.inserted + '<br>' +
+        'RAG rebuilt: ' + (data.rag_rebuilt ? 'Yes' : 'No') + '<br>' +
+        'Upload ID: <code>' + data.upload_id + '</code>';
+      showToast('Upload successful!', 'success');
+      loadStats(); loadEntries();
+    } else {
+      box.className = 'result-box error';
+      box.innerHTML = 'Error: ' + (data.detail || JSON.stringify(data));
+      showToast('Upload failed', 'error');
+    }
+    box.style.display = 'block';
+  } catch (e) {
+    showToast('Network error: ' + e.message, 'error');
+  }
+
+  btn.disabled = false; btn.textContent = 'Upload to KB';
+  document.getElementById('progressBar').classList.remove('active');
+  selectedFile = null;
+  document.getElementById('fileInput').value = '';
+  document.getElementById('fileName').textContent = '';
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/admin/kb/stats', { headers: { 'X-Internal-Key': API_KEY } });
+    const d = await r.json();
+    document.getElementById('statsGrid').innerHTML =
+      '<div class="stat-card"><div class="num">' + d.total + '</div><div class="label">Total</div></div>' +
+      d.stats.map(function(s) {
+        return '<div class="stat-card"><div class="num">' + s.n + '</div><div class="label">' + s.category + '</div></div>';
+      }).join('');
+  } catch (e) {
+    document.getElementById('statsGrid').textContent = 'Load failed';
+  }
+}
+
+async function loadEntries() {
+  const cat = document.getElementById('catFilter').value;
+  const url = cat ? '/admin/kb/list?category=' + cat + '&limit=30' : '/admin/kb/list?limit=30';
+  try {
+    const r = await fetch(url, { headers: { 'X-Internal-Key': API_KEY } });
+    const d = await r.json();
+    const tbody = document.getElementById('entriesBody');
+    if (!d.entries.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#5f6368;">Empty</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.entries.map(function(e) {
+      return '<tr>' +
+        '<td>' + e.id + '</td>' +
+        '<td><span style="background:#e8f0fe;padding:2px 6px;border-radius:8px;font-size:0.78rem;">' + e.category + '</span></td>' +
+        '<td style="font-size:0.8rem;max-width:140px;word-break:break-all;">' + esc(e.key) + '</td>' +
+        '<td style="font-size:0.82rem;max-width:280px;">' + esc(e.reply_preview || e.value_preview || '') + '</td>' +
+        '<td>' + (e.is_active ? 'Yes' : 'No') + '</td>' +
+        '<td><button class="btn btn-danger btn-sm" onclick="deleteEntry(' + e.id + ')">Del</button></td>' +
+        '</tr>';
+    }).join('');
+  } catch (e) {
+    document.getElementById('entriesBody').innerHTML = '<tr><td colspan="6">Load error</td></tr>';
+  }
+}
+
+async function deleteEntry(id) {
+  if (!confirm('Delete entry #' + id + '?')) return;
+  try {
+    const r = await fetch('/admin/kb/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Key': API_KEY },
+      body: JSON.stringify({ entry_id: id }),
+    });
+    if (r.ok) { showToast('Deleted', 'success'); loadEntries(); loadStats(); }
+    else { showToast('Delete failed', 'error'); }
+  } catch (e) {
+    showToast('Network error', 'error');
+  }
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function showToast(m, t) {
+  const el = document.getElementById('toast');
+  el.textContent = m;
+  el.className = 'toast show ' + (t || '');
+  setTimeout(function() { el.className = 'toast'; }, 3000);
+}
+</script>
+</body>
+</html>

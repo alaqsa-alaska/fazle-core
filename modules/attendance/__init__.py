@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from app.database import execute, fetch_one, fetch_val
+from shared.draft_reply import create_draft_reply
 
 log = logging.getLogger("fazle.attendance")
 
@@ -129,12 +130,13 @@ async def handle_attendance_message(
         )
 
         # Save draft for admin approval
-        draft_id = await fetch_val(
-            """INSERT INTO fazle_draft_replies
-                   (recipient, reply_text, intent, source, status, created_at)
-               VALUES ($1, $2, 'attendance', $3, 'pending', NOW())
-               RETURNING id""",
-            sender_phone, draft_text, source,
+        draft_id = await create_draft_reply(
+            sender=sender_phone,
+            bridge=source,
+            draft_text=draft_text,
+            role="employee",
+            intent="attendance",
+            source_module="attendance",
         )
 
         # Store attendance payload in remarks JSON in draft_text is sufficient for now

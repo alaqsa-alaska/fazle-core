@@ -24,6 +24,7 @@ Ingest policy (v1.0.2 — locked):
 """
 
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -32,6 +33,7 @@ from typing import Optional
 
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_all, fetch_val
+from shared.draft_reply import create_draft_reply
 from app.bridge import get_bridge1, get_bridge2
 from modules.message_router import process_message, get_primary_admin, _is_safe_autosend_intent
 from modules.intent import classify as classify_intent
@@ -50,18 +52,18 @@ BRIDGE_POLL_MIN_S   = 1.0   # poll interval when messages are arriving
 BRIDGE_POLL_MAX_S   = 30.0  # poll interval during sustained idle
 BRIDGE_POLL_BACKOFF = 1.5   # multiply sleep by this each consecutive idle iteration
 
-# Per-bridge SQLite paths — loaded from settings at startup
+# Per-bridge SQLite paths — resolved from settings so .env overrides work.
 BRIDGE_CONFIGS = [
     {
         "name": "bridge1",
-        "messages_db": "/home/azim/whatsapp1/store/messages.db",
-        "whatsapp_db": "/home/azim/whatsapp1/store/whatsapp.db",
+        "messages_db": _settings.bridge1_db_path,
+        "whatsapp_db": _settings.bridge1_whatsapp_db_path,
         "get_bridge": get_bridge1,
     },
     {
         "name": "bridge2",
-        "messages_db": "/home/azim/whatsapp2/store/messages.db",
-        "whatsapp_db": "/home/azim/whatsapp2/store/whatsapp.db",
+        "messages_db": _settings.bridge2_db_path,
+        "whatsapp_db": _settings.bridge2_whatsapp_db_path,
         "get_bridge": get_bridge2,
     },
 ]
@@ -673,6 +675,7 @@ async def _poll_bridge(config: dict):
     get_bridge = config["get_bridge"]
 
     log.info(f"[{bridge_name}] Poller started")
+    log.info("[bridge_poller] SQLite path=%s exists=%s", messages_db, os.path.exists(messages_db))
 
     # Load cursor from DB
     cursor = await _get_cursor(bridge_name)
@@ -1274,38 +1277,37 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
     persisted (for audit) but with status='rejected_quality'/'rejected_fallback'
     and meta.quality_reason — they never appear in the admin pending list.
     """
-    from modules.draft_quality import check_draft_quality
+    from modules.draft_quality import check_draft_quality, strip_reply_emoji
     from modules import observability as _obs
+    reply_text = strip_reply_emoji(reply_text) if reply_text else reply_text
     ok, reason = check_draft_quality(reply_text)
     if not ok:
         _obs.inc("drafts_rejected_total", labels={"reason": reason or "unknown", "source": source})
         log.warning(f"[draft_quality] rejected source={source} recipient={recipient} reason={reason}")
-        try:
-            await execute(
-                """
-                INSERT INTO fazle_draft_replies
-                    (source, recipient, reply_text, intent, draft_only, status, created_at, meta)
-                VALUES ($1, $2, $3, $4, true, $5, NOW(),
-                        jsonb_build_object('quality_reason', $6, 'gate', 'b25'))
-                """,
-                source, recipient, reply_text or "", intent,
-                "rejected_fallback" if reason == "llm_fallback" else "rejected_quality",
-                reason or "unknown",
-            )
-        except Exception as e:
-            log.warning(f"Draft save (rejected) error: {e}")
-        return
-    try:
-        await execute(
-            """
-            INSERT INTO fazle_draft_replies
-                (source, recipient, reply_text, intent, draft_only, status, created_at)
-            VALUES ($1, $2, $3, $4, true, 'pending', NOW())
-            """,
-            source, recipient, reply_text, intent,
+        draft_id = await create_draft_reply(
+            sender=recipient,
+            bridge=source,
+            draft_text=reply_text or "",
+            role="unknown",
+            intent=intent,
+            context=json.dumps({"quality_reason": reason or "unknown", "gate": "b25"}),
+            source_module="bridge_poller",
         )
-    except Exception as e:
-        log.warning(f"Draft save error: {e}")
+        if draft_id:
+            await execute(
+                "UPDATE fazle_draft_replies SET status = $1 WHERE id = $2",
+                "rejected_fallback" if reason == "llm_fallback" else "rejected_quality",
+                draft_id,
+            )
+        return
+    await create_draft_reply(
+        sender=recipient,
+        bridge=source,
+        draft_text=reply_text,
+        role="unknown",
+        intent=intent,
+        source_module="bridge_poller",
+    )
 
 
 async def _save_message(

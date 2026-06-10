@@ -24,19 +24,26 @@ class Settings(BaseSettings):
 
     # Bridges
     bridge1_url: str = "http://localhost:8080"
-    bridge1_number: str = "8801958122300"
+    bridge1_number: str = ""
     bridge1_label: str = "HR"
 
     bridge2_url: str = "http://localhost:8081"
-    bridge2_number: str = "8801880446111"
+    bridge2_number: str = ""
     bridge2_label: str = "OPS"
+
+    # Bridge SQLite store paths — override in .env if the store directory moves.
+    # Defaults match the current production layout on this VPS.
+    bridge1_db_path: str = "/home/azim/whatsapp1/store/messages.db"
+    bridge1_whatsapp_db_path: str = "/home/azim/whatsapp1/store/whatsapp.db"
+    bridge2_db_path: str = "/home/azim/whatsapp2/store/messages.db"
+    bridge2_whatsapp_db_path: str = "/home/azim/whatsapp2/store/whatsapp.db"
 
     # Meta WhatsApp
     meta_phone_number_id: str = ""
     meta_api_token: str = ""
     meta_api_url: str = "https://graph.facebook.com/v22.0"
     meta_app_secret: str = ""
-    meta_verify_token: str = "fazle_core_webhook_2026"
+    meta_verify_token: str = ""
 
     # Media
     media_processor_url: str = "http://localhost:8090"
@@ -45,7 +52,7 @@ class Settings(BaseSettings):
     app_port: int = 8200
     log_level: str = "INFO"
     debug: bool = False
-    internal_api_key: str = "fazle-core-internal-2026"
+    internal_api_key: str = ""
 
     @field_validator("debug", mode="before")
     @classmethod
@@ -81,9 +88,9 @@ class Settings(BaseSettings):
     company_name: str = "Al-Aqsa Security Service"
     accountant_phone: str = ""
     admin_numbers: str = ""
-    admin_meta_number: str = "8801880446111"    # Verified Meta admin
-    admin_bridge1_number: str = "8801958122300" # Bridge1 HR admin
-    admin_bridge2_number: str = "8801880446111" # Bridge2 OPS admin
+    admin_meta_number: str = ""
+    admin_bridge1_number: str = ""
+    admin_bridge2_number: str = ""
 
     # Escort order configuration
     # Comma-separated phone numbers that are authorised to send escort client orders.
@@ -103,9 +110,9 @@ class Settings(BaseSettings):
     # Names: case-insensitive display name substrings
     # Default: if a saved contact name contains these tokens, never auto-send
     # (reply becomes a draft for admin review).
-    draft_always_names: str = "al-aqsa,escort,client,office"
+    draft_always_names: str = "al-aqsa,escort,client,office,operation,tcis,gms,dalal"
     # Prefixes: contact display_name starts with any of these words → always draft
-    draft_name_prefixes: str = "client,escort,office"
+    draft_name_prefixes: str = "client,escort,office,operation,tcis,gms,dalal"
 
     # ── AI Safety Mode (STEP 5) ──────────────────────────────────────────
     # When True: long replies, low-confidence, and uncertain-intent auto-replies
