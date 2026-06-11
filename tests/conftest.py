@@ -26,7 +26,9 @@ import respx
 from httpx import AsyncClient, ASGITransport
 
 # ── One-time test schema setup (sync, no event loop conflicts) ───────────────
-@pytest.fixture(scope="session", autouse=True)
+# autouse=False: only runs for tests that explicitly request this fixture
+# (or DB-dependent fixtures that chain to it). Pure unit tests are unaffected.
+@pytest.fixture(scope="session", autouse=False)
 def _setup_test_schema(override_env):
     """Drop and recreate the public schema once per session (sync wrapper)."""
     async def _run():
@@ -42,10 +44,23 @@ def _setup_test_schema(override_env):
 # 1. Environment / Settings override
 # ─────────────────────────────────────────────────────────────────────────────
 
-TEST_DB_URL = os.getenv(
-    "TEST_DATABASE_URL",
-    "postgresql://postgres:3UTioVfpNwVgcZ2VtlEr9XDR5C8PSOb@172.20.0.3:5432/fazle_test",
-)
+def _default_test_db_url() -> str:
+    """Derive test DB URL from runtime-services.env (prod creds, fazle_test DB).
+    CI can override via TEST_DATABASE_URL env var."""
+    import subprocess
+    try:
+        prod = subprocess.check_output(
+            ["bash", "-c",
+             "grep '^DATABASE_URL=' /home/azim/secure-env-backup/runtime-services.env"
+             " | cut -d= -f2-"],
+            text=True,
+        ).strip()
+        return prod.rsplit("/", 1)[0] + "/fazle_test"
+    except Exception:
+        return "postgresql://postgres:postgres@172.20.0.3:5432/fazle_test"
+
+
+TEST_DB_URL = os.getenv("TEST_DATABASE_URL") or _default_test_db_url()
 TEST_API_KEY = "test-internal-key-fixture-only"
 
 
@@ -477,10 +492,41 @@ ON CONFLICT (name) DO NOTHING;
 
 
 @pytest_asyncio.fixture
-async def test_db_pool() -> AsyncGenerator[asyncpg.Pool, None]:
-    """Per-test asyncpg pool (function-scoped to avoid event loop conflicts)."""
+async def test_db_pool(_setup_test_schema) -> AsyncGenerator[asyncpg.Pool, None]:
+    """Per-test asyncpg pool. Chains _setup_test_schema so the schema is
+    created/wiped once per session before any DB test runs. Truncates all
+    data tables in teardown so each test starts with clean state. Pure
+    (no-DB) unit tests never request test_db_pool so they are unaffected."""
     pool = await asyncpg.create_pool(TEST_DB_URL, min_size=1, max_size=3)
     yield pool
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("""
+                TRUNCATE TABLE
+                    fazle_payment_correction_log,
+                    fazle_admin_audit,
+                    fazle_reviewed_reply_memory,
+                    fazle_payment_drafts,
+                    fazle_draft_replies,
+                    fazle_recruitment_sessions,
+                    wbom_payroll_approval_log,
+                    wbom_payroll_run_items,
+                    wbom_payroll_runs,
+                    wbom_staging_payments,
+                    wbom_cash_transactions,
+                    wbom_attendance,
+                    wbom_escort_programs,
+                    fazle_contact_roles,
+                    wbom_contacts,
+                    wbom_employees,
+                    fazle_admins,
+                    fazle_admin_roles,
+                    wbom_whatsapp_messages,
+                    fazle_db_backups
+                RESTART IDENTITY CASCADE
+            """)
+        except Exception:
+            pass
     await pool.close()
 
 

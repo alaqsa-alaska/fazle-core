@@ -26,18 +26,33 @@ _github_sem = asyncio.Semaphore(1)
 
 # Round-robin token index (module-level, in-process rotation).
 _token_idx: int = 0
+import time as _time
+_token_cooldown: dict[int, float] = {}   # {token_index: cooldown_until_monotonic}
+_TOKEN_DEFAULT_COOLDOWN_S = 65.0         # GitHub free-tier window ~60 s + buffer
 
 
 def _get_next_token() -> str:
     global _token_idx
     settings = get_settings()
-    tokens = [t for t in [settings.github_token, settings.github_token_2, settings.github_token_3] if t]
+    tokens = [t for t in [
+        settings.github_token,
+        settings.github_token_2,
+        settings.github_token_3,
+    ] if t]
     if not tokens:
         raise ValueError("No GitHub token configured — set GITHUB_TOKEN in .env")
-    token = tokens[_token_idx % len(tokens)]
-    _token_idx += 1
-    log.debug("[github_models] using token_idx=%d", (_token_idx - 1) % len(tokens))
-    return token
+    now = _time.monotonic()
+    for _ in range(len(tokens)):
+        idx = _token_idx % len(tokens)
+        _token_idx += 1
+        if _token_cooldown.get(idx, 0.0) <= now:
+            log.debug("[github_models] using token_idx=%d", idx)
+            return tokens[idx]
+        log.debug(
+            "[github_models] token_idx=%d in cooldown (%.0fs remaining)",
+            idx, _token_cooldown[idx] - now,
+        )
+    raise ValueError("All GitHub tokens in cooldown — falling back to Ollama")
 
 
 def _make_client() -> AsyncOpenAI:
@@ -108,6 +123,10 @@ async def classify_intent_llm(text: str) -> str:
             asyncio.create_task(_log_llm("classify_intent_llm", model, prompt, result, latency_ms))
             return result if result in valid else "unknown"
         except (RateLimitError, APIError) as e:
+            _ra = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+            _cd = float(_ra) if _ra else _TOKEN_DEFAULT_COOLDOWN_S
+            _nt = len([t for t in [settings.github_token, settings.github_token_2, settings.github_token_3] if t])
+            _token_cooldown[(_token_idx - 1) % _nt] = _time.monotonic() + _cd
             log.warning("[github_models] classify rate/API error: %s", e)
         except Exception as e:
             log.warning("[github_models] classify error: %s: %s", type(e).__name__, e)
@@ -155,6 +174,10 @@ async def generate_reply(
             log.info("[github_models] generate_reply OK latency=%dms intent=%s role=%s", latency_ms, intent, role)
             return reply_text
         except (RateLimitError, APIError) as e:
+            _ra = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+            _cd = float(_ra) if _ra else _TOKEN_DEFAULT_COOLDOWN_S
+            _nt = len([t for t in [settings.github_token, settings.github_token_2, settings.github_token_3] if t])
+            _token_cooldown[(_token_idx - 1) % _nt] = _time.monotonic() + _cd
             log.warning("[github_models] generate_reply rate/API error: %s", e)
         except Exception as e:
             log.error("[github_models] generate_reply error: %s: %s", type(e).__name__, e)
@@ -196,6 +219,10 @@ async def generate_recruitment_reply(
             asyncio.create_task(_log_llm("generate_recruitment_reply", model, prompt, reply_text, latency_ms))
             return reply_text
         except (RateLimitError, APIError) as e:
+            _ra = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+            _cd = float(_ra) if _ra else _TOKEN_DEFAULT_COOLDOWN_S
+            _nt = len([t for t in [settings.github_token, settings.github_token_2, settings.github_token_3] if t])
+            _token_cooldown[(_token_idx - 1) % _nt] = _time.monotonic() + _cd
             log.warning("[github_models] recruitment rate/API error: %s", e)
         except Exception as e:
             log.error("[github_models] recruitment error: %s: %s", type(e).__name__, e)
@@ -231,6 +258,10 @@ async def generate_structured_response(
             asyncio.create_task(_log_llm("generate_structured_response", use_model, prompt[:200], raw, latency_ms))
             return raw
         except (RateLimitError, APIError) as e:
+            _ra = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+            _cd = float(_ra) if _ra else _TOKEN_DEFAULT_COOLDOWN_S
+            _nt = len([t for t in [settings.github_token, settings.github_token_2, settings.github_token_3] if t])
+            _token_cooldown[(_token_idx - 1) % _nt] = _time.monotonic() + _cd
             log.warning("[github_models] structured response rate/API error: %s", e)
         except Exception as e:
             log.error("[github_models] structured response error: %s: %s", type(e).__name__, e)
@@ -289,6 +320,10 @@ async def generate_chat_reply(
             log.info("[github_models] generate_chat_reply OK latency=%dms", latency_ms)
             return reply_text
         except (RateLimitError, APIError) as e:
+            _ra = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+            _cd = float(_ra) if _ra else _TOKEN_DEFAULT_COOLDOWN_S
+            _nt = len([t for t in [settings.github_token, settings.github_token_2, settings.github_token_3] if t])
+            _token_cooldown[(_token_idx - 1) % _nt] = _time.monotonic() + _cd
             log.warning("[github_models] generate_chat_reply rate/API error: %s", e)
         except Exception as e:
             log.error("[github_models] generate_chat_reply error: %s: %s", type(e).__name__, e)

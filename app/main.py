@@ -47,6 +47,7 @@ from modules.admin_employees import router as admin_employees_router
 from modules.admin_transactions import router as admin_transactions_router
 from modules.social_auto_reply import ingest_social_event, start_social_auto_reply, stop_social_auto_reply
 from modules.social_auto_reply.routes import router as social_auto_reply_router
+from modules.contact_roles.routes import router as contact_roles_router
 
 setup_logging()
 log = logging.getLogger("fazle.app")
@@ -274,6 +275,7 @@ app.include_router(kb_upload_router)
 app.include_router(admin_employees_router)   # Phase 18B — Admin Employee CRUD
 app.include_router(admin_transactions_router) # Phase 19 — Admin Transaction CRUD
 app.include_router(social_auto_reply_router)  # Backend social auto-reply queue/admin API
+app.include_router(contact_roles_router)      # P2-4 — Contact roles CRUD
 
 # Phase 12C — Realtime WebSocket endpoint
 from shared.realtime import router as _realtime_router
@@ -326,6 +328,21 @@ async def metrics_middleware(request: _Req, call_next):
                 dur_ms,
                 labels={"method": request.method, "path": path},
             )
+
+
+# ── Security headers — all text/html responses ────────────────────────────────
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    if "text/html" in response.headers.get("content-type", ""):
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'"
+        )
+    return response
 
 
 # ── Batch 11 — recruitment-only auto-reply gate ────────────────────────────────
@@ -522,7 +539,7 @@ async def health_deep():
 
 
 # ── Phase 13A — Runtime node registry ───────────────────────────────────────
-@app.get("/api/runtime/nodes")
+@app.get("/api/runtime/nodes", dependencies=[Depends(require_api_key)])
 async def get_runtime_nodes():
     """
     List all registered runtime nodes (fazle-core, payroll-engine, escort-roster).
@@ -548,7 +565,7 @@ async def get_runtime_nodes():
 
 
 # ── Phase 13B — Dead-letter inspection ───────────────────────────────────────
-@app.get("/api/queue/dead-letters")
+@app.get("/api/queue/dead-letters", dependencies=[Depends(require_api_key)])
 async def get_dead_letter_queue(limit: int = 50, offset: int = 0):
     """
     Return dead-letter lease entries for diagnosis.
@@ -574,7 +591,7 @@ async def get_dead_letter_queue(limit: int = 50, offset: int = 0):
     }
 
 
-@app.get("/api/queue/arbiter-metrics")
+@app.get("/api/queue/arbiter-metrics", dependencies=[Depends(require_api_key)])
 async def get_arbiter_metrics_endpoint():
     """
     Return in-process arbitration metrics: lease counts, conflicts,
@@ -619,7 +636,7 @@ async def frontend_heartbeat(request: Request):
                 "backoff_hint_s": 3, "ts": time.time()}
 
 
-@app.get("/api/frontend/sync-stats")
+@app.get("/api/frontend/sync-stats", dependencies=[Depends(require_api_key)])
 async def frontend_sync_stats():
     """
     Diagnostics for the unified frontend synchronization layer.
@@ -639,7 +656,7 @@ async def frontend_sync_stats():
 
 
 # ── Phase 13D — Bridge orchestration diagnostics ──────────────────────────────
-@app.get("/api/bridges/diagnostics")
+@app.get("/api/bridges/diagnostics", dependencies=[Depends(require_api_key)])
 async def bridge_diagnostics():
     """
     Health, lag, deduplication, and failover diagnostics for all bridges.
@@ -674,7 +691,7 @@ async def bridge_probe(_key: str = Depends(require_api_key)):
 
 
 # ── Phase 13E — Self-Healing Runtime diagnostics ──────────────────────────────
-@app.get("/api/self-heal/diagnostics")
+@app.get("/api/self-heal/diagnostics", dependencies=[Depends(require_api_key)])
 async def self_heal_diagnostics():
     """
     Runtime self-heal status: pressure score, panic mode, signal breakdown,
@@ -1829,6 +1846,63 @@ async def list_payment_draft_api(limit: int = 20):
         return {"error": str(e), "payment_drafts": []}
 
 
+@app.get("/admin/approvals", dependencies=[Depends(require_api_key)])
+async def unified_approvals_queue(
+    limit: int = 50,
+    offset: int = 0,
+    source: Optional[str] = None,
+):
+    """Unified pending-approvals queue. source: 'draft' | 'payment' | None (both)."""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    if source and source not in ("draft", "payment"):
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(status_code=400, detail="source must be 'draft' or 'payment'")
+    try:
+        if source == "draft":
+            rows = await fetch_all(
+                """SELECT 'draft' AS source_table, id, created_at, status,
+                          recipient AS phone, NULL::NUMERIC AS amount
+                   FROM fazle_draft_replies
+                   WHERE status IN ('pending', 'pending_selfie', 'edited')
+                   ORDER BY created_at DESC LIMIT $1 OFFSET $2""",
+                limit, offset,
+            )
+        elif source == "payment":
+            rows = await fetch_all(
+                """SELECT 'payment' AS source_table, id, created_at, status,
+                          phone, amount
+                   FROM fazle_payment_drafts
+                   WHERE status = 'pending'
+                   ORDER BY created_at DESC LIMIT $1 OFFSET $2""",
+                limit, offset,
+            )
+        else:
+            rows = await fetch_all(
+                """
+                SELECT 'draft'   AS source_table,
+                       id, created_at, status,
+                       recipient AS phone,
+                       NULL::NUMERIC AS amount
+                FROM fazle_draft_replies
+                WHERE status IN ('pending', 'pending_selfie', 'edited')
+                UNION ALL
+                SELECT 'payment' AS source_table,
+                       id, created_at, status,
+                       phone, amount
+                FROM fazle_payment_drafts
+                WHERE status = 'pending'
+                ORDER BY created_at DESC
+                LIMIT $1 OFFSET $2
+                """,
+                limit, offset,
+            )
+        return {"items": [dict(r) for r in rows], "count": len(rows),
+                "limit": limit, "offset": offset, "source": source}
+    except Exception as e:
+        return {"items": [], "count": 0, "error": str(e)}
+
+
 @app.get("/admin/recruitment", dependencies=[Depends(require_api_key)])
 async def list_recruitment(limit: int = 50):
     try:
@@ -1840,6 +1914,71 @@ async def list_recruitment(limit: int = 50):
         return {"count": len(rows), "leads": rows}
     except Exception as e:
         return {"error": str(e), "leads": []}
+
+
+# ── Memory manager — reviewed reply memory CRUD ─────────────────────────────────
+@app.get("/admin/memory/reviewed-replies", dependencies=[Depends(require_api_key)])
+async def list_reviewed_replies(
+    active_only: int = 0,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List reviewed-reply memory entries."""
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    if active_only:
+        rows = await fetch_all(
+            """SELECT id, source, intent, draft_type, role, recipient_phone,
+                      match_scope, reply_text, status, priority, usage_count,
+                      last_used_at, created_at, updated_at
+               FROM fazle_reviewed_replies
+               WHERE status = 'active'
+               ORDER BY priority DESC, usage_count DESC
+               LIMIT $1 OFFSET $2""",
+            limit, offset,
+        )
+    else:
+        rows = await fetch_all(
+            """SELECT id, source, intent, draft_type, role, recipient_phone,
+                      match_scope, reply_text, status, priority, usage_count,
+                      last_used_at, created_at, updated_at
+               FROM fazle_reviewed_replies
+               ORDER BY created_at DESC
+               LIMIT $1 OFFSET $2""",
+            limit, offset,
+        )
+    return {"items": [dict(r) for r in rows], "count": len(rows),
+            "limit": limit, "offset": offset, "active_only": bool(active_only)}
+
+
+@app.patch("/admin/memory/reviewed-replies/{entry_id}/toggle", dependencies=[Depends(require_api_key)])
+async def toggle_reviewed_reply(entry_id: int):
+    """Toggle a reviewed-reply memory entry between active and disabled."""
+    row = await fetch_one(
+        """UPDATE fazle_reviewed_replies
+           SET status     = CASE WHEN status = 'active' THEN 'disabled' ELSE 'active' END,
+               updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, status, intent, updated_at""",
+        entry_id,
+    )
+    if row is None:
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(status_code=404, detail=f"reviewed_reply id={entry_id} not found")
+    return {"ok": True, **dict(row)}
+
+
+@app.delete("/admin/memory/reviewed-replies/{entry_id}", dependencies=[Depends(require_api_key)])
+async def delete_reviewed_reply(entry_id: int):
+    """Permanently delete a reviewed-reply memory entry."""
+    row = await fetch_one(
+        "DELETE FROM fazle_reviewed_replies WHERE id = $1 RETURNING id",
+        entry_id,
+    )
+    if row is None:
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(status_code=404, detail=f"reviewed_reply id={entry_id} not found")
+    return {"ok": True, "deleted_id": entry_id}
 
 
 # ── Batch 19 — RBAC admin endpoints ────────────────────────────────────────────

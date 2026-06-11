@@ -94,6 +94,9 @@ async def classify_intent_llm(text: str) -> str:
                         "slip_submission", "voice_note", "greeting", "unknown",
                     }
                     return result if result in valid else "unknown"
+                else:
+                    log.warning("[ollama] classify_intent_llm non-200: status=%d body=%.100s",
+                                r.status_code, r.text)
         except Exception as e:
             log.warning(f"Ollama classify error: {type(e).__name__}: {e}")
     return "unknown"
@@ -142,6 +145,9 @@ async def generate_reply(
                         "generate_reply", settings.ollama_model, prompt, reply_text, latency_ms,
                     ))
                     return reply_text
+                else:
+                    log.warning("[ollama] generate_reply non-200: status=%d body=%.100s",
+                                r.status_code, r.text)
         except Exception as e:
             log.error(f"Ollama generate error: {type(e).__name__}: {e}")
 
@@ -207,7 +213,8 @@ async def generate_recruitment_reply(
                         "generate_recruitment_reply", settings.ollama_model, prompt, reply_text, latency_ms,
                     ))
                     return reply_text
-                log.warning("Ollama recruitment reply non-200: %s", r.status_code)
+                log.warning("[ollama] generate_recruitment_reply non-200: status=%d body=%.100s",
+                            r.status_code, r.text)
         except Exception as e:
             log.error(f"Ollama recruitment generate error: {type(e).__name__}: {e}")
 
@@ -284,7 +291,8 @@ async def generate_rag_answer(
                 if r.status_code == 200:
                     reply = r.json().get("response", "").strip()
                     return reply if reply else None
-                log.warning("Ollama RAG answer non-200: %s", r.status_code)
+                log.warning("[ollama] generate_rag_answer non-200: status=%d body=%.100s",
+                            r.status_code, r.text)
         except Exception as e:
             log.error("Ollama RAG answer error: %s: %s", type(e).__name__, e)
     return None
@@ -349,7 +357,8 @@ Admin-এর প্রশ্ন: {question[:400]}
                 if r.status_code == 200:
                     reply = r.json().get("response", "").strip()
                     return reply if reply else None
-                log.warning("Ollama chat reply non-200: %s", r.status_code)
+                log.warning("[ollama] generate_chat_reply non-200: status=%d body=%.100s",
+                            r.status_code, r.text)
         except Exception as e:
             log.error("Ollama chat reply error: %s: %s", type(e).__name__, e)
     return None

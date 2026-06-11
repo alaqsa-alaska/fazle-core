@@ -150,6 +150,10 @@ _ESCORTCONFIRM_RE = re.compile(
     r"^escortconfirm\s+(\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([DNdn])",
     re.IGNORECASE,
 )
+# REVERSE <transaction_id> <reason…>
+_REVERSE_RE = re.compile(r"^reverse\s+\d+.*$", re.IGNORECASE)
+# ADJUST <draft_id> <amount> <method>
+_ADJUST_RE = re.compile(r"^adjust\s+\d+.*$", re.IGNORECASE)
 
 
 def is_admin_command(text: str) -> bool:
@@ -170,7 +174,8 @@ def is_admin_command(text: str) -> bool:
         _BACKUP_LIST_RE.match(t) or
         _USER_LIST_RE.match(t) or _USER_ADD_RE.match(t) or
         _USER_ROLE_RE.match(t) or _USER_REMOVE_RE.match(t) or
-        _USER_APIKEY_RE.match(t)
+        _USER_APIKEY_RE.match(t) or
+        _REVERSE_RE.match(t) or _ADJUST_RE.match(t)
     )
 
 

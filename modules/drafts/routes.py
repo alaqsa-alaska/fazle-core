@@ -25,8 +25,18 @@ _API_KEY_HEADER = APIKeyHeader(name="X-Internal-Key", auto_error=False)
 
 
 async def _require_api_key(key: str = Depends(_API_KEY_HEADER)) -> None:
-    if not key or key != _get_settings().internal_api_key:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    settings = _get_settings()
+    if key and key == settings.internal_api_key:
+        return
+    if key:
+        try:
+            from modules import rbac
+            admin = await rbac.get_admin_by_api_key(key)
+            if admin and admin.get("status") == "active":
+                return
+        except Exception:
+            pass
+    raise HTTPException(status_code=403, detail="Forbidden")
 
 
 # ── Request models ──────────────────────────────────────────────────────────

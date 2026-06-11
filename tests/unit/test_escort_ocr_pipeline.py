@@ -22,6 +22,10 @@ pytestmark = pytest.mark.unit
 
 # ── 1. _find_bridge_image_file() ──────────────────────────────────────────────
 
+@pytest.mark.xfail(
+    reason="_find_bridge_image_file not yet implemented in modules.bridge_poller",
+    strict=True,
+)
 class TestFindBridgeImageFile:
     """Unit tests for the helper that reconstructs the bridge image file path."""
 

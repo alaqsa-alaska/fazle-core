@@ -396,11 +396,52 @@ async def stats() -> dict[str, Any]:
 
 
 async def rebuild_index() -> dict[str, Any]:
-    """PATCH 6: Force full index rebuild from scratch. Clears any poisoned in-memory index."""
+    """PATCH 6: Force full index rebuild. Holds lock continuously from wipe through rebuild
+    to prevent ensure_index() from triggering a concurrent build during the gap."""
     log.warning("[rag] [RAG_REBUILD] Forced index rebuild requested — clearing poisoned index")
     async with _IDX.lock:
-        _IDX.reset()  # wipe current (potentially poisoned) index
-    return await build_index()
+        _IDX.reset()
+        t0 = time.monotonic()
+        sources: list[tuple[str, str, str, bool]] = []
+        sources.extend(_load_resource_files())
+        sources.extend(await _load_kb_rows())
+        unsafe_count = 0
+        for source_id, title, text, source_safe in sources:
+            for idx, chunk in enumerate(_chunk_text(text)):
+                tokens = _tokenize(chunk)
+                if not tokens:
+                    continue
+                chunk_safe = source_safe and _is_chunk_safe(chunk)
+                if not chunk_safe:
+                    unsafe_count += 1
+                    log.warning(
+                        f"[RAG_CHUNK_PURGED] source={source_id!r} chunk_idx={idx} "
+                        f"— unsafe chunk excluded from rebuild"
+                    )
+                    continue
+                _IDX.docs.append({
+                    "source": source_id,
+                    "title": title,
+                    "chunk_idx": idx,
+                    "text": chunk,
+                    "tokens": tokens,
+                    "len": len(tokens),
+                    "safe_for_customer": True,
+                })
+        for d in _IDX.docs:
+            for t in set(d["tokens"]):
+                _IDX.df[t] += 1
+        _IDX.avgdl = (
+            sum(d["len"] for d in _IDX.docs) / len(_IDX.docs) if _IDX.docs else 0.0
+        )
+        _IDX.built_at = time.time()
+        _IDX.build_ms = int((time.monotonic() - t0) * 1000)
+        safe_count = len(_IDX.docs)
+        log.info(
+            f"[rag] rebuild done docs={len(_IDX.docs)} safe={safe_count} "
+            f"unsafe={unsafe_count} vocab={len(_IDX.df)} in {_IDX.build_ms}ms"
+        )
+        return await _stats_locked()
 
 
 async def recent_searches() -> list[dict]:

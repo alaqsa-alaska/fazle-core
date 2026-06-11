@@ -6,8 +6,10 @@ GET  /admin/kb/stats     → KB statistics
 POST /admin/kb/delete    → delete KB entries by upload_id or entry_id
 """
 from __future__ import annotations
+import asyncio
 import logging
 import os
+import pathlib
 import time
 import uuid
 from typing import Optional
@@ -32,6 +34,14 @@ async def _require_api_key(key: str = Depends(_KB_KEY_HEADER)) -> None:
     settings = get_settings()
     if key and key == settings.internal_api_key:
         return
+    if key:
+        try:
+            from modules import rbac
+            admin = await rbac.get_admin_by_api_key(key)
+            if admin and admin.get("status") == "active":
+                return
+        except Exception:
+            pass
     raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -47,7 +57,8 @@ async def upload_to_kb(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
 
-    ext = os.path.splitext(file.filename)[1].lower()
+    safe_name = pathlib.Path(file.filename).name
+    ext = os.path.splitext(safe_name)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
@@ -97,7 +108,7 @@ async def upload_to_kb(
     txt_path = os.path.join(RESOURCES_DIR, txt_filename)
     try:
         with open(txt_path, "w", encoding="utf-8") as fh:
-            fh.write(f"# Source: {file.filename}\n")
+            fh.write(f"# Source: {safe_name}\n")
             fh.write(f"# Category: {category}\n")
             fh.write(f"# Upload ID: {upload_id}\n")
             fh.write(f"# Uploaded: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
@@ -119,7 +130,7 @@ async def upload_to_kb(
                 VALUES ($1, $2, $3, $4, $5, 'bn-en', 0.85, $6, true)
                 """,
                 category,
-                subcategory or file.filename,
+                subcategory or safe_name,
                 chunk_key,
                 chunk[:200],
                 chunk,
@@ -130,16 +141,14 @@ async def upload_to_kb(
             log.warning("Chunk %d insert failed: %s", i + 1, e)
 
     log.info("KB upload complete: %s → %d chunks, upload_id=%s",
-             file.filename, inserted, upload_id)
+             safe_name, inserted, upload_id)
 
-    rag_rebuilt = False
     try:
         from modules.rag import build_index
-        await build_index()
-        rag_rebuilt = True
-        log.info("RAG index rebuilt after upload")
+        asyncio.create_task(build_index())
+        log.info("RAG index rebuild scheduled (background)")
     except Exception as e:
-        log.warning("RAG rebuild failed: %s", e)
+        log.warning("RAG rebuild schedule failed: %s", e)
 
     return {
         "ok": True,
@@ -150,7 +159,7 @@ async def upload_to_kb(
         "total_chunks": len(chunks),
         "inserted": inserted,
         "category": category,
-        "rag_rebuilt": rag_rebuilt,
+        "rag_rebuild": "scheduled",
         "txt_path": txt_filename,
     }
 

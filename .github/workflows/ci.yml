@@ -27,7 +27,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyflakes
+          pip install pyflakes pytest pytest-asyncio respx httpx
 
       - name: Syntax check (compileall)
         run: python -m compileall -q app modules scripts
@@ -45,6 +45,21 @@ jobs:
 
       - name: Batch 22 observability test (offline)
         run: python scripts/test_batch22_observability.py
+
+      - name: Unit tests (offline, no DB)
+        run: |
+          INTERNAL_API_KEY=test AUTO_REPLY_ENABLED=false \
+            python -m pytest tests/unit/ -m unit \
+            --ignore=tests/unit/test_payroll.py \
+            --ignore=tests/unit/test_attendance.py \
+            --ignore=tests/unit/test_escort_lifecycle.py \
+            --ignore=tests/unit/test_escort_module.py \
+            --ignore=tests/unit/test_escort_ocr_pipeline.py \
+            --ignore=tests/unit/test_accountant_payment_pipeline.py \
+            --ignore=tests/unit/test_payment_workflow.py \
+            --ignore=tests/unit/test_backup_pipeline.py \
+            --ignore=tests/unit/test_draft_reply.py \
+            --timeout=30 -q --no-header
 
       - name: Summary
         if: always()

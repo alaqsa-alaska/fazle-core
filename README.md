@@ -442,6 +442,45 @@ All require `X-Internal-Key` header.
 
 ---
 
+## CHANGES — 2026-06-11 (Session: P0–P2 + Phase 3)
+
+### Admin Commands Fix
+- `REVERSE <id>` and `ADJUST <id>` now recognized by `is_admin_command()` — were silently ignored before
+
+### Contact Roles CRUD (new module)
+- `modules/contact_roles/` added
+- `GET /admin/contact-roles` — paginated with `offset`/`limit`, returns `{items, count, limit, offset}`
+- `POST /admin/contact-roles` — upsert by phone+platform
+- `PUT /admin/contact-roles/{phone}` — partial update, 404 on miss
+- `DELETE /admin/contact-roles/{phone}` — with 404 guard
+
+### Admin Approvals Source Filter
+- `GET /admin/approvals` now accepts `source: Optional[str]` query param
+
+### Memory Manager Endpoints
+- `GET /admin/memory/reviewed-replies` — list with `active_only`, `limit`, `offset`
+- `PATCH /admin/memory/reviewed-replies/{id}/toggle` — toggle active ↔ disabled
+- `DELETE /admin/memory/reviewed-replies/{id}` — delete with 404 guard
+
+### KB Upload Security
+- Upload filenames sanitized with `pathlib.Path(file.filename).name` — prevents path traversal
+
+### Migration Runner
+- `db/migrate.py` — standalone migration runner with `--dry-run` flag
+- `python db/migrate.py` runs pending migrations; `--dry-run` previews only
+
+### Test Suite Overhaul
+- Pure unit tests now run without DB (no connection errors)
+- DB credentials read dynamically from `runtime-services.env`
+- Auto-truncate in `test_db_pool` teardown prevents inter-test pollution
+- **Result: 65 passed, 0 failed, 6 xfailed**
+
+### Infrastructure
+- SSH config: `Host github-arshiyaazim` alias added — enables `git push` to fazle-core remote
+- ExecStartPre permission fixed: `generate_runtime_services_env.sh` now executable
+
+---
+
 ## CHANGES — 2026-06-10 (v1.2.0)
 
 ### v1.2.0 — Continuous Learning Loop + User Context Engine
