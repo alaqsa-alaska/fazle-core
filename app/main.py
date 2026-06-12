@@ -2267,7 +2267,27 @@ async def chat_message(request: Request):
 
     settings = get_settings()
     active_model = requested_model or settings.ollama_model
-    answer = await ai.generate_chat_reply(q, context, history, model=active_model)
+
+    # Hard deadline well inside nginx's 300s window so we return a clean
+    # message rather than letting nginx cut the connection mid-response.
+    _CHAT_TIMEOUT_S = 240
+    try:
+        answer = await asyncio.wait_for(
+            ai.generate_chat_reply(q, context, history, model=active_model),
+            timeout=_CHAT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        log.warning("[chat/message] LLM timed out after %ss for model=%s", _CHAT_TIMEOUT_S, active_model)
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": "llm_timeout",
+                "answer": "মডেলটি সময়মতো উত্তর দিতে পারেনি। একটু পরে আবার চেষ্টা করুন।",
+                "model": active_model,
+                "rag_used": app_context and bool(context),
+                "timeout_s": _CHAT_TIMEOUT_S,
+            },
+        )
 
     if answer:
         return {
