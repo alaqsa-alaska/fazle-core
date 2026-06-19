@@ -19,9 +19,10 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from app.database import fetch_one, fetch_all, execute, fetch_val
+from app.database import fetch_one, fetch_all, execute, fetch_val, get_pool
 from shared.draft_reply import create_draft_reply
 from modules.payment_workflow import create_escort_payment_draft
+from modules.escort_roster.calculations import count_shifts, shifts_to_days
 
 log = logging.getLogger("fazle.escort_lifecycle")
 
@@ -52,6 +53,7 @@ def is_release_intent(text: str) -> bool:
 async def find_active_program_for_employee(
     employee_id: int,
     on_or_before: Optional[date] = None,
+    conn=None,
 ) -> Optional[dict]:
     """Latest non-completed program for this employee whose program_date <= ref_date."""
     ref = on_or_before or date.today()
@@ -65,18 +67,18 @@ async def find_active_program_for_employee(
              AND program_date <= $2
            ORDER BY program_date DESC, program_id DESC
            LIMIT 1""",
-        employee_id, ref,
+        employee_id, ref, conn=conn,
     )
     return dict(row) if row else None
 
 
-async def find_existing_draft_for_program(program_id: int) -> Optional[dict]:
+async def find_existing_draft_for_program(program_id: int, conn=None) -> Optional[dict]:
     row = await fetch_one(
         """SELECT id, employee_id, expected_amount, status, accountant_msg
            FROM fazle_payment_drafts
            WHERE escort_program_id = $1
            ORDER BY id DESC LIMIT 1""",
-        program_id,
+        program_id, conn=conn,
     )
     return dict(row) if row else None
 
@@ -90,12 +92,15 @@ async def close_program(
     release_point: Optional[str],
     day_count: Optional[float],
     completed_by: str,
+    food_bill: float = 0,
+    conveyance: float = 0,
+    conn=None,
 ) -> dict:
     """UPDATE only when status<>'Completed'. Return {ok, already_closed, day_count, program_id}."""
     cur = await fetch_one(
         "SELECT program_id, status, program_date, end_date, day_count "
         "FROM wbom_escort_programs WHERE program_id=$1",
-        program_id,
+        program_id, conn=conn,
     )
     if not cur:
         return {"ok": False, "error": f"program {program_id} not found"}
@@ -128,9 +133,12 @@ async def close_program(
                end_shift=$3,
                release_point=COALESCE($4, release_point),
                day_count=$5,
-               remarks=COALESCE(remarks,'') || ' | b13-closed-by:' || $6
+               food_bill=$6,
+               conveyance=$7,
+               remarks=COALESCE(remarks,'') || ' | b13-closed-by:' || $8
            WHERE program_id=$1""",
-        program_id, end_date_v, end_shift, release_point, day_count, completed_by,
+        program_id, end_date_v, end_shift, release_point, day_count,
+        food_bill, conveyance, completed_by, conn=conn,
     )
     log.info(f"[escort-lifecycle] closed program {program_id} days={day_count} by={completed_by}")
     return {
@@ -141,12 +149,12 @@ async def close_program(
 
 # ── Attendance backfill ───────────────────────────────────────────────────────
 
-async def backfill_attendance_for_program(program_id: int) -> int:
+async def backfill_attendance_for_program(program_id: int, conn=None) -> int:
     """INSERT wbom_attendance rows for program_date..end_date inclusive, ON CONFLICT DO NOTHING."""
     prog = await fetch_one(
         """SELECT escort_employee_id, program_date, end_date, mother_vessel
            FROM wbom_escort_programs WHERE program_id=$1""",
-        program_id,
+        program_id, conn=conn,
     )
     if not prog or not prog["escort_employee_id"]:
         return 0
@@ -166,7 +174,7 @@ async def backfill_attendance_for_program(program_id: int) -> int:
                   (employee_id, attendance_date, status, location, recorded_by)
                VALUES ($1, $2, 'Present', $3, 'escort-lifecycle')
                ON CONFLICT (employee_id, attendance_date) DO NOTHING""",
-            eid, cur, location,
+            eid, cur, location, conn=conn,
         )
         # asyncpg execute returns 'INSERT 0 1' or 'INSERT 0 0'
         if isinstance(result, str) and result.endswith(" 1"):
@@ -213,13 +221,27 @@ async def handle_release_event(
     employee_id: int,
     extracted: Optional[dict] = None,
     source: str = "release-text",
+    admin_confirmed: bool = False,
 ) -> dict:
     """
     Top-level: close active program, backfill attendance, create payment draft.
     Idempotent: returns existing draft if program already closed.
     """
+    if not admin_confirmed:
+        return {
+            "ok": False,
+            "status": "admin_confirmation_required",
+            "message": "Release can only be finalized by an admin [RELEASE CONFIRMED] message.",
+        }
     extracted = extracted or {}
-    prog = await find_active_program_for_employee(employee_id)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await _handle_release_event_tx(employee_id, extracted, source, conn)
+
+
+async def _handle_release_event_tx(employee_id: int, extracted: dict, source: str, conn) -> dict:
+    prog = await find_active_program_for_employee(employee_id, conn=conn)
     if not prog:
         return {"ok": False, "status": "no_active_program",
                 "message": "No assigned/in-progress program found"}
@@ -229,11 +251,27 @@ async def handle_release_event(
     end_shift = (extracted.get("end_shift") or extracted.get("shift") or "D")
     release_point = extracted.get("release_point") or extracted.get("location")
     day_count = extracted.get("day_count") or extracted.get("days")
+    food_bill = extracted.get("food_bill") or 0
+    conveyance = extracted.get("conveyance") or 0
     if day_count is not None:
         try:
             day_count = float(day_count)
         except Exception:
             day_count = None
+    try:
+        food_bill = max(float(food_bill), 0)
+        conveyance = max(float(conveyance), 0)
+    except (TypeError, ValueError):
+        raise ValueError("food_bill and conveyance must be non-negative numbers")
+
+    start_date = prog.get("start_date") or prog.get("program_date")
+    start_shift = (prog.get("shift") or "D").upper()[:1]
+    if start_date and end_date_v:
+        total_shifts = count_shifts(start_date, start_shift, end_date_v, end_shift)
+        roster_days = float(shifts_to_days(total_shifts))
+        if roster_days <= 0:
+            raise ValueError("release end date/shift is before program start")
+        day_count = roster_days
 
     closed = await close_program(
         program_id=program_id,
@@ -242,15 +280,18 @@ async def handle_release_event(
         release_point=release_point,
         day_count=day_count,
         completed_by=source,
+        food_bill=food_bill,
+        conveyance=conveyance,
+        conn=conn,
     )
     if not closed.get("ok"):
         return {"ok": False, "status": "close_failed", **closed}
 
-    inserted_att = await backfill_attendance_for_program(program_id)
+    inserted_att = await backfill_attendance_for_program(program_id, conn=conn)
 
     # Idempotency: if already closed, look up existing draft
     if closed.get("already_closed"):
-        existing = await find_existing_draft_for_program(program_id)
+        existing = await find_existing_draft_for_program(program_id, conn=conn)
         return {
             "ok": True, "status": "already_closed",
             "program_id": program_id,
@@ -266,6 +307,39 @@ async def handle_release_event(
         escort_program_id=program_id,
         override_days=closed.get("day_count"),
         source=source,
+        conn=conn,
+    )
+    if not draft.get("draft_id"):
+        raise RuntimeError(draft.get("error") or "payment draft creation failed")
+
+    await conn.execute(
+        """
+        INSERT INTO escort_roster_entries (
+            program_id, mother_vessel, lighter_vessel, master_mobile, escort_name,
+            escort_mobile, destination, start_date, start_shift, end_date, end_shift,
+            total_shifts, total_days, salary, conveyance, food_bill, advance_deduction,
+            net_payable, total, release_point, roster_status, calc_version, last_synced_at
+        )
+        SELECT p.program_id, p.mother_vessel, p.lighter_vessel, p.master_mobile,
+               e.employee_name, p.escort_mobile, p.destination,
+               COALESCE(p.start_date, p.program_date), p.shift, p.end_date, p.end_shift,
+               $2, $3, d.gross_amount, d.conveyance, d.food_bill, d.advance_deduction,
+               d.expected_amount, d.expected_amount, p.release_point, 'completed', 1, NOW()
+        FROM wbom_escort_programs p
+        JOIN wbom_employees e ON e.employee_id=p.escort_employee_id
+        JOIN fazle_payment_drafts d ON d.escort_program_id=p.program_id
+        WHERE p.program_id=$1 AND d.id=$4
+        ON CONFLICT (program_id) DO UPDATE SET
+            end_date=EXCLUDED.end_date, end_shift=EXCLUDED.end_shift,
+            total_shifts=EXCLUDED.total_shifts, total_days=EXCLUDED.total_days,
+            salary=EXCLUDED.salary, conveyance=EXCLUDED.conveyance,
+            food_bill=EXCLUDED.food_bill, advance_deduction=EXCLUDED.advance_deduction,
+            net_payable=EXCLUDED.net_payable, total=EXCLUDED.total,
+            release_point=EXCLUDED.release_point, roster_status='completed',
+            calc_version=escort_roster_entries.calc_version + 1,
+            last_synced_at=NOW(), updated_at=NOW()
+        """,
+        program_id, total_shifts, day_count, draft["draft_id"],
     )
 
     return {
@@ -295,6 +369,7 @@ _RC_POINT_RE = re.compile(
 )
 _RC_DAYS_RE = re.compile(r"\bDays?[:\s]+(\d+(?:\.\d+)?)\b", re.IGNORECASE)
 _RC_CONV_RE = re.compile(r"\bConveyance[:\s]+([\d,]+)\b", re.IGNORECASE)
+_RC_FOOD_RE = re.compile(r"\bFood(?:\s*Bill)?[:\s]+([\d,]+)\b", re.IGNORECASE)
 _RC_ESCORT_RE = re.compile(r"\bEscort[:\s]+([^\n]{3,30})", re.IGNORECASE)
 _RC_LIGHTER_RE = re.compile(r"\bLighter[:\s]+([^\n]{3,30})", re.IGNORECASE)
 _RC_ANCHOR = re.compile(r"\[RELEASE CONFIRMED\]", re.IGNORECASE)
@@ -521,6 +596,9 @@ def parse_release_confirmation(text: str) -> dict:
     m = _RC_CONV_RE.search(text)
     if m:
         fields["conveyance"] = m.group(1).replace(",", "").strip()
+    m = _RC_FOOD_RE.search(text)
+    if m:
+        fields["food_bill"] = m.group(1).replace(",", "").strip()
 
     m = _RC_ESCORT_RE.search(text)
     if m:
@@ -550,13 +628,14 @@ async def handle_admin_release_confirmation(
         log.warning(f"[release-confirm] No fields parsed from text, skipping")
         return {"ok": False, "status": "no_fields"}
 
-    # Try to find employee by the chat_jid phone number
+    # Identify employee by canonical employee_mobile. wbom_employees has no contact_id.
     phone = chat_jid.replace("@s.whatsapp.net", "").strip()
     emp = await fetch_one(
-        """SELECT e.employee_id
-           FROM wbom_employees e
-           JOIN wbom_contacts c ON c.contact_id = e.contact_id
-           WHERE c.whatsapp_number = $1 LIMIT 1""",
+        """SELECT employee_id
+           FROM wbom_employees
+           WHERE regexp_replace(employee_mobile, '\\D', '', 'g')
+                 LIKE '%' || RIGHT(regexp_replace($1, '\\D', '', 'g'), 11)
+           LIMIT 1""",
         phone,
     )
     if not emp:
@@ -582,6 +661,7 @@ async def handle_admin_release_confirmation(
         employee_id=employee_id,
         extracted=fields,
         source=source,
+        admin_confirmed=True,
     )
 
 

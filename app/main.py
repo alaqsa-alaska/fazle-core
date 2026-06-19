@@ -5,7 +5,8 @@ Handles: Meta WhatsApp webhook, Bridge1, Bridge2, Send APIs, Dashboard
 All message routing is delegated to modules.message_router.process_message().
 This file only handles HTTP transport, signature verification, and delivery.
 
-SAFE MODE: AUTO_REPLY_ENABLED=false suppresses all outgoing messages.
+SAFE MODE: AUTO_REPLY_ENABLED=false suppresses customer replies except the
+explicit RECRUITMENT_AUTOREPLY_ENABLED candidate-intake bypass.
 Admin command confirmations are still logged (but not sent) in safe mode.
 """
 import asyncio
@@ -34,7 +35,6 @@ from modules.bridge_poller import start_pollers
 from modules.escort_slip_extractor import extract_escort_slip, test_report as escort_test_report
 from modules.payment_workflow import create_escort_payment_draft, finalize_payment, create_advance_request_draft
 from modules.message_router import process_message, get_primary_admin
-from modules.recruitment_flow import is_recruitment_trigger, get_active_session
 from modules import outbound as outbound_queue
 from modules import scheduler as fazle_scheduler
 from shared.queue import record_heartbeat
@@ -137,6 +137,12 @@ async def lifespan(app: FastAPI):
         log.info(f"[rbac] bootstrap complete (created={n})")
     except Exception as e:
         log.warning(f"[rbac] bootstrap failed: {e}")
+    # WhatsApp Chat UI — ensure runtime settings + groups tables exist
+    try:
+        await ensure_wa_chat_tables()
+        log.info("[wa_chat] tables ready")
+    except Exception as e:
+        log.warning(f"[wa_chat] table init failed (non-fatal): {e}")
     await start_pollers()
     outbound_queue.start_background_worker()
     fazle_scheduler.start_scheduler()
@@ -277,6 +283,10 @@ app.include_router(admin_transactions_router) # Phase 19 — Admin Transaction C
 app.include_router(social_auto_reply_router)  # Backend social auto-reply queue/admin API
 app.include_router(contact_roles_router)      # P2-4 — Contact roles CRUD
 
+# WhatsApp Chat UI — 3-panel frontend at /wa-chat
+from modules.wa_chat_frontend import router as wa_chat_router, ensure_wa_chat_tables
+app.include_router(wa_chat_router)
+
 # Phase 12C — Realtime WebSocket endpoint
 from shared.realtime import router as _realtime_router
 app.include_router(_realtime_router)
@@ -347,30 +357,58 @@ async def _security_headers(request: Request, call_next):
 
 # ── Batch 11 — recruitment-only auto-reply gate ────────────────────────────────
 def _admin_numbers_set() -> set[str]:
+    from modules.phone_normalizer import normalize_phone
     return {
+        normalized
+        for phone in {
         settings.admin_meta_number,
         settings.admin_bridge1_number,
         settings.admin_bridge2_number,
         *settings.admin_number_list,
+        }
+        if (normalized := normalize_phone(phone))
     }
 
 
 async def _should_recruitment_autoreply(sender_clean: str, text: str) -> bool:
-    """Return True iff SAFE MODE should be bypassed for this single message
-    because it is a recruitment intake (trigger word OR active session).
-    Admin senders are always excluded."""
+    """Return True only for a common-decision explicit recruitment message.
+
+    Identity detection failure falls back to role='unknown' so explicit-keyword
+    messages (চাকরি, job, etc.) are never silently dropped due to a DB error.
+    """
     if not settings.recruitment_autoreply_enabled:
         return False
+    from modules.phone_normalizer import normalize_phone
+    sender_clean = normalize_phone(sender_clean) or sender_clean
     if sender_clean in _admin_numbers_set():
         return False
-    if is_recruitment_trigger(text):
-        return True
+
+    # Step 1: identity lookup — degrade gracefully to 'unknown' on any error.
+    role = "unknown"
     try:
-        if await get_active_session(sender_clean):
-            return True
-    except Exception as e:  # never block flow on session lookup
-        log.debug(f"recruitment session check failed for {sender_clean}: {e}")
-    return False
+        from modules.identity_brain import detect_identity
+        identity = await detect_identity(sender_clean, text)
+        role = identity.get("identity_role") or identity.get("role") or "unknown"
+    except Exception as e:
+        log.warning(
+            "[RECRUIT-GATE] identity check failed for %s, using role='unknown': %s",
+            sender_clean, e,
+        )
+
+    # Step 2: eligibility decision — explicit keywords must still fire even when
+    # identity is unknown (e.g. 'চাকরি দরকার', 'is there any job').
+    try:
+        from modules.intent import classify as classify_intent
+        from modules.recruitment_flow import recruitment_eligibility
+        decision = await recruitment_eligibility(
+            sender_clean, text, role=role, intent=classify_intent(text),
+        )
+        return bool(decision["autosend"])
+    except Exception as e:
+        log.warning(
+            "[RECRUIT-GATE] eligibility check failed for %s: %s", sender_clean, e,
+        )
+        return False
 
 
 # ── Health (B15.5 expanded) ───────────────────────────────────────────────────
@@ -417,14 +455,13 @@ async def _probe_outbound() -> dict:
     try:
         pend = await outbound_queue.pending_count()
         dlq = await outbound_queue.dlq_count()
+        actionable_dlq = await outbound_queue.actionable_dlq_count()
         status = "ok"
-        if dlq > 0:
+        if pend > 0:
             status = "degraded"
         if pend > 200:
-            status = "degraded"
-        if dlq > 50:
             status = "critical"
-        return {"status": status, "pending": pend, "dlq": dlq}
+        return {"status": status, "pending": pend, "dlq": dlq, "actionable_dlq": actionable_dlq}
     except Exception as e:
         return {"status": "critical", "error": str(e)[:200]}
 
@@ -468,6 +505,14 @@ async def _build_health(deep: bool = False) -> dict:
     )
     bridge1_db = _probe_file_age("/home/azim/whatsapp1/store/messages.db", "bridge1")
     bridge2_db = _probe_file_age("/home/azim/whatsapp2/store/messages.db", "bridge2")
+    # SQLite mtime is activity, not liveness. A fresh poller heartbeat proves
+    # the quiet bridge is healthy while preserving the age as diagnostics.
+    if hb1_p.get("status") == "ok" and bridge1_db.get("status") == "degraded":
+        bridge1_db["status"] = "ok"
+        bridge1_db["quiet_but_poller_healthy"] = True
+    if hb2_p.get("status") == "ok" and bridge2_db.get("status") == "degraded":
+        bridge2_db["status"] = "ok"
+        bridge2_db["quiet_but_poller_healthy"] = True
     disk_p = _probe_disk()
     mem_p = _probe_mem()
 
@@ -818,6 +863,10 @@ async def meta_webhook(request: Request):
         ).hexdigest()
         if not hmac.compare_digest(sig, expected):
             raise HTTPException(status_code=403, detail="Invalid signature")
+    elif settings.meta_webhook_signature_enforcement:
+        raise HTTPException(status_code=403, detail="Missing Meta webhook signature")
+    else:
+        log.warning("[WEBHOOK_AUTH_AUDIT] unsigned Meta webhook accepted; enforcement disabled")
 
     try:
         payload: dict[str, Any] = json.loads(body_bytes)
@@ -849,21 +898,57 @@ async def meta_webhook(request: Request):
 
 
 async def _handle_meta_message(msg: dict, value: dict):
-    sender = msg.get("from", "")
+    from modules.phone_normalizer import normalize_phone
+    sender_raw = msg.get("from", "")
+    sender = normalize_phone(sender_raw) or sender_raw
+    message_id = str(msg.get("id") or "")
+    queue_key = (
+        f"meta-recruit:{hashlib.sha256(message_id.encode()).hexdigest()[:48]}"
+        if message_id else None
+    )
     msg_type = msg.get("type", "")
     text = ""
+    extracted_text = ""
 
     if msg_type == "text":
         text = msg.get("text", {}).get("body", "").strip()
     elif msg_type in ("image", "audio", "document", "video"):
-        text = f"[{msg_type} message]"
+        try:
+            from modules.media_normalization import normalize_meta_media_message
+            normalized_media = await normalize_meta_media_message(msg)
+            text = normalized_media["text"]
+            if normalized_media["meta"].get("normalized"):
+                extracted_text = text
+        except Exception as media_err:
+            log.warning("[META] media normalization failed type=%s error=%s", msg_type, media_err)
+            text = f"[{msg_type} message]"
 
     log.info(f"[META] from={sender} type={msg_type} text={text[:60]!r}")
 
     if not text:
         return
 
-    await _save_message("meta", sender, text, direction="inbound")
+    if message_id:
+        existing = await fetch_one(
+            """SELECT id FROM wbom_whatsapp_messages
+               WHERE platform='meta' AND direction='inbound' AND source_message_ref=$1
+               LIMIT 1""",
+            message_id,
+        )
+        if existing:
+            log.info("[META] duplicate webhook safely acknowledged inbound_id=%s", message_id)
+            return
+
+    await _save_message(
+        "meta",
+        sender,
+        text,
+        direction="inbound",
+        msg_type=msg_type or "text",
+        extracted_text=extracted_text,
+        source_message_ref=message_id,
+        metadata={"delivery_state": "received", "meta_message_id": message_id},
+    )
 
     try:
         await record_heartbeat(
@@ -874,19 +959,19 @@ async def _handle_meta_message(msg: dict, value: dict):
     except Exception as hb_err:
         log.debug(f"[META] bridge_heartbeats write failed: {hb_err}")
 
-    try:
-        await ingest_social_event(
-            platform="meta_whatsapp",
-            event_type="message",
-            sender_id=sender,
-            text=text,
-            message_id=msg.get("id"),
-            media_flag=msg_type in ("image", "audio", "document", "video"),
-            raw_payload=msg,
-        )
-    except Exception as e:
-        log.warning(f"[social] meta ingest failed for {sender}: {e}")
     if _social_auto_reply_single_engine():
+        try:
+            await ingest_social_event(
+                platform="meta_whatsapp",
+                event_type="message",
+                sender_id=sender,
+                text=text,
+                message_id=msg.get("id"),
+                media_flag=msg_type in ("image", "audio", "document", "video"),
+                raw_payload=msg,
+            )
+        except Exception as e:
+            log.warning(f"[social] meta ingest failed for {sender}: {e}")
         log.debug(f"[META] social daemon is single reply engine, legacy reply path skipped for {sender}")
         return
 
@@ -898,6 +983,7 @@ async def _handle_meta_message(msg: dict, value: dict):
     reply, send_to_admin = await _process_message(sender, text, "meta")
 
     if reply:
+        await _record_meta_delivery_state(message_id, "generated")
         recruit_gate = (not settings.auto_reply_enabled
                         and await _should_recruitment_autoreply(sender, text))
         if settings.auto_reply_enabled or recruit_gate:
@@ -905,15 +991,46 @@ async def _handle_meta_message(msg: dict, value: dict):
                 log.info(f"[META] forced draft by saved contact name policy for {sender}")
                 intent = classify(text)
                 await _save_draft("meta", sender, reply, intent)
+                await _record_meta_delivery_state(message_id, "drafted")
             else:
                 if recruit_gate:
                     log.info(f"[RECRUIT-AUTOREPLY] sending to {sender} (meta) despite SAFE MODE")
-                await _send_meta(sender, reply)
-                await _save_message("meta", sender, reply, direction="outbound")
+                from modules.outbound import enqueue as enqueue_outbound
+                try:
+                    qid = await enqueue_outbound(
+                        sender,
+                        reply,
+                        source_bridge="meta",
+                        purpose="customer-reply:recruitment",
+                        idempotency_key=queue_key,
+                        meta={"customer_reply": True, "intent": "recruitment", "inbound_id": message_id},
+                    )
+                except Exception as enqueue_err:
+                    log.exception("[META] recruitment enqueue failed sender=%s inbound_id=%s", sender, message_id)
+                    await _record_meta_delivery_state(message_id, "failed", str(enqueue_err))
+                    await _save_draft("meta", sender, reply, "recruitment")
+                    return
+                if qid:
+                    await _save_message("meta", sender, reply, direction="outbound")
+                    await _record_meta_delivery_state(message_id, "queued")
+                    log.info("[META] queued recruitment reply sender=%s qid=%s", sender, qid)
+                else:
+                    await _record_meta_delivery_state(message_id, "queued_deduplicated")
+                    log.info("[META] recruitment reply deduplicated sender=%s inbound_id=%s", sender, message_id)
         else:
-            log.warning(f"SAFE MODE: reply suppressed for {sender} (meta). Saving draft.")
+            from modules.recruitment_flow import is_recruitment_trigger
+            if is_recruitment_trigger(text):
+                log.warning(
+                    "[RECRUIT-GATE] explicit recruitment message not queued — "
+                    "recruit_gate=False, saving draft. sender=%s", sender,
+                )
+            else:
+                log.warning(f"SAFE MODE: reply suppressed for {sender} (meta). Saving draft.")
             intent = classify(text)
             await _save_draft("meta", sender, reply, intent)
+            await _record_meta_delivery_state(message_id, "drafted")
+    else:
+        await _record_meta_delivery_state(message_id, "suppressed")
 
     # send_to_admin is a dict: {admin_phone, text, bridge} — used for payment drafts
     if send_to_admin:
@@ -1015,11 +1132,27 @@ async def _handle_fb_comment(value: dict):
 
 
 # ── Bridge 1 Webhook ───────────────────────────────────────────────────────────
+def _verify_bridge_webhook(body: bytes, signature: str, source: str) -> None:
+    """Audit or enforce bridge HMAC without touching bridge QR/session state."""
+    if signature and settings.bridge_webhook_secret:
+        expected = "sha256=" + hmac.new(
+            settings.bridge_webhook_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        if hmac.compare_digest(signature, expected):
+            return
+        raise HTTPException(status_code=403, detail="Invalid bridge webhook signature")
+    if settings.webhook_signature_enforcement:
+        raise HTTPException(status_code=403, detail="Missing bridge webhook signature")
+    log.warning("[WEBHOOK_AUTH_AUDIT] unsigned %s webhook accepted; enforcement disabled", source)
+
+
 @app.post("/webhook/mcp1")
 async def bridge1_webhook(request: Request):
     """Receive events from Bridge 1 (HR number)."""
+    body = await request.body()
+    _verify_bridge_webhook(body, request.headers.get("X-Fazle-Signature-256", ""), "bridge1")
     try:
-        payload = await request.json()
+        payload = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Bad JSON")
     await _handle_bridge_event(payload, source="bridge1")
@@ -1030,8 +1163,10 @@ async def bridge1_webhook(request: Request):
 @app.post("/webhook/mcp2")
 async def bridge2_webhook(request: Request):
     """Receive events from Bridge 2 (OPS number)."""
+    body = await request.body()
+    _verify_bridge_webhook(body, request.headers.get("X-Fazle-Signature-256", ""), "bridge2")
     try:
-        payload = await request.json()
+        payload = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Bad JSON")
     await _handle_bridge_event(payload, source="bridge2")
@@ -1097,8 +1232,11 @@ async def _handle_bridge_event(payload: dict, source: str):
             _id_role, _id_conf, _id_name = "unknown", 0, ""
 
         try:
-            await _save_message(source, sender_clean, text, direction="inbound",
-                                identity_role=_id_role, identity_confidence=_id_conf)
+            await _save_message(
+                source, sender_clean, text, direction="inbound",
+                identity_role=_id_role, identity_confidence=_id_conf,
+                msg_type=media_type if media_type else "text",
+            )
         except Exception as _save_err:
             if msg_id and pre_marked:
                 try:
@@ -1116,19 +1254,19 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         _forward_to_agent_if_admin(sender_clean, text, source)
 
-        try:
-            await ingest_social_event(
-                platform=source,
-                event_type="message",
-                sender_id=sender_clean,
-                text=text,
-                message_id=msg_id or None,
-                media_flag=bool(media_type),
-                raw_payload=event,
-            )
-        except Exception as e:
-            log.warning(f"[social] bridge ingest failed source={source} sender={sender_clean}: {e}")
         if _social_auto_reply_single_engine():
+            try:
+                await ingest_social_event(
+                    platform=source,
+                    event_type="message",
+                    sender_id=sender_clean,
+                    text=text,
+                    message_id=msg_id or None,
+                    media_flag=bool(media_type),
+                    raw_payload=event,
+                )
+            except Exception as e:
+                log.warning(f"[social] bridge ingest failed source={source} sender={sender_clean}: {e}")
             log.debug(f"[{source.upper()}] social daemon is single reply engine, legacy reply path skipped for {sender_clean}")
             continue
 
@@ -1166,6 +1304,8 @@ _AGENT_INBOX_URL = "http://127.0.0.1:8300/admin/inbox"
 
 def _forward_to_agent_if_admin(sender_clean: str, text: str, source: str) -> None:
     """Fire-and-forget forward to fazle-agent. Never raises, never blocks."""
+    if os.getenv("AGENT_ADMIN_FORWARD_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return
     if sender_clean not in _AGENT_FORWARD_PHONES:
         return
     bridge = "1" if source == "bridge1" else "2"
@@ -1205,6 +1345,12 @@ async def send_mcp1(body: dict):
     text = body.get("text", "")
     if not to or not text:
         raise HTTPException(status_code=400, detail="Missing to/text")
+    proactive_enabled = os.getenv("AGENT_PROACTIVE_OUTBOUND_ENABLED", "false").lower() in (
+        "1", "true", "yes",
+    )
+    if not proactive_enabled and text.lstrip().startswith("🤖 [proactive]"):
+        log.warning("[send_mcp1] suppressed disabled agent proactive message to=%s", to)
+        return {"sent": False, "suppressed": True, "reason": "agent_proactive_disabled"}
     ok = await get_bridge1().send(to, text)
     return {"sent": ok}
 
@@ -1306,6 +1452,18 @@ async def drafts_spa():
 async def kb_spa():
     """Knowledge Base management SPA."""
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "kb.html"))
+
+
+@app.get("/wa-chat", response_class=HTMLResponse)
+async def wa_chat_spa():
+    """WhatsApp-like 3-panel chat frontend SPA."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "wa_chat.html"))
+
+
+@app.get("/dashboard/wa-chat", response_class=HTMLResponse)
+async def wa_chat_spa_dashboard():
+    """WhatsApp-like chat SPA — public URL alias at /dashboard/wa-chat."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "wa_chat.html"))
 
 
 @app.get("/dashboard/legacy", response_class=HTMLResponse)
@@ -1455,20 +1613,59 @@ async def _save_message(
     direction: str,
     identity_role: str = "",
     identity_confidence: int = 0,
+    receiver_number: str = "",
+    intent_detected: str = "",
+    extracted_text: str = "",
+    msg_type: str = "text",
+    source_message_ref: str = "",
+    metadata: Optional[dict] = None,
 ):
+    _receiver = receiver_number or _source_to_receiver(source)
+    _conv_key = f"{sender}:{source}" if sender else None
     try:
         await execute(
             """
             INSERT INTO wbom_whatsapp_messages
-                (sender_number, message_body, message_type, direction, platform, is_processed, contact_identifier,
-                 identity_role, identity_confidence)
-            VALUES ($1, $2, 'text', $3, $4, true, $1, $5, $6)
+                (sender_number, message_body, message_type, direction, platform, is_processed,
+                 contact_identifier, identity_role, identity_confidence,
+                 receiver_number, conversation_key, intent_detected, extracted_text,
+                 source_message_ref, metadata_json)
+            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
             """,
-            sender, text, direction, source,
+            sender, text, msg_type, direction, source,
             identity_role or None, identity_confidence or None,
+            _receiver or None, _conv_key,
+            intent_detected or None, extracted_text or None,
+            source_message_ref or None, json.dumps(metadata or {}),
         )
     except Exception as e:
         log.warning(f"Message save error: {e}")
+
+
+async def _record_meta_delivery_state(message_id: str, state: str, error: str = "") -> None:
+    if not message_id:
+        return
+    try:
+        await execute(
+            """UPDATE wbom_whatsapp_messages
+               SET metadata_json=COALESCE(metadata_json, '{}'::jsonb) ||
+                   jsonb_build_object('delivery_state', $2::text, 'delivery_error', $3::text)
+               WHERE platform='meta' AND direction='inbound' AND source_message_ref=$1""",
+            message_id, state, error[:500],
+        )
+    except Exception as exc:
+        log.warning("[META] delivery state update failed inbound_id=%s error=%s", message_id, exc)
+
+
+def _source_to_receiver(source: str) -> str:
+    """Map bridge source name to the phone number that received the message."""
+    _map = {
+        "bridge1": settings.bridge1_number,
+        "bridge2": settings.bridge2_number,
+        "meta":    settings.admin_meta_number,
+        "whatsapp": settings.admin_meta_number,
+    }
+    return _map.get(source, "")
 
 
 async def _save_draft(source: str, recipient: str, reply_text: str, intent: str):
@@ -1585,7 +1782,8 @@ async def _notify_admin(notification: dict):
 async def api_extract_escort_slip(body: dict):
     file_path    = body.get("file_path", "")
     source_label = body.get("source_label", "api_upload")
-    auto_close   = bool(body.get("auto_close", True))
+    # OCR extraction never finalizes a release. Only [RELEASE CONFIRMED] does.
+    auto_close   = False
     if not file_path:
         raise HTTPException(status_code=400, detail="Missing file_path")
     # B15.6 — cap concurrent OCR + 30s timeout
@@ -1622,21 +1820,10 @@ async def api_escort_release(body: dict):
     """Batch 13: manual escort lifecycle close + draft creation.
     Body: {employee_id, end_date?, end_shift?, release_point?, day_count?}
     """
-    from modules.escort_lifecycle import handle_release_event
-    eid = body.get("employee_id")
-    if not eid:
-        raise HTTPException(status_code=400, detail="Missing employee_id")
-    extracted = {
-        "end_date": body.get("end_date"),
-        "end_shift": body.get("end_shift"),
-        "release_point": body.get("release_point"),
-        "day_count": body.get("day_count"),
-    }
-    result = await handle_release_event(int(eid), extracted=extracted,
-                                         source=body.get("source", "api"))
-    if not result.get("ok"):
-        raise HTTPException(status_code=422, detail=result)
-    return result
+    raise HTTPException(
+        status_code=409,
+        detail="Direct release finalization is disabled; send an admin [RELEASE CONFIRMED] message.",
+    )
 
 
 # ── Payroll API (Batch 14) ─────────────────────────────────────────────────────

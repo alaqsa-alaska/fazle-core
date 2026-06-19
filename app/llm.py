@@ -53,21 +53,28 @@ async def _save_to_memory(
 
 async def classify_intent_llm(text: str) -> str:
     """
-    Classify intent when rule-based engine returns 'unknown'.
-    Tries primary provider first, falls back to secondary.
+    Classify intent via Groq → GitHub Models → Ollama.
     """
     settings = get_settings()
-    provider = settings.primary_ai_provider
 
-    if provider == "github_models":
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            result = await groq_provider.classify_intent_llm(text)
+            if result != "unknown":
+                return result
+        except Exception as e:
+            log.warning("[llm] groq classify failed, falling back to github_models: %s", e)
+
+    if settings.github_token:
         try:
             from app import github_models
             result = await github_models.classify_intent_llm(text)
-            return result
+            if result != "unknown":
+                return result
         except Exception as e:
             log.warning("[llm] github_models classify failed, falling back to ollama: %s", e)
 
-    # Ollama fallback (or primary if provider=ollama)
     try:
         from app import ollama
         return await ollama.classify_intent_llm(text)
@@ -186,36 +193,9 @@ async def generate_recruitment_reply(
     contact_context: str = "",
     source: str = "unknown",
 ) -> str:
-    """Recruitment-specific reply. GitHub Models → Groq → Ollama fallback."""
+    """Recruitment-specific reply. Groq → GitHub Models → Ollama → safe fallback."""
     settings = get_settings()
-    provider = settings.primary_ai_provider
 
-    if provider == "github_models":
-        try:
-            from app import github_models
-            reply = await github_models.generate_recruitment_reply(
-                user_message=user_message,
-                kb_context=kb_context,
-                history=history,
-                contact_context=contact_context,
-                source=source,
-            )
-            if reply:
-                asyncio.create_task(_save_to_memory(
-                    provider="github_models",
-                    model=settings.github_model_name,
-                    trigger_text=user_message,
-                    reply_text=reply,
-                    intent="recruitment",
-                    source=source,
-                    context_used=kb_context,
-                ))
-                return reply
-            log.warning("[llm] github_models recruitment returned empty, falling back to groq/ollama")
-        except Exception as e:
-            log.warning("[llm] github_models recruitment failed, falling back to groq/ollama: %s", e)
-
-    # Groq secondary
     if settings.groq_api_key:
         try:
             from app import groq_provider
@@ -235,29 +215,64 @@ async def generate_recruitment_reply(
                     intent="recruitment",
                     source=source,
                     context_used=kb_context,
+                ))
+                return reply
+            log.warning("[llm] groq recruitment returned empty, falling back to github_models")
+        except Exception as e:
+            log.warning("[llm] groq recruitment failed, falling back to github_models: %s", e)
+
+    if settings.github_token:
+        try:
+            from app import github_models
+            reply = await github_models.generate_recruitment_reply(
+                user_message=user_message,
+                kb_context=kb_context,
+                history=history,
+                contact_context=contact_context,
+                source=source,
+            )
+            if reply:
+                asyncio.create_task(_save_to_memory(
+                    provider="github_models",
+                    model=settings.github_model_name,
+                    trigger_text=user_message,
+                    reply_text=reply,
+                    intent="recruitment",
+                    source=source,
+                    context_used=kb_context,
                     is_fallback=True,
                 ))
                 return reply
-            log.warning("[llm] groq recruitment returned empty, falling through")
+            log.warning("[llm] github_models recruitment returned empty, falling back to ollama")
         except Exception as e:
-            log.warning("[llm] groq recruitment failed: %s", e)
+            log.warning("[llm] github_models recruitment failed: %s", e)
 
-    if settings.ollama_reply_disabled:
-        log.info("[llm] ollama_reply_disabled=True — returning holding message (recruitment)")
-        return "আপাতত সার্ভিস একটু ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন অথবা সরাসরি অফিসে যোগাযোগ করুন।"
-    try:
-        from app import ollama
-        return await ollama.generate_recruitment_reply(
-            user_message=user_message,
-            kb_context=kb_context,
-            history=history,
-            contact_context=contact_context,
-            source=source,
-        )
-    except Exception as e:
-        log.error("[llm] ollama recruitment also failed: %s", e)
+    if not settings.ollama_reply_disabled:
+        try:
+            from app import ollama
+            reply = await ollama.generate_recruitment_reply(
+                user_message=user_message,
+                kb_context=kb_context,
+                history=history,
+                contact_context=contact_context,
+                source=source,
+            )
+            if reply:
+                asyncio.create_task(_save_to_memory(
+                    provider="ollama",
+                    model=settings.ollama_model,
+                    trigger_text=user_message,
+                    reply_text=reply,
+                    intent="recruitment",
+                    source=source,
+                    context_used=kb_context,
+                    is_fallback=True,
+                ))
+                return reply
+        except Exception as e:
+            log.warning("[llm] ollama recruitment failed: %s", e)
 
-    return _FALLBACK_REPLY
+    return "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
 
 
 async def generate_chat_reply(

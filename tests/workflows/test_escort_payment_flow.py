@@ -121,6 +121,7 @@ async def _insert_outbound_table_if_missing(pool):
                 recipient        TEXT NOT NULL,
                 body             TEXT NOT NULL,
                 source_bridge    TEXT NOT NULL DEFAULT 'bridge2',
+                fallback_channel TEXT,
                 purpose          TEXT,
                 idempotency_key  TEXT UNIQUE,
                 meta_json        JSONB DEFAULT '{}',
@@ -129,8 +130,11 @@ async def _insert_outbound_table_if_missing(pool):
                 max_attempts     INT  NOT NULL DEFAULT 5,
                 next_retry_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 sent_at          TIMESTAMPTZ,
+                external_id      TEXT,
+                locked_at        TIMESTAMPTZ,
                 last_error       TEXT,
-                created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
 

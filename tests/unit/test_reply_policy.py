@@ -134,9 +134,10 @@ def test_recruitment_policy_contains_system_rules():
         user_message="job?",
         kb_context="",
     )
-    assert "HR recruitment assistant" in prompt
-    assert "Approved Recruitment Knowledge" in prompt
-    assert "01958 122322" in prompt
+    assert "WhatsApp recruitment reply assistant" in prompt
+    assert "Approved Recruitment Source of Truth" in prompt
+    assert "সর্বশেষ যোগাযোগ নম্বর" in prompt
+    assert "অন্য KB, memory, code, database বা context ব্যবহার করবে না" in prompt
 
 
 def test_recruitment_policy_fallback_when_kb_empty():
@@ -145,7 +146,7 @@ def test_recruitment_policy_fallback_when_kb_empty():
         user_message="job?",
         kb_context="",
     )
-    assert "কোনো অতিরিক্ত KB তথ্য পাওয়া যায়নি" in prompt
+    assert "অনুমোদিত recruitment source পাওয়া যায়নি" in prompt
 
 
 def test_recruitment_policy_fallback_when_history_empty():
@@ -155,7 +156,7 @@ def test_recruitment_policy_fallback_when_history_empty():
         kb_context="some kb",
         history="",
     )
-    assert "সাম্প্রতিক কথোপকথন পাওয়া যায়নি" in prompt
+    assert "Recent Conversation" not in prompt
 
 
 # ── Policy version stability ───────────────────────────────────────────────────

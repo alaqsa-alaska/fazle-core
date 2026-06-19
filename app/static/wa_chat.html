@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fazle Chat — WhatsApp UI</title>
+<style>
+:root{
+  --bg:#f0f2f5;--sidebar-bg:#fff;--panel-bg:#efeae2;--drafts-bg:#fff8f0;
+  --bubble-in:#fff;--bubble-out:#d9fdd3;
+  --accent:#1a472a;--accent2:#2d6a4f;--accent-light:#e8f5ee;
+  --bridge1:#1a73e8;--bridge2:#34a853;--meta:#00bcd4;--group:#9c27b0;
+  --unread:#25d366;--danger:#d32f2f;--warn:#f39c12;
+  --header-bg:#1a472a;--header-text:#fff;
+  --border:#e1e6ec;--muted:#7b8a99;--shadow:0 1px 3px rgba(0,0,0,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;
+     background:var(--bg);color:#222;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── Login Overlay ─────────────────────────────────────────────── */
+#loginOverlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;
+  align-items:center;justify-content:center;z-index:9999}
+#loginBox{background:#fff;padding:28px;border-radius:12px;box-shadow:0 12px 48px rgba(0,0,0,.22);
+  min-width:340px;max-width:90vw}
+#loginBox h2{color:var(--accent);margin-bottom:12px;font-size:18px}
+#loginBox p{color:var(--muted);font-size:12px;margin-bottom:14px}
+#loginBox input{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:6px;
+  font-size:14px;margin-bottom:10px}
+#loginBox button{width:100%;background:var(--accent);color:#fff;border:none;padding:10px;
+  border-radius:6px;cursor:pointer;font-size:14px;font-weight:600}
+#loginErr{color:var(--danger);font-size:12px;min-height:16px;margin-top:6px}
+
+/* ── Header ────────────────────────────────────────────────────── */
+#topbar{background:var(--header-bg);color:var(--header-text);padding:0 16px;
+  display:flex;align-items:center;gap:10px;height:54px;flex-shrink:0;
+  box-shadow:0 2px 6px rgba(0,0,0,.18)}
+#topbar .brand{font-size:17px;font-weight:700;white-space:nowrap}
+#topbar nav{display:flex;gap:2px;flex:1}
+#topbar nav button{background:none;border:none;color:rgba(255,255,255,.8);padding:8px 12px;
+  border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;white-space:nowrap}
+#topbar nav button:hover,#topbar nav button.active{background:rgba(255,255,255,.15);color:#fff}
+#topbar .right{display:flex;align-items:center;gap:8px;margin-left:auto}
+#topbar .right button{background:rgba(255,255,255,.12);color:#fff;border:none;
+  padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap}
+#topbar .right button:hover{background:rgba(255,255,255,.22)}
+#syncStatus{font-size:11px;color:rgba(255,255,255,.6)}
+#draftBadge{background:var(--danger);color:#fff;border-radius:10px;padding:1px 6px;
+  font-size:11px;margin-left:4px;display:none}
+
+/* ── Dropdown ──────────────────────────────────────────────────── */
+.dropdown{position:relative}
+.dropdown-body{position:absolute;top:calc(100% + 6px);right:0;background:#fff;
+  border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.18);min-width:240px;z-index:200;
+  padding:12px;display:none}
+.dropdown-body.open{display:block}
+.dropdown-body h4{font-size:12px;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--muted);margin-bottom:10px}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;
+  padding:7px 0;border-bottom:1px solid var(--border)}
+.toggle-row:last-child{border-bottom:none}
+.toggle-row label{font-size:13px;cursor:pointer}
+.toggle-switch{position:relative;display:inline-block;width:42px;height:22px}
+.toggle-switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:#ccc;border-radius:22px;cursor:pointer;transition:.3s}
+.slider:before{content:'';position:absolute;width:16px;height:16px;left:3px;bottom:3px;
+  background:#fff;border-radius:50%;transition:.3s}
+input:checked + .slider{background:var(--accent)}
+input:checked + .slider:before{transform:translateX(20px)}
+
+/* ── App Layout (3 panels) ─────────────────────────────────────── */
+#appLayout{display:grid;grid-template-columns:310px 1fr 300px;flex:1;min-height:0;overflow:hidden}
+#sidebar,#centerPanel,#draftsPanel{min-height:0}
+
+/* ── Left Panel ────────────────────────────────────────────────── */
+#sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden}
+#searchBox{padding:10px 12px;border-bottom:1px solid var(--border);flex-shrink:0}
+#searchBox input{width:100%;padding:8px 12px 8px 32px;border:none;background:#f0f2f5;
+  border-radius:20px;font-size:13px;outline:none}
+#searchWrapper{position:relative}
+#searchWrapper::before{content:'🔍';position:absolute;left:10px;top:50%;transform:translateY(-50%);
+  font-size:12px;pointer-events:none}
+#contactList{flex:1;overflow-y:auto}
+#bulkBar{padding:8px 12px;border-top:1px solid var(--border);display:flex;
+  align-items:center;gap:8px;background:#fafbfc;flex-shrink:0}
+#bulkBar label{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);cursor:pointer}
+#selectedCount{font-size:12px;color:var(--muted);flex:1}
+#broadcastBtn{background:var(--accent);color:#fff;border:none;padding:5px 10px;
+  border-radius:5px;cursor:pointer;font-size:12px;opacity:.5;pointer-events:none}
+#broadcastBtn.enabled{opacity:1;pointer-events:auto}
+#loadMoreContacts{text-align:center;padding:10px;color:var(--muted);font-size:12px;cursor:pointer;display:none}
+#loadMoreContacts:hover{color:var(--accent)}
+#contactLoadingSpinner{padding:20px;text-align:center;color:var(--muted);font-size:13px;display:none}
+#contactLoadingSpinner span{display:inline-block;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.contact-item{padding:10px 12px;border-bottom:1px solid #f0f2f5;cursor:pointer;
+  display:flex;align-items:flex-start;gap:8px;transition:background .15s}
+.contact-item:hover{background:#f5f5f5}
+.contact-item.active{background:var(--accent-light)}
+.contact-item .chk{margin-top:3px;flex-shrink:0}
+.contact-avatar{width:40px;height:40px;border-radius:50%;background:var(--accent2);
+  color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;
+  font-size:15px;flex-shrink:0}
+.contact-avatar.group-av{background:var(--group)}
+.contact-body{flex:1;min-width:0}
+.contact-top{display:flex;align-items:center;gap:6px;justify-content:space-between}
+.contact-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.contact-ts{font-size:11px;color:var(--muted);white-space:nowrap;flex-shrink:0}
+.contact-sub{display:flex;align-items:center;gap:5px;margin-top:2px}
+.contact-preview{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;flex:1}
+.platform-badge{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;
+  color:#fff;flex-shrink:0}
+.pb-bridge1{background:var(--bridge1)}
+.pb-bridge2{background:var(--bridge2)}
+.pb-meta{background:var(--meta)}
+.pb-group{background:var(--group)}
+.unread-badge{background:var(--unread);color:#fff;border-radius:10px;padding:1px 6px;
+  font-size:11px;font-weight:700;flex-shrink:0}
+
+/* ── Center Panel ──────────────────────────────────────────────── */
+#centerPanel{display:flex;flex-direction:column;overflow:hidden;background:var(--panel-bg)}
+#convHeader{background:#fff;border-bottom:1px solid var(--border);padding:10px 16px;
+  display:flex;align-items:center;gap:10px;flex-shrink:0;box-shadow:var(--shadow)}
+#convHeader .conv-avatar{width:38px;height:38px;border-radius:50%;background:var(--accent2);
+  color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
+#convHeader .conv-info{flex:1}
+#convHeader .conv-name{font-weight:700;font-size:14px}
+#convHeader .conv-sub{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px;margin-top:2px}
+#convHeader .header-actions{display:flex;gap:6px}
+#convHeader .header-actions button{background:none;border:1px solid var(--border);
+  padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px}
+#convHeader .header-actions button:hover{background:#f5f5f5}
+#emptyState{flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;color:var(--muted);gap:8px}
+#emptyState .big-icon{font-size:48px}
+#messageList{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:4px}
+#loadMoreMsgs{text-align:center;padding:6px;color:var(--muted);font-size:11px;cursor:pointer}
+#loadMoreMsgs:hover{color:var(--accent)}
+
+.msg-bubble{max-width:70%;padding:7px 10px 4px;border-radius:8px;
+  box-shadow:0 1px 1px rgba(0,0,0,.06);word-break:break-word}
+.msg-bubble.in{background:var(--bubble-in);align-self:flex-start;border-top-left-radius:2px}
+.msg-bubble.out{background:var(--bubble-out);align-self:flex-end;border-top-right-radius:2px}
+.msg-body{font-size:13px;line-height:1.5}
+.msg-meta{display:flex;align-items:center;gap:5px;margin-top:3px;justify-content:flex-end}
+.msg-ts{font-size:10px;color:var(--muted)}
+.role-badge{font-size:10px;background:#e8f0fe;color:#1a73e8;padding:1px 5px;border-radius:4px}
+.intent-badge{font-size:10px;background:#f0f4c3;color:#827717;padding:1px 5px;border-radius:4px}
+.date-divider{text-align:center;margin:10px 0}
+.date-divider span{background:rgba(255,255,255,.7);padding:3px 10px;border-radius:10px;
+  font-size:11px;color:var(--muted)}
+
+#composeBar{background:#fff;border-top:1px solid var(--border);padding:10px 12px;
+  display:flex;align-items:flex-end;gap:8px;flex-shrink:0}
+#composeBar button{background:none;border:none;cursor:pointer;font-size:20px;
+  padding:4px;border-radius:50%;transition:background .15s;line-height:1;flex-shrink:0}
+#composeBar button:hover{background:#f0f2f5}
+#msgInput{flex:1;padding:9px 12px;border:none;background:#f0f2f5;border-radius:20px;
+  font-size:13px;outline:none;resize:none;min-height:40px;max-height:100px;
+  font-family:inherit;line-height:1.5}
+#sendBtn{background:var(--accent);color:#fff;border-radius:50% !important;
+  width:38px;height:38px;display:flex;align-items:center;justify-content:center;font-size:16px}
+#sendBtn:hover{background:var(--accent2) !important}
+#filePreviewChip,#voicePreviewChip{display:none;background:#e8f5ee;padding:4px 10px;
+  border-radius:12px;font-size:12px;color:var(--accent);align-items:center;gap:6px}
+#filePreviewChip.show,#voicePreviewChip.show{display:flex}
+#filePreviewChip .rm,#voicePreviewChip .rm{cursor:pointer;color:var(--danger);font-weight:700}
+#emojiPicker{position:absolute;bottom:70px;left:0;background:#fff;border-radius:10px;
+  box-shadow:0 4px 20px rgba(0,0,0,.18);padding:10px;display:none;flex-wrap:wrap;
+  gap:4px;max-width:260px;z-index:100}
+#emojiPicker.open{display:flex}
+#composeArea{position:relative;display:flex;flex:1;gap:8px;align-items:flex-end}
+
+/* ── Right Panel (Drafts) ─────────────────────────────────────── */
+#draftsPanel{background:var(--drafts-bg);border-left:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden}
+#draftsHeader{padding:12px 14px;border-bottom:1px solid var(--border);background:#fff;
+  display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+#draftsHeader h3{font-size:13px;font-weight:700;color:var(--accent2)}
+#draftsCount{background:var(--danger);color:#fff;border-radius:10px;padding:1px 7px;font-size:11px}
+#draftList{flex:1;overflow-y:auto}
+.draft-item{padding:10px 12px;border-bottom:1px solid #ede8dc;cursor:pointer;transition:background .15s}
+.draft-item:hover{background:#fff3e0}
+.draft-item.highlighted{background:#fff8e1;border-left:3px solid var(--warn)}
+.draft-contact{font-weight:700;font-size:12px;color:#333}
+.draft-phone{font-size:11px;color:var(--muted);margin-bottom:3px}
+.draft-orig{font-size:11px;color:#555;background:#f5f5f5;padding:3px 7px;border-radius:4px;
+  margin-bottom:4px;font-style:italic;max-height:40px;overflow:hidden}
+.draft-body-text{font-size:12px;color:#333;margin-bottom:6px;line-height:1.4;
+  max-height:55px;overflow:hidden}
+.draft-actions{display:flex;gap:5px}
+.draft-actions button{border:none;padding:4px 8px;border-radius:5px;cursor:pointer;
+  font-size:11px;font-weight:600}
+.btn-approve{background:#e8f5ee;color:var(--accent2)}
+.btn-approve:hover{background:#c8e6c9}
+.btn-reject{background:#fdeceb;color:var(--danger)}
+.btn-reject:hover{background:#ffcdd2}
+.btn-edit-d{background:#fff3e0;color:#e65100}
+.btn-edit-d:hover{background:#ffe0b2}
+.draft-edit-area{display:none;margin-top:6px}
+.draft-edit-area textarea{width:100%;padding:6px 8px;border:1px solid var(--border);
+  border-radius:5px;font-size:12px;resize:vertical;min-height:60px;font-family:inherit}
+.draft-edit-area .save-edit{background:var(--accent);color:#fff;border:none;
+  padding:4px 10px;border-radius:5px;cursor:pointer;font-size:12px;margin-top:4px}
+
+/* ── Modals ────────────────────────────────────────────────────── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:500;
+  display:flex;align-items:center;justify-content:center;display:none}
+.modal-overlay.open{display:flex}
+.modal{background:#fff;border-radius:12px;box-shadow:0 12px 48px rgba(0,0,0,.2);
+  padding:24px;min-width:340px;max-width:90vw;max-height:90vh;overflow-y:auto}
+.modal h3{font-size:15px;font-weight:700;color:var(--accent);margin-bottom:16px}
+.modal label{font-size:12px;font-weight:600;color:var(--muted);display:block;margin-bottom:4px;margin-top:10px}
+.modal input,.modal textarea,.modal select{width:100%;padding:8px 10px;border:1px solid var(--border);
+  border-radius:6px;font-size:13px;font-family:inherit}
+.modal textarea{resize:vertical;min-height:80px}
+.modal .modal-actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+.modal .modal-actions button{padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;border:none}
+.btn-primary{background:var(--accent);color:#fff;font-weight:600}
+.btn-primary:hover{background:var(--accent2)}
+.btn-secondary{background:#f0f2f5;color:#333}
+.btn-danger-outline{background:#fdeceb;color:var(--danger)}
+
+/* ── Toast ─────────────────────────────────────────────────────── */
+#toast{position:fixed;bottom:24px;right:24px;background:#1a1a1a;color:#fff;
+  padding:10px 18px;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.25);
+  z-index:9000;display:none;font-size:13px;max-width:320px}
+#toast.show{display:block}
+#toast.ok{background:var(--accent)}
+#toast.err{background:var(--danger)}
+#toast.warn{background:var(--warn)}
+
+/* ── Scrollbars ─────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:4px}
+</style>
+</head>
+<body>
+
+<!-- ── Login Overlay ── -->
+<div id="loginOverlay">
+  <div id="loginBox">
+    <h2>🔐 Fazle Chat</h2>
+    <p>API key দিন (X-Internal-Key)। localStorage-এ সংরক্ষিত হবে।</p>
+    <input id="keyInput" type="password" placeholder="fk_..." autofocus>
+    <button onclick="doLogin()">Login করুন</button>
+    <div id="loginErr"></div>
+  </div>
+</div>
+
+<!-- ── Header ── -->
+<header id="topbar">
+  <span class="brand">🌿 Fazle Chat</span>
+  <nav>
+    <button class="active" onclick="showContactsView()">💬 Contacts</button>
+    <button onclick="showGroupsModal()">👥 Groups</button>
+    <button onclick="focusDrafts()">
+      ✏️ Drafts <span id="draftBadge"></span>
+    </button>
+    <div class="dropdown">
+      <button onclick="toggleSettingsDropdown(this)">⚙️ Settings ▾</button>
+      <div class="dropdown-body" id="settingsDropdown">
+        <h4>Auto-Reply Controls</h4>
+        <div id="toggleList"></div>
+      </div>
+    </div>
+  </nav>
+  <div class="right">
+    <button onclick="triggerSync()" title="Sync contacts from WhatsApp">⟳ Sync</button>
+    <span id="syncStatus"></span>
+    <button onclick="logout()">Logout</button>
+  </div>
+</header>
+
+<!-- ── App Layout ── -->
+<div id="appLayout">
+
+  <!-- LEFT: Contact Sidebar -->
+  <aside id="sidebar">
+    <div id="searchBox">
+      <div id="searchWrapper">
+        <input id="searchInput" type="text" placeholder="Search contacts..." oninput="onSearch()">
+      </div>
+    </div>
+    <div id="contactLoadingSpinner"><span>⟳</span> লোড হচ্ছে…</div>
+    <div id="contactList"></div>
+    <div id="loadMoreContacts" onclick="loadMoreContacts()">আরও লোড করুন…</div>
+    <div id="bulkBar">
+      <label><input type="checkbox" id="selectAllChk" onchange="toggleSelectAll()"> All</label>
+      <span id="selectedCount">0 selected</span>
+      <button id="broadcastBtn" onclick="openBroadcastModal()">Send to Selected</button>
+    </div>
+  </aside>
+
+  <!-- CENTER: Conversation -->
+  <main id="centerPanel">
+    <div id="convHeader" style="display:none">
+      <div class="conv-avatar" id="convAvatar"></div>
+      <div class="conv-info">
+        <div class="conv-name" id="convName" onclick="openContactModal(currentPhone)"></div>
+        <div class="conv-sub">
+          <span id="convPlatformBadge" class="platform-badge"></span>
+          <span id="convRole" style="font-size:11px;color:var(--muted)"></span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button onclick="openContactModal(currentPhone)">✏️ Edit</button>
+        <button onclick="openBroadcastModal([currentPhone])">📤 Broadcast</button>
+      </div>
+    </div>
+    <div id="emptyState">
+      <div class="big-icon">💬</div>
+      <div>বাম পাশ থেকে একটি contact বেছে নিন</div>
+    </div>
+    <div id="messageList" style="display:none"></div>
+    <div id="loadMoreMsgs" style="display:none" onclick="loadMoreMessages()">⬆ আরও দেখুন</div>
+
+    <!-- Compose -->
+    <div id="composeBar" style="display:none">
+      <div style="position:relative">
+        <button onclick="toggleEmojiPicker()" title="Emoji">😊</button>
+        <div id="emojiPicker"></div>
+      </div>
+      <input type="file" id="fileInput" hidden onchange="handleFileAttach(event)">
+      <button onclick="document.getElementById('fileInput').click()" title="Attach file">📎</button>
+      <button id="voiceBtn" onmousedown="startRecording(event)" onmouseup="stopRecording()" ontouchstart="startRecording(event)" ontouchend="stopRecording()" title="Hold to record">🎤</button>
+      <div id="composeArea">
+        <div id="filePreviewChip"><span id="filePreviewName"></span><span class="rm" onclick="clearFile()">✕</span></div>
+        <div id="voicePreviewChip">🎤 <span id="voiceDuration">0s</span><span class="rm" onclick="clearVoice()">✕</span></div>
+        <textarea id="msgInput" placeholder="একটি মেসেজ লিখুন…" onkeydown="handleMsgKey(event)" rows="1" oninput="autoResize(this)"></textarea>
+      </div>
+      <button id="sendBtn" onclick="sendMessage()" title="Send">➤</button>
+    </div>
+  </main>
+
+  <!-- RIGHT: Drafts Panel -->
+  <aside id="draftsPanel">
+    <div id="draftsHeader">
+      <h3>✏️ Pending Drafts</h3>
+      <span id="draftsCount"></span>
+    </div>
+    <div id="draftList"></div>
+  </aside>
+
+</div>
+
+<!-- ── Contact Edit Modal ── -->
+<div class="modal-overlay" id="contactModal">
+  <div class="modal">
+    <h3>📋 Contact Details</h3>
+    <label>Phone</label>
+    <input id="cModalPhone" readonly style="background:#f5f5f5">
+    <label>Display Name</label>
+    <input id="cModalName" placeholder="Display name">
+    <label>Auto-detected Role</label>
+    <input id="cModalRole" readonly style="background:#f5f5f5">
+    <label>Auto-Reply Status</label>
+    <div id="cModalBlocked" style="font-size:12px;margin-top:4px;padding:6px 10px;background:#fff3cd;border-radius:5px"></div>
+    <div class="modal-actions">
+      <button class="btn-danger-outline" onclick="blockContact()">🚫 Block Auto-Reply</button>
+      <button class="btn-secondary" onclick="closeContactModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveContact()">💾 Save</button>
+    </div>
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;display:flex;gap:8px">
+      <button class="btn-danger-outline" style="font-size:12px" onclick="deleteContact()">🗑️ Delete Contact</button>
+      <button class="btn-secondary" style="font-size:12px" onclick="unblockContact()">✅ Unblock Auto-Reply</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Broadcast Modal ── -->
+<div class="modal-overlay" id="broadcastModal">
+  <div class="modal">
+    <h3>📤 Send to Multiple Contacts</h3>
+    <label>Recipients</label>
+    <div id="broadcastRecipients" style="font-size:12px;color:var(--muted);min-height:18px;margin-bottom:6px"></div>
+    <label>Bridge Channel</label>
+    <select id="broadcastPlatform">
+      <option value="bridge2">Bridge 2 (OPS — 8801880446111)</option>
+      <option value="bridge1">Bridge 1 (HR — 8801958122300)</option>
+      <option value="meta">Meta Cloud API</option>
+    </select>
+    <label>Message</label>
+    <textarea id="broadcastText" placeholder="মেসেজ লিখুন…"></textarea>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="closeBroadcastModal()">Cancel</button>
+      <button class="btn-primary" onclick="sendBroadcast()">📤 Send All</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Groups Modal ── -->
+<div class="modal-overlay" id="groupsModal">
+  <div class="modal" style="min-width:400px">
+    <h3>👥 Groups</h3>
+    <div id="groupList" style="margin-bottom:16px;max-height:250px;overflow-y:auto"></div>
+    <div style="border-top:1px solid var(--border);padding-top:14px">
+      <h3 style="font-size:13px;margin-bottom:10px">➕ Create New Group</h3>
+      <label>Group Name</label>
+      <input id="newGroupName" placeholder="e.g. Al-Aqsa OPS Team">
+      <label>Admin Phone</label>
+      <input id="newGroupAdmin" placeholder="e.g. 8801880446111">
+      <label>Members (one per line, or select from contacts)</label>
+      <textarea id="newGroupMembers" placeholder="8801700000000&#10;8801800000000" style="min-height:70px"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="closeGroupsModal()">Close</button>
+      <button class="btn-primary" onclick="createGroup()">➕ Create Group</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast ── -->
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+// ── State ────────────────────────────────────────────────────────────────────
+let apiKey = localStorage.getItem('fazle_api_key') || '';
+let currentPhone = null;
+let currentContactName = '';
+let currentPlatform = '';
+let contactOffset = 0;
+const CONTACT_LIMIT = 50;
+let allContacts = [];   // full fetched list (for bulk select)
+let selectedPhones = new Set();
+let messageOldestId = null;
+let hasMoreMessages = false;
+let sseSource = null;
+let lastMsgId = 0;
+let lastDraftId = 0;
+let mediaRecorder = null;
+let recordedBlob = null;
+let voiceTimer = null;
+let voiceSeconds = 0;
+let attachedFile = null;
+let searchTimer = null;
+let broadcastTargets = [];
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+function doLogin() {
+  const k = document.getElementById('keyInput').value.trim();
+  if (!k) { document.getElementById('loginErr').textContent = 'API key দিন'; return; }
+  apiKey = k;
+  localStorage.setItem('fazle_api_key', k);
+  document.getElementById('loginOverlay').style.display = 'none';
+  init();
+}
+function logout() {
+  localStorage.removeItem('fazle_api_key');
+  apiKey = '';
+  location.reload();
+}
+async function apiFetch(path, opts = {}) {
+  const headers = { 'X-Internal-Key': apiKey, ...(opts.headers || {}) };
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 403) { showLogin(); throw new Error('auth'); }
+  if (r.status === 429) throw new Error('rate_limit');
+  if (!r.ok && r.status >= 500) throw new Error(`server_error_${r.status}`);
+  return r;
+}
+async function apiJson(path, opts = {}) {
+  const r = await apiFetch(path, opts);
+  const ct = r.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) throw new Error('not_json');
+  return r.json();
+}
+function showLogin() {
+  document.getElementById('loginOverlay').style.display = 'flex';
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+async function init() {
+  await Promise.all([loadContacts(), loadDrafts(), loadSettings()]);
+  connectSSE();
+  buildEmojiPicker();
+}
+
+// ── Contacts ─────────────────────────────────────────────────────────────────
+async function loadContacts(reset = true) {
+  if (reset) { contactOffset = 0; allContacts = []; document.getElementById('contactList').innerHTML = ''; }
+  const search = document.getElementById('searchInput').value.trim();
+  const spinner = document.getElementById('contactLoadingSpinner');
+  spinner.style.display = 'block';
+  try {
+    const d = await apiJson(`/api/wa/contacts?limit=${CONTACT_LIMIT}&offset=${contactOffset}&search=${encodeURIComponent(search)}`);
+    if (!Array.isArray(d.contacts)) throw new Error('bad_response');
+    allContacts = reset ? d.contacts : [...allContacts, ...d.contacts];
+    renderContactList(d.contacts, reset);
+    contactOffset += d.contacts.length;
+    document.getElementById('loadMoreContacts').style.display =
+      d.total > contactOffset ? 'block' : 'none';
+    // Seed SSE cursors so we only receive messages/drafts arriving after this load
+    if (reset && d.max_message_id) lastMsgId = Math.max(lastMsgId, d.max_message_id);
+    if (reset && d.max_draft_id)   lastDraftId = Math.max(lastDraftId, d.max_draft_id);
+  } catch(e) {
+    if (e.message === 'auth') return;
+    if (e.message === 'rate_limit') showToast('অনুরোধ বেশি হয়েছে, ২ সেকেন্ড পর আবার চেষ্টা করুন', 'warn');
+    else showToast('Contact লোড ব্যর্থ — পুনরায় চেষ্টা করতে রিফ্রেশ করুন', 'err');
+  } finally {
+    spinner.style.display = 'none';
+  }
+}
+function loadMoreContacts() { loadContacts(false); }
+
+function onSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => loadContacts(true), 300);
+}
+
+function renderContactList(contacts, reset) {
+  const el = document.getElementById('contactList');
+  if (reset) el.innerHTML = '';
+  contacts.forEach(c => el.insertAdjacentHTML('beforeend', contactHtml(c)));
+}
+
+function contactHtml(c) {
+  const isGroup = c.platform === 'group';
+  const initials = (c.display_name || c.phone).slice(0,2).toUpperCase();
+  const pbClass = isGroup ? 'pb-group' : `pb-${c.platform || 'bridge2'}`;
+  const platLabel = isGroup ? 'group' : (c.platform || '');
+  const unread = c.unread_count > 0 ? `<span class="unread-badge">${c.unread_count}</span>` : '';
+  const ts = c.last_message_at ? timeAgo(c.last_message_at) : '';
+  const preview = escHtml((c.last_message || '').slice(0, 55));
+  const roleText = c.identity_role && c.identity_role !== 'unknown' ? `· ${c.identity_role}` : '';
+  const active = currentPhone === c.phone ? ' active' : '';
+  const checked = selectedPhones.has(c.phone) ? ' checked' : '';
+  return `<div class="contact-item${active}" data-phone="${escHtml(c.phone)}" onclick="openConversation('${escHtml(c.phone)}','${escHtml(c.display_name || c.phone)}','${escHtml(c.platform || '')}')">
+    <input type="checkbox" class="chk" data-phone="${escHtml(c.phone)}"${checked} onclick="toggleSelect(event,'${escHtml(c.phone)}')">
+    <div class="contact-avatar${isGroup ? ' group-av' : ''}">${initials}</div>
+    <div class="contact-body">
+      <div class="contact-top">
+        <span class="contact-name">${escHtml(c.display_name || c.phone)}</span>
+        <span class="contact-ts">${ts}</span>
+      </div>
+      <div class="contact-sub">
+        <span class="platform-badge ${pbClass}">${platLabel}</span>
+        <span class="contact-preview">${roleText} ${preview}</span>
+        ${unread}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Bulk Select ───────────────────────────────────────────────────────────────
+function toggleSelect(e, phone) {
+  e.stopPropagation();
+  if (e.target.checked) selectedPhones.add(phone);
+  else selectedPhones.delete(phone);
+  updateBulkBar();
+}
+function toggleSelectAll() {
+  const all = document.getElementById('selectAllChk').checked;
+  selectedPhones = all ? new Set(allContacts.map(c => c.phone)) : new Set();
+  document.querySelectorAll('.contact-item .chk').forEach(chk => chk.checked = all);
+  updateBulkBar();
+}
+function updateBulkBar() {
+  const n = selectedPhones.size;
+  document.getElementById('selectedCount').textContent = `${n} selected`;
+  const btn = document.getElementById('broadcastBtn');
+  btn.classList.toggle('enabled', n > 0);
+}
+
+// ── Conversation ──────────────────────────────────────────────────────────────
+async function openConversation(phone, name, platform) {
+  currentPhone = phone;
+  currentContactName = name || phone;
+  currentPlatform = platform || '';
+  messageOldestId = null;
+  hasMoreMessages = false;
+
+  // Update sidebar active state
+  document.querySelectorAll('.contact-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.phone === phone);
+  });
+
+  // Update header
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('messageList').style.display = 'flex';
+  document.getElementById('convHeader').style.display = 'flex';
+  document.getElementById('composeBar').style.display = 'flex';
+  document.getElementById('convAvatar').textContent = name.slice(0,2).toUpperCase();
+  document.getElementById('convName').textContent = name;
+  const pb = document.getElementById('convPlatformBadge');
+  pb.textContent = platform;
+  pb.className = `platform-badge pb-${platform || 'bridge2'}`;
+
+  document.getElementById('messageList').innerHTML = '';
+  document.getElementById('loadMoreMsgs').style.display = 'none';
+  await loadMessages(phone, true);
+
+  // Highlight relevant draft in right panel
+  document.querySelectorAll('.draft-item').forEach(el => {
+    el.classList.toggle('highlighted', el.dataset.phone === phone);
+  });
+}
+
+async function loadMessages(phone, reset = true) {
+  try {
+    const cursor = reset ? '' : `&before_id=${messageOldestId}`;
+    const r = await apiFetch(`/api/wa/messages/${encodeURIComponent(phone)}?limit=50${cursor}`);
+    const d = await r.json();
+
+    // Update identity role badge
+    if (d.messages.length > 0) {
+      const last = d.messages.find(m => m.direction === 'inbound');
+      document.getElementById('convRole').textContent = last?.identity_role || '';
+    }
+
+    const list = document.getElementById('messageList');
+    const msgs = [...d.messages].reverse(); // oldest first for display
+
+    if (reset) {
+      list.innerHTML = '';
+      msgs.forEach(m => list.insertAdjacentHTML('beforeend', bubbleHtml(m)));
+      list.scrollTop = list.scrollHeight;
+    } else {
+      const prevHeight = list.scrollHeight;
+      msgs.forEach(m => list.insertAdjacentHTML('afterbegin', bubbleHtml(m)));
+      list.scrollTop = list.scrollHeight - prevHeight;
+    }
+
+    hasMoreMessages = d.has_more;
+    if (d.oldest_id) messageOldestId = d.oldest_id;
+    document.getElementById('loadMoreMsgs').style.display = d.has_more ? 'block' : 'none';
+
+    if (d.messages.length > 0) {
+      lastMsgId = Math.max(lastMsgId, ...d.messages.map(m => m.id));
+    }
+  } catch(e) { if (e.message !== 'auth') showToast('Message load failed', 'err'); }
+}
+
+function loadMoreMessages() {
+  if (currentPhone && hasMoreMessages) loadMessages(currentPhone, false);
+}
+
+function bubbleHtml(m) {
+  const isOut = m.direction === 'outbound';
+  const body = markdownLite(escHtml(m.body || ''));
+  const ts = m.received_at ? new Date(m.received_at).toLocaleTimeString('bn-BD',{hour:'2-digit',minute:'2-digit'}) : '';
+  const role = (!isOut && m.identity_role && m.identity_role !== 'unknown')
+    ? `<span class="role-badge">${escHtml(m.identity_role)}</span>` : '';
+  const intent = (!isOut && m.intent_detected)
+    ? `<span class="intent-badge">${escHtml(m.intent_detected)}</span>` : '';
+  return `<div class="msg-bubble ${isOut ? 'out' : 'in'}">
+    <div class="msg-body">${body}</div>
+    <div class="msg-meta">${role}${intent}<span class="msg-ts">${ts}</span></div>
+  </div>`;
+}
+
+function appendBubble(m) {
+  const list = document.getElementById('messageList');
+  if (list.style.display === 'none') return;
+  list.insertAdjacentHTML('beforeend', bubbleHtml(m));
+  list.scrollTop = list.scrollHeight;
+}
+
+// ── Send ──────────────────────────────────────────────────────────────────────
+async function sendMessage() {
+  if (!currentPhone) return;
+  const text = document.getElementById('msgInput').value.trim();
+  if (!text && !attachedFile && !recordedBlob) return;
+
+  const body = text || (attachedFile ? `[📎 ${attachedFile.name}]` : '[🎤 voice]');
+  try {
+    await apiFetch('/api/wa/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: currentPhone, text: body, platform: currentPlatform }),
+    });
+    document.getElementById('msgInput').value = '';
+    autoResize(document.getElementById('msgInput'));
+    clearFile(); clearVoice();
+    showToast('মেসেজ পাঠানো হয়েছে', 'ok');
+    appendBubble({ id: Date.now(), direction: 'outbound', body, received_at: new Date().toISOString() });
+  } catch(e) { if (e.message !== 'auth') showToast('Send failed', 'err'); }
+}
+
+function handleMsgKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+}
+
+// ── Emoji ─────────────────────────────────────────────────────────────────────
+const EMOJIS = ['😊','👍','❌','✅','🔔','📋','💼','🏢','📞','⚠️','🕐','💰','📎','🎤',
+  '😂','🙏','👋','💪','🤝','🌿','📱','✏️','🗒️','📌','🔥','⭐','💯','🎯'];
+function buildEmojiPicker() {
+  const p = document.getElementById('emojiPicker');
+  EMOJIS.forEach(e => {
+    const btn = document.createElement('button');
+    btn.textContent = e; btn.style.cssText = 'font-size:20px;background:none;border:none;cursor:pointer;padding:3px';
+    btn.onclick = () => { document.getElementById('msgInput').value += e; toggleEmojiPicker(); };
+    p.appendChild(btn);
+  });
+}
+function toggleEmojiPicker() {
+  document.getElementById('emojiPicker').classList.toggle('open');
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('#emojiPicker') && !e.target.closest('[onclick*="toggleEmojiPicker"]'))
+    document.getElementById('emojiPicker').classList.remove('open');
+});
+
+// ── File Attach ───────────────────────────────────────────────────────────────
+function handleFileAttach(e) {
+  attachedFile = e.target.files[0];
+  if (!attachedFile) return;
+  document.getElementById('filePreviewName').textContent = attachedFile.name;
+  document.getElementById('filePreviewChip').classList.add('show');
+}
+function clearFile() {
+  attachedFile = null;
+  document.getElementById('fileInput').value = '';
+  document.getElementById('filePreviewChip').classList.remove('show');
+}
+
+// ── Voice Record ──────────────────────────────────────────────────────────────
+async function startRecording(e) {
+  if (e.type === 'touchstart') e.preventDefault();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = ev => chunks.push(ev.data);
+    mediaRecorder.onstop = () => {
+      recordedBlob = new Blob(chunks, { type: 'audio/webm' });
+      stream.getTracks().forEach(t => t.stop());
+      document.getElementById('voicePreviewChip').classList.add('show');
+      document.getElementById('voiceDuration').textContent = voiceSeconds + 's';
+    };
+    mediaRecorder.start();
+    voiceSeconds = 0;
+    document.getElementById('voiceBtn').style.background = '#ffcdd2';
+    voiceTimer = setInterval(() => { voiceSeconds++; document.getElementById('voiceDuration').textContent = voiceSeconds + 's'; }, 1000);
+  } catch { showToast('Microphone access denied', 'warn'); }
+}
+function stopRecording() {
+  clearInterval(voiceTimer);
+  document.getElementById('voiceBtn').style.background = '';
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+}
+function clearVoice() {
+  recordedBlob = null;
+  voiceSeconds = 0;
+  document.getElementById('voicePreviewChip').classList.remove('show');
+}
+
+// ── Drafts ────────────────────────────────────────────────────────────────────
+async function loadDrafts() {
+  try {
+    const r = await apiFetch('/api/wa/drafts?limit=100');
+    const d = await r.json();
+    renderDrafts(d.drafts);
+    updateDraftBadge(d.total);
+    if (d.drafts.length > 0) lastDraftId = Math.max(...d.drafts.map(x => x.id));
+  } catch(e) {}
+}
+
+function renderDrafts(drafts) {
+  const el = document.getElementById('draftList');
+  el.innerHTML = '';
+  if (!drafts.length) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No pending drafts</div>';
+    return;
+  }
+  drafts.forEach(d => el.insertAdjacentHTML('beforeend', draftHtml(d)));
+}
+
+function draftHtml(d) {
+  const orig = d.original_message ? escHtml(d.original_message.slice(0,80)) : '—';
+  const body = escHtml(d.draft_body || '');
+  const ts = d.created_at ? new Date(d.created_at).toLocaleString('bn-BD',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+  return `<div class="draft-item" data-id="${d.id}" data-phone="${escHtml(d.phone)}" onclick="openDraftContext(${d.id},'${escHtml(d.phone)}')">
+    <div class="draft-contact">${escHtml(d.contact_name || d.phone)}</div>
+    <div class="draft-phone">${escHtml(d.phone)} · ${escHtml(d.intent || '')} · ${ts}</div>
+    <div class="draft-orig">📩 "${orig}"</div>
+    <div class="draft-body-text">💬 ${body}</div>
+    <div class="draft-actions" onclick="event.stopPropagation()">
+      <button class="btn-approve" onclick="approveDraft(${d.id})">✓ Approve</button>
+      <button class="btn-reject" onclick="rejectDraft(${d.id})">✗ Reject</button>
+      <button class="btn-edit-d" onclick="toggleDraftEdit(${d.id})">✏️ Edit</button>
+    </div>
+    <div class="draft-edit-area" id="dedit-${d.id}">
+      <textarea id="dedit-txt-${d.id}">${escHtml(d.draft_body || '')}</textarea>
+      <button class="save-edit" onclick="saveDraftEdit(${d.id})">💾 Save</button>
+    </div>
+  </div>`;
+}
+
+function openDraftContext(id, phone) {
+  // Open the conversation in center panel
+  const contact = allContacts.find(c => c.phone === phone);
+  if (contact) openConversation(phone, contact.display_name || phone, contact.platform || '');
+  // Highlight this draft
+  document.querySelectorAll('.draft-item').forEach(el => {
+    el.classList.toggle('highlighted', el.dataset.id == id);
+  });
+}
+
+function updateDraftBadge(n) {
+  const badge = document.getElementById('draftBadge');
+  const header = document.getElementById('draftsCount');
+  if (n > 0) {
+    badge.textContent = n; badge.style.display = 'inline';
+    if (header) header.textContent = n;
+  } else {
+    badge.style.display = 'none';
+    if (header) header.textContent = '0';
+  }
+}
+
+function focusDrafts() {
+  document.getElementById('draftsPanel').scrollIntoView({ behavior: 'smooth' });
+}
+
+async function approveDraft(id) {
+  try {
+    await apiFetch(`/api/wa/drafts/${id}/approve`, { method: 'POST' });
+    document.querySelector(`.draft-item[data-id="${id}"]`)?.remove();
+    showToast('Draft approved & sent', 'ok');
+    loadDrafts();
+  } catch(e) { if (e.message !== 'auth') showToast('Approve failed', 'err'); }
+}
+async function rejectDraft(id) {
+  try {
+    await apiFetch(`/api/wa/drafts/${id}/reject`, { method: 'POST' });
+    document.querySelector(`.draft-item[data-id="${id}"]`)?.remove();
+    showToast('Draft rejected', 'warn');
+    loadDrafts();
+  } catch(e) { if (e.message !== 'auth') showToast('Reject failed', 'err'); }
+}
+function toggleDraftEdit(id) {
+  const el = document.getElementById(`dedit-${id}`);
+  el.style.display = el.style.display === 'block' ? 'none' : 'block';
+}
+async function saveDraftEdit(id) {
+  const txt = document.getElementById(`dedit-txt-${id}`).value;
+  try {
+    await apiFetch(`/api/wa/drafts/${id}/edit`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_body: txt }),
+    });
+    showToast('Draft updated', 'ok');
+    document.getElementById(`dedit-${id}`).style.display = 'none';
+    const bodyEl = document.querySelector(`.draft-item[data-id="${id}"] .draft-body-text`);
+    if (bodyEl) bodyEl.textContent = '💬 ' + txt.slice(0,120);
+  } catch(e) { if (e.message !== 'auth') showToast('Save failed', 'err'); }
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const r = await apiFetch('/api/wa/settings');
+    const d = await r.json();
+    const list = document.getElementById('toggleList');
+    list.innerHTML = '';
+    Object.entries(d.labels).forEach(([key, label]) => {
+      const val = d.toggles[key] || false;
+      list.insertAdjacentHTML('beforeend', `
+        <div class="toggle-row">
+          <label for="tog-${key.replace('.','_')}">${label}</label>
+          <label class="toggle-switch">
+            <input type="checkbox" id="tog-${key.replace('.','_')}" ${val ? 'checked' : ''}
+              onchange="patchSetting('${key}', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>`);
+    });
+  } catch(e) {}
+}
+
+async function patchSetting(key, val) {
+  try {
+    await apiFetch('/api/wa/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: { [key]: val } }),
+    });
+    showToast(`${key}: ${val ? 'ON' : 'OFF'}`, val ? 'ok' : 'warn');
+  } catch(e) { if (e.message !== 'auth') showToast('Settings update failed', 'err'); }
+}
+
+function toggleSettingsDropdown(btn) {
+  const dd = document.getElementById('settingsDropdown');
+  dd.classList.toggle('open');
+  // Close when clicking outside
+  setTimeout(() => {
+    const handler = e => { if (!dd.contains(e.target) && !btn.contains(e.target)) { dd.classList.remove('open'); document.removeEventListener('click', handler); } };
+    document.addEventListener('click', handler);
+  }, 50);
+}
+
+// ── Contact Sync ──────────────────────────────────────────────────────────────
+async function triggerSync() {
+  const st = document.getElementById('syncStatus');
+  st.textContent = '⟳ Syncing…';
+  try {
+    const r = await apiFetch('/api/wa/contacts/sync', { method: 'POST' });
+    const d = await r.json();
+    st.textContent = d.synced ? '✓ Synced' : '✗ Failed';
+    showToast('Contact sync complete', 'ok');
+    loadContacts(true);
+    setTimeout(() => { st.textContent = ''; }, 5000);
+  } catch(e) {
+    st.textContent = '✗ Error';
+    if (e.message !== 'auth') showToast('Sync failed', 'err');
+  }
+}
+
+// ── Contact Modal ─────────────────────────────────────────────────────────────
+let contactModalPhone = null;
+
+async function openContactModal(phone) {
+  if (!phone) return;
+  contactModalPhone = phone;
+  try {
+    const r = await apiFetch(`/api/wa/contacts/${encodeURIComponent(phone)}`);
+    const d = await r.json();
+    document.getElementById('cModalPhone').value = d.phone || phone;
+    document.getElementById('cModalName').value = d.display_name || '';
+    document.getElementById('cModalRole').value = d.identity_role || '—';
+    const blockedEl = document.getElementById('cModalBlocked');
+    if (d.auto_reply_blocked) {
+      blockedEl.textContent = '🚫 Auto-reply is BLOCKED for this number';
+      blockedEl.style.background = '#ffcdd2';
+    } else {
+      blockedEl.textContent = '✅ Auto-reply is active for this number';
+      blockedEl.style.background = '#e8f5ee';
+    }
+    document.getElementById('contactModal').classList.add('open');
+  } catch(e) {
+    if (e.message !== 'auth') {
+      // Contact might not exist in DB yet, show with phone only
+      document.getElementById('cModalPhone').value = phone;
+      document.getElementById('cModalName').value = '';
+      document.getElementById('cModalRole').value = '—';
+      document.getElementById('cModalBlocked').textContent = 'Not in contact book';
+      document.getElementById('contactModal').classList.add('open');
+    }
+  }
+}
+
+function closeContactModal() {
+  document.getElementById('contactModal').classList.remove('open');
+  contactModalPhone = null;
+}
+
+async function saveContact() {
+  if (!contactModalPhone) return;
+  const name = document.getElementById('cModalName').value.trim();
+  try {
+    await apiFetch(`/api/wa/contacts/${encodeURIComponent(contactModalPhone)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: name }),
+    });
+    showToast('Contact updated', 'ok');
+    closeContactModal();
+    loadContacts(true);
+  } catch(e) { if (e.message !== 'auth') showToast('Update failed', 'err'); }
+}
+
+async function blockContact() {
+  if (!contactModalPhone) return;
+  if (!confirm(`Block auto-reply for ${contactModalPhone}?`)) return;
+  try {
+    await apiFetch(`/api/wa/contacts/${encodeURIComponent(contactModalPhone)}/block`, { method: 'POST' });
+    showToast('Auto-reply blocked', 'warn');
+    closeContactModal();
+  } catch(e) { if (e.message !== 'auth') showToast('Block failed', 'err'); }
+}
+
+async function unblockContact() {
+  if (!contactModalPhone) return;
+  try {
+    await apiFetch(`/api/wa/contacts/${encodeURIComponent(contactModalPhone)}/unblock`, { method: 'POST' });
+    showToast('Auto-reply unblocked', 'ok');
+    closeContactModal();
+  } catch(e) { if (e.message !== 'auth') showToast('Unblock failed', 'err'); }
+}
+
+async function deleteContact() {
+  if (!contactModalPhone) return;
+  if (!confirm(`Delete contact ${contactModalPhone} from DB? (Messages are kept)`)) return;
+  try {
+    await apiFetch(`/api/wa/contacts/${encodeURIComponent(contactModalPhone)}`, { method: 'DELETE' });
+    showToast('Contact deleted', 'ok');
+    closeContactModal();
+    loadContacts(true);
+  } catch(e) { if (e.message !== 'auth') showToast('Delete failed', 'err'); }
+}
+
+// ── Broadcast Modal ───────────────────────────────────────────────────────────
+function openBroadcastModal(phones) {
+  broadcastTargets = phones instanceof Array ? phones : [...selectedPhones];
+  if (!broadcastTargets.length) { showToast('কোনো contact নির্বাচিত নেই', 'warn'); return; }
+  document.getElementById('broadcastRecipients').textContent =
+    broadcastTargets.length + ' contact(s): ' + broadcastTargets.slice(0,5).join(', ') + (broadcastTargets.length > 5 ? '…' : '');
+  document.getElementById('broadcastText').value = '';
+  document.getElementById('broadcastModal').classList.add('open');
+}
+function closeBroadcastModal() { document.getElementById('broadcastModal').classList.remove('open'); }
+
+async function sendBroadcast() {
+  const text = document.getElementById('broadcastText').value.trim();
+  const platform = document.getElementById('broadcastPlatform').value;
+  if (!text) { showToast('মেসেজ লিখুন', 'warn'); return; }
+  try {
+    const r = await apiFetch('/api/wa/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phones: broadcastTargets, text, platform }),
+    });
+    const d = await r.json();
+    closeBroadcastModal();
+    showToast(`${d.sent}/${d.total} মেসেজ পাঠানো হয়েছে`, 'ok');
+    selectedPhones.clear();
+    document.querySelectorAll('.contact-item .chk').forEach(c => c.checked = false);
+    document.getElementById('selectAllChk').checked = false;
+    updateBulkBar();
+  } catch(e) { if (e.message !== 'auth') showToast('Broadcast failed', 'err'); }
+}
+
+// ── Groups Modal ──────────────────────────────────────────────────────────────
+async function showGroupsModal() {
+  await loadGroups();
+  document.getElementById('groupsModal').classList.add('open');
+}
+function closeGroupsModal() { document.getElementById('groupsModal').classList.remove('open'); }
+
+async function loadGroups() {
+  try {
+    const r = await apiFetch('/api/wa/groups');
+    const d = await r.json();
+    const el = document.getElementById('groupList');
+    if (!d.groups.length) {
+      el.innerHTML = '<div style="color:var(--muted);font-size:12px">No groups yet</div>';
+      return;
+    }
+    el.innerHTML = d.groups.map(g => `
+      <div style="padding:10px;border:1px solid var(--border);border-radius:7px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <strong>${escHtml(g.name)}</strong>
+            <span class="platform-badge pb-group" style="margin-left:6px">group</span>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button style="font-size:11px;padding:3px 8px;border:none;background:#e8f5ee;color:var(--accent);border-radius:4px;cursor:pointer"
+              onclick="sendToGroup(${g.id},'${escHtml(g.name)}')">💬 Message</button>
+            <button style="font-size:11px;padding:3px 8px;border:none;background:#fdeceb;color:var(--danger);border-radius:4px;cursor:pointer"
+              onclick="deleteGroup(${g.id})">🗑️</button>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">
+          ${g.members.length} members · Admin: ${escHtml(g.admin_phone || '—')}
+        </div>
+      </div>`).join('');
+  } catch(e) {}
+}
+
+async function createGroup() {
+  const name = document.getElementById('newGroupName').value.trim();
+  const admin = document.getElementById('newGroupAdmin').value.trim();
+  const raw = document.getElementById('newGroupMembers').value.trim();
+  const members = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!name) { showToast('Group name দিন', 'warn'); return; }
+  try {
+    await apiFetch('/api/wa/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, admin_phone: admin || null, members }),
+    });
+    showToast('Group created', 'ok');
+    document.getElementById('newGroupName').value = '';
+    document.getElementById('newGroupAdmin').value = '';
+    document.getElementById('newGroupMembers').value = '';
+    await loadGroups();
+  } catch(e) { if (e.message !== 'auth') showToast('Group creation failed', 'err'); }
+}
+
+function sendToGroup(groupId, groupName) {
+  const text = prompt(`Message to group "${groupName}":`);
+  if (!text?.trim()) return;
+  apiFetch(`/api/wa/groups/${groupId}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: '', text, platform: 'bridge2' }),
+  }).then(r => r.json()).then(d => showToast(`${d.sent}/${d.total} sent to group`, 'ok'))
+    .catch(() => showToast('Send failed', 'err'));
+}
+
+async function deleteGroup(id) {
+  if (!confirm('Delete this group?')) return;
+  try {
+    await apiFetch(`/api/wa/groups/${id}`, { method: 'DELETE' });
+    showToast('Group deleted', 'ok');
+    loadGroups();
+  } catch(e) {}
+}
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+function connectSSE() {
+  if (sseSource) sseSource.close();
+  const url = `/api/wa/stream?last_id=${lastMsgId}&last_draft_id=${lastDraftId}&key=${encodeURIComponent(apiKey)}`;
+  sseSource = new EventSource(url);
+  sseSource.onmessage = e => {
+    try {
+      const ev = JSON.parse(e.data);
+      if (ev.type === 'new_message') handleNewMessage(ev.payload);
+      if (ev.type === 'new_draft') handleNewDraft(ev.payload);
+    } catch {}
+  };
+  sseSource.onerror = () => {
+    sseSource.close();
+    setTimeout(connectSSE, 5000);
+  };
+}
+
+let _contactRefreshTimer = null;
+function _scheduleContactRefresh() {
+  clearTimeout(_contactRefreshTimer);
+  _contactRefreshTimer = setTimeout(() => loadContacts(true), 1500);
+}
+
+function handleNewMessage(msg) {
+  lastMsgId = Math.max(lastMsgId, msg.id || 0);
+  if (msg.phone === currentPhone || msg.direction === 'outbound') {
+    appendBubble(msg);
+  }
+  // Debounce sidebar refresh — burst of SSE events must not fire concurrent reloads
+  _scheduleContactRefresh();
+}
+
+function handleNewDraft(draft) {
+  lastDraftId = Math.max(lastDraftId, draft.id || 0);
+  const list = document.getElementById('draftList');
+  if (list.querySelector('[data-id="' + draft.id + '"]')) return; // already exists
+  list.insertAdjacentHTML('afterbegin', draftHtml(draft));
+  const badge = document.getElementById('draftBadge');
+  badge.textContent = parseInt(badge.textContent || '0') + 1;
+  badge.style.display = 'inline';
+  const hdr = document.getElementById('draftsCount');
+  if (hdr) hdr.textContent = parseInt(hdr.textContent || '0') + 1;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function markdownLite(html) {
+  return html
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/_(.+?)_/g, '<em>$1</em>')
+    .replace(/\n/g, '<br>');
+}
+function timeAgo(iso) {
+  const now = Date.now();
+  const then = new Date(iso).getTime();
+  const diff = Math.floor((now - then) / 1000);
+  if (diff < 60) return 'এখন';
+  if (diff < 3600) return Math.floor(diff / 60) + ' মিনিট';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' ঘণ্টা';
+  return new Date(iso).toLocaleDateString('bn-BD',{month:'short',day:'numeric'});
+}
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + type;
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.className = '', 3500);
+}
+function showContactsView() {
+  document.querySelectorAll('#topbar nav button').forEach(b => b.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+if (apiKey) {
+  document.getElementById('loginOverlay').style.display = 'none';
+  init();
+}
+document.getElementById('keyInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
+});
+</script>
+</body>
+</html>

@@ -78,22 +78,25 @@ INTENT_HINTS: dict[str, str] = {
 # so the static rules are visible and auditable without parsing f-strings.
 
 _RECRUITMENT_SYSTEM_HEADER = """\
-তুমি ফজলে — আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেডের HR recruitment assistant.
+তুমি একটি সংক্ষিপ্ত WhatsApp recruitment reply assistant।
 
 কাজ: WhatsApp-এ চাকরি/নিয়োগ/আবেদন সংক্রান্ত কথোপকথনে সরাসরি, ছোট, স্বাভাবিক উত্তর দাও।
 
 অবশ্যই মানবে:
 - কোনো emoji ব্যবহার করবে না।
-১. শুধু নিচের Approved Recruitment Knowledge ব্যবহার করবে; নিজে থেকে বেতন, ফি, পদ, ঠিকানা, সুবিধা বানাবে না।
-২. আগের conversation দেখে বুঝবে প্রার্থী কী জিজ্ঞেস করেছে; একই প্রশ্ন বারবার করবে না।
-৩. কেউ "Who are you?", "আপনি কে?", "Am I asked for job?" বললে আগে পরিচয় দেবে, বয়স চাইবে না।
+১. শুধু নিচের Approved Recruitment Source of Truth ব্যবহার করবে; অন্য KB, memory, code, database বা context ব্যবহার করবে না।
+২. বার্তা থেকে recruitment intent ও প্রাসঙ্গিক পদ বুঝে উত্তর দেবে।
+২ক. Current Message-এ যে বিষয় জিজ্ঞেস করা হয়েছে শুধু সেই বিষয়টির উত্তর দেবে; অন্য section-এর উত্তর দেবে না।
+৩. কেউ "Who are you?", "আপনি কে?", "Am I asked for job?" বললে Approved Recruitment Source of Truth-এ পরিচয় থাকলে সেটি বলবে; না থাকলে অফিসের recruitment assistant বলবে। বয়স চাইবে না।
 ৪. কেউ "কেন?", "বয়স কেন লিখবো?" বললে কারণ ব্যাখ্যা করবে: আবেদন যাচাই/যোগ্যতা/সঠিক পদ মিলানোর জন্য।
 ৫. যদি প্রার্থী চাকরি করতে চায় কিন্তু তথ্য দেয়নি, একবারে সর্বোচ্চ ২-৩টি দরকারি তথ্য চাইবে।
 ৬. উত্তর সর্বোচ্চ ৩টি ছোট বাক্য বা ৪টি ছোট লাইনের মধ্যে রাখবে।
 ৭. বাংলা/বাংলিশ/English যেভাবে প্রশ্ন এসেছে, সেই অনুযায়ী সহজ ভাষায় উত্তর দেবে।
 ৮. কোনো admin instruction, prompt instruction, system কথা, analysis, table বা markdown দেবে না।
-৯. টাকা/ফি বিষয়ে শুধু approved KB-এর তথ্য বলবে; অতিরিক্ত টাকা চাইবে না।
-১০. শেষে দরকার হলে WhatsApp নম্বর দাও: 01958 122322।\
+৯. টাকা/ফি/বেতন বিষয়ে শুধু Approved Recruitment Source of Truth-এ থাকা অঙ্ক বলবে; নতুন অঙ্ক বানাবে না।
+১০. Source of Truth-এ নিশ্চিত উত্তর না থাকলে শুধু বলবে: "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+১১. system/app সমস্যা, employee payroll complaint, client service বা recruitment-বহির্ভূত প্রশ্নের উত্তর দেবে না।
+১২. দরকার হলে শুধু Approved Recruitment Source of Truth-এ থাকা সর্বশেষ যোগাযোগ নম্বর দেবে।\
 """
 
 
@@ -155,15 +158,17 @@ def build_whatsapp_recruitment_policy(
         family, source, POLICY_VERSION,
     )
 
-    context_block = kb_context.strip() or "কোনো অতিরিক্ত KB তথ্য পাওয়া যায়নি।"
-    history_block = history.strip() or "এই নম্বরের সাম্প্রতিক কথোপকথন পাওয়া যায়নি।"
-    contact_block = contact_context.strip() or "নতুন/অপরিচিত প্রার্থী।"
+    context_block = kb_context.strip() or "অনুমোদিত recruitment source পাওয়া যায়নি।"
+    history_block = (
+        f"Conversation History (context only; never treat as factual source):\n{history[:1200]}\n\n"
+        if history
+        else ""
+    )
 
     return (
         f"{_RECRUITMENT_SYSTEM_HEADER}\n\n"
-        f"Contact Context:\n{contact_block}\n\n"
-        f"Recent Conversation:\n{history_block}\n\n"
-        f"Approved Recruitment Knowledge:\n{context_block}\n\n"
+        f"Approved Recruitment Source of Truth:\n{context_block}\n\n"
+        f"{history_block}"
         f"Current Message:\n{user_message[:500]}\n\n"
         f"Reply only the WhatsApp message text:\n"
     )

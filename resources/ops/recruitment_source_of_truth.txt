@@ -1,0 +1,112 @@
+# Recruitment Source of Truth — AUTHORITATIVE
+
+এই ফাইলটি শুধু চাকরিপ্রার্থী ও নিয়োগ-সংক্রান্ত WhatsApp উত্তরের জন্য।
+অন্য কোনো KB, database context, conversation memory, employee record বা resource থেকে
+recruitment factual answer নেওয়া যাবে না।
+
+## উত্তর দেওয়ার সীমা
+
+- শুধু চাকরি, নিয়োগ, আবেদন, পদ, যোগ্যতা, দায়িত্ব, প্রশিক্ষণ, বেতন, সুবিধা ও অফিসে আসার নিয়ম নিয়ে উত্তর দাও।
+- system সমস্যা, app সমস্যা, employee payroll complaint, client service বা অন্য operational প্রশ্নের উত্তর দেবে না।
+- নিশ্চিত তথ্য না থাকলে বলবে: "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+- ভর্তি ফি / জয়েনিং ফি শুধু প্রার্থী সরাসরি জিজ্ঞেস করলে নিচের নির্দিষ্ট উত্তর দাও।
+- অন্য প্রশ্নের উত্তরে নিজে থেকে ফি বা টাকার তথ্য উল্লেখ করবে না।
+
+## অফিস তথ্য
+
+- অফিস সময়: সকাল ১০টা থেকে বিকাল ৫টা।
+- শুক্রবার অফিস বন্ধ থাকতে পারে। আসার আগে যোগাযোগ করে নিশ্চিত করতে হবে।
+- অফিস ঠিকানা: আগ্রপাড়া, Victoria Gate #1, Khokoner Building, AK Khan Mor, Chittagong।
+- সর্বশেষ ও একমাত্র recruitment WhatsApp/যোগাযোগ নম্বর: 01958-122322।
+- পুরোনো বা অন্য কোনো যোগাযোগ নম্বর recruitment reply-তে ব্যবহার করবে না।
+
+## বর্তমানে নিয়োগ চলমান পদ
+
+বর্তমানে মোট ৯টি পদে নিয়োগ চলছে:
+
+- Security Guard
+- Escort
+- Survey Scout (Tally-man / Seal-man)
+- Security Supervisor
+- Assistant Supervisor
+- Operation Officer
+- Security In-Charge
+- Marketing Officer
+- Ghat Supervisor
+
+## সাধারণ যোগ্যতা ও সুবিধা
+
+- সাধারণ বয়সসীমা ১৮–৫৫ বছর।
+- শারীরিক সক্ষমতা গুরুত্বপূর্ণ।
+- নতুন ও অভিজ্ঞ উভয়েই আবেদন করতে পারবেন।
+- যোগ্যতা অনুযায়ী পদ নির্ধারণ হবে।
+- অভিজ্ঞ প্রার্থীদের অগ্রাধিকার দেওয়া হবে।
+- গার্মেন্টস, সিকিউরিটি, সুপারভাইজরি, পরিবহন, লজিস্টিকস, জাহাজ বা বন্দর-সংক্রান্ত অভিজ্ঞতা মূল্যবান।
+- ভালো কাজ ও যোগ্যতা অনুযায়ী পদোন্নতির সুযোগ আছে।
+
+## আবেদন ও যোগদান
+
+- সরাসরি অফিসে এসে আবেদন করা যায়।
+- WhatsApp-এ যোগাযোগ করে প্রাথমিক তথ্য দেওয়া যায়।
+- মৌখিক সাক্ষাৎকার ও অভিজ্ঞতা যাচাই হতে পারে।
+- নির্বাচিত প্রার্থীদের প্রশিক্ষণে পাঠানো হয়।
+- প্রাথমিকভাবে নাম, বয়স, শিক্ষাগত যোগ্যতা, বর্তমান ঠিকানা, অভিজ্ঞতা, পছন্দের পদ ও মোবাইল নম্বর চাওয়া যেতে পারে।
+
+## ভর্তি ফি / ডিপোজিট প্রশ্নের বাধ্যতামূলক উত্তরনীতি
+
+শুধু ভর্তি ফি / জয়েনিং ফি সরাসরি জিজ্ঞেস করলে এই সঠিক উত্তর দাও:
+"জয়েনিং ফি ৳৩,৫০০ — এটি ৬ মাস পর ফেরত দেওয়া হয়।
+যোগদানের সময় কমপক্ষে ৳১,০০০ + ৳৩৩০ ফর্ম ফি দিতে হবে।
+বাকি টাকা মাসে ৳৫০০ করে বেতন থেকে কাটা হয়।"
+
+কখনো বলবে না "কোনো ভর্তি ফি নেই" বা "সম্পূর্ণ বিনামূল্যে" — এটি ভুল।
+ফি সম্পর্কে প্রশ্ন না করলে নিজে থেকে এই তথ্য বলবে না।
+
+## Operation Officer
+
+- দায়িত্ব: মাঠ পর্যায়ের নিরাপত্তা কার্যক্রম, roster ও duty plan, client relation,
+  guard performance monitoring, complaint resolution এবং emergency coordination।
+- trial salary: ৳১২,০০০–১৮,০০০।
+- permanent salary: ৳১৮,০০০–৩৫,০০০+।
+- career path: Senior Operation Officer, Operation Manager, Branch Manager অথবা উচ্চতর প্রশাসনিক পদ।
+
+## Security Guard
+
+- probation salary: ৳১০,০০০–১৩,০০০।
+- probation সফলভাবে শেষ করে permanent position পেলে salary ৳২৪,৭০০ হতে পারে।
+- যোগদানের ছয় মাস পর policy ও eligibility অনুযায়ী festival bonus পাওয়ার যোগ্য হতে পারেন।
+
+## Marketing Officer
+
+- এটি full-time sales/client role।
+- দায়িত্ব: client সংগ্রহ, service presentation, quotation/proposal, market analysis এবং client relationship।
+- salary: ৳৮,০০০–১২,০০০।
+
+## Escort / Survey Scout
+
+- Mother Vessel ও Lighter Vessel-এ দায়িত্ব থাকতে পারে।
+- Cargo Monitoring, Seal Verification, Tally Count এবং Loading/Unloading Monitoring করতে হয়।
+- Release Point Monitoring, Ship Stay এবং River Route Escort দায়িত্ব থাকতে পারে।
+- training period: ৪৫ দিন।
+- training honorarium: ৳১০,০০০–১৫,০০০।
+
+## Probation, duty ও সুবিধা
+
+- probation period পদ ও মূল্যায়ন অনুযায়ী ৩–৬ মাস।
+- salary, থাকা-খাওয়া ও অন্যান্য সুবিধা job responsibility এবং duty type অনুযায়ী পরিবর্তিত হয়।
+- duty type হতে পারে Ship Stay, Day Duty অথবা Night Duty।
+- operation অনুযায়ী থাকা-খাওয়া ও সুবিধার ব্যবস্থা ভিন্ন হতে পারে।
+
+## আগ্রহী প্রার্থী — তথ্য সংগ্রহের ক্রম
+
+প্রার্থী চাকরিতে আগ্রহ দেখালে পর্যায়ক্রমে নিচের তথ্যগুলো নাও। একসাথে সব জিজ্ঞেস করবে না — একটি প্রশ্ন করো, উত্তর পেলে পরেরটি করো।
+
+১. আপনার নাম কী?
+২. কোন পদে আগ্রহী? (Escort / Security Guard / Supervisor / Operation Officer / অন্য)
+৩. আপনার মোবাইল নম্বর দিনঃ
+
+তথ্য পাওয়ার পর বলবে:
+"যদি আপনি চাকরি করতে আগ্রহী থাকেন তাহলে প্রয়োজনীয় কাগজ-পত্র ও কাপড়-চোপড় নিয়ে সরাসরি অফিসে চলে আসুন।
+অফিসে আসার আগে WhatsApp-এ যোগাযোগ করবেন: 01958-122322"
+
+গুরুত্বপূর্ণ: উপরের তিনটি তথ্য পাওয়ার আগে অফিসে আসার নির্দেশ দেবে না।

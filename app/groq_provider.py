@@ -28,6 +28,11 @@ _groq_sem = asyncio.Semaphore(2)
 
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 _GROQ_DEFAULT_COOLDOWN_S = 35.0
+_VALID_INTENTS = {
+    "recruitment", "salary_query", "payment_due", "escort_duty",
+    "complaint", "client_order", "leave", "join", "attendance",
+    "slip_submission", "voice_note", "greeting", "unknown",
+}
 
 
 def _make_client() -> AsyncOpenAI:
@@ -55,6 +60,41 @@ async def _log_llm(caller: str, model: str, prompt: str, reply: str, latency_ms:
         )
     except Exception:
         pass
+
+
+async def classify_intent_llm(text: str) -> str:
+    """Classify WhatsApp intent through Groq; return unknown on any failure."""
+    settings = get_settings()
+    model = settings.groq_model_name
+    prompt = (
+        "Classify this WhatsApp message into one category. "
+        "Reply with ONLY the category name.\n\n"
+        "Categories: recruitment, salary_query, payment_due, escort_duty, complaint, "
+        "client_order, leave, join, attendance, slip_submission, voice_note, greeting, unknown\n\n"
+        f"Message: {text[:300]}\n\nCategory:"
+    )
+    t0 = time.monotonic()
+    async with _groq_sem:
+        try:
+            client = _make_client()
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=10,
+                    temperature=0.0,
+                ),
+                timeout=15.0,
+            )
+            result = (resp.choices[0].message.content or "").strip().lower().split()[0]
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            asyncio.create_task(_log_llm("classify_intent_llm", model, prompt, result, latency_ms))
+            return result if result in _VALID_INTENTS else "unknown"
+        except (RateLimitError, APIError) as e:
+            log.warning("[groq] classify rate/API error: %s", e)
+        except Exception as e:
+            log.warning("[groq] classify error: %s: %s", type(e).__name__, e)
+    return "unknown"
 
 
 async def generate_reply(

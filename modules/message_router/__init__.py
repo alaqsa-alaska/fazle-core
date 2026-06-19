@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.database import fetch_one, fetch_all, execute
 from shared.draft_reply import create_draft_reply
 from modules.intent import classify
+from modules.phone_normalizer import normalize_phone
 from modules.identity_brain import detect_identity
 from modules.number_identity import normalize_phone as get_phone_variants
 from app import llm as ai
@@ -37,13 +38,9 @@ from modules.escort import (
 )
 from modules.knowledge_base import get_reply as kb_get_reply
 from modules.recruitment_flow import (
-    get_active_session,
-    is_recruitment_trigger,
+    recruitment_eligibility,
 )
-from modules.recruitment_ai import (
-    generate_recruitment_reply,
-    looks_like_recruitment_followup,
-)
+from modules.recruitment_ai import generate_recruitment_reply
 from modules.admin_commands import is_admin_command, process_admin_command, list_payment_drafts
 from modules.admin_commands.nl_router import is_nl_admin_query, process_nl_admin_query
 from modules.payment_workflow import is_advance_request
@@ -103,6 +100,7 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
       2. wbom_contacts.display_name contains 'al-aqsa', 'escort', or 'client' → skip
     """
     settings = get_settings()
+    sender = normalize_phone(sender) or sender.strip()
     if settings.accountant_phone and sender == settings.accountant_phone:
         return True, f"accountant phone match ({sender})"
     try:
@@ -157,6 +155,7 @@ async def process_message(
     Does NOT send anything — callers handle delivery.
     """
     settings = get_settings()
+    sender = normalize_phone(sender) or sender.strip()
 
     # TASK 2: Silent-skip excluded contacts before any processing or draft creation
     _skip, _skip_reason = await _should_silent_skip(sender)
@@ -259,10 +258,20 @@ async def process_message(
         }
 
     # ── 5. Intent classification ───────────────────────────────────────────────
-    intent = classify(text)
+    # AI is authoritative for intent; deterministic rules are the availability fallback.
+    intent = await ai.classify_intent_llm(text)
     if intent == "unknown":
-        intent = await ai.classify_intent_llm(text)
+        intent = classify(text)
     log.info(f"[INTENT] {sender} → {intent}")
+
+    # Trusted operational identities must never enter any recruitment reply
+    # fallback, even if the message text itself looks recruitment-related.
+    if intent == "recruitment" and role_str not in ("candidate", "new_lead", "unknown"):
+        log.info(
+            "[RECRUITMENT_BLOCKED_OPERATIONAL] sender=%s role=%s source=%s",
+            sender, role_str, identity.get("identity_source"),
+        )
+        return "", None
 
     # ── 6. ACCOUNTANT ─────────────────────────────────────────────────────────
     if role_str == "accountant":
@@ -293,31 +302,26 @@ async def process_message(
         reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
         return reply, None
 
-    # ── 7. CANDIDATE — recruitment funnel ─────────────────────────────────────
-    if role_str == "candidate" or intent == "recruitment":
+    # ── 7/8. Recruitment — one eligibility decision for every unknown/candidate ─
+    if role_str in ("candidate", "new_lead", "unknown"):
+        recruit_decision = await recruitment_eligibility(
+            sender, text, role=role_str, intent=intent,
+        )
+    else:
+        recruit_decision = {"eligible": False}
+
+    if recruit_decision["eligible"]:
         db_ctx = await get_contact_context(sender)
+        history = "\n".join(await get_recent_history(sender))
         ai_reply = await generate_recruitment_reply(
             phone=sender,
             text=text,
             source=source,
             contact_context=db_ctx,
+            history=history,
         )
         if ai_reply:
             return ai_reply, None
-
-    # ── 8. RECRUITMENT for new_lead / known_contact roles ─────────────────────
-    if role_str in ("new_lead", "unknown", "known_contact"):
-        active_session = await get_active_session(sender)
-        if active_session or is_recruitment_trigger(text) or looks_like_recruitment_followup(text):
-            db_ctx = await get_contact_context(sender)
-            ai_reply = await generate_recruitment_reply(
-                phone=sender,
-                text=text,
-                source=source,
-                contact_context=db_ctx,
-            )
-            if ai_reply:
-                return ai_reply, None
 
     # ── 9. ESCORT ORDER (intent-triggered for non-registered senders) ─────────
     if intent in ("client_order", "escort_duty"):
@@ -342,25 +346,29 @@ async def process_message(
         if intent == "slip_submission":
             return await start_slip_verification(sender, text, source, emp_id)
 
-        # Batch 13: text-based release intent (close active program, draft payment)
+        # Employee release messages request admin review. Only an admin's exact
+        # [RELEASE CONFIRMED] message may finalize the release.
         if emp_id:
-            from modules.escort_lifecycle import is_release_intent, handle_release_event
+            from modules.escort_lifecycle import is_release_intent
             if is_release_intent(text):
-                rel = await handle_release_event(emp_id, extracted=None, source=f"release-text:{source}")
-                if rel.get("status") == "closed":
-                    reply = (
-                        f"✅ আপনার ডিউটি বন্ধের তথ্য পাওয়া গেছে।\n"
-                        f"Days: {rel.get('day_count')}\n"
-                        f"পেমেন্ট ড্রাফট তৈরি হয়েছে (#{rel.get('draft_id')})।\n"
-                        f"Admin অনুমোদনের পর পেমেন্ট প্রসেস হবে।"
-                    )
-                    return reply, None
-                if rel.get("status") == "already_closed":
-                    return ("ℹ️ আপনার সর্বশেষ ডিউটি ইতিমধ্যে ক্লোজ করা হয়েছে। "
-                            "আবার রিলিজ পাঠানোর প্রয়োজন নেই।"), None
-                if rel.get("status") == "no_active_program":
-                    return ("⚠️ আপনার নামে কোনো চলমান escort program পাওয়া যায়নি। "
-                            "Admin-কে যোগাযোগ করুন।"), None
+                return (
+                    "✅ আপনার release request পাওয়া গেছে। Admin যাচাই করে "
+                    "[RELEASE CONFIRMED] পাঠানোর পর attendance ও settlement তৈরি হবে।",
+                    {
+                        "admin_phone": get_settings().admin_bridge1_number
+                        or ((get_settings().admin_number_list or [""])[0]),
+                        "bridge": "bridge1",
+                        "purpose": "release-request",
+                        "text": (
+                            "⚠️ RELEASE REVIEW REQUIRED\n"
+                            f"Employee ID: {emp_id}\nPhone: {sender}\n"
+                            f"Message: {text}\n\n"
+                            "Review the active program and send an exact "
+                            "[RELEASE CONFIRMED] message with End Date, Shift, Days, "
+                            "Food, Conveyance, Escort and Lighter."
+                        ),
+                    },
+                )
 
         if intent in ("employee_salary_complaint", "legal_issue", "payment_issue"):
             await create_draft_reply(
@@ -497,12 +505,13 @@ async def get_recent_history(phone: str, limit: int = 5) -> list:
     """Return recent inbound message texts for a given phone number."""
     try:
         rows = await fetch_all(
-            """SELECT message_text FROM wbom_inbound_messages
-               WHERE sender_number = $1
+            """SELECT message_body
+               FROM wbom_whatsapp_messages
+               WHERE sender_number = $1 AND direction = 'inbound'
                ORDER BY received_at DESC LIMIT $2""",
             phone, limit,
         )
-        return [r["message_text"] for r in rows if r.get("message_text")]
+        return [r["message_body"] for r in reversed(rows) if r.get("message_body")]
     except Exception as e:
         log.debug(f"get_recent_history error: {e}")
         return []

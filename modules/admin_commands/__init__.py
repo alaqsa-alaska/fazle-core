@@ -1006,47 +1006,10 @@ async def _cmd_release(
     days: float | None,
     admin_phone: str,
 ) -> str:
-    from datetime import date as _date
-    from modules.escort_lifecycle import close_program, backfill_attendance_for_program, find_existing_draft_for_program
-    from modules.payment_workflow import create_escort_payment_draft
-    try:
-        y, m, d = [int(x) for x in end_date_str.split("-")]
-        end_dt = _date(y, m, d)
-    except Exception as e:
-        return f"❌ তারিখ পার্স ত্রুটি: {e}"
-
-    prog = await fetch_one(
-        "SELECT escort_employee_id, status FROM wbom_escort_programs WHERE program_id=$1",
-        program_id,
-    )
-    if not prog:
-        return f"❌ Program #{program_id} খুঁজে পাওয়া যায়নি।"
-    eid = prog.get("escort_employee_id")
-    if not eid:
-        return f"❌ Program #{program_id} এ কোনো escort_employee_id সেট নেই।"
-
-    closed = await close_program(program_id, end_dt, end_shift, release_point, days, f"admin:{admin_phone}")
-    if not closed.get("ok"):
-        return f"❌ ক্লোজ ব্যর্থ: {closed.get('error')}"
-    inserted = await backfill_attendance_for_program(program_id)
-
-    if closed.get("already_closed"):
-        existing = await find_existing_draft_for_program(program_id)
-        return (f"ℹ️ Program #{program_id} আগেই Completed।\n"
-                f"Days: {closed.get('day_count')} | Att inserted: {inserted}\n"
-                f"Existing draft: #{existing['id'] if existing else 'none'}")
-
-    draft = await create_escort_payment_draft(
-        employee_id=eid, escort_program_id=program_id,
-        override_days=closed.get("day_count"), source=f"admin-release:{admin_phone}",
-    )
-    if draft.get("error"):
-        return (f"⚠️ Program #{program_id} ক্লোজ হয়েছে কিন্তু draft তৈরি হয়নি:\n{draft['error']}")
     return (
-        f"✅ RELEASE Program #{program_id}\n"
-        f"Days: {closed.get('day_count')} | End: {end_date_str} {end_shift} @ {release_point}\n"
-        f"Attendance inserted: {inserted}\n"
-        f"Draft #{draft.get('draft_id')} created — অনুমোদন: PAID {draft.get('draft_id')} <amount> bkash/nagad/cash"
+        "❌ RELEASE command no longer finalizes financial state.\n"
+        "Review the release and send an exact [RELEASE CONFIRMED] message "
+        "containing End Date, Shift, Days, Food, Conveyance, Escort and Lighter."
     )
 
 

@@ -17,7 +17,8 @@ FLOW:
 DB usage (no schema change):
   wbom_escort_programs columns used:
     mother_vessel, lighter_vessel, master_mobile,
-    destination, status, contact_id, program_date, remarks
+    destination, status, contact_id, program_date, remarks,
+    escort_name, escort_mobile, escort_employee_id, shift
   remarks stores JSON:
     {sender_phone, source_bridge, escort_name, escort_mobile,
      capacity, importer, cargo_type}
@@ -61,15 +62,23 @@ class CompletedDraft(TypedDict):
     escort_mobile: Optional[str]
     date_str: Optional[str]
     shift: Optional[str]     # "D" or "N"
+    destination: Optional[str]
 
 
 # ── Compiled patterns ──────────────────────────────────────────────────────────
 
+# Plain BD numbers: 01XXXXXXXXX or 8801XXXXXXXXX (no spaces/dashes)
 _MOBILE_RE = re.compile(r"\b((?:880|0)1[3-9]\d{8})\b")
+
+# Formatted BD numbers: +880 1729-455965, +880 1811-505325, etc.
+# Pattern: country code + 1[3-9] + 8 more digits (optionally split by space/dash)
+_MOBILE_FMT_RE = re.compile(
+    r"\+?(?:880|0)[\s\-]?1[3-9](?:[\s\-]?\d){8}"
+)
 
 _MV_LABEL_RE = re.compile(
     r"(?:m\.?v\.?|এমভি|mother\s*vessel)\s*[:\s.]*"
-    r"([A-Za-z][A-Za-z0-9\s.\-]{1,40}?)(?=\s*[\n/]|$)",
+    r"([A-Za-z][A-Za-z0-9\s.\-]{1,40}?)(?=\s*[,\n/]|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 _IMPORTER_RE = re.compile(
@@ -77,7 +86,7 @@ _IMPORTER_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _CARGO_RE = re.compile(
-    r"\b(wheat|corn|soybean|soya(?:bean)?\s*meal|coal|sugar|rice|salt|"
+    r"\b(wheat|corn|soybean|soya(?:bean)?\s*meal|coal|sugar|rice|salt|y\.?\s*peas|yellow\s*peas|"
     r"গম|ভুট্টা|চিনি|কয়লা)\b",
     re.IGNORECASE,
 )
@@ -96,7 +105,7 @@ _CD_ESCORT_MOB_RE = re.compile(
 _CD_SHIFT_RE = re.compile(
     r"\(\s*([DN])\s*\)|(?:^|\s)(Day|Night)(?:\s|$)",
     re.IGNORECASE | re.MULTILINE,
-)  # FIX: also match bare 'Day' / 'Night' text (no parentheses)
+)  # also matches bare 'Day' / 'Night' text (no parentheses)
 _CD_MV_RE = re.compile(
     r"(?:m\.?v\.?|mother\s*vessel)\s*[:\s.]*([A-Za-z][A-Za-z0-9\s.\-]{1,40}?)(?=\s*[\n/]|\s*$)",
     re.IGNORECASE | re.MULTILINE,
@@ -109,21 +118,64 @@ _CD_MASTER_MOB_RE = re.compile(
     r"(?:master(?:'?s)?\s*(?:number|mobile|mob)?|mob)\s*:\s*(\b(?:880|0)1[3-9]\d{8}\b)",
     re.IGNORECASE,
 )
+_CD_DEST_RE = re.compile(
+    r"destination\s*:\s*(.+?)(?=\s*\n|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
 _AL_AQSA_RE = re.compile(r"al.?aqsa|আল.?আকসা", re.IGNORECASE)
 
+# O/a to <destination> pattern for inbound messages
+_OA_DEST_RE = re.compile(
+    r"(?:o/?a|alongside)\s+(?:to\s+)?([A-Za-z][A-Za-z0-9\s,.\-]{2,25}?)(?=\s*$)",
+    re.IGNORECASE | re.MULTILINE,
+)
 
-# ── Extraction helpers ─────────────────────────────────────────────────────────
-
-# FIX: detect inbound messages where lighter is listed first with At-O/A marker
+# detect inbound messages where lighter is listed first with At-O/A marker
 _AT_OA_MV_RE = re.compile(
     r"(?:at[-\s]*o/?a|alongside)\s*[:\s]*([A-Za-z][A-Za-z0-9\s.\-]{1,40}?)(?=\s*[\n/]|\s*$)",
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Mv. <name> block line detection (for multi-Mv block format)
+_MV_BLOCK_LINE_RE = re.compile(
+    r"^\s*(?:[^\w]*)(?:M\.?V\.?)\s+([^,/\n]{2,40}?)(?:[,/].*)?$",
+    re.IGNORECASE,
+)
+
+# Master: / Mob: <phone> on a line (formatted or plain, handles +880 1729-455965 style)
+_MASTER_LINE_RE = re.compile(
+    r"(?:master|mob|mobile|phone|tel)\s*[:\s]+(\+?(?:880|0)[\s\-]?1[3-9](?:[\s\-]?\d){8})",
+    re.IGNORECASE,
+)
+
+
+# ── Mobile helpers ─────────────────────────────────────────────────────────────
+
+def _normalize_mobile(raw: str) -> Optional[str]:
+    """Normalize a raw mobile string (may contain +, spaces, dashes) to 01XXXXXXXXX."""
+    digits = re.sub(r"[\s\-+]", "", raw)
+    if digits.startswith("880") and len(digits) == 13:
+        return "0" + digits[3:]
+    if len(digits) == 11 and digits.startswith("01") and digits[2] in "3456789":
+        return digits
+    return None
+
+
+def _extract_mobile(text: str) -> Optional[str]:
+    """Extract and normalize the first mobile number from text (plain or formatted)."""
+    m = _MOBILE_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _MOBILE_FMT_RE.search(text)
+    if m:
+        return _normalize_mobile(m.group(0))
+    return None
+
+
+# ── Extraction helpers ─────────────────────────────────────────────────────────
 
 def _extract_mother_vessel(text: str) -> Optional[str]:
-    # FIX: if 'At-O/A MV ...' pattern present, use that as the mother vessel
-    # (lighter-first formats where LV is listed before MV)
+    # If 'At-O/A MV ...' pattern present, use that as the mother vessel
     at_oa = _AT_OA_MV_RE.search(text)
     if at_oa:
         name = at_oa.group(1).strip().rstrip(".,- ")
@@ -134,7 +186,7 @@ def _extract_mother_vessel(text: str) -> Optional[str]:
     if not m:
         return None
     name = m.group(1).strip().rstrip(".,- ")
-    # FIX: strip double MV/MV. prefix (e.g. 'MV. EVA PARIS' → 'MV EVA PARIS')
+    # Strip double MV/MV. prefix (e.g. 'MV. EVA PARIS' → 'MV EVA PARIS')
     name = re.sub(r"^MV\.?\s+", "", name, flags=re.IGNORECASE).strip() or name
     return f"MV {name.upper()}"
 
@@ -159,14 +211,13 @@ def _parse_lighter_block(section: str) -> Optional[LighterInfo]:
     )
     master_name = master_name_m.group(1).strip() if master_name_m else None
 
-    mob_m = _MOBILE_RE.search(rest)
-    master_mobile = mob_m.group(1) if mob_m else None
+    master_mobile = _extract_mobile(rest)
 
     cap_m = _CAPACITY_RE.search(rest)
     capacity = f"{cap_m.group(1)} MT" if cap_m else None
 
     dest_m = re.search(
-        r"(?:dest(?:ination)?|going\s*to)\s*:?\s*(.+?)(?=\s*\n|$)",
+        r"(?:dest(?:ination)?|going\s*to|o/?a\s+(?:to\s+)?)\s*:?\s*(.+?)(?=\s*\n|$)",
         rest, re.IGNORECASE | re.MULTILINE,
     )
     destination = dest_m.group(1).strip() if dest_m else None
@@ -275,6 +326,70 @@ def _parse_inline_lighters(text: str) -> list:
     return lighters
 
 
+def _parse_mv_block_lighters(text: str) -> list:
+    """
+    Parse messages where lighter vessels are 'Mv. <name>' blocks followed by
+    O/a to / Capacity / Master lines (and the mother vessel is the first MV line
+    with no phone in its lookahead).
+
+    Handles examples like:
+      MV MARIMYR A , SOYBEAN MEAL        ← mother vessel (first, no adjacent phone)
+      Mv. Fazlay Khoda                   ← lighter name
+      O/a to Narayanganj                 ← destination
+      Capacity: 1100                     ← capacity
+      Master: +880 1811-505325           ← master mobile (formatted)
+    """
+    lines = text.splitlines()
+    lighters = []
+    i = 0
+
+    _cap_re = re.compile(r"(?:capacity|cap)\s*[:\s]*(\d[\d,]+)", re.IGNORECASE)
+
+    while i < len(lines):
+        line = lines[i].strip()
+        mv_m = _MV_BLOCK_LINE_RE.match(line)
+
+        if mv_m:
+            name_raw = mv_m.group(1).strip().rstrip("., ")
+
+            # Collect lookahead lines (stop at next Mv. block or blank line)
+            j = i + 1
+            lookahead = []
+            while j < len(lines) and len(lookahead) < 5:
+                nxt = lines[j].strip()
+                if not nxt:
+                    break
+                if _MV_BLOCK_LINE_RE.match(nxt):
+                    break
+                lookahead.append(nxt)
+                j += 1
+
+            lookahead_text = "\n".join(lookahead)
+            master_m = _MASTER_LINE_RE.search(lookahead_text)
+
+            if master_m:
+                mobile = _normalize_mobile(master_m.group(1))
+                dest_m = _OA_DEST_RE.search(lookahead_text)
+                destination = dest_m.group(1).strip().rstrip(",. ") if dest_m else None
+                cap_m = _cap_re.search(lookahead_text)
+                capacity = f"{cap_m.group(1)} MT" if cap_m else None
+
+                if name_raw and mobile:
+                    lighters.append(LighterInfo(
+                        lighter_vessel=name_raw,
+                        master_name=None,
+                        master_mobile=mobile,
+                        capacity=capacity,
+                        destination=destination,
+                    ))
+                i = j
+                continue
+
+        i += 1
+
+    return lighters
+
+
 def parse_escort_message(text: str) -> EscortOrder:
     """Extract all vessel/lighter info from a client escort message."""
     mother_vessel = _extract_mother_vessel(text)
@@ -288,10 +403,12 @@ def parse_escort_message(text: str) -> EscortOrder:
     date_m = _DATE_RE.search(text)
     date_hint = date_m.group(1) if date_m else None
 
-    # Try labeled first, then inline
+    # Try labeled first, then inline numbered, then Mv. block format
     lighters = _parse_labeled_lighters(text)
     if not lighters:
         lighters = _parse_inline_lighters(text)
+    if not lighters:
+        lighters = _parse_mv_block_lighters(text)
 
     return EscortOrder(
         mother_vessel=mother_vessel,
@@ -315,9 +432,10 @@ def build_admin_draft(mv: str, lighter: LighterInfo, date_str: Optional[str] = N
         f"Mother Vessel: {mv or ''}",
         f"Lighter Vessel: {lighter['lighter_vessel']}",
         f"Master Mobile: {lighter['master_mobile'] or ''}",
+        f"Destination: {lighter.get('destination') or ''}",
         "Escort Name:",
         "Escort Mobile:",
-        f"{d} (D)",
+        f"{d} (D/N)",
         "Al-Aqsa Security & Logistics Services Ltd",
     ]
     return "\n".join(lines)
@@ -378,6 +496,7 @@ def parse_completed_draft(text: str) -> CompletedDraft:
     escort_mob_m = _CD_ESCORT_MOB_RE.search(text)
     date_m = _DATE_RE.search(text)
     shift_m = _CD_SHIFT_RE.search(text)
+    dest_m = _CD_DEST_RE.search(text)
 
     mv = mv_m.group(1).strip() if mv_m else None
     if mv:
@@ -388,13 +507,15 @@ def parse_completed_draft(text: str) -> CompletedDraft:
         else:
             mv = mv.upper()
 
-    # FIX: parse shift from '(D)'/'(N)' OR bare 'Day'/'Night' text
+    # Parse shift from '(D)'/'(N)' OR bare 'Day'/'Night' text
     shift = None
     if shift_m:
         if shift_m.group(1):   # matched (D) or (N)
             shift = shift_m.group(1).upper()
         elif shift_m.group(2):  # matched 'Day' or 'Night'
             shift = "D" if shift_m.group(2).lower() == "day" else "N"
+
+    destination = dest_m.group(1).strip() if dest_m else None
 
     return CompletedDraft(
         mother_vessel=mv,
@@ -404,20 +525,28 @@ def parse_completed_draft(text: str) -> CompletedDraft:
         escort_mobile=escort_mob_m.group(1) if escort_mob_m else None,
         date_str=date_m.group(1) if date_m else _TODAY(),
         shift=shift,
+        destination=destination,
     )
 
 
-def build_final_slip(draft: CompletedDraft) -> str:
-    """Build the finalized slip to send to the original client."""
+def build_final_slip(draft: CompletedDraft, db_destination: Optional[str] = None) -> str:
+    """Build the finalized slip to send to the original client.
+
+    Field labels and footer match the exact format used in the field:
+      Mother Vessel / Lighter Vessel / Master Mobile / Destination /
+      Escort Name / Escort Mobile / Start Date (D/N) / Al-Aqsa Security Service
+    """
     shift_label = f" ({draft['shift']})" if draft.get("shift") else ""
+    destination = draft.get("destination") or db_destination or ""
     lines = [
         f"Mother Vessel: {draft['mother_vessel'] or '—'}",
-        f"Lighter: {draft['lighter_vessel'] or '—'}",
-        f"Master Number: {draft['master_mobile'] or '—'}",
+        f"Lighter Vessel: {draft['lighter_vessel'] or '—'}",
+        f"Master Mobile: {draft['master_mobile'] or '—'}",
+        f"Destination: {destination or '—'}",
         f"Escort Name: {draft['escort_name'] or '—'}",
         f"Escort Mobile: {draft['escort_mobile'] or '—'}",
-        f"{draft['date_str'] or _TODAY()}{shift_label}",
-        "Al-Aqsa Security & Logistics Services Ltd",
+        f"Start Date: {draft['date_str'] or _TODAY()}{shift_label}",
+        "Al-Aqsa Security Service",
     ]
     return "\n".join(lines)
 
@@ -465,8 +594,8 @@ async def save_escort_programs(
             "cargo_type": order.get("cargo_type"),
         }
         try:
-            # Dedup guard: if any non-cancelled program already exists for this
-            # MV+lighter (no date limit), reuse it instead of inserting a duplicate.
+            # Dedup guard: if a non-cancelled program for same MV+lighter exists
+            # within the last 30 days, reuse it instead of inserting a duplicate.
             if mv_clean:
                 lv_clean = (lighter["lighter_vessel"] or "").strip()
                 dup = await fetch_one(
@@ -475,6 +604,7 @@ async def save_escort_programs(
                     WHERE  UPPER(REPLACE(mother_vessel, 'MV ', '')) = $1
                       AND  LOWER(lighter_vessel) = LOWER($2)
                       AND  status NOT IN ('cancelled')
+                      AND  program_date >= CURRENT_DATE - INTERVAL '30 days'
                     ORDER BY program_id DESC LIMIT 1
                     """,
                     mv_clean, lv_clean,
@@ -520,7 +650,7 @@ async def _find_pending_program(mv: Optional[str], lv: Optional[str]) -> Optiona
         if mv_clean and lv_clean:
             # Exact lv match
             row = await fetch_one(
-                """SELECT program_id, remarks, mother_vessel, lighter_vessel
+                """SELECT program_id, remarks, mother_vessel, lighter_vessel, destination
                    FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                      AND LOWER(lighter_vessel) = LOWER($2)
@@ -533,7 +663,7 @@ async def _find_pending_program(mv: Optional[str], lv: Optional[str]) -> Optiona
 
             # Fuzzy lv match: fetch all mv candidates and pick best similarity
             candidates = await fetch_all(
-                """SELECT program_id, remarks, mother_vessel, lighter_vessel
+                """SELECT program_id, remarks, mother_vessel, lighter_vessel, destination
                    FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                      AND lighter_vessel IS NOT NULL AND lighter_vessel != ''
@@ -560,7 +690,7 @@ async def _find_pending_program(mv: Optional[str], lv: Optional[str]) -> Optiona
 
         if mv_clean:
             row = await fetch_one(
-                """SELECT program_id, remarks, mother_vessel, lighter_vessel
+                """SELECT program_id, remarks, mother_vessel, lighter_vessel, destination
                    FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                      AND status = 'draft'
@@ -588,6 +718,35 @@ def _parse_program_date(date_str: Optional[str]):
     return None
 
 
+async def _resolve_escort_employee_id(escort_mobile: str) -> Optional[int]:
+    """Look up wbom_employees.employee_id by escort_mobile."""
+    if not escort_mobile:
+        return None
+    try:
+        from modules.number_identity import normalize_phone as get_phone_variants
+        variants = get_phone_variants(escort_mobile)
+        if not variants:
+            return None
+        row = await fetch_one(
+            "SELECT employee_id FROM wbom_employees WHERE employee_mobile = ANY($1) AND status = 'Active' LIMIT 1",
+            variants,
+        )
+        return row["employee_id"] if row else None
+    except Exception as e:
+        log.warning(f"[escort] employee_id lookup error: {e}")
+    return None
+
+
+async def _sync_roster_after_confirm(program_id: int) -> None:
+    """Auto-sync program to escort_roster_entries after confirmation."""
+    try:
+        from modules.escort_roster.db import sync_program_to_roster
+        await sync_program_to_roster(program_id, actor="auto_confirm")
+        log.info(f"[escort] roster synced after confirmation: program_id={program_id}")
+    except Exception as _sync_err:
+        log.warning(f"[escort] roster sync failed after confirmation: {_sync_err}")
+
+
 async def _update_program_confirmed(
     program_id: int,
     escort_name: str,
@@ -595,9 +754,10 @@ async def _update_program_confirmed(
     lighter_vessel: Optional[str] = None,
     shift: Optional[str] = None,
     program_date=None,
+    escort_employee_id: Optional[int] = None,
 ) -> bool:
     """Update an existing draft/program to confirmed status.
-    Also fills lighter_vessel, shift, program_date if draft had empty values.
+    Also fills lighter_vessel, shift, program_date, escort_employee_id if draft had empty values.
     """
     try:
         await execute(
@@ -605,7 +765,6 @@ async def _update_program_confirmed(
                SET status = 'confirmed',
                    escort_name  = $2,
                    escort_mobile = $3,
-                   -- FIX: fill in lighter_vessel from admin message if draft had empty/null
                    lighter_vessel = CASE
                        WHEN ($4::text IS NOT NULL AND $4::text != '' AND (lighter_vessel IS NULL OR lighter_vessel = '' OR lighter_vessel = '-'))
                        THEN $4::text
@@ -619,10 +778,12 @@ async def _update_program_confirmed(
                    program_date = CASE
                        WHEN $6::text IS NOT NULL THEN $6::text::date
                        ELSE program_date
-                   END
+                   END,
+                   escort_employee_id = COALESCE($7, escort_employee_id)
                WHERE program_id = $1""",
             program_id, escort_name, escort_mobile,
             lighter_vessel, shift, str(program_date) if program_date else None,
+            escort_employee_id,
         )
         return True
     except Exception as e:
@@ -646,12 +807,17 @@ async def _create_confirmed_from_admin(
         escort_mobile = draft["escort_mobile"] or ""
         shift = draft["shift"] or "D"
         program_date = _parse_program_date(draft.get("date_str"))
+        destination = draft.get("destination") or ""
 
-        # Clean MV for comparison (same logic as _find_pending_program)
+        # Resolve escort_employee_id from mobile
+        emp_id = await _resolve_escort_employee_id(escort_mobile)
+        if emp_id:
+            log.info(f"[escort] resolved escort_employee_id={emp_id} mobile={escort_mobile}")
+
+        # Clean MV for comparison
         mv_clean = re.sub(r"^MV\.?\s+", "", mv, flags=re.IGNORECASE).strip().upper()
 
-        # Dedup check: if confirmed record already exists for this escort on same MV,
-        # update it (fill missing LV/shift/date) instead of creating a duplicate.
+        # Dedup check: if confirmed record already exists for this escort on same MV, update it.
         if escort_name:
             existing = await fetch_one(
                 """SELECT program_id FROM wbom_escort_programs
@@ -670,7 +836,9 @@ async def _create_confirmed_from_admin(
                 await _update_program_confirmed(
                     pid, escort_name, escort_mobile,
                     lighter_vessel=lv, shift=shift, program_date=program_date,
+                    escort_employee_id=emp_id,
                 )
+                await _sync_roster_after_confirm(pid)
                 return pid
 
         remarks_data = {
@@ -684,14 +852,18 @@ async def _create_confirmed_from_admin(
             """INSERT INTO wbom_escort_programs (
                    mother_vessel, lighter_vessel,
                    master_mobile,
+                   destination,
                    escort_name, escort_mobile,
+                   escort_employee_id,
                    shift, status, program_date, remarks
-               ) VALUES ($1, $2, $3, $4, $5, $6, 'confirmed',
-                   COALESCE($7, CURRENT_DATE), $8)
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'confirmed',
+                   COALESCE($9, CURRENT_DATE), $10)
                RETURNING program_id""",
             mv, lv,
             draft.get("master_mobile") or "",
+            destination,
             escort_name, escort_mobile,
+            emp_id,
             shift, program_date,
             json.dumps(remarks_data, ensure_ascii=False),
         )
@@ -699,8 +871,9 @@ async def _create_confirmed_from_admin(
             pid = row["program_id"]
             log.info(
                 f"[escort] created confirmed from admin msg: "
-                f"program_id={pid} mv={mv} lv={lv} escort={escort_name}"
+                f"program_id={pid} mv={mv} lv={lv} escort={escort_name} emp_id={emp_id}"
             )
+            await _sync_roster_after_confirm(pid)
             return pid
     except Exception as e:
         log.error(f"[escort] create confirmed from admin error: {e}")
@@ -773,7 +946,7 @@ async def handle_admin_escort_completion(
             f"lv={draft['lighter_vessel']} escort={draft['escort_name']} "
             f"→ creating confirmed record from admin message"
         )
-        # FIX: Admin reply is the source of truth — create a confirmed record
+        # Admin reply is the source of truth — create a confirmed record
         # even when no draft exists (inbound parse may have failed).
         pid = await _create_confirmed_from_admin(draft, source)
         if pid:
@@ -805,7 +978,12 @@ async def handle_admin_escort_completion(
     client_phone = remarks.get("sender_phone")
     client_bridge = remarks.get("source_bridge", source)
 
-    # Update DB — also fill lighter_vessel/shift/program_date from admin message
+    # Resolve escort_employee_id from mobile
+    emp_id = await _resolve_escort_employee_id(draft["escort_mobile"] or "")
+    if emp_id:
+        log.info(f"[escort] resolved escort_employee_id={emp_id} mobile={draft['escort_mobile']}")
+
+    # Update DB — fill escort fields, lighter_vessel, shift, program_date, escort_employee_id
     await _update_program_confirmed(
         program["program_id"],
         draft["escort_name"] or "",
@@ -813,7 +991,11 @@ async def handle_admin_escort_completion(
         lighter_vessel=draft.get("lighter_vessel"),
         shift=draft.get("shift"),
         program_date=_parse_program_date(draft.get("date_str")),
+        escort_employee_id=emp_id,
     )
+
+    # Auto-sync to roster after confirmation
+    await _sync_roster_after_confirm(program["program_id"])
 
     # Reconcile: delete any other orphaned draft rows for the same lighter vessel
     if draft.get("lighter_vessel"):
@@ -827,7 +1009,9 @@ async def handle_admin_escort_completion(
         except Exception as _rec_err:
             log.warning(f"[escort] reconcile after update failed: {_rec_err}")
 
-    final_slip = build_final_slip(draft)
+    # Destination: prefer admin's completed draft; fallback to DB record
+    db_destination = program.get("destination") or None
+    final_slip = build_final_slip(draft, db_destination=db_destination)
 
     if not client_phone:
         # No client phone stored — only confirm to admin

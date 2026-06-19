@@ -1,528 +1,276 @@
-# Fazle Core — Single Source of Truth
+# Fazle Core
 
-**Last Updated:** 2026-06-10
-**Status:** Production Healthy — v1.2.0 — Continuous Learning Loop + User Context Engine deployed (2026-06-10)
+Fazle Core is the WhatsApp-first operations backend for Al-Aqsa Security &
+Logistics Services Ltd. It combines customer and recruitment messaging,
+employee/payroll operations, escort-service workflows, OCR/media processing,
+admin review queues, scheduled jobs, and observability in one FastAPI service.
 
-This README is the single authoritative reference for the Fazle Core production stack.
-All other documentation, archived notes, and prior READMEs must be considered stale.
+**Repository:** `git@github.com:arshiyaazim/studious-system.git`
+**Live service:** `fazle-core.service` on port `8200`
+**Current branch:** `backup/vps-core-20260612`
+**Last verified:** 2026-06-13
 
----
+## Current Operating Mode
 
-## Current Production Architecture
+The application is healthy, but it is intentionally not running as a general
+customer auto-reply system.
 
-### Main Application
+| Setting | Live value | Effect |
+|---|---|---|
+| `AUTO_REPLY_ENABLED` | `false` | General replies and internal `admin_note` delivery are suppressed |
+| `RECRUITMENT_AUTOREPLY_ENABLED` | `true` | Recruitment replies may bypass global safe mode |
+| `AUTO_REPLY_SOURCES` | `bridge1,bridge2` | Meta inbound is persisted but not auto-replied |
+| `DRAFT_CREATION_ENABLED` | `true` | Suppressed/unsafe replies are stored for review |
+| `OUTBOUND_ENABLED` | `false` | Generic outbound worker is disabled |
+| `PRIMARY_AI_PROVIDER` | `github_models` | General and Chat Lab replies start with GitHub Models |
+| `OLLAMA_REPLY_DISABLED` | `true` | Ollama is not used for customer-facing reply fallback |
 
-| Item | Value |
-|---|---|
-| App path | `/home/azim/core` |
-| Framework | FastAPI |
-| Entry point | `run.py → app.main:app` |
-| Systemd unit | `fazle-core.service` |
-| Local port | `8200` |
-| Health endpoint | `http://localhost:8200/health` |
-| Environment file | `/home/azim/core/.env` (single source for all runtime flags) |
+Do not describe this deployment as fully autonomous. Recruitment is the only
+enabled auto-reply exception, and financial/operational actions still require
+human review.
 
-> The old path `/home/azim/fazle-core` may still appear in archived files. The active service uses `/home/azim/core`.
+## Live Status
 
-### WhatsApp Bridges
+Verified on 2026-06-13:
 
-Bridges run as **systemd services** (not Docker containers).
+- `fazle-core`, `nginx`, and `fail2ban` are active.
+- `/health` returns HTTP 200 and reports PostgreSQL, bridges, outbound queue,
+  disk, memory, Ollama, GitHub Models, and Groq as healthy.
+- Bridge 1 and Bridge 2 heartbeats are current.
+- Meta Cloud API heartbeat is healthy; it was about two hours old at audit time.
+- 14 Docker infrastructure containers are running.
+- Disk usage is about 45%; approximately 10 GiB RAM is available.
+- Swap use is about 125 MiB of 3 GiB.
+- `location-where` is online, but currently shows repeated `401` requests,
+  9 lifetime restarts, and a sampled CPU value of 200%.
 
-| Bridge | Label | Number | Systemd Unit | Port | SQLite Store |
-|---|---|---|---|---|---|
-| bridge1 | HR | `8801958122300` | `whatsapp-bridge.service` | `8082` | `/home/azim/whatsapp1/store/messages.db` |
-| bridge2 | OPS | `8801880446111` | `whatsapp-bridge2.service` | `8081` | `/home/azim/whatsapp2/store/messages.db` |
-| meta | Meta Cloud API | — | webhook at `/webhook/meta` | — | — |
+See [audit-report-2026-06-10.md](audit-report-2026-06-10.md) for the full
+current-state review.
 
-**Bridge binary location:** `/home/azim/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge`
-**bridge1 working directory:** `/home/azim/whatsapp-mcp/whatsapp-bridge`
-**bridge2 working directory:** `/home/azim/whatsapp2`
+## Architecture
 
-Active auto-reply sources: `bridge1,bridge2` (set via `AUTO_REPLY_SOURCES` in `.env`).
-Meta ingestion is present but not in `AUTO_REPLY_SOURCES` — Meta messages are received but do not trigger auto-reply.
+```text
+WhatsApp Bridge 1 / Bridge 2 / Meta Cloud API
+                    |
+          webhook + bridge pollers
+                    |
+        normalize phone and identify role
+                    |
+             message_router
+       +------------+-------------+
+       |            |             |
+ recruitment   operations     general reply
+       |       payroll/escort       |
+       |            |               |
+ restricted AI   review/action   GitHub -> Groq
+       |            |          -> holding message
+       +------------+---------------+
+                    |
+       direct bridge send or draft queue
 
-### AI Layer — Dual Provider (GitHub Models + Ollama)
-
-**Primary:** GitHub Models (cloud, gpt-4o-mini) — **Active**
-**Fallback:** Ollama (local, qwen2.5:3b) — automatic if GitHub Models fails
-
-#### GitHub Models (Primary)
-
-| Item | Value |
-|---|---|
-| Provider | GitHub Models OpenAI-compatible API |
-| Endpoint | `https://models.github.ai/inference` |
-| Model | `openai/gpt-4o-mini` (set via `GITHUB_MODEL_NAME` in `.env`) |
-| Token rotation | `GITHUB_TOKEN`, `GITHUB_TOKEN_2`, `GITHUB_TOKEN_3` (round-robin) |
-| Rate limit | 15 RPM / 1000 TPM (free tier) — semaphore-serialized |
-| Client module | `app/github_models.py` |
-| Learning memory | `llm_learning_memory` DB table (every reply stored) |
-
-**To switch primary AI provider to Ollama**, update `.env`:
-```env
-PRIMARY_AI_PROVIDER=ollama
+PostgreSQL: operational, accounting, memory, audit, queue data
+Redis: queues/cache/dedup support
+Ollama: local intent/RAG/learning workloads
+Media processor: OCR and document field extraction
+Prometheus/Grafana/Loki/OpenTelemetry: observability
 ```
 
-#### Ollama (Fallback / Secondary)
+`app/main.py` is the composition root and currently remains a large monolith.
+It mounts routers, starts pollers/workers/scheduler/RAG, serves the admin pages,
+and exposes health, webhook, operations, RAG, memory, and observability APIs.
 
-| Item | Value |
+## AI and Reply Workflow
+
+### Intent classification
+
+Free-form intent classification uses:
+
+```text
+Groq llama-3.1-8b-instant
+  -> GitHub Models openai/gpt-4o-mini
+  -> local Ollama qwen2.5:3b
+  -> unknown
+```
+
+Deterministic rules still run in several modules. The bridge safety gate and
+the router can therefore disagree about intent.
+
+### Recruitment replies
+
+Recruitment replies use:
+
+```text
+Groq -> GitHub Models -> fixed safe fallback
+```
+
+The only approved recruitment source is:
+
+```text
+resources/ops/recruitment_source_of_truth.txt
+```
+
+`modules/recruitment_ai` deliberately ignores DB knowledge, conversation
+history, contact context, and other resource files. Fee questions receive a
+fixed policy response without a specific amount.
+
+### General replies
+
+General replies currently use:
+
+```text
+GitHub Models -> Groq -> polite holding message
+```
+
+Ollama reply generation is disabled for customer-facing general messages.
+
+### Sending and review
+
+Bridge 1 and Bridge 2 replies pass through prompt-injection checks, financial
+draft gates, risk/draft rules, loop detection, poison/length guards, and safe
+mode checks. Admin-approved drafts can be enqueued for delivery even when
+general auto-reply is disabled.
+
+Important limitation: direct bridge auto-sends do not yet have a durable
+retry/DLQ path, and internal operational `admin_note` notifications currently
+depend on `AUTO_REPLY_ENABLED`.
+
+## Main Business Domains
+
+| Domain | Main modules | Current state |
+|---|---|---|
+| WhatsApp ingestion | `bridge_poller`, `message_router`, `message_archive` | Working; direct-send reliability needs improvement |
+| Recruitment | `recruitment_ai`, `recruitment_flow`, `role_classifier` | Restricted-source auto-reply enabled |
+| Employee operations | `admin_employees`, `employee_verification`, `attendance` | Functional but employee identities are split |
+| Payroll/accounting | `fazle_payroll_engine`, `payroll`, `payment_*`, `admin_transactions` | Feature-rich; WBOM/FPE write paths are fragmented |
+| Escort operations | `escort`, `escort_lifecycle`, `escort_roster`, `escort_slip_extractor` | Order/roster UI exists; release/payment paths have schema defects |
+| Knowledge/memory | `rag`, `knowledge_base`, `memory_extractor`, `reviewed_reply_memory` | BM25 and learning tables active; Qdrant unused |
+| Operations | `scheduler`, `backup`, `reports`, `observability`, `rbac` | Running; tests and incident noise require work |
+
+## Data Model Reality
+
+The live database has 229 application tables, including 208 in `public`.
+Several domains currently have parallel stores:
+
+| Store | Purpose | Live rows |
+|---|---|---:|
+| `wbom_employees` | Operational employee records | 171 |
+| `fpe_employees` | Payroll-engine identities | 351 |
+| `wbom_escort_programs` | Operational escort programs | 319 |
+| `escort_roster_entries` | Roster UI projection | 140 |
+| `fazle_payment_drafts` | Payment approval queue | 47 |
+| `agent.incidents` | Guardian incidents | 8,812 |
+
+Only 98 FPE employees are linked to WBOM, and 179 escort programs are absent
+from the roster projection. Treat the current model as transitional: do not
+write directly to multiple related tables from new code.
+
+## Frontends
+
+| Route | Purpose |
 |---|---|
-| Container name | `ollama` |
-| Docker network | `ai-network` |
-| Static IP | `172.22.0.7` |
-| Port (internal) | `11434` |
-| Compose file | `/home/azim/ai-call-platform/ai-infra/docker-compose.yaml` |
-| Active model | `qwen2.5:3b` (set via `OLLAMA_MODEL` in `.env`) |
-| Available models | `qwen2.5:3b` (1.9 GB), `qwen3:8b` |
-| `OLLAMA_URL` in `.env` | `http://172.22.0.7:11434` |
+| `/dashboard` | Operations/admin dashboard |
+| `/payroll` | FPE payroll, transactions, employees, review, and sync |
+| `/escort-roster` | Escort roster, filters, details, sync, and calculation |
+| `/drafts` | Reply review and approval |
+| `/kb` | Knowledge-base management |
 
-> The host shell does not have `ollama` in PATH. Use `docker exec ollama ollama list` to inspect models.
-> Host port binding (127.0.0.1:11434) is not functional; fazle-core reaches Ollama via Docker network IP directly.
+Missing high-value operational pages include escort-order review, assignment
+availability, advance verification, release settlement approval, payment-draft
+reconciliation, and WBOM/FPE reconciliation.
 
-**To pull a new model** (ai-network is isolated, needs temporary internet bridge):
-```bash
-docker network connect al-aqsa_openwebui-bridge ollama
-curl -N -X POST http://172.22.0.7:11434/api/pull -H "Content-Type: application/json" -d '{"model":"<name>","stream":true}'
-docker network disconnect al-aqsa_openwebui-bridge ollama
+## Important API Groups
+
+- Health and diagnostics: `/health`, `/health/deep`, `/api/bridges/diagnostics`
+- Webhooks: `/webhook/meta`, `/webhook/mcp1`, `/webhook/mcp2`
+- Sending: `/send/meta`, `/send/mcp1`, `/send/mcp2`
+- Payroll/payment: `/payroll/*`, `/payment/*`, mounted FPE/admin routers
+- Escort: `/escort/release`, `/escort-slip/*`, mounted roster router
+- Scheduler/backup/reports: `/scheduler/*`, `/backup/*`, `/reports/*`
+- RAG/chat/memory: `/rag/*`, `/chat/*`, `/api/users/*`, `/api/memory/*`
+- Observability: `/metrics`, `/observability/*`
+
+Most administrative endpoints require the internal API key. Never commit or
+print that key.
+
+## Repository Layout
+
+```text
+app/
+  main.py                 FastAPI composition root and legacy route surface
+  config.py               Environment-backed settings
+  llm.py                  Unified AI provider routing
+  static/                 Dashboard, payroll, roster, drafts, and KB pages
+
+modules/
+  bridge_poller/          Bridge polling, safety gates, direct send
+  message_router/         Business routing
+  recruitment_ai/         Restricted-source recruitment generation
+  fazle_payroll_engine/   Immutable WhatsApp accounting pipeline
+  escort*/                Escort order, lifecycle, roster, OCR
+  payment*/ payroll/      Payment and payroll workflows
+  rag/ knowledge_base/    Retrieval and KB
+  scheduler/ backup/      Scheduled operations
+
+shared/                   Cross-domain policies and infrastructure helpers
+db/migrations/            Core schema migrations
+resources/ops/            Approved operational policy resources
+scripts/                  Maintenance, recovery, and batch verification tools
+tests/                    Unit, integration, DB, workflow, resilience, and E2E tests
 ```
 
----
+## Running and Verification
 
-## Ports & URLs — Complete Reference
-
-| Component | Address | Type | Notes |
-|---|---|---|---|
-| fazle-core | `http://localhost:8200` | Main API | Health at `/health` |
-| bridge1 (HR outbound) | `http://localhost:8082` | Bridge send | `BRIDGE1_URL` in `.env` |
-| bridge2 (OPS outbound) | `http://localhost:8081` | Bridge send | `BRIDGE2_URL` in `.env` |
-| Ollama | `http://172.22.0.7:11434` | AI model | `OLLAMA_URL` in `.env` |
-| Open WebUI | `172.22.0.2:8080` → `chat.iamazim.com` | Private AI chat | Single user (owner only) |
-| System Agent | `http://localhost:8300` (if running) | Internal | `fazle-agent.service` |
-| Media Processor | `http://localhost:8090` | STT/OCR/PDF | `media-processor.service` |
-| VS Code Server | `http://localhost:8443` → `vscode.iamazim.com` | Dev IDE | `code-server` container |
-
-## Active Public Hostnames (Nginx)
-
-| Hostname | Routing | Status |
-|---|---|---|
-| `fazle.iamazim.com` | → `127.0.0.1:8200` | Active |
-| `api.iamazim.com` | → `127.0.0.1:8200` (via upstream conf) | Active |
-| `iamazim.com` | → static `/var/www/iamazim.com/` (Al-Aqsa company website) | Active ✅ Fixed 2026-06-04 |
-| `www.iamazim.com` | Redirect → `iamazim.com` | Active alias |
-| `chat.iamazim.com` | → `172.22.0.2:8080` (Open WebUI) | Active |
-| `vscode.iamazim.com` | → `127.0.0.1:8443` | Active |
-
-`livekit.iamazim.com` exists in `sites-available` but is **not enabled** — not counted as active.
-
-> **Pending cleanup:** 10 stale `.bak` files in `/etc/nginx/sites-available/` require manual `sudo rm` from a terminal session (not blocking, not symlinked, not in `sites-enabled`).
-
----
-
-## Active Modules Inside fazle-core
-
-| Module | Mount / Path | Purpose |
-|---|---|---|
-| `bridge_poller` | `modules/bridge_poller/` | Polls SQLite stores for inbound messages |
-| `social_auto_reply` | `modules/social_auto_reply/` | Legacy reply pipeline (`SOCIAL_AUTO_REPLY_SINGLE_ENGINE=false`) |
-| `message_router` | internal | Routes by intent and sender identity |
-| `outbound` | `modules/outbound/` | Queue-based send with DLQ (`OUTBOUND_ENABLED=false`) |
-| `recruitment_ai` | `modules/recruitment_ai/` | qwen-backed recruitment replies |
-| `knowledge_base` | `modules/knowledge_base/` | Hardcoded + DB-backed knowledge |
-| `payroll` | `/payroll` | Fazle Payroll Engine |
-| `escort_roster` | `/escort-roster` | Escort roster management |
-| `contact_sync` | internal | Employee/contact identity management |
-| `fazle_agent` | `fazle-agent.service` | System agent (dry-run mode) |
-| `phone_normalizer` | `modules/phone_normalizer/` | BD phone → 8801XXXXXXXXX canonical form *(v1.2.0)* |
-| `role_classifier` | `modules/role_classifier/` | Per-contact role context + memory loader *(v1.2.0)* |
-| `memory_extractor` | `modules/memory_extractor/` | GitHub Models structured fact extraction → `user_memory` *(v1.2.0)* |
-
----
-
-## Auto-Reply Pipeline
-
-Inbound message flow:
-
-1. Inbound message arrives from bridge SQLite or Meta webhook
-2. Phone normalisation → `8801XXXXXXXXX` canonical form
-3. Identity detection (admin / employee / candidate / unknown)
-4. Intent classification
-5. Business routing (recruitment, payroll, escort, office, general)
-6. Knowledge base lookup → reviewed reply memory → Ollama generation → fallback
-7. Draft gate (finance, advance, release-slip → always draft)
-8. Send via bridge client or save as draft
-9. **Background (async):** `memory_extractor` sends conversation to GitHub Models → structured facts saved to `user_memory` *(v1.2.0)*
-
-### Unified LLM Interface (`app/llm.py`)
-
-All AI reply calls go through `app/llm.py` which:
-1. Tries GitHub Models first (if `PRIMARY_AI_PROVIDER=github_models`)
-2. Falls back to Ollama automatically on any error
-3. Stores every reply in `llm_learning_memory` table for Ollama training
-
-`message_router`, `recruitment_ai`, and `main.py` import this as `from app import llm as ai`.
-
-Exposed functions (v1.2.0): `generate_reply`, `generate_recruitment_reply`, `generate_chat_reply`, `generate_rag_answer`, `classify_intent_llm`, `check_ollama_health`, `check_health`.
-
-### Recruitment Reply Brain
-
-- Uses GitHub Models gpt-4o-mini (primary) → Ollama qwen2.5:3b (fallback)
-- Approved facts from `fazle_knowledge_base` rows in `recruitment` and `vessel_duty`
-- Conversation memory from read-only `wbom_whatsapp_messages` history
-- Module: `modules/recruitment_ai`
-- Answers only from approved knowledge — no hallucinated facts
-- Still passes outbound safety gate before send
-
-### Safety Protections (Always Enforced)
-
-- Advance money requests → always draft/admin review
-- Financial complaints (salary not received, payment dispute) → always draft/admin review
-- Release slip / escort slip calculations → draft-only, require admin approval
-- Contacts in `DRAFT_ALWAYS_ROLES`, `DRAFT_ALWAYS_NAMES`, `DRAFT_ALWAYS_PHONES` → always draft
-- Contacts with `admin_review_only` risk level → all AI replies drafted
-
----
-
-## Knowledge Base Status
-
-**Migration 014 applied: 2026-05-31**
-
-| Tier | Category | Count |
-|---|---|---|
-| DB (`fazle_knowledge_base`) | recruitment | 66 rows |
-| DB (`fazle_knowledge_base`) | vessel_duty | 3 rows |
-| DB (`fazle_knowledge_base`) | client | 2 rows |
-| DB (`fazle_knowledge_base`) | business | 6 rows |
-| DB (`fazle_knowledge_base`) | conversation | 80 rows |
-| DB (`fazle_knowledge_base`) | personal | 11 rows |
-| RAG file | `resources/al_aqsa_career_hr_intents.txt` | 64 intent blocks |
-| Hardcoded fallback | `knowledge_base/__init__.py` | ~25 entries |
-
-Topics covered: all 9 job positions (duties, salary, career path), vessel/escort duty, salary packages, payment methods (bKash/Nagad/bank), training, probation, leave, discipline, resignation, provident fund, insurance, conveyance, salary advance policy, client services, marketing contact.
-
----
-
-## Current Critical Configuration Flags
-
-These are the verified live values in `/home/azim/core/.env` as of 2026-06-10:
-
-```
-AUTO_REPLY_ENABLED=true
-AUTO_REPLY_SOURCES=bridge1,bridge2
-OLLAMA_MODEL=qwen2.5:3b
-OLLAMA_URL=http://172.22.0.7:11434
-BRIDGE1_URL=http://localhost:8082
-BRIDGE2_URL=http://localhost:8081
-RECRUITMENT_AUTOREPLY_ENABLED=true
-SOCIAL_AUTO_REPLY_SINGLE_ENGINE=false
-OUTBOUND_ENABLED=false
-USE_OUTBOUND_QUEUE=true
-DRAFT_QUALITY_GATE=true
-AI_SAFE_MODE=false
-REVIEWED_REPLY_MEMORY_ENABLED=true
-SCHEDULER_ENABLED=true
-GAP_SCAN_ENABLED=true
-PRIMARY_AI_PROVIDER=github_models
-GITHUB_MODEL_NAME=openai/gpt-4o-mini
-DRAFT_CREATION_ENABLED=true
-```
-
-**New in v1.1.0 (2026-06-10):**
-- `PRIMARY_AI_PROVIDER=github_models` — GitHub Models gpt-4o-mini is now the primary AI
-- `DRAFT_CREATION_ENABLED=true` — Drafts are created for admin review
-- `GITHUB_TOKEN` / `GITHUB_TOKEN_2` / `GITHUB_TOKEN_3` — round-robin token rotation
-
-**New in v1.2.0 (2026-06-10) — optional, have defaults:**
-- `MEMORY_REVIEW_HOUR=9` — hour (Asia/Dhaka) for daily memory review job
-- `RAG_REBUILD_HOUR=18` — hour (Asia/Dhaka) for evening BM25 index rebuild
-
----
-
-## Docker Infrastructure
-
-All AI infrastructure containers run from `/home/azim/ai-call-platform/ai-infra/docker-compose.yaml`.
-
-| Container | Status | IP / Port |
-|---|---|---|
-| `ollama` | healthy | `172.22.0.7:11434` |
-| `ai-postgres` | healthy (5 days) | `db-network` |
-| `ai-redis` | healthy (5 days) | `db-network` |
-| `qdrant` | healthy (5 days) | internal |
-| `minio` | healthy (5 days) | internal |
-| `open-webui` | healthy | `172.22.0.2:8080` |
-| `grafana` | healthy (5 days) | internal |
-| `prometheus` | healthy (5 days) | internal |
-| `loki` | healthy (5 days) | internal |
-| `code-server` | healthy (5 days) | `127.0.0.1:8443` |
-| `fazle-otel-collector` | running (5 days) | internal |
-
-**VPS Resources (verified 2026-05-31):**
-- RAM: 23 GiB total, ~16 GiB available
-- Disk: 194 GB total, ~110 GB free (44% used)
-- Docker images: 21.89 GB total
-- Docker volumes: 16.24 GB total
-
----
-
-## Bridge Store Paths — Canonical Reference
-
-The `bridge_poller` reads from these hardcoded paths (`modules/bridge_poller/__init__.py:53-60`):
-
-| Bridge | Canonical store path |
-|---|---|
-| bridge1 (HR) | `/home/azim/whatsapp1/store/messages.db` |
-| bridge2 (OPS) | `/home/azim/whatsapp2/store/messages.db` |
-
-**Stale/legacy directories** (do not use as primary path):
-- `/home/azim/bridges/bridge1/store/` — stale, last updated 2026-05-27. Remove after 2026-06-07.
-- `/home/azim/bridges/bridge2/store/messages.db` — hardlink to `/home/azim/whatsapp2/store/messages.db` (same inode). Not stale but redundant.
-- `/home/azim/bridges/bridge3/store/` — for future bridge3 if activated.
-
----
-
-## Supporting Services (Intentionally Inactive — Decision 2026-05-31)
-
-### fazle-recruitment-bridge3
-
-- **Unit:** `/etc/systemd/system/fazle-recruitment-bridge3.service`
-- **Code:** `/home/azim/external_recruitment_agent/bridge3_agent.py`
-- **Purpose:** Isolated recruitment companion for the +8801958122322 WhatsApp bridge (Bridge Three). Reads Bridge Three SQLite, mirrors rows into Fazle DB, replies only on confident recruitment intent.
-- **Status: INACTIVE — intentional**
-- **Reason:** Requires `whatsapp-bridge3.service` and a configured `.env`. `fazle-core` `recruitment_ai` handles all current recruitment replies. Do not activate without configuring bridge3 and validating in dry-run mode first.
-
-### fazle-recruitment-agent
-
-- **Unit:** `/etc/systemd/system/fazle-recruitment-agent.service`
-- **Code:** `/home/azim/external_recruitment_agent/agent.py`
-- **Status: INACTIVE — intentional**
-- **Reason:** `fazle-core` `recruitment_ai` is sufficient. Activating risks double-replies to candidates. Requires `.env` with `DATABASE_URL`, `INTERNAL_API_KEY`, `ADMIN_PHONE`. Set `RECRUITMENT_AGENT_SEND_ENABLED=false` for dry-run before enabling live send.
-
-### fazle-recruitment-bot-v3
-
-- **Unit:** `/etc/systemd/system/fazle-recruitment-bot-v3.service`
-- **Code:** `/home/azim/external_recruitment_bot_v3/bot.py`
-- **Status: INACTIVE — intentional**
-- **Reason:** Superseded by `fazle-core` `recruitment_ai` module. Same double-reply risk as above.
-
----
-
-## Fazle Diagnostic Agent
-
-- **Location:** `/home/azim/fazle-diagnostic-agent`
-- **Purpose:** Read-only diagnostics for VPS, apps, code, routes, DB inspection
-- **Constraint:** Must remain separate. Must not modify the main app, databases, bridges, or other services.
+Production is managed by systemd:
 
 ```bash
-cd /home/azim/fazle-diagnostic-agent
-./venv/bin/python agent.py --full --target core
-./venv/bin/python agent.py --area code --target core --json
-./venv/bin/python agent.py --full --target vps
-```
-
----
-
-## Future Upgrade Plan (Prioritised)
-
-### High Priority — within 7 days
-
-- [ ] Remove 10 stale nginx `.bak` files from `/etc/nginx/sites-available/` (requires `sudo rm` from terminal).
-- [ ] Monitor `llm_fallback_total` counter for 48 hours after Ollama fix. If elevated, investigate model load time.
-- [x] ~~Remove stale `/home/azim/bridges/bridge1/store/` after 2026-06-07 confirmation.~~ — done 2026-06-09
-- [ ] Dashboard: add User Management tab, Memory Review tab (Phase 4 frontend — HTML/JS).
-
-### Medium Priority — within 30 days
-
-- [ ] Re-evaluate `DRAFT_CREATION_ENABLED`. Consider enabling with Grafana/Prometheus alert on draft queue growth.
-- [ ] Load test `qwen3:14b` under simulated message burst. Create a rollback procedure before switching `OLLAMA_MODEL`.
-- [ ] Add Grafana alert for: bridge polling lag > 5 minutes, Ollama (unhealthy) state, outbound DLQ > 0.
-- [ ] Fix host port binding for Ollama (`127.0.0.1:11434`) — currently null; container only reachable via docker network IP.
-- [ ] Add unique constraint on `user_memory (phone_canonical, memory_type, content)` to prevent duplicate fact accumulation from daily memory review re-runs.
-- [ ] Integrate `get_user_context` + `build_context_for_llm` into `modules/message_router` for role-aware WhatsApp replies.
-
-### Long-term Upgrades
-
-- [ ] Deploy React frontend from `/home/azim/frontend/` via nginx (built but not publicly exposed).
-- [ ] Implement a message recovery queue for silent-loss cases when `DRAFT_CREATION_ENABLED=false` and send fails.
-- [ ] Consider moving bridge processes to Docker containers with correct volume mounts for operational consistency.
-- [ ] Evaluate LiveKit voice stack reactivation only when RAM usage is consistently under 12 GiB under normal load.
-
----
-
-## Safety Rules
-
-- Do not store secrets in this README.
-- Do not expose `.env` secret values — only flag names are safe here.
-- `/home/azim/core/.env` is the single production env source for `fazle-core`. Do not use any other file.
-- Use read-only DB credentials for all audits and diagnostics.
-- Keep advance requests, financial complaints, and release-slip calculations in draft/admin-review flow — never auto-send.
-- Do not switch to `qwen3:14b` without load testing and a documented rollback procedure.
-- Do not start external recruitment agents without dry-run validation and explicit owner approval.
-
----
-
-## Quick Verification Commands
-
-```bash
-# Core services
-sudo systemctl status fazle-core whatsapp-bridge whatsapp-bridge2 fazle-agent --no-pager
-
-# Docker AI layer
-docker ps --filter name=ollama --format "{{.Names}} {{.Status}}"
-docker ps --format "{{.Names}} {{.Status}}" | grep -E "postgres|redis|webui"
-
-# Health endpoint (full JSON)
+sudo systemctl status fazle-core
+sudo systemctl restart fazle-core
 curl -s http://localhost:8200/health | python3 -m json.tool
-
-# Ollama models
-curl -s http://172.22.0.7:11434/api/tags | python3 -c 'import sys,json; print([m["name"] for m in json.load(sys.stdin)["models"]])'
-
-# Bridge store freshness
-ls -lh /home/azim/whatsapp1/store/messages.db /home/azim/whatsapp2/store/messages.db
-
-# Key config flags
-grep -E "AUTO_REPLY|OLLAMA|BRIDGE|DRAFT|OUTBOUND" /home/azim/core/.env
-
-# Nginx
-sudo nginx -t
+sudo journalctl -u fazle-core -n 100 --no-pager
 ```
 
----
+Use the repository virtual environment at `/home/azim/.venv`.
 
-## Database Tables — v1.2.0 Additions
-
-| Table | Migration | Purpose |
-|---|---|---|
-| `user_profiles` | 016 | Per-contact profile: canonical phone, name, role, relationship_type, notes |
-| `user_memory` | 016 | Structured facts extracted per contact (work_info, personal_info, pending_matter…) |
-| `role_reply_styles` | 016 | Per-role tone/length/template config (for future use) |
-| `phone_normalization_log` | 016 | Audit log of raw→canonical phone conversions |
-| `llm_learning_memory.promoted_to_kb` | 017 | Boolean — marks reviewed replies promoted to KB |
-| `llm_learning_memory.dismissed` | 017 | Boolean — hides dismissed replies from Memory Review queue |
-
-Apply with:
 ```bash
-export DB="postgresql://postgres:<pass>@172.20.0.3:5432/postgres"
-docker exec -i ai-postgres psql "$DB" < db/migrations/016_user_profiles_memory.sql
-docker exec -i ai-postgres psql "$DB" < db/migrations/017_memory_promotion.sql
+cd /home/azim/core
+/home/azim/.venv/bin/pytest -q
 ```
 
----
+The complete suite does not currently pass:
 
-## Scheduled Jobs — Complete Reference
+- Full collection fails when `DATABASE_URL` is absent for script-style tests.
+- Unit execution includes DB-dependent setup failures in restricted/no-test-DB
+  environments.
+- Confirmed non-environment failures include stale backup tests, missing
+  `context_memory`, write-router API drift, parser model/test drift, and an OCR
+  timeout.
 
-| Job | Schedule | Purpose |
-|---|---|---|
-| `daily_payroll_compute` | 02:00 | Auto-compute payroll for current month |
-| `daily_admin_digest` | 08:00 | Send daily summary to admin |
-| `daily_memory_review` | 09:00 | GitHub Models extracts facts from last 24h conversations → `user_memory` |
-| `stale_escort_reminder` | 09:00 | Alert admin for escort programs Active >30 days |
-| `rag_rebuild` | 18:00 | Rebuild BM25 RAG index (picks up new KB entries from the day) |
-| `backup_staleness_alert` | 03:00 | Alert if newest backup is older than 48h |
-| `dlq_alert` | every 15 min | Alert if outbound DLQ > 0 |
-| `payment_reconciliation` | every 1h | Re-match unresolved staging payments |
-| `combined_draft_cleanup` | every 1h | Expire stale escort + payment drafts (>24h) |
+Do not use a green health endpoint as a substitute for a green regression suite.
 
-Override hours via `.env`: `MEMORY_REVIEW_HOUR=9`, `RAG_REBUILD_HOUR=18`.
+## Production Guardrails
 
----
+1. Keep `.env` permission at `600`; never commit secrets.
+2. Keep financial, employee identity, assignment, and release actions under
+   human approval until canonical write paths exist.
+3. Do not enable Meta auto-reply until its path has the same safety and durable
+   delivery controls as Bridge 1/2.
+4. Separate internal operations notifications from customer auto-reply before
+   relying on WhatsApp-driven escort/payment workflows.
+5. Fix release schema mismatches before enabling automated settlement.
+6. Reconcile WBOM/FPE employees and roster projection before treating payroll
+   or escort totals as authoritative.
 
-## New API Endpoints — v1.2.0
+## Priority Work
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/users/search?q=` | Search user_profiles by phone or name |
-| GET | `/api/users/{phone}` | Full profile + memories for a contact |
-| PUT | `/api/users/{phone}` | Upsert contact profile (role, name, notes) |
-| POST | `/api/users/{phone}/memory` | Manually add a fact to user_memory |
-| GET | `/api/memory/pending` | LLM replies awaiting KB promotion review |
-| POST | `/api/memory/{id}/promote` | Promote an LLM reply to fazle_knowledge_base |
-| POST | `/api/memory/{id}/dismiss` | Dismiss a reply from the review queue |
-| GET | `/api/stats/llm` | GitHub Models + Ollama usage stats |
+1. Fix release/payment schema mismatches and make release settlement atomic.
+2. Introduce durable outbound retry/DLQ for every channel.
+3. Separate internal notification enablement from customer auto-reply.
+4. Define canonical employee, escort, and financial write services.
+5. Reconcile employee identities, payment records, and roster projection.
+6. Restore a deterministic, isolated, passing test suite.
+7. Diagnose `location-where` repeated `401` traffic and current high CPU.
 
-All require `X-Internal-Key` header.
-
----
-
-## CHANGES — 2026-06-11 (Session: P0–P2 + Phase 3)
-
-### Admin Commands Fix
-- `REVERSE <id>` and `ADJUST <id>` now recognized by `is_admin_command()` — were silently ignored before
-
-### Contact Roles CRUD (new module)
-- `modules/contact_roles/` added
-- `GET /admin/contact-roles` — paginated with `offset`/`limit`, returns `{items, count, limit, offset}`
-- `POST /admin/contact-roles` — upsert by phone+platform
-- `PUT /admin/contact-roles/{phone}` — partial update, 404 on miss
-- `DELETE /admin/contact-roles/{phone}` — with 404 guard
-
-### Admin Approvals Source Filter
-- `GET /admin/approvals` now accepts `source: Optional[str]` query param
-
-### Memory Manager Endpoints
-- `GET /admin/memory/reviewed-replies` — list with `active_only`, `limit`, `offset`
-- `PATCH /admin/memory/reviewed-replies/{id}/toggle` — toggle active ↔ disabled
-- `DELETE /admin/memory/reviewed-replies/{id}` — delete with 404 guard
-
-### KB Upload Security
-- Upload filenames sanitized with `pathlib.Path(file.filename).name` — prevents path traversal
-
-### Migration Runner
-- `db/migrate.py` — standalone migration runner with `--dry-run` flag
-- `python db/migrate.py` runs pending migrations; `--dry-run` previews only
-
-### Test Suite Overhaul
-- Pure unit tests now run without DB (no connection errors)
-- DB credentials read dynamically from `runtime-services.env`
-- Auto-truncate in `test_db_pool` teardown prevents inter-test pollution
-- **Result: 65 passed, 0 failed, 6 xfailed**
-
-### Infrastructure
-- SSH config: `Host github-arshiyaazim` alias added — enables `git push` to fazle-core remote
-- ExecStartPre permission fixed: `generate_runtime_services_env.sh` now executable
-
----
-
-## CHANGES — 2026-06-10 (v1.2.0)
-
-### v1.2.0 — Continuous Learning Loop + User Context Engine
-
-**Bug fixed (critical — carried from v1.1.0):**
-- `app/llm.py` — `check_ollama_health()` and `generate_rag_answer()` were missing after `main.py` switched to `from app import llm as ai`. Both functions now present as pass-throughs. Without this fix the `/health`, `/chat/models`, and `/rag/answer` endpoints would throw `AttributeError`.
-
-**New modules:**
-- `modules/phone_normalizer/` — Bangladeshi phone number normalisation (`+880…`, `0…`, `1…` → `8801XXXXXXXXX`)
-- `modules/role_classifier/` — Per-contact role context loader from `user_profiles` + `user_memory`
-- `modules/memory_extractor/` — GitHub Models structured JSON extraction from conversations → `user_memory`
-
-**Updated files:**
-- `app/github_models.py` — added `generate_structured_response()` (raw text, for JSON extraction) and `generate_chat_reply()` (Chat Lab)
-- `app/llm.py` — added `generate_chat_reply()` router, `check_ollama_health()`, `generate_rag_answer()` pass-throughs
-- `app/main.py` — background memory extraction in bridge event handler; Phase 5 User Management + Memory Review + LLM Stats APIs
-- `modules/scheduler/__init__.py` — `daily_memory_review` (09:00) and `rag_rebuild` (18:00) jobs registered
-
-**New migrations:**
-- `016_user_profiles_memory.sql` — `user_profiles`, `user_memory`, `role_reply_styles`, `phone_normalization_log` ✅ Applied
-- `017_memory_promotion.sql` — `promoted_to_kb`, `promoted_at`, `dismissed` on `llm_learning_memory` ✅ Applied
-
-**Health check after restart (2026-06-10):**
-```json
-{
-  "status": "ok",
-  "probes": {
-    "db": { "status": "ok" },
-    "ollama": { "status": "ok", "models": ["qwen3:8b", "qwen2.5:3b"] },
-    "llm": {
-      "primary_provider": "github_models",
-      "github_models": { "status": "ok", "model": "openai/gpt-4o-mini" },
-      "ollama": { "status": "ok", "active_model": "qwen2.5:3b" }
-    }
-  }
-}
-```
-
----
-
-## Backup Location
-
-Most recent pre-regen backup: `/home/azim/backups/fazle-backup-20260531-2150`
-
-Contents: `.env`, `config.py`, systemd units, docker compose files, nginx configs, logs snapshot, DB schema dump, knowledge base data dump.
+Detailed findings and the remediation roadmap are maintained in
+[audit-report-2026-06-10.md](audit-report-2026-06-10.md). The focused payroll
+and escort review is in
+[payroll-escort-workflow-audit-2026-06-13.md](payroll-escort-workflow-audit-2026-06-13.md).

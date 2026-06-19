@@ -17,6 +17,7 @@ Each job records a row in fazle_scheduled_jobs and updates the
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -139,26 +140,26 @@ async def job_daily_payroll() -> dict:
         key = f"payroll-daily-{now.strftime('%Y%m%d')}"
         cnt = r.get("count") or r.get("processed") or 0
         msg = f"📊 Payroll auto-compute {now.year}-{now.month:02d}: {cnt} runs processed."
-        await outbound.enqueue(admin, msg, source_bridge="bridge2",
+        await outbound.enqueue(admin, msg, source_bridge="bridge1", fallback_channel="bridge2",
                                purpose="payroll-daily", idempotency_key=key)
     return {"status": "ok", "result": r}
 
 
 async def job_dlq_alert() -> dict:
-    """B16.3 — if outbound DLQ > 0, alert admin (one alert per hour)."""
+    """Alert only for recent actionable DLQ; never alert about alert failures."""
     from modules import outbound
     dlq = await outbound.dlq_count()
+    actionable = await outbound.actionable_dlq_count()
     pend = await outbound.pending_count()
-    if dlq <= 0:
-        return {"status": "ok", "dlq": 0, "pending": pend}
+    if actionable <= 0:
+        return {"status": "ok", "dlq": dlq, "actionable": 0, "pending": pend, "alerted": False}
     admin = _admin_number()
     if admin:
-        hour = datetime.utcnow().strftime("%Y%m%d%H")
-        key = f"dlq-alert-{hour}"
-        msg = f"⚠️ Outbound DLQ has {dlq} stuck message(s). Pending: {pend}. Investigate."
-        await outbound.enqueue(admin, msg, source_bridge="bridge2",
+        key = f"dlq-alert-actionable-{actionable}-pending-{pend}"
+        msg = f"⚠️ Outbound has {actionable} recent actionable DLQ message(s). Pending: {pend}. Investigate."
+        await outbound.enqueue(admin, msg, source_bridge="bridge1",
                                purpose="dlq-alert", idempotency_key=key)
-    return {"status": "ok", "dlq": dlq, "pending": pend, "alerted": True}
+    return {"status": "ok", "dlq": dlq, "actionable": actionable, "pending": pend, "alerted": True}
 
 
 async def job_health_summary() -> dict:
@@ -175,9 +176,45 @@ async def job_health_summary() -> dict:
         key = f"health-summary-{slot}"
         bad = [k for k, v in h["probes"].items() if v.get("status") != "ok"]
         msg = f"🏥 System {h['status']}. Probes degraded: {', '.join(bad)}"
-        await outbound.enqueue(admin, msg, source_bridge="bridge2",
+        await outbound.enqueue(admin, msg, source_bridge="bridge1", fallback_channel="bridge2",
                                purpose="health-summary", idempotency_key=key)
     return {"status": "ok", "overall": h["status"]}
+
+
+async def job_agent_incident_summary() -> dict:
+    """Summarize actionable monitoring-agent incidents with stable deduplication."""
+    rows = await fetch_all(
+        """SELECT severity, source, title, COUNT(*) AS n
+             FROM agent.incidents
+            WHERE resolved_at IS NULL
+              AND title <> 'ollama_model_evicted'
+            GROUP BY severity, source, title
+            ORDER BY
+              CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 ELSE 2 END,
+              title"""
+    )
+    if not rows:
+        return {"status": "ok", "actionable": 0}
+
+    signature = "|".join(
+        f"{r['severity']}:{r['source']}:{r['title']}:{r['n']}" for r in rows
+    )
+    key = f"agent-incident-summary-{hashlib.sha256(signature.encode()).hexdigest()[:20]}"
+    admin = _admin_number()
+    if not admin:
+        return {"status": "ok", "actionable": len(rows), "alerted": False}
+
+    from modules import outbound
+    details = ", ".join(f"{r['title']}×{r['n']}" for r in rows[:8])
+    qid = await outbound.enqueue(
+        admin,
+        f"⚠️ Monitoring incidents: {details}",
+        source_bridge="bridge1",
+        fallback_channel="bridge2",
+        purpose="agent-incident-summary",
+        idempotency_key=key,
+    )
+    return {"status": "ok", "actionable": len(rows), "alerted": bool(qid)}
 
 
 async def job_stale_escort_reminder() -> dict:
@@ -211,7 +248,7 @@ async def job_stale_escort_reminder() -> dict:
                 continue
             msg = (f"⏳ Escort program #{pid} ({r['mother_vessel']}/{r['lighter_vessel']}) "
                    f"still Active since {r['started']}. Please close or update.")
-            await outbound.enqueue(admin, msg, source_bridge="bridge2",
+            await outbound.enqueue(admin, msg, source_bridge="bridge1", fallback_channel="bridge2",
                                    purpose="stale-escort", idempotency_key=key)
             sent += 1
     return {"status": "ok", "stale": len(rows), "alerted": sent}
@@ -304,7 +341,7 @@ async def job_backup_staleness() -> dict:
             msg = f"⚠️ No DB backups found in {backup_dir}. Run a backup."
         else:
             msg = f"⚠️ Newest DB backup is {newest_age_h:.1f}h old (threshold {stale_hours}h)."
-        await outbound.enqueue(admin, msg, source_bridge="bridge2",
+        await outbound.enqueue(admin, msg, source_bridge="bridge1", fallback_channel="bridge2",
                                purpose="backup-stale", idempotency_key=key)
     return {"status": "ok", "newest_age_h": newest_age_h, "alerted": True}
 
@@ -442,6 +479,7 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     register_job("daily_payroll_compute", job_daily_payroll)
     register_job("dlq_alert", job_dlq_alert)
     register_job("health_summary", job_health_summary)
+    register_job("agent_incident_summary", job_agent_incident_summary)
     register_job("stale_escort_reminder", job_stale_escort_reminder)
     register_job("payment_reconciliation", job_payment_reconciliation)
     register_job("backup_staleness_alert", job_backup_staleness)
@@ -484,6 +522,9 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     _scheduler.add_job(_wrap("health_summary", job_health_summary),
                        IntervalTrigger(hours=6),
                        id="health_summary", replace_existing=True)
+    _scheduler.add_job(_wrap("agent_incident_summary", job_agent_incident_summary),
+                       IntervalTrigger(hours=6),
+                       id="agent_incident_summary", replace_existing=True)
     _scheduler.add_job(_wrap("stale_escort_reminder", job_stale_escort_reminder),
                        CronTrigger(hour=9, minute=0),
                        id="stale_escort_reminder", replace_existing=True)

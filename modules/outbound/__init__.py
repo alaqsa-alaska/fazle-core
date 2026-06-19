@@ -38,6 +38,7 @@ async def enqueue(
     body: str,
     *,
     source_bridge: str = "bridge2",
+    fallback_channel: Optional[str] = None,
     purpose: Optional[str] = None,
     idempotency_key: Optional[str] = None,
     meta: Optional[dict[str, Any]] = None,
@@ -47,11 +48,11 @@ async def enqueue(
     meta_json = json.dumps(meta or {})
     row = await fetch_one(
         """INSERT INTO fazle_outbound_queue
-              (recipient, body, source_bridge, purpose, idempotency_key, meta_json)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+              (recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
            ON CONFLICT (idempotency_key) DO NOTHING
            RETURNING id""",
-        recipient, body, source_bridge, purpose, idempotency_key, meta_json,
+        recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json,
     )
     qid = row["id"] if row else None
     if qid:
@@ -73,8 +74,28 @@ async def dlq_count() -> int:
     ) or 0)
 
 
-async def _send_with_bridge(source_bridge: str, recipient: str, body: str) -> None:
-    """Raises BridgeSendError on failure. Honors breaker. Honors OUTBOUND_ENABLED."""
+async def actionable_dlq_count() -> int:
+    """Recent business DLQ only; terminal alert/history rows are informational."""
+    return int(await fetch_val(
+        """SELECT COUNT(*) FROM fazle_outbound_queue
+           WHERE status='dlq'
+             AND created_at >= NOW() - INTERVAL '24 hours'
+             AND COALESCE(purpose, '') NOT IN ('dlq-alert', 'health-summary', 'circuit-alert')"""
+    ) or 0)
+
+
+async def _send_with_channel(source_bridge: str, recipient: str, body: str) -> str:
+    """Send through a supported channel and return an external delivery id."""
+    if source_bridge in {"meta", "meta_whatsapp", "messenger", "facebook_comment"}:
+        from modules.social_auto_reply.send_queue import (
+            _send_comment, _send_messenger, _send_meta_whatsapp,
+        )
+        if source_bridge in {"meta", "meta_whatsapp"}:
+            return await _send_meta_whatsapp(recipient, body)
+        if source_bridge == "messenger":
+            return await _send_messenger(recipient, body)
+        return await _send_comment(recipient, body)
+
     from app.bridge import get_bridge1, get_bridge2, BridgeSendError
     client = get_bridge2() if source_bridge == "bridge2" else get_bridge1()
 
@@ -82,17 +103,12 @@ async def _send_with_bridge(source_bridge: str, recipient: str, body: str) -> No
         log.warning(f"[OUTBOUND_SEND_FAIL] circuit_open bridge={source_bridge} recipient={recipient}")
         raise BridgeSendError(f"circuit_open:{source_bridge}")
 
-    if not _outbound_enabled():
-        # Stub mode: count as success without hitting network
-        client.breaker.record_success()
-        log.info(f"[OUTBOUND_SEND_STUB] bridge={source_bridge} recipient={recipient} body={body[:60]!r}")
-        return
-
     log.info(f"[OUTBOUND_SEND_START] bridge={source_bridge} recipient={recipient} body={body[:60]!r}")
     try:
         await client.send_strict(recipient, body)
         client.breaker.record_success()
         log.info(f"[OUTBOUND_SEND_SUCCESS] bridge={source_bridge} recipient={recipient}")
+        return f"{source_bridge}:{recipient}"
     except BridgeSendError as exc:
         just_opened = client.breaker.record_failure()
         log.error(f"[OUTBOUND_SEND_FAIL] bridge={source_bridge} recipient={recipient} error={exc}")
@@ -122,12 +138,14 @@ async def _alert_circuit_open(source_bridge: str) -> None:
 
 async def sweep_once(limit: int = 20) -> dict:
     """Pick up to N due rows, send them, update status. Returns counts."""
+    if not _outbound_enabled():
+        return {"picked": 0, "sent": 0, "failed": 0, "dlq": 0, "paused": True}
     pool = get_pool()
     sent = failed = dlq = 0
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
-                """SELECT id, recipient, body, source_bridge, attempts, max_attempts
+                """SELECT id, recipient, body, source_bridge, fallback_channel, attempts, max_attempts
                      FROM fazle_outbound_queue
                     WHERE status IN ('pending','failed')
                       AND next_retry_at <= NOW()
@@ -139,7 +157,8 @@ async def sweep_once(limit: int = 20) -> dict:
             ids = [r["id"] for r in rows]
             if ids:
                 await conn.execute(
-                    "UPDATE fazle_outbound_queue SET status='sending' WHERE id = ANY($1::bigint[])",
+                    "UPDATE fazle_outbound_queue SET status='sending', locked_at=NOW(), updated_at=NOW() "
+                    "WHERE id = ANY($1::bigint[])",
                     ids,
                 )
 
@@ -148,12 +167,27 @@ async def sweep_once(limit: int = 20) -> dict:
             rid = r["id"]
             attempts = r["attempts"] + 1
             try:
-                await _send_with_bridge(r["source_bridge"], r["recipient"], r["body"])
+                try:
+                    external_id = await _send_with_channel(
+                        r["source_bridge"], r["recipient"], r["body"]
+                    )
+                except Exception:
+                    fallback = r.get("fallback_channel")
+                    if not fallback:
+                        raise
+                    log.warning(
+                        "[OUTBOUND_FAILOVER] id=%s from=%s to=%s",
+                        rid, r["source_bridge"], fallback,
+                    )
+                    external_id = await _send_with_channel(
+                        fallback, r["recipient"], r["body"]
+                    )
                 await conn.execute(
                     """UPDATE fazle_outbound_queue
-                          SET status='sent', attempts=$2, sent_at=NOW(), last_error=NULL
+                          SET status='sent', attempts=$2, sent_at=NOW(), last_error=NULL,
+                              external_id=$3, locked_at=NULL, updated_at=NOW()
                         WHERE id=$1""",
-                    rid, attempts,
+                    rid, attempts, external_id,
                 )
                 sent += 1
             except Exception as e:
@@ -161,7 +195,8 @@ async def sweep_once(limit: int = 20) -> dict:
                 if attempts >= r["max_attempts"]:
                     await conn.execute(
                         """UPDATE fazle_outbound_queue
-                              SET status='dlq', attempts=$2, last_error=$3
+                              SET status='dlq', attempts=$2, last_error=$3,
+                                  locked_at=NULL, updated_at=NOW()
                             WHERE id=$1""",
                         rid, attempts, err,
                     )
@@ -171,8 +206,11 @@ async def sweep_once(limit: int = 20) -> dict:
                     # Exponential backoff: 1m, 2m, 4m, ...
                     await conn.execute(
                         """UPDATE fazle_outbound_queue
-                              SET status='failed', attempts=$2, last_error=$3,
-                                  next_retry_at = NOW() + (INTERVAL '1 minute' * (2 ^ $2))
+                              SET status='failed', attempts=$2::integer, last_error=$3,
+                                  next_retry_at = NOW() + (
+                                      INTERVAL '1 minute' * power(2::numeric, $2::integer)
+                                  )
+                                  , locked_at=NULL, updated_at=NOW()
                             WHERE id=$1""",
                         rid, attempts, err,
                     )
@@ -184,6 +222,8 @@ async def _worker_loop(interval_seconds: int) -> None:
     log.info(f"[outbound] worker started (interval={interval_seconds}s, enabled={_outbound_enabled()})")
     while True:
         try:
+            # Never replay an old `sending` row automatically. A prior process
+            # may have delivered it before losing its acknowledgement.
             await sweep_once(limit=20)
         except asyncio.CancelledError:
             log.info("[outbound] worker cancelled")

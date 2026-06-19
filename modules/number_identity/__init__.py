@@ -20,22 +20,13 @@ def normalize_phone(raw: str) -> list[str]:
 
     Order: [01XXXXXXXXXX, 8801XXXXXXXXXX, +8801XXXXXXXXXX]
     Returns empty list if input cannot be normalized.
+    Delegates to phone_normalizer for canonical validation (operator code check included).
     """
-    if not raw:
+    from modules.phone_normalizer import normalize_phone as _canonical
+    canonical = _canonical(raw)
+    if not canonical:
         return []
-    digits = re.sub(r"\D", "", raw)
-    if not digits:
-        return []
-    # Already canonical local format
-    if len(digits) == 11 and digits.startswith("01"):
-        return [digits, "880" + digits[1:], "+880" + digits[1:]]
-    # 880 country code
-    if len(digits) == 13 and digits.startswith("880"):
-        return ["0" + digits[3:], digits, "+" + digits]
-    # 10-digit bare mobile
-    if len(digits) == 10 and digits.startswith("1"):
-        return ["0" + digits, "880" + digits, "+880" + digits]
-    return []
+    return ["0" + canonical[3:], canonical, "+" + canonical]
 
 
 def phone_last10(raw: str) -> str:

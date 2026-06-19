@@ -311,7 +311,7 @@ class SelfHealer:
         """Return pressure based on outbound DLQ count."""
         try:
             from modules import outbound as _q
-            dlq = await _q.dlq_count()
+            dlq = await _q.actionable_dlq_count()
             if dlq >= RETRY_STORM_THRESHOLD:
                 self._audit(
                     "retry_storm",

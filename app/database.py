@@ -43,23 +43,33 @@ async def db_conn():
         yield conn
 
 
-async def fetch_one(sql: str, *args) -> Optional[dict]:
+async def fetch_one(sql: str, *args, conn: Optional[asyncpg.Connection] = None) -> Optional[dict]:
+    if conn is not None:
+        row = await conn.fetchrow(sql, *args)
+        return dict(row) if row else None
     async with db_conn() as conn:
         row = await conn.fetchrow(sql, *args)
         return dict(row) if row else None
 
 
-async def fetch_all(sql: str, *args) -> list[dict]:
+async def fetch_all(sql: str, *args, conn: Optional[asyncpg.Connection] = None) -> list[dict]:
+    if conn is not None:
+        rows = await conn.fetch(sql, *args)
+        return [dict(r) for r in rows]
     async with db_conn() as conn:
         rows = await conn.fetch(sql, *args)
         return [dict(r) for r in rows]
 
 
-async def execute(sql: str, *args) -> str:
+async def execute(sql: str, *args, conn: Optional[asyncpg.Connection] = None) -> str:
+    if conn is not None:
+        return await conn.execute(sql, *args)
     async with db_conn() as conn:
         return await conn.execute(sql, *args)
 
 
-async def fetch_val(sql: str, *args) -> Any:
+async def fetch_val(sql: str, *args, conn: Optional[asyncpg.Connection] = None) -> Any:
+    if conn is not None:
+        return await conn.fetchval(sql, *args)
     async with db_conn() as conn:
         return await conn.fetchval(sql, *args)

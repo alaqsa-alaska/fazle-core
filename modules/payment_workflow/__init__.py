@@ -25,9 +25,9 @@ Flow (Advance):
 """
 import logging
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
-from app.database import fetch_one, fetch_all, execute, fetch_val
+from app.database import fetch_one, fetch_all, execute, fetch_val, get_pool
 from app.config import get_settings
 
 log = logging.getLogger("fazle.payment")
@@ -43,6 +43,7 @@ async def create_escort_payment_draft(
     escort_program_id: Optional[int] = None,
     override_days: Optional[float] = None,
     source: str = "bridge1",
+    conn: Optional[Any] = None,
 ) -> dict:
     """
     Create a payment draft after escort duty release.
@@ -54,21 +55,24 @@ async def create_escort_payment_draft(
                       basic_salary, bkash_number, nagad_number
                FROM wbom_employees WHERE employee_id = $1""",
             employee_id,
+            conn=conn,
         )
         if not emp:
             return {"error": f"Employee {employee_id} not found", "draft_id": None}
 
         duty_days = override_days
         prog_name = "Unknown Program"
+        prog: dict = {}
 
         # Try to get program info
         if escort_program_id:
             prog = await fetch_one(
                 """SELECT program_id, program_date, mother_vessel, end_date,
                           completion_time, lighter_vessel, master_mobile,
-                          shift, shift_type
+                          shift, end_shift, day_count, food_bill, conveyance
                    FROM wbom_escort_programs WHERE program_id = $1""",
                 escort_program_id,
+                conn=conn,
             )
             if prog:
                 prog_name = prog.get("mother_vessel") or f"Program #{escort_program_id}"
@@ -88,19 +92,27 @@ async def create_escort_payment_draft(
         if duty_days is None:
             duty_days = 1.0
 
-        # Calculate payable
+        # Authoritative settlement:
+        # (basic_salary / 30 * roster duty_days) - food - conveyance -
+        # advances for this escort program in the current payroll month.
         daily_rate = float(emp.get("basic_salary") or DEFAULT_DAILY_RATE) / 30
-        expected   = round(duty_days * daily_rate, 0)
+        gross_amount = round(duty_days * daily_rate, 2)
+        food_bill = float(prog.get("food_bill") or 0)
+        conveyance = float(prog.get("conveyance") or 0)
 
-        # Check previous advances
+        # Only advances tied to this escort program and current payroll month.
         advances = await fetch_val(
             """SELECT COALESCE(SUM(amount), 0)
                FROM wbom_cash_transactions
                WHERE employee_id = $1 AND transaction_type = 'advance'
-                 AND transaction_date >= CURRENT_DATE - INTERVAL '60 days'""",
-            employee_id,
+                 AND program_id = $2
+                 AND transaction_date >= DATE_TRUNC('month', CURRENT_DATE)::date
+                 AND transaction_date < (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month')::date
+                 AND COALESCE(is_reversed, false) = false""",
+            employee_id, escort_program_id,
+            conn=conn,
         ) or 0.0
-        net_payable = max(float(expected) - float(advances), 0)
+        net_payable = max(gross_amount - food_bill - conveyance - float(advances), 0)
 
         bkash = emp.get("bkash_number") or emp.get("nagad_number") or "?"
 
@@ -115,7 +127,7 @@ async def create_escort_payment_draft(
                 if prog_date_raw and hasattr(prog_date_raw, "strftime")
                 else str(prog_date_raw or "")
             )
-            shift_raw = prog.get("shift") or prog.get("shift_type") or ""
+            shift_raw = prog.get("shift") or ""
             shift_label = (
                 "দিন (D)" if str(shift_raw).upper().startswith("D")
                 else "রাত (N)" if str(shift_raw).upper().startswith("N")
@@ -136,24 +148,52 @@ async def create_escort_payment_draft(
             f"কর্মী: {emp['employee_name']}\n"
             f"{vessel_lines}"
             f"দিন: {duty_days:.1f}\n"
-            f"প্রত্যাশিত: ৳{expected:,.0f}\n"
+            f"গ্রস বেতন: ৳{gross_amount:,.0f}\n"
+            f"খাবার বিল কর্তন: ৳{food_bill:,.0f}\n"
+            f"কনভেয়েন্স কর্তন: ৳{conveyance:,.0f}\n"
             f"অগ্রিম কর্তন: ৳{advances:,.0f}\n"
             f"নেট দেয়: ৳{net_payable:,.0f}\n"
             f"বিকাশ/নগদ: {bkash}\n\n"
             f"✅ অনুমোদন দিতে: PAID <draft_id> {net_payable:.0f} bkash"
         )
 
-        # Save draft
-        draft_id = await fetch_val(
-            """INSERT INTO fazle_payment_drafts
-                   (draft_type, employee_id, employee_name, employee_mobile,
-                    escort_program_id, duty_days, expected_amount, status, draft_text,
-                    source, updated_at)
-               VALUES ('escort_payment', $1, $2, $3, $4, $5, $6, 'pending', $7, $8, NOW())
-               RETURNING id""",
-            employee_id, emp["employee_name"], emp.get("employee_mobile"),
-            escort_program_id, duty_days, net_payable, draft_text, source,
+        # Serialize release-draft creation inside the caller's transaction.
+        if conn is not None and escort_program_id is not None:
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", int(escort_program_id))
+        existing_draft_id = await fetch_val(
+            """SELECT id FROM fazle_payment_drafts
+               WHERE escort_program_id=$1 AND draft_type='escort_payment'
+               ORDER BY id DESC LIMIT 1""",
+            escort_program_id,
+            conn=conn,
         )
+        if existing_draft_id:
+            draft_id = existing_draft_id
+            await execute(
+                """UPDATE fazle_payment_drafts
+                   SET employee_id=$2, employee_name=$3, employee_mobile=$4,
+                       duty_days=$5, gross_amount=$6, food_bill=$7, conveyance=$8,
+                       advance_deduction=$9, expected_amount=$10, status='pending',
+                       draft_text=$11, source=$12, updated_at=NOW()
+                   WHERE id=$1""",
+                draft_id, employee_id, emp["employee_name"], emp.get("employee_mobile"),
+                duty_days, gross_amount, food_bill, conveyance, advances, net_payable,
+                draft_text, source, conn=conn,
+            )
+        else:
+            draft_id = await fetch_val(
+                """INSERT INTO fazle_payment_drafts
+                   (draft_type, employee_id, employee_name, employee_mobile,
+                    escort_program_id, duty_days, gross_amount, food_bill, conveyance,
+                    advance_deduction, expected_amount, status, draft_text, source, updated_at)
+               VALUES ('escort_payment', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                       'pending', $11, $12, NOW())
+               RETURNING id""",
+                employee_id, emp["employee_name"], emp.get("employee_mobile"),
+                escort_program_id, duty_days, gross_amount, food_bill, conveyance,
+                advances, net_payable, draft_text, source,
+                conn=conn,
+            )
 
         if draft_id:
             # Update draft_text with actual ID
@@ -161,6 +201,7 @@ async def create_escort_payment_draft(
             await execute(
                 "UPDATE fazle_payment_drafts SET draft_text=$1 WHERE id=$2",
                 draft_text, draft_id,
+                conn=conn,
             )
 
         log.info(f"[payment] escort draft #{draft_id} created for emp {employee_id}, ৳{net_payable:,.0f}")
@@ -174,6 +215,8 @@ async def create_escort_payment_draft(
 
     except Exception as e:
         log.error(f"[payment] create_escort_payment_draft error: {e}")
+        if conn is not None:
+            raise
         return {"error": str(e), "draft_id": None}
 
 
@@ -266,43 +309,56 @@ async def finalize_payment(draft_id: int, approved_amount: float, method: str) -
     Returns accountant_message to forward to accountant.
     """
     try:
-        draft = await fetch_one(
-            "SELECT * FROM fazle_payment_drafts WHERE id = $1", draft_id
-        )
-        if not draft:
-            return {"error": f"Draft #{draft_id} not found"}
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                draft_row = await conn.fetchrow(
+                    "SELECT * FROM fazle_payment_drafts WHERE id = $1 FOR UPDATE", draft_id
+                )
+                if not draft_row:
+                    return {"error": f"Draft #{draft_id} not found"}
+                draft = dict(draft_row)
+                if draft.get("status") == "sent":
+                    return {
+                        "already_finalized": True,
+                        "accountant_msg": draft.get("accountant_msg"),
+                        "employee_name": draft.get("employee_name"),
+                        "amount": float(draft.get("approved_amount") or approved_amount),
+                        "method": draft.get("payment_method") or method,
+                    }
 
-        method_map = {"bkash": "Bkash", "nagad": "Nagad", "cash": "Cash"}
-        method_display = method_map.get(method.lower(), method.upper())
+                method_map = {"bkash": "Bkash", "nagad": "Nagad", "cash": "Cash"}
+                method_display = method_map.get(method.lower(), method.upper())
 
-        # Record transaction
-        txn_type = "advance" if draft.get("draft_type") == "advance" else "escort_payment"
-        await execute(
-            """INSERT INTO wbom_cash_transactions
-                   (employee_id, amount, transaction_type, payment_method,
-                    transaction_date, remarks)
-               VALUES ($1, $2, $3, $4, CURRENT_DATE, $5)""",
-            draft.get("employee_id"), approved_amount, txn_type, method,
-            f"Draft #{draft_id} — approved by admin",
-        )
+                txn_type = "advance" if draft.get("draft_type") == "advance" else "escort_payment"
+                await conn.execute(
+                    """INSERT INTO wbom_cash_transactions
+                           (employee_id, program_id, amount, transaction_type, payment_method,
+                            transaction_date, remarks, idempotency_key, source)
+                       VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7, 'payment-draft')
+                       ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING""",
+                    draft.get("employee_id"), draft.get("escort_program_id"), approved_amount,
+                    txn_type, method, f"Draft #{draft_id} — approved by admin",
+                    f"payment-draft:{draft_id}",
+                )
 
-        accountant_msg = (
-            f"💳 পেমেন্ট নির্দেশনা\n\n"
-            f"কর্মী: {draft.get('employee_name','?')}\n"
-            f"মোবাইল: {draft.get('employee_mobile','?')}\n"
-            f"পরিমাণ: ৳{approved_amount:,.0f}\n"
-            f"পদ্ধতি: {method_display}\n"
-            f"ধরন: {'অগ্রিম' if txn_type == 'advance' else 'এস্কর্ট পেমেন্ট'}\n"
-            f"Draft: #{draft_id}"
-        )
+                accountant_msg = (
+                    f"💳 পেমেন্ট নির্দেশনা\n\n"
+                    f"কর্মী: {draft.get('employee_name','?')}\n"
+                    f"মোবাইল: {draft.get('employee_mobile','?')}\n"
+                    f"পরিমাণ: ৳{approved_amount:,.0f}\n"
+                    f"পদ্ধতি: {method_display}\n"
+                    f"ধরন: {'অগ্রিম' if txn_type == 'advance' else 'এস্কর্ট পেমেন্ট'}\n"
+                    f"Draft: #{draft_id}"
+                )
 
-        # Mark draft as sent
-        await execute(
-            """UPDATE fazle_payment_drafts
-               SET status='sent', accountant_msg=$1, updated_at=NOW()
-               WHERE id=$2""",
-            accountant_msg, draft_id,
-        )
+                await conn.execute(
+                    """UPDATE fazle_payment_drafts
+                       SET status='sent', approved_amount=$1, payment_method=$2,
+                           accountant_msg=$3, approved_at=NOW(), updated_at=NOW()
+                       WHERE id=$4""",
+                    approved_amount, method, accountant_msg, draft_id,
+                )
 
         log.info(f"[payment] finalized draft #{draft_id}: ৳{approved_amount:,.0f} via {method}")
         return {

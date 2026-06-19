@@ -9,7 +9,7 @@ import httpx
 
 from app.config import get_settings
 from modules import observability as obs
-from modules.ocr_processor import process_image
+from modules.ocr_processor import process_document, process_image
 from modules.voice_processor import process_voice
 
 
@@ -94,6 +94,22 @@ async def normalize_meta_media_message(msg: dict[str, Any]) -> MediaNormalizatio
                         "normalized": True,
                         "slip_type": ocr.get("slip_type") or "unknown",
                         "duplicate": bool(ocr.get("is_duplicate")),
+                    },
+                )
+
+        if msg_type == "document":
+            document = await process_document(file_path, filename=filename)
+            extracted_text = str(document.get("extracted_text") or "").strip()
+            if extracted_text:
+                obs.inc("media_normalization_total", labels={"type": msg_type, "result": "extracted"})
+                text = f"[document message] {extracted_text}".strip()[:4000]
+                return MediaNormalizationResult(
+                    text=text,
+                    media_type=msg_type,
+                    meta={
+                        "normalized": True,
+                        "doc_type": document.get("doc_type") or "unknown",
+                        "confidence_score": int(document.get("confidence_score") or 0),
                     },
                 )
 

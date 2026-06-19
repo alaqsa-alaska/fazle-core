@@ -10,25 +10,21 @@ from typing import Any
 from app.database import fetch_all, fetch_one, fetch_val
 
 
-def _normalize_mobile(raw: str) -> str:
-    digits = re.sub(r"\D", "", raw)
-    return digits[-10:] if len(digits) >= 10 else digits
-
-
 async def find_by_mobile(mobile: str) -> dict[str, Any] | None:
-    last10 = _normalize_mobile(mobile)
-    if len(last10) < 9:
+    from modules.number_identity import normalize_phone as get_phone_variants
+    variants = get_phone_variants(mobile)
+    if not variants:
         return None
     return await fetch_one(
         """
         SELECT employee_id, employee_name, designation, basic_salary, status,
                employee_mobile, joining_date
         FROM wbom_employees
-        WHERE RIGHT(REGEXP_REPLACE(COALESCE(employee_mobile, ''), '[^0-9]', '', 'g'), 10) = $1
+        WHERE employee_mobile = ANY($1)
           AND status NOT IN ('deleted', 'terminated')
         LIMIT 1
         """,
-        last10,
+        variants,
     )
 
 

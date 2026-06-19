@@ -77,14 +77,17 @@ async def classify_intent_llm(text: str) -> str:
     async with _ollama_sem:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
+                payload = {
+                    "model": settings.ollama_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.1, "num_predict": 10, "num_ctx": 256},
+                }
+                if _is_qwen3(settings.ollama_model):
+                    payload["think"] = False
                 r = await client.post(
                     f"{settings.ollama_url}/api/generate",
-                    json={
-                        "model": settings.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 10, "num_ctx": 256},
-                    },
+                    json=payload,
                 )
                 if r.status_code == 200:
                     result = r.json().get("response", "").strip().lower().split()[0]
@@ -129,14 +132,17 @@ async def generate_reply(
     async with _ollama_sem:
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
+                payload = {
+                    "model": settings.ollama_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.4, "num_predict": 50, "num_ctx": 512},
+                }
+                if _is_qwen3(settings.ollama_model):
+                    payload["think"] = False
                 r = await client.post(
                     f"{settings.ollama_url}/api/generate",
-                    json={
-                        "model": settings.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.4, "num_predict": 50, "num_ctx": 512},
-                    },
+                    json=payload,
                 )
                 if r.status_code == 200:
                     reply_text = r.json().get("response", "").strip()
@@ -192,19 +198,22 @@ async def generate_recruitment_reply(
     async with _ollama_sem:
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
+                payload = {
+                    "model": settings.ollama_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.2,
+                        "num_predict": 50,
+                        "num_ctx": 512,
+                        "repeat_penalty": 1.08,
+                    },
+                }
+                if _is_qwen3(settings.ollama_model):
+                    payload["think"] = False
                 r = await client.post(
                     f"{settings.ollama_url}/api/generate",
-                    json={
-                        "model": settings.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {
-                            "temperature": 0.2,
-                            "num_predict": 50,
-                            "num_ctx": 512,
-                            "repeat_penalty": 1.08,
-                        },
-                    },
+                    json=payload,
                 )
                 if r.status_code == 200:
                     reply_text = r.json().get("response", "").strip()

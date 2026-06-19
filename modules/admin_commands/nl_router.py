@@ -41,12 +41,13 @@ _PHONE_RE = re.compile(r"(?:\+?88)?(01[3-9]\d{8})")
 
 
 def extract_phone(text: str) -> Optional[str]:
-    """Find first valid BD phone in text. Returns 880-prefixed canonical form."""
+    """Find first valid BD phone in text. Returns 8801XXXXXXXXX canonical form."""
+    from modules.phone_normalizer import normalize_phone
     t = text.translate(_BN_DIGITS)
     m = _PHONE_RE.search(t)
     if not m:
         return None
-    return "88" + m.group(1)
+    return normalize_phone("88" + m.group(1))
 
 
 def _phone_variants(canonical: str) -> list[str]:
