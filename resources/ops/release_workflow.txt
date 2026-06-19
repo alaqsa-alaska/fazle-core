@@ -1,3 +1,6 @@
+# AI_CONTEXT: NOT_FOR_CANDIDATE_REPLIES
+# এই ফাইলটি শুধু কর্মরত এস্কর্ট/গার্ডদের জন্য। চাকরিপ্রার্থী (candidate) প্রশ্নে এই ফাইল ব্যবহার করো না।
+
 # রিলিজ স্লিপ ওয়ার্কফ্লো — AUTHORITATIVE
 # Source: Al-Aqsa Security & Logistics Services Ltd. Operational Policy
 # Last-verified: 2026-05-29

@@ -7,11 +7,12 @@ Resolution order (highest priority wins):
   → repeat_client → vendor → employee → supervisor → candidate → unknown
 
 Sources (checked in order):
-  1. seed_rule  — static entries in fazle_contact_roles (highest trust)
-  2. db_employee — wbom_employees.employee_mobile match
-  3. db_contact  — wbom_contacts / wbom_relation_types match
-  4. text_hint   — keyword analysis of message text (candidate detection)
-  5. unknown     — no match found
+  1. seed_rule     — static entries in fazle_contact_roles (highest trust)
+  2. db_employee   — wbom_employees.employee_mobile match
+  3. escort_roster — wbom_escort_programs active duty (Assigned/Running)
+  4. db_contact    — wbom_contacts / wbom_relation_types match
+  5. text_hint     — keyword analysis of message text (candidate detection)
+  6. unknown       — no match found
 
 Returns a dict compatible with the legacy UserRole TypedDict plus:
   identity_role, identity_confidence, identity_source, identity_priority
@@ -22,7 +23,8 @@ import re
 from typing import Optional
 
 from app.database import fetch_one
-from modules.user_role import normalize_phone
+from modules.phone_normalizer import normalize_phone
+from modules.number_identity import normalize_phone as phone_variants
 
 log = logging.getLogger("fazle.identity_brain")
 
@@ -98,6 +100,35 @@ async def detect_identity(phone: str, text: str = "") -> dict:
             return _build(phone=norm, role="employee", confidence=88, source="db_employee",
                           priority=_ROLE_PRIORITY["employee"], emp=emp)
 
+        # ── Step 3.5: operational evidence lookups ─────────────────────────────
+        cash_emp = await _lookup_cash_identity(norm)
+        if cash_emp:
+            log.info(f"[identity] {norm} → employee (cash_payment)")
+            return _build(phone=norm, role="employee", confidence=86, source="cash_payment",
+                          priority=_ROLE_PRIORITY["employee"], emp=cash_emp)
+
+        attendance_emp = await _lookup_attendance_identity(norm)
+        if attendance_emp:
+            log.info(f"[identity] {norm} → employee (attendance)")
+            return _build(phone=norm, role="employee", confidence=86, source="attendance",
+                          priority=_ROLE_PRIORITY["employee"], emp=attendance_emp)
+
+        escort_row = await _lookup_escort_roster(norm)
+        if escort_row:
+            escort_role = escort_row.get("identity_role") or "employee"
+            _esc_name = escort_row.get("escort_name") or ""
+            _esc_status = escort_row.get("status") or ""
+            _esc_date = escort_row.get("program_date") or ""
+            log.info(
+                "[identity] %s → %s (escort_roster, name=%r, status=%r, date=%s)",
+                norm, escort_role, _esc_name, _esc_status, _esc_date,
+            )
+            return _build(
+                phone=norm, role=escort_role, confidence=85, source="escort_roster",
+                priority=_ROLE_PRIORITY.get(escort_role, _ROLE_PRIORITY["employee"]),
+                notes=f"escort_duty:{_esc_status}:{_esc_date}",
+            )
+
         # ── Step 4: contact DB lookup ──────────────────────────────────────────
         contact = await _lookup_contact(norm)
         if contact:
@@ -158,40 +189,104 @@ async def _lookup_seed(phone: str) -> Optional[dict]:
 
 
 async def _lookup_employee(phone: str) -> Optional[dict]:
-    variants = [phone]
-    if phone.startswith("0"):
-        variants.append("880" + phone[1:])
-        variants.append("88" + phone)
-    for v in variants:
-        row = await fetch_one(
-            """SELECT employee_id, employee_name, designation,
-                      basic_salary, bkash_number, status
-               FROM wbom_employees WHERE employee_mobile = $1""",
-            v,
-        )
-        if row:
-            return dict(row)
-    return None
+    variants = phone_variants(phone)
+    if not variants:
+        return None
+    row = await fetch_one(
+        """SELECT employee_id, employee_name, designation,
+                  basic_salary, bkash_number, status
+           FROM wbom_employees
+           WHERE employee_mobile = ANY($1)
+           ORDER BY employee_id DESC
+           LIMIT 1""",
+        variants,
+    )
+    return dict(row) if row else None
+
+
+async def _lookup_cash_identity(phone: str) -> Optional[dict]:
+    """Resolve operational identity from existing cash/payment records."""
+    variants = phone_variants(phone)
+    if not variants:
+        return None
+    row = await fetch_one(
+        """SELECT e.employee_id, e.employee_name, e.designation,
+                  e.basic_salary, e.bkash_number, e.status
+           FROM wbom_cash_transactions t
+           LEFT JOIN wbom_employees e ON e.employee_id = t.employee_id
+           WHERE t.employee_phone = ANY($1)
+              OR t.payment_mobile = ANY($1)
+              OR t.payment_number = ANY($1)
+              OR e.employee_mobile = ANY($1)
+           ORDER BY t.transaction_id DESC
+           LIMIT 1""",
+        variants,
+    )
+    if not row:
+        return None
+    result = dict(row)
+    result.setdefault("employee_id", None)
+    result.setdefault("employee_name", None)
+    result.setdefault("designation", None)
+    result.setdefault("basic_salary", None)
+    result.setdefault("bkash_number", None)
+    result.setdefault("status", None)
+    return result
+
+
+async def _lookup_attendance_identity(phone: str) -> Optional[dict]:
+    """Resolve an employee through attendance joined to the employee register."""
+    variants = phone_variants(phone)
+    if not variants:
+        return None
+    row = await fetch_one(
+        """SELECT e.employee_id, e.employee_name, e.designation,
+                  e.basic_salary, e.bkash_number, e.status
+           FROM wbom_attendance a
+           JOIN wbom_employees e ON e.employee_id = a.employee_id
+           WHERE e.employee_mobile = ANY($1)
+           ORDER BY a.attendance_date DESC, a.attendance_id DESC
+           LIMIT 1""",
+        variants,
+    )
+    return dict(row) if row else None
+
+
+async def _lookup_escort_roster(phone: str) -> Optional[dict]:
+    """Return any existing escort/ship identity before candidate classification."""
+    variants = phone_variants(phone)
+    if not variants:
+        return None
+    row = await fetch_one(
+        """SELECT program_id, escort_name, escort_mobile, master_mobile,
+                  status, program_date,
+                  CASE WHEN escort_mobile = ANY($1)
+                       THEN 'employee' ELSE 'repeat_client' END AS identity_role
+           FROM wbom_escort_programs
+           WHERE escort_mobile = ANY($1) OR master_mobile = ANY($1)
+           ORDER BY program_date DESC NULLS LAST, program_id DESC
+           LIMIT 1""",
+        variants,
+    )
+    return dict(row) if row else None
 
 
 async def _lookup_contact(phone: str) -> Optional[dict]:
-    variants = [phone]
-    if phone.startswith("0"):
-        variants.append("880" + phone[1:])
-        variants.append("+880" + phone[1:])
-    for v in variants:
-        row = await fetch_one(
-            """SELECT c.contact_id, c.display_name, c.company_name,
-                      rt.relation_name
-               FROM wbom_contacts c
-               LEFT JOIN wbom_relation_types rt
-                      ON rt.relation_type_id = c.relation_type_id
-               WHERE c.whatsapp_number = $1 AND c.is_active = true""",
-            v,
-        )
-        if row:
-            return dict(row)
-    return None
+    variants = phone_variants(phone)
+    if not variants:
+        return None
+    row = await fetch_one(
+        """SELECT c.contact_id, c.display_name, c.company_name,
+                  COALESCE(rt.relation_name, c.relation) AS relation_name
+           FROM wbom_contacts c
+           LEFT JOIN wbom_relation_types rt
+                  ON rt.relation_type_id = c.relation_type_id
+           WHERE c.whatsapp_number = ANY($1) AND c.is_active = true
+           ORDER BY c.contact_id DESC
+           LIMIT 1""",
+        variants,
+    )
+    return dict(row) if row else None
 
 
 def _map_relation(relation: str) -> str:

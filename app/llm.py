@@ -1,12 +1,12 @@
 """
 Fazle Core — Unified LLM Interface
 
-Routes all AI calls to GitHub Models (primary) or Ollama (fallback).
-Provider selection: PRIMARY_AI_PROVIDER env var ("github_models" | "ollama").
+Reply chain:  GitHub Models (primary) → Groq (secondary) → Ollama (fallback)
+              When OLLAMA_REPLY_DISABLED=true the chain is:
+              GitHub Models → Groq → polite holding message
 
-Every GitHub Models reply is persisted to llm_learning_memory so Ollama
-can learn from high-quality examples over time.  When Ollama graduates,
-flip PRIMARY_AI_PROVIDER=ollama and it runs first.
+Provider selection: PRIMARY_AI_PROVIDER env var ("github_models" | "ollama").
+Groq is always tried as a secondary when GROQ_API_KEY is set.
 
 message_router imports this as `ai`:
     from app import llm as ai
@@ -53,21 +53,28 @@ async def _save_to_memory(
 
 async def classify_intent_llm(text: str) -> str:
     """
-    Classify intent when rule-based engine returns 'unknown'.
-    Tries primary provider first, falls back to secondary.
+    Classify intent via Groq → GitHub Models → Ollama.
     """
     settings = get_settings()
-    provider = settings.primary_ai_provider
 
-    if provider == "github_models":
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            result = await groq_provider.classify_intent_llm(text)
+            if result != "unknown":
+                return result
+        except Exception as e:
+            log.warning("[llm] groq classify failed, falling back to github_models: %s", e)
+
+    if settings.github_token:
         try:
             from app import github_models
             result = await github_models.classify_intent_llm(text)
-            return result
+            if result != "unknown":
+                return result
         except Exception as e:
             log.warning("[llm] github_models classify failed, falling back to ollama: %s", e)
 
-    # Ollama fallback (or primary if provider=ollama)
     try:
         from app import ollama
         return await ollama.classify_intent_llm(text)
@@ -114,11 +121,43 @@ async def generate_reply(
                     context_used=db_context,
                 ))
                 return reply
-            log.warning("[llm] github_models returned empty reply, falling back to ollama")
+            log.warning("[llm] github_models returned empty reply, falling back to groq/ollama")
         except Exception as e:
-            log.warning("[llm] github_models generate failed, falling back to ollama: %s", e)
+            log.warning("[llm] github_models generate failed, falling back to groq/ollama: %s", e)
+
+    # Groq secondary (tried whenever GitHub Models fails, regardless of provider setting)
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            reply = await groq_provider.generate_reply(
+                user_message=user_message,
+                intent=intent,
+                db_context=db_context,
+                history=history,
+                role=role,
+                source=source,
+            )
+            if reply:
+                asyncio.create_task(_save_to_memory(
+                    provider="groq",
+                    model=settings.groq_model_name,
+                    trigger_text=user_message,
+                    reply_text=reply,
+                    intent=intent,
+                    role=role,
+                    source=source,
+                    context_used=db_context,
+                    is_fallback=True,
+                ))
+                return reply
+            log.warning("[llm] groq returned empty reply, falling through")
+        except Exception as e:
+            log.warning("[llm] groq generate failed: %s", e)
 
     # Ollama fallback (or primary if provider=ollama)
+    if settings.ollama_reply_disabled:
+        log.info("[llm] ollama_reply_disabled=True — returning holding message")
+        return "আপাতত সার্ভিস একটু ব্যস্ত। কিছুক্ষণ পর আবার চেষ্টা করুন অথবা সরাসরি অফিসে যোগাযোগ করুন।"
     try:
         from app import ollama
         reply = await ollama.generate_reply(
@@ -154,11 +193,35 @@ async def generate_recruitment_reply(
     contact_context: str = "",
     source: str = "unknown",
 ) -> str:
-    """Recruitment-specific reply. GitHub Models → Ollama fallback."""
+    """Recruitment-specific reply. Groq → GitHub Models → Ollama → safe fallback."""
     settings = get_settings()
-    provider = settings.primary_ai_provider
 
-    if provider == "github_models":
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            reply = await groq_provider.generate_recruitment_reply(
+                user_message=user_message,
+                kb_context=kb_context,
+                history=history,
+                contact_context=contact_context,
+                source=source,
+            )
+            if reply:
+                asyncio.create_task(_save_to_memory(
+                    provider="groq",
+                    model=settings.groq_model_name,
+                    trigger_text=user_message,
+                    reply_text=reply,
+                    intent="recruitment",
+                    source=source,
+                    context_used=kb_context,
+                ))
+                return reply
+            log.warning("[llm] groq recruitment returned empty, falling back to github_models")
+        except Exception as e:
+            log.warning("[llm] groq recruitment failed, falling back to github_models: %s", e)
+
+    if settings.github_token:
         try:
             from app import github_models
             reply = await github_models.generate_recruitment_reply(
@@ -177,25 +240,39 @@ async def generate_recruitment_reply(
                     intent="recruitment",
                     source=source,
                     context_used=kb_context,
+                    is_fallback=True,
                 ))
                 return reply
             log.warning("[llm] github_models recruitment returned empty, falling back to ollama")
         except Exception as e:
-            log.warning("[llm] github_models recruitment failed, falling back to ollama: %s", e)
+            log.warning("[llm] github_models recruitment failed: %s", e)
 
-    try:
-        from app import ollama
-        return await ollama.generate_recruitment_reply(
-            user_message=user_message,
-            kb_context=kb_context,
-            history=history,
-            contact_context=contact_context,
-            source=source,
-        )
-    except Exception as e:
-        log.error("[llm] ollama recruitment also failed: %s", e)
+    if not settings.ollama_reply_disabled:
+        try:
+            from app import ollama
+            reply = await ollama.generate_recruitment_reply(
+                user_message=user_message,
+                kb_context=kb_context,
+                history=history,
+                contact_context=contact_context,
+                source=source,
+            )
+            if reply:
+                asyncio.create_task(_save_to_memory(
+                    provider="ollama",
+                    model=settings.ollama_model,
+                    trigger_text=user_message,
+                    reply_text=reply,
+                    intent="recruitment",
+                    source=source,
+                    context_used=kb_context,
+                    is_fallback=True,
+                ))
+                return reply
+        except Exception as e:
+            log.warning("[llm] ollama recruitment failed: %s", e)
 
-    return _FALLBACK_REPLY
+    return "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
 
 
 async def generate_chat_reply(
@@ -205,7 +282,7 @@ async def generate_chat_reply(
     model: str | None = None,
 ) -> Optional[str]:
     """
-    Unified Chat Lab reply router. GitHub Models → Ollama fallback.
+    Unified Chat Lab reply router. GitHub Models → Groq → Ollama fallback.
     """
     settings = get_settings()
     provider = settings.primary_ai_provider
@@ -221,10 +298,29 @@ async def generate_chat_reply(
             )
             if reply:
                 return reply
-            log.warning("[llm] github_models chat reply empty, falling back to ollama")
+            log.warning("[llm] github_models chat reply empty, falling back to groq/ollama")
         except Exception as e:
-            log.warning("[llm] github_models chat reply failed, falling back to ollama: %s", e)
+            log.warning("[llm] github_models chat reply failed, falling back to groq/ollama: %s", e)
 
+    # Groq secondary
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            reply = await groq_provider.generate_chat_reply(
+                question=question,
+                context=context,
+                history=history,
+                model=None,  # always use groq's own model
+            )
+            if reply:
+                return reply
+            log.warning("[llm] groq chat reply empty, falling through")
+        except Exception as e:
+            log.warning("[llm] groq chat reply failed: %s", e)
+
+    if settings.ollama_reply_disabled:
+        log.info("[llm] ollama_reply_disabled=True — skipping ollama chat fallback")
+        return None
     try:
         from app import ollama
         return await ollama.generate_chat_reply(
@@ -255,14 +351,26 @@ async def generate_rag_answer(
 
 
 async def check_health() -> dict:
-    """Health check for both providers."""
+    """Health check for all providers."""
     settings = get_settings()
-    result = {"primary_provider": settings.primary_ai_provider}
+    result = {
+        "primary_provider": settings.primary_ai_provider,
+        "ollama_reply_disabled": settings.ollama_reply_disabled,
+        "groq_configured": bool(settings.groq_api_key),
+    }
     try:
         from app import github_models
         result["github_models"] = await github_models.check_health()
     except Exception as e:
         result["github_models"] = {"status": "error", "error": str(e)}
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            result["groq"] = await groq_provider.check_health()
+        except Exception as e:
+            result["groq"] = {"status": "error", "error": str(e)}
+    else:
+        result["groq"] = {"status": "disabled", "reason": "GROQ_API_KEY not set"}
     try:
         from app import ollama
         result["ollama"] = await ollama.check_ollama_health()

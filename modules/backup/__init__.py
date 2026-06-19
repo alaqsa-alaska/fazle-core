@@ -254,7 +254,7 @@ async def job_daily_db_backup() -> dict[str, Any]:
                 day = datetime.utcnow().strftime("%Y%m%d")
                 msg = f"⚠️ DB backup FAILED ({res.get('error', '')[:140]})"
                 await outbound.enqueue(
-                    adm, msg, source_bridge="bridge2",
+                    adm, msg, source_bridge="bridge1", fallback_channel="bridge2",
                     purpose="backup-failed",
                     idempotency_key=f"backup-failed-{day}",
                 )

@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS wbom_escort_programs (
     release_point VARCHAR(100),
     day_count     FLOAT,
     conveyance    DECIMAL(10,2) DEFAULT 0,
+    food_bill     DECIMAL(10,2) DEFAULT 0,
     capacity      VARCHAR(20),
     completion_time TIMESTAMPTZ,
     total_payment DECIMAL(10,2) DEFAULT 0,
@@ -180,8 +181,12 @@ CREATE TABLE IF NOT EXISTS wbom_cash_transactions (
     correction_note TEXT,
     reversal_reason TEXT,
     source        TEXT,
+    idempotency_key TEXT,
     whatsapp_message_id INT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_test_txn_idempotency
+    ON wbom_cash_transactions (idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS wbom_staging_payments (
     staging_id      SERIAL PRIMARY KEY,
@@ -349,8 +354,13 @@ CREATE TABLE IF NOT EXISTS fazle_payment_drafts (
     employee_mobile TEXT,
     escort_program_id INT REFERENCES wbom_escort_programs(program_id),
     duty_days     FLOAT,
+    gross_amount  FLOAT DEFAULT 0,
+    food_bill     FLOAT DEFAULT 0,
+    conveyance    FLOAT DEFAULT 0,
+    advance_deduction FLOAT DEFAULT 0,
     expected_amount FLOAT,
     approved_amount FLOAT,
+    approved_at   TIMESTAMPTZ,
     payment_method TEXT,
     payment_number TEXT,
     status        TEXT DEFAULT 'pending',
@@ -368,6 +378,23 @@ CREATE TABLE IF NOT EXISTS fazle_payment_drafts (
     corrected_at  TIMESTAMPTZ,
     created_at    TIMESTAMPTZ DEFAULT NOW(),
     updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payment_drafts_program_type
+    ON fazle_payment_drafts (escort_program_id, draft_type)
+    WHERE escort_program_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS escort_roster_entries (
+    id SERIAL PRIMARY KEY,
+    program_id INT UNIQUE NOT NULL,
+    mother_vessel TEXT, lighter_vessel TEXT, master_mobile TEXT,
+    escort_name TEXT, escort_mobile TEXT, destination TEXT,
+    start_date DATE, start_shift CHAR(1), end_date DATE, end_shift CHAR(1),
+    total_shifts INT, total_days NUMERIC(6,2), salary NUMERIC(10,2),
+    conveyance NUMERIC(10,2) DEFAULT 0, food_bill NUMERIC(10,2) DEFAULT 0,
+    advance_deduction NUMERIC(12,2) DEFAULT 0, net_payable NUMERIC(12,2) DEFAULT 0,
+    total NUMERIC(12,2), release_point TEXT, roster_status TEXT DEFAULT 'draft',
+    calc_version INT DEFAULT 1, last_synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS fazle_payment_correction_log (

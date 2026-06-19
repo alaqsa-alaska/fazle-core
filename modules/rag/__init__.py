@@ -57,6 +57,8 @@ _EXCLUDED_DIRS: frozenset = frozenset({
 _EXCLUDED_NAME_KEYWORDS: tuple = (
     "analysis", "prompt", "intent", "debug", "test", "sample",
     "chain", "reasoning", "internal", "archived",
+    # system_context.txt is VPS/server documentation — never show to customers
+    "system_context",
 )
 # PATCH 3: Backup/temp file guard — substrings that mark non-authoritative files.
 # Blocks *.bak*, *.backup*, *.old*, *.tmp* regardless of whether they end in .txt.
@@ -106,11 +108,44 @@ def _is_chunk_safe(text: str) -> bool:
 _TOKEN_RE = re.compile(r"[A-Za-z0-9\u0980-\u09FF]+", re.UNICODE)
 
 
+# True function words (grammatical glue) that carry no document-discriminating signal.
+# Rule: only include a word if removing it cannot hurt recall for ANY plausible query.
+# "লোক","পদে","নেওয়া","হচ্ছে" were here before but caused recall loss on recruitment
+# queries like "কোন পদে লোক নেওয়া হচ্ছে" — removed because they ARE content words.
+_STOP_WORDS: frozenset = frozenset({
+    # Bangla conjunctions / particles
+    "এবং","বা","কিন্তু","তবে","যদি","তাহলে","তখন","কারণ","তাই","আর",
+    # Bangla negations & auxiliary verbs (no standalone meaning in search)
+    # হচ্ছে/হচ্ছেন = progressive marker — appears in ALL intents, not discriminating
+    "না","নয়","নি","হয়","হবে","হচ্ছে","হচ্ছেন","হচ্ছিল","হয়েছে","করা","করে","করেন",
+    "করবেন","করুন","করতে","আছে","ছিল","থাকে","থাকবে","দিতে","যাবে","দেওয়া",
+    # Bangla pronouns
+    "আমি","আমার","আমরা","আমাদের","আপনি","আপনার","আপনারা","তুমি",
+    "তোমার","সে","তার","তারা","তাদের",
+    # Bangla demonstratives / deictic words
+    "এই","এটি","এটা","এখানে","এখন","সেই","সেটা","সেখানে",
+    # Bangla question words (do NOT filter কোন — it appears in "কোন পদে")
+    "কি","কী","কিভাবে","কেন","কখন","কোনো","কে","কার",
+    # Bangla relative / indefinite pronouns
+    "যা","যে","যার","যখন","কিছু","সব","সকল",
+    # Bangla postpositions
+    "থেকে","দিয়ে","উপর","নিচে","ভেতরে","জন্য","কাছে","সাথে","মতো","মধ্যে","বিষয়ে",
+    # Bangla quantifiers/adverbs (no discriminating power)
+    "একটি","একটা","একজন","অনেক","বেশি","কম","খুব","বেশ",
+    # English function words
+    "the","a","an","and","or","but","in","on","at","to","for","of",
+    "with","by","from","is","are","was","were","be","been","have","has",
+    "had","do","does","did","will","would","can","could","this","that",
+    "these","those","it","its","we","our","you","your","he","she","they",
+    "their","my","me","not","no","if","as","so","up","out","about","than",
+})
+
+
 def _tokenize(text: str) -> list[str]:
     if not text:
         return []
     toks = _TOKEN_RE.findall(text.lower())
-    return [t for t in toks if len(t) >= MIN_TOKEN_LEN]
+    return [t for t in toks if len(t) >= MIN_TOKEN_LEN and t not in _STOP_WORDS]
 
 
 # ── Chunker ────────────────────────────────────────────────────────────────────

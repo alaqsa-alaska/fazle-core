@@ -23,18 +23,8 @@ CRITICAL_NUMBERS_RAW = [
 
 
 def normalize_phone_880(raw: str) -> str:
-    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if not digits:
-        return ""
-    if digits.startswith("880") and len(digits) == 13:
-        return digits
-    if digits.startswith("0") and len(digits) == 11:
-        return "88" + digits
-    if digits.startswith("1") and len(digits) == 10:
-        return "880" + digits
-    if len(digits) > 13 and digits.endswith("01"):
-        return ""
-    return digits if len(digits) == 13 and digits.startswith("880") else ""
+    from modules.phone_normalizer import normalize_phone
+    return normalize_phone(raw) or ""
 
 
 CRITICAL_NUMBERS = tuple(

@@ -73,7 +73,8 @@ DEFAULT_REQUIRED_ROLE = "admin"  # unknown cmd defaults to admin
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 def _normalize_phone(p: str) -> str:
-    return re.sub(r"\D", "", p or "")
+    from modules.phone_normalizer import normalize_phone as _pn
+    return _pn(p or "") or re.sub(r"\D", "", p or "")
 
 
 def hash_api_key(key: str) -> str:

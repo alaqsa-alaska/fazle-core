@@ -24,6 +24,7 @@ Ingest policy (v1.0.2 — locked):
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -37,8 +38,7 @@ from shared.draft_reply import create_draft_reply
 from app.bridge import get_bridge1, get_bridge2
 from modules.message_router import process_message, get_primary_admin, _is_safe_autosend_intent
 from modules.intent import classify as classify_intent
-from modules.recruitment_flow import is_recruitment_trigger as _is_recruit_trigger, get_active_session as _get_recruit_session
-from modules.recruitment_ai import looks_like_recruitment_followup as _looks_like_recruit_followup
+from modules.recruitment_flow import recruitment_eligibility
 
 _settings = get_settings()
 
@@ -722,6 +722,8 @@ async def _poll_bridge(config: dict):
                     dedup_skipped += 1
                     continue
 
+                _extracted_text = ""  # filled by media processors below; stored in extracted_text column
+
                 # ── Phase 22: 2-step OCR for images without pre-processed text ─
                 if msg.get("media_type") == "image" and not text and msg.get("filename"):
                     from modules.ocr_processor import classify_from_context, process_image as _proc_img
@@ -783,6 +785,7 @@ async def _poll_bridge(config: dict):
                         elif slip_type not in ("unknown", "duplicate"):
                             # escort_slip or payment_slip — use OCR text as message text
                             text = ocr_result.get("raw_text") or f"[image: {slip_type}]"
+                            _extracted_text = ocr_result.get("raw_text") or ""
                         else:
                             continue  # Unknown or duplicate — skip routing
                     finally:
@@ -798,6 +801,7 @@ async def _poll_bridge(config: dict):
                             voice_result = await _proc_voice(file_path)
                             if voice_result["confident"]:
                                 text = voice_result["transcript"]
+                                _extracted_text = voice_result["transcript"]
                                 log.info("[AUDIO_TRANSCRIBED] bridge=%s msg_id=%s words=%d", bridge_name, msg_id, voice_result["word_count"])
                             else:
                                 text = "[audio: unclear]"
@@ -838,6 +842,7 @@ async def _poll_bridge(config: dict):
                             )
                             ack_reply = doc_result.get("reply", "")
                             extracted = doc_result.get("extracted_text") or ""
+                            _extracted_text = extracted
                             # Store extracted text as the routing text
                             text = extracted[:300] or f"[document:{doc_type}:{filename}]"
 
@@ -886,9 +891,13 @@ async def _poll_bridge(config: dict):
                 id_conf = identity["identity_confidence"]
                 id_name = (identity.get("display_name") or "").strip()
 
-                # Save inbound with identity metadata
-                await _save_message(bridge_name, phone, text, "inbound",
-                                    identity_role=id_role, identity_confidence=id_conf)
+                # Save inbound with identity metadata + new central-message fields
+                await _save_message(
+                    bridge_name, phone, text, "inbound",
+                    identity_role=id_role, identity_confidence=id_conf,
+                    msg_type=msg.get("type") or "text",
+                    extracted_text=_extracted_text,
+                )
                 inbound_saved += 1
                 try:
                     from modules import observability as _obs
@@ -949,12 +958,13 @@ async def _poll_bridge(config: dict):
                 cursor = new_cursor
                 await _set_cursor(bridge_name, cursor)
 
-            # ── Outgoing escort completion processing (bridge2 only) ──────────
-            # Admin sends completed escort assignment slips TO clients via bridge2.
+            # ── Outgoing admin confirmation processing ────────────────────────
+            # Both bridges may carry admin confirmations. Reading outgoing SQLite
+            # rows does not modify bridge sessions or QR state.
             # Those messages are is_from_me=1 in bridge2 SQLite and never appear
             # in the inbound query above. We read them separately and route to
             # handle_admin_escort_completion() so escort_name/mobile get saved.
-            if bridge_name == "bridge2":
+            if bridge_name in ("bridge1", "bridge2"):
                 out_cursor = await _get_outgoing_cursor(bridge_name)
                 loop2 = asyncio.get_event_loop()
                 out_msgs, new_out_cursor = await loop2.run_in_executor(
@@ -968,7 +978,10 @@ async def _poll_bridge(config: dict):
                 from modules.escort import is_completed_escort_draft, handle_admin_escort_completion
                 from modules.escort_lifecycle import is_release_confirmation, handle_admin_release_confirmation
 
-                admin_number = _settings.bridge2_number  # "8801880446111"
+                admin_number = (
+                    _settings.bridge1_number if bridge_name == "bridge1"
+                    else _settings.bridge2_number
+                )
 
                 for omsg in out_msgs:
                     omsg_id: str = omsg["id"]
@@ -1119,34 +1132,72 @@ async def _save_message(
     identity_role: str = "",
     identity_confidence: int = 0,
     workflow: str = "",
+    intent_detected: str = "",
+    msg_type: str = "text",
+    extracted_text: str = "",
 ):
+    _receiver = _source_to_receiver(source)
+    _conv_key = f"{sender}:{source}" if sender else None
     try:
         await execute(
             """
             INSERT INTO wbom_whatsapp_messages
                 (sender_number, message_body, message_type, direction,
                  platform, is_processed, contact_identifier,
-                 identity_role, identity_confidence, workflow_triggered)
-            VALUES ($1, $2, 'text', $3, $4, true, $1, $5, $6, $7)
+                 identity_role, identity_confidence, workflow_triggered,
+                 receiver_number, conversation_key, intent_detected, extracted_text)
+            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12)
             """,
-            sender, text, direction, source,
+            sender, text, msg_type, direction, source,
             identity_role or None, identity_confidence or None, workflow or None,
+            _receiver or None, _conv_key,
+            intent_detected or None, extracted_text or None,
         )
     except Exception as e:
         log.warning(f"Message save error: {e}")
 
 
+def _source_to_receiver(source: str) -> str:
+    """Map bridge source name to the receiving phone number."""
+    try:
+        from app.config import get_settings as _gs
+        s = _gs()
+        return {
+            "bridge1": s.bridge1_number,
+            "bridge2": s.bridge2_number,
+            "meta":    s.admin_meta_number,
+            "whatsapp": s.admin_meta_number,
+        }.get(source, "")
+    except Exception:
+        return ""
+
+
 async def _notify_admin_bridge(notification: dict):
-    """Send admin notification via the appropriate bridge."""
+    """Durably queue Bridge1-first internal notification with Bridge2 failover."""
     admin_phone = notification.get("admin_phone", "")
     text = notification.get("text", "")
-    bridge_src = notification.get("bridge", "bridge2")
+    bridge_src = "bridge1"
     if not admin_phone or not text:
         return
     try:
-        bridge = get_bridge1() if bridge_src == "bridge1" else get_bridge2()
-        await bridge.send(f"{admin_phone}@s.whatsapp.net", text)
-        log.info(f"[bridge_poller] admin notified: {admin_phone}")
+        from modules.outbound import enqueue
+        import hashlib
+        purpose = notification.get("purpose", "internal-notification")
+        from datetime import datetime, timezone
+        hour_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+        digest = hashlib.sha256(
+            f"{purpose}|{admin_phone}|{text}|{hour_bucket}".encode("utf-8")
+        ).hexdigest()[:24]
+        qid = await enqueue(
+            admin_phone,
+            text,
+            source_bridge=bridge_src,
+            fallback_channel="bridge2",
+            purpose=purpose,
+            idempotency_key=f"internal:{digest}",
+            meta={"internal": True},
+        )
+        log.info("[bridge_poller] admin notification queued: phone=%s qid=%s", admin_phone, qid)
     except Exception as e:
         log.error(f"[bridge_poller] admin notify error: {e}")
 
@@ -1184,7 +1235,7 @@ async def _alert_admin_safety_block(
             f"Recipient: {phone}\n"
             f"Preview: {short_preview}"
         ),
-        "bridge": "bridge2",
+        "bridge": "bridge1",
     })
     log.info(f"[SAFETY_ALERT] admin alerted reason={reason} recipient={phone}")
 
@@ -1220,12 +1271,11 @@ async def process_bridge_inbound(
 
     # 3. Intent classification (router re-classifies internally; this copy drives draft gates)
     msg_intent = classify_intent(text)
-    if msg_intent in ("unknown", "greeting"):
-        try:
-            if _is_recruit_trigger(text) or _looks_like_recruit_followup(text) or await _get_recruit_session(phone):
-                msg_intent = "recruitment"
-        except Exception as _e:
-            log.debug("[P17-RECRUIT] intent override check failed %s: %s", phone, _e)
+    recruit_decision = await recruitment_eligibility(
+        phone, text, role=id_role, intent=msg_intent,
+    )
+    if recruit_decision["eligible"]:
+        msg_intent = "recruitment"
 
     # 4. Prompt injection defense
     _inj = _detect_prompt_injection(text)
@@ -1244,29 +1294,52 @@ async def process_bridge_inbound(
     # 5. Full routing
     reply, admin_note = await process_message(phone, text, bridge_name)
 
+    # Write intent back to the most recent inbound row for this sender+source
+    if msg_intent:
+        try:
+            await execute(
+                """
+                UPDATE wbom_whatsapp_messages
+                SET intent_detected = $1
+                WHERE id = (
+                    SELECT id FROM wbom_whatsapp_messages
+                    WHERE sender_number = $2 AND platform = $3 AND direction = 'inbound'
+                    ORDER BY id DESC LIMIT 1
+                )
+                """,
+                msg_intent, phone, bridge_name,
+            )
+        except Exception as _e:
+            log.debug("[intent_writeback] %s: %s", phone, _e)
+
     if reply:
         # P17-FIX-2: recruit_gate — recruitment intake bypasses SAFE MODE
+        # Role-based auto-reply: read live from DB (via wa_chat_frontend) so the UI toggle takes effect immediately.
         _recruit_gate = False
-        if not _settings.auto_reply_enabled and _settings.recruitment_autoreply_enabled:
+        try:
+            from modules.wa_chat_frontend import get_effective_auto_reply as _get_ar, _id_role_to_setting_key
+            _role_key = _id_role_to_setting_key(id_role)
+            _auto_reply_on = await _get_ar(_role_key)
+            _recruit_autoreply_on = await _get_ar("recruitment")
+        except Exception:
+            _auto_reply_on = _settings.auto_reply_enabled
+            _recruit_autoreply_on = _settings.recruitment_autoreply_enabled
+
+        if not _auto_reply_on and _recruit_autoreply_on:
             _admin_set = {
                 _settings.admin_meta_number,
                 _settings.admin_bridge1_number,
                 _settings.admin_bridge2_number,
                 *_settings.admin_number_list,
             }
-            if phone not in _admin_set:
-                if _is_recruit_trigger(text):
-                    _recruit_gate = True
-                    log.info("[P17-RECRUIT] [%s] recruit_gate=TRIGGER phone=%s", bridge_name, phone)
-                else:
-                    try:
-                        if await _get_recruit_session(phone):
-                            _recruit_gate = True
-                            log.info("[P17-RECRUIT] [%s] recruit_gate=SESSION phone=%s", bridge_name, phone)
-                    except Exception as _e:
-                        log.debug("[P17-RECRUIT] session check failed %s: %s", phone, _e)
+            if phone not in _admin_set and recruit_decision["autosend"]:
+                _recruit_gate = True
+                log.info(
+                    "[P17-RECRUIT] [%s] recruit_gate=%s phone=%s role=%s",
+                    bridge_name, recruit_decision["reason"], phone, id_role,
+                )
 
-        if _settings.auto_reply_enabled or _recruit_gate:
+        if _auto_reply_on or _recruit_gate:
             # Phase 4.5: advance request phrase guard
             if any(phrase in text.lower() for phrase in _ADVANCE_REQUEST_PHRASES):
                 log.info("[ADVANCE_REQUEST_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
@@ -1364,19 +1437,31 @@ async def process_bridge_inbound(
                         return
 
                 # Send
-                bridge = get_bridge1() if bridge_name == "bridge1" else get_bridge2()
-                sent = await bridge.send(phone, reply)
-                if sent:
+                from modules.outbound import enqueue as enqueue_outbound
+                fallback = None
+                if msg_intent != "recruitment":
+                    fallback = "bridge2" if bridge_name == "bridge1" else "bridge1"
+                qid = await enqueue_outbound(
+                    phone,
+                    reply,
+                    source_bridge=bridge_name,
+                    fallback_channel=fallback,
+                    purpose=f"customer-reply:{msg_intent or 'unknown'}",
+                    idempotency_key=f"{bridge_name}-recruit:{hashlib.sha256(f'{phone}|{text}'.encode()).hexdigest()[:40]}"
+                    if msg_intent == "recruitment" else None,
+                    meta={"customer_reply": True, "intent": msg_intent},
+                )
+                if qid:
                     await _record_reply(phone)
                     await _save_message(bridge_name, phone, reply, "outbound",
                                         identity_role=id_role, identity_confidence=id_conf,
                                         workflow=msg_intent)
-                    log.info("[%s] Replied to %s", bridge_name, phone)
+                    log.info("[%s] Queued reply to %s qid=%s", bridge_name, phone, qid)
                 else:
-                    log.warning("[%s] Send failed to %s", bridge_name, phone)
+                    log.warning("[%s] Reply enqueue failed/deduped for %s", bridge_name, phone)
         else:
             log.warning("SAFE MODE: reply suppressed for %s (%s). Saving draft.", phone, bridge_name)
             await _save_draft(bridge_name, phone, reply, msg_intent)
 
-    if admin_note and _settings.auto_reply_enabled:
+    if admin_note and _settings.internal_notifications_enabled:
         await _notify_admin_bridge(admin_note)

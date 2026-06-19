@@ -149,26 +149,27 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
         await execute(
             """
             UPDATE escort_roster_entries SET
-                mother_vessel   = $2,
-                lighter_vessel  = $3,
-                master_mobile   = $4,
-                escort_name     = $5,
-                escort_mobile   = $6,
-                destination     = $7,
-                start_date      = $8,
-                start_shift     = $9,
-                end_date        = $10,
-                end_shift       = $11,
-                total_shifts    = $12,
-                total_days      = $13,
-                salary          = $14,
-                conveyance      = $15,
-                total           = $16,
-                release_point   = $17,
-                roster_status   = $18,
-                calc_version    = $19,
-                last_synced_at  = NOW(),
-                updated_at      = NOW()
+                mother_vessel       = $2,
+                lighter_vessel      = $3,
+                master_mobile       = $4,
+                escort_name         = $5,
+                escort_mobile       = $6,
+                destination         = $7,
+                start_date          = $8,
+                start_shift         = $9,
+                end_date            = $10,
+                end_shift           = $11,
+                total_shifts        = $12,
+                total_days          = $13,
+                salary              = $14,
+                conveyance          = $15,
+                total               = $16,
+                release_point       = $17,
+                roster_status       = $18,
+                calc_version        = $19,
+                escort_employee_id  = $20,
+                last_synced_at      = NOW(),
+                updated_at          = NOW()
             WHERE program_id = $1
             """,
             program_id,
@@ -190,6 +191,7 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
             prog.get("release_point") or prog.get("release_location"),
             roster_status,
             old_version + 1,
+            prog.get("escort_employee_id"),
         )
         action = "sync_update"
     else:
@@ -200,9 +202,10 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
                 escort_name, escort_mobile, destination,
                 start_date, start_shift, end_date, end_shift,
                 total_shifts, total_days, salary, conveyance, total,
-                release_point, roster_status, calc_version, last_synced_at
+                release_point, roster_status, escort_employee_id,
+                calc_version, last_synced_at
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,1,NOW()
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,1,NOW()
             )
             """,
             program_id,
@@ -223,6 +226,7 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
             pay.get("total"),
             prog.get("release_point") or prog.get("release_location"),
             roster_status,
+            prog.get("escort_employee_id"),
         )
         action = "sync_insert"
 
@@ -730,7 +734,7 @@ async def get_draft_entries(page: int = 1, page_size: int = 50) -> dict:
         SELECT *
         FROM escort_roster_entries
         WHERE roster_status = 'draft'
-        ORDER BY created_at DESC
+        ORDER BY id DESC
         LIMIT $1 OFFSET $2
         """,
         page_size,

@@ -54,28 +54,14 @@ BRIDGE_SOURCES = [
 
 # ── Phone normalization ────────────────────────────────────────────────────────
 
-_BD_LOCAL_RE = re.compile(r"^01[3-9]\d{8}$")
-_BD_FULL_RE  = re.compile(r"^8801[3-9]\d{8}$")
-
-
 def normalize_phone(raw: str) -> Optional[str]:
     """Normalize a raw JID/phone to 8801XXXXXXXXXX (13-digit BD mobile). Returns None if invalid."""
+    from modules.phone_normalizer import normalize_phone as _pn
     if not raw:
         return None
-    # Strip JID suffix (@s.whatsapp.net, @lid, etc.)
-    phone = raw.split("@")[0].split(":")[0].strip()
-    # Keep only digits
-    phone = re.sub(r"[^\d]", "", phone)
-    if not phone:
-        return None
-    # Already canonical: 8801XXXXXXXXXX (13 digits, valid BD mobile)
-    if _BD_FULL_RE.match(phone):
-        return phone
-    # Local BD format: 01XXXXXXXXXX (11 digits) → prepend 880
-    if _BD_LOCAL_RE.match(phone):
-        return "880" + phone
-    # All other formats (881X 12-digit malformed, international, etc.) → reject
-    return None
+    # Strip JID suffix (@s.whatsapp.net, @lid, etc.) before normalizing
+    jid_stripped = raw.split("@")[0].split(":")[0].strip()
+    return _pn(jid_stripped)
 
 
 def _best_name(*names: Optional[str]) -> str:

@@ -38,6 +38,67 @@ class TestIsReleaseIntent:
         assert is_release_intent(text) is False
 
 
+class TestReleaseAuthorization:
+    async def test_employee_release_cannot_finalize(
+        self, test_db_pool, seed_employee, seed_escort_program
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.escort_lifecycle import handle_release_event
+
+        result = await handle_release_event(seed_employee["employee_id"])
+        assert result["status"] == "admin_confirmation_required"
+        async with test_db_pool.acquire() as conn:
+            status = await conn.fetchval(
+                "SELECT status FROM wbom_escort_programs WHERE program_id=$1",
+                seed_escort_program["program_id"],
+            )
+        assert status != "Completed"
+
+    async def test_admin_confirmation_updates_release_state_atomically(
+        self, test_db_pool, seed_employee, seed_escort_program
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.escort_lifecycle import handle_release_event
+
+        result = await handle_release_event(
+            seed_employee["employee_id"],
+            extracted={
+                "end_date": "2026-05-02",
+                "end_shift": "N",
+                "food_bill": "100",
+                "conveyance": "200",
+                "release_point": "Test Port",
+            },
+            source="release-admin-confirm",
+            admin_confirmed=True,
+        )
+        assert result["ok"] is True
+        async with test_db_pool.acquire() as conn:
+            program = await conn.fetchrow(
+                "SELECT status, food_bill, conveyance FROM wbom_escort_programs WHERE program_id=$1",
+                seed_escort_program["program_id"],
+            )
+            attendance = await conn.fetchval(
+                "SELECT COUNT(*) FROM wbom_attendance WHERE employee_id=$1",
+                seed_employee["employee_id"],
+            )
+            draft = await conn.fetchrow(
+                "SELECT * FROM fazle_payment_drafts WHERE escort_program_id=$1",
+                seed_escort_program["program_id"],
+            )
+            roster = await conn.fetchrow(
+                "SELECT * FROM escort_roster_entries WHERE program_id=$1",
+                seed_escort_program["program_id"],
+            )
+        assert program["status"] == "Completed"
+        assert attendance == 2
+        assert draft is not None
+        assert roster is not None
+        assert float(roster["total_days"]) == pytest.approx(2.0)
+
+
 class TestCloseProgram:
     """Test program closure: status update, day_count computation."""
 

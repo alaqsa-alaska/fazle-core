@@ -1,31 +1,32 @@
-"""
-Recruitment AI reply brain.
-
-Builds a focused prompt from approved recruitment KB + recent conversation
-history, then asks the configured Ollama model for a production auto-reply.
-"""
+"""Restricted recruitment AI reply brain."""
 from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 
 from app import llm as ai
-from app.database import fetch_all, fetch_one
 
 log = logging.getLogger("fazle.recruitment_ai")
 
-_CORE_KEYS = (
-    "job",
-    "apply",
-    "fee",
-    "salary",
-    "office",
-    "security",
-    "survey",
-    "escort",
-    "document",
-    "vacancy",
+_RECRUITMENT_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "resources"
+    / "ops"
+    / "recruitment_source_of_truth.txt"
+)
+_SAFE_FALLBACK = "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+_OFFICE_REPLY = (
+    "অফিস ঠিকানা: আগ্রপাড়া, Victoria Gate #1, Khokoner Building, AK Khan Mor, Chittagong। "
+    "অফিস সময় সকাল ১০টা থেকে বিকাল ৫টা। আসার আগে 01958-122322 নম্বরে যোগাযোগ করুন।"
+)
+_CONTACT_REPLY = "সর্বশেষ recruitment WhatsApp/যোগাযোগ নম্বর: 01958-122322।"
+_AGE_REPLY = "সাধারণ বয়সসীমা ১৮–৫৫ বছর।"
+_FEE_PHRASES = (
+    "ভর্তি ফি", "জয়েনিং ফি", "জয়েনিং ফি", "ট্রেনিং ফি", "প্রসেসিং ফি",
+    "আবেদন ফি", "ফর্ম ফি", "joining fee", "training fee", "processing fee",
+    "application fee", "form fee", "ডিপোজিট", "deposit", "টাকা লাগবে", "টাকা লাগে",
 )
 
 _QUESTION_HINTS = (
@@ -48,6 +49,32 @@ def _tokens(text: str) -> set[str]:
     return {t for t in re.split(r"[\s,.;:!?।()\[\]{}<>/\\|\"'`~\-]+", text.lower()) if len(t) >= 2}
 
 
+def _looks_like_fee_question(text: str) -> bool:
+    lower = (text or "").lower()
+    if any(phrase in lower for phrase in _FEE_PHRASES):
+        return True
+    return bool(re.search(r"(?:^|[\s,.;:!?।])(?:ফি|fee)(?:$|[\s,.;:!?।])", lower))
+
+
+def _looks_like_contact_question(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(phrase in lower for phrase in (
+        "যোগাযোগ নম্বর", "কন্টাক্ট নম্বর", "contact number", "whatsapp number",
+        "ফোন নম্বর", "office number", "অফিস নম্বর",
+    ))
+
+
+def _deterministic_fact_reply(text: str) -> str:
+    lower = (text or "").lower()
+    if _looks_like_contact_question(lower):
+        return _CONTACT_REPLY
+    if any(p in lower for p in ("office location", "office address", "অফিস কোথায়", "অফিস কোথায়", "অফিসের ঠিকানা")):
+        return _OFFICE_REPLY
+    if any(p in lower for p in ("বয়সসীমা", "বয়সসীমা", "age limit")):
+        return _AGE_REPLY
+    return ""
+
+
 def looks_like_recruitment_followup(text: str) -> bool:
     lower = (text or "").strip().lower()
     if not lower:
@@ -55,108 +82,59 @@ def looks_like_recruitment_followup(text: str) -> bool:
     return any(hint in lower for hint in _QUESTION_HINTS)
 
 
-async def build_recruitment_kb_context(message: str, limit: int = 10) -> str:
-    """Return compact approved recruitment KB context for the current message."""
-    msg_lower = (message or "").lower()
-    msg_tokens = _tokens(msg_lower)
-    rows: list[dict] = []
+def build_recruitment_source_context(message: str = "") -> str:
+    """Load relevant sections from the single approved recruitment source."""
     try:
-        rows = await fetch_all(
-            """
-            SELECT key, trigger_keywords, reply_text, confidence
-            FROM fazle_knowledge_base
-            WHERE is_active = true
-              AND category IN ('recruitment', 'vessel_duty')
-            ORDER BY confidence DESC NULLS LAST, key ASC
-            """
-        )
-    except Exception as e:
-        log.warning("[recruit_ai] KB load failed: %s", e)
+        full_context = _RECRUITMENT_SOURCE.read_text(encoding="utf-8").strip()
+        message_lower = (message or "").lower()
+        if not _looks_like_fee_question(message_lower):
+            full_context = re.sub(
+                r"\n## ভর্তি ফি / ডিপোজিট প্রশ্নের বাধ্যতামূলক উত্তরনীতি\n.*?(?=\n## |\Z)",
+                "",
+                full_context,
+                flags=re.S,
+            )
 
-    scored: list[tuple[int, dict]] = []
-    for row in rows:
-        keywords = [str(k).lower() for k in (row.get("trigger_keywords") or [])]
-        key = str(row.get("key") or "").lower()
-        reply = str(row.get("reply_text") or "")
-        score = 0
-        if key and any(core in key for core in _CORE_KEYS):
-            score += 2
-        for kw in keywords:
-            if kw and kw in msg_lower:
-                score += 12
-            elif kw and _tokens(kw) & msg_tokens:
-                score += 4
-        if any(core in reply.lower() for core in _CORE_KEYS):
-            score += 1
-        scored.append((score, row))
+        preamble, *raw_sections = re.split(r"(?m)^## ", full_context)
+        sections: list[tuple[str, str]] = []
+        for raw in raw_sections:
+            title, _, body = raw.partition("\n")
+            sections.append((title.strip(), body.strip()))
 
-    picked = [row for score, row in sorted(scored, key=lambda item: item[0], reverse=True) if score > 0][:limit]
-    if len(picked) < 5:
-        seen = {row.get("key") for row in picked}
-        for _score, row in sorted(scored, key=lambda item: item[0], reverse=True):
-            if row.get("key") not in seen:
-                picked.append(row)
-                seen.add(row.get("key"))
-            if len(picked) >= 5:
-                break
+        query_tokens = _tokens(message_lower)
+        scored: list[tuple[int, int, str, str]] = []
+        for idx, (title, body) in enumerate(sections):
+            section_tokens = _tokens(f"{title} {body}")
+            overlap = len(query_tokens & section_tokens)
+            title_overlap = len(query_tokens & _tokens(title))
+            score = overlap + (title_overlap * 4)
+            if title == "উত্তর দেওয়ার সীমা":
+                score += 100
+            if _looks_like_fee_question(message_lower) and "ফি" in title:
+                score += 100
+            if _looks_like_contact_question(message_lower) and title == "অফিস তথ্য":
+                score += 100
+            scored.append((score, -idx, title, body))
 
-    lines: list[str] = []
-    for row in picked[:limit]:
-        key = row.get("key") or "kb"
-        reply = re.sub(r"\s+", " ", str(row.get("reply_text") or "")).strip()
-        if reply:
-            lines.append(f"- {key}: {reply[:420]}")
-    return "\n".join(lines)
+        selected = sorted(scored, reverse=True)[:4]
+        if not query_tokens:
+            selected = [
+                row for row in scored
+                if row[2] in {
+                    "উত্তর দেওয়ার সীমা",
+                    "বর্তমানে নিয়োগ চলমান পদ",
+                    "সাধারণ যোগ্যতা ও সুবিধা",
+                    "আবেদন ও যোগদান",
+                }
+            ]
 
-
-async def get_recent_conversation(phone: str, limit: int = 12) -> str:
-    """Return recent normalized WhatsApp conversation memory, read-only."""
-    try:
-        rows = await fetch_all(
-            """
-            SELECT platform, direction, message_body, received_at
-            FROM wbom_whatsapp_messages
-            WHERE sender_number = $1
-              AND platform IN ('bridge1', 'bridge2', 'meta')
-            ORDER BY received_at DESC
-            LIMIT $2
-            """,
-            phone,
-            limit,
-        )
-    except Exception as e:
-        log.warning("[recruit_ai] history load failed phone=%s: %s", phone, e)
+        parts = [preamble.strip()]
+        for _score, _idx, title, body in sorted(selected, key=lambda row: -row[1]):
+            parts.append(f"## {title}\n{body}")
+        return "\n\n".join(part for part in parts if part).strip()[:4500]
+    except OSError as exc:
+        log.error("[recruit_ai] approved source unavailable: %s", exc)
         return ""
-
-    lines: list[str] = []
-    for row in reversed(rows):
-        direction = "candidate" if row.get("direction") == "inbound" else "fazle"
-        platform = row.get("platform") or "bridge"
-        body = re.sub(r"\s+", " ", str(row.get("message_body") or "")).strip()
-        if body:
-            lines.append(f"{platform}/{direction}: {body[:240]}")
-    return "\n".join(lines)
-
-
-async def get_recruitment_session_context(phone: str) -> str:
-    """Return active/intake session status as context only; qwen decides wording."""
-    try:
-        row = await fetch_one(
-            """
-            SELECT collection_step, funnel_stage, full_name, age, area,
-                   job_preference, experience_years, score_bucket
-            FROM fazle_recruitment_sessions
-            WHERE phone = $1
-            LIMIT 1
-            """,
-            phone,
-        )
-    except Exception:
-        row = None
-    if not row:
-        return "No stored recruitment session yet."
-    parts = [f"{k}={v}" for k, v in row.items() if v not in (None, "")]
-    return "Recruitment session: " + ", ".join(parts)
 
 
 def clean_recruitment_reply(reply: str) -> str:
@@ -180,28 +158,71 @@ def clean_recruitment_reply(reply: str) -> str:
     return text
 
 
+def enforce_recruitment_reply_policy(message: str, reply: str, source_context: str = "") -> str:
+    """Fail closed when a generated reply introduces facts absent from the source."""
+    cleaned = clean_recruitment_reply(reply)
+    if not cleaned:
+        return _SAFE_FALLBACK
+
+    number_re = re.compile(r"[0-9০-৯][0-9০-৯,.\-–+]*")
+    source_numbers = set(number_re.findall(source_context))
+    reply_numbers = set(number_re.findall(cleaned))
+    if not reply_numbers.issubset(source_numbers):
+        log.warning(
+            "[recruit_ai] blocked unsupported numeric facts: %s",
+            sorted(reply_numbers - source_numbers),
+        )
+        return _SAFE_FALLBACK
+
+    # Place-specific hiring claims are especially risky: a model can copy a
+    # location from the user's operational message and invent a vacancy there.
+    # [\u0980-\u09ff]{0,3} absorbs Bangla case-markers (র, ে, য়, তে…) so
+    # inflected forms like "চরপাড়ার" and "ঘাটে" are matched, not just bare stems.
+    place_patterns = re.findall(
+        r"[\w\u0980-\u09ff-]{2,}(?:পাড়া|ঘাট|এলাকা|জেলা|বন্দর)[\u0980-\u09ff]{0,3}",
+        cleaned,
+    )
+    # Strip common inflection suffixes before checking against the source text
+    # so "আগ্রপাড়ায়" in a reply still matches "আগ্রপাড়া" in the source.
+    _INFLECTION_SUFFIXES = ("য়ে", "য়", "তে", "র", "ে", "এ")
+
+    def _place_stem(token: str) -> str:
+        for sfx in _INFLECTION_SUFFIXES:
+            if token.endswith(sfx):
+                return token[: -len(sfx)]
+        return token
+
+    unsupported_places = [
+        p for p in place_patterns
+        if _place_stem(p).lower() not in source_context.lower()
+    ]
+    if unsupported_places:
+        log.warning("[recruit_ai] blocked unsupported location facts: %s", unsupported_places)
+        return _SAFE_FALLBACK
+    return cleaned
+
 async def generate_recruitment_reply(
     *,
     phone: str,
     text: str,
     source: str,
     contact_context: str = "",
+    history: str = "",
 ) -> Optional[str]:
-    kb_context = await build_recruitment_kb_context(text)
-    history = await get_recent_conversation(phone)
-    session_context = await get_recruitment_session_context(phone)
-    full_contact_context = "\n".join(
-        part for part in (f"source={source}", contact_context, session_context) if part
-    )
+    del contact_context
+    deterministic = _deterministic_fact_reply(text)
+    if deterministic:
+        return deterministic
+    kb_context = build_recruitment_source_context(text)
+    if not kb_context:
+        return _SAFE_FALLBACK
     reply = await ai.generate_recruitment_reply(
         user_message=text,
         kb_context=kb_context,
         history=history,
-        contact_context=full_contact_context,
+        contact_context="",
         source=source,
     )
-    reply = clean_recruitment_reply(reply)
-    if not reply:
-        return None
+    reply = enforce_recruitment_reply_policy(text, reply, kb_context)
     log.info("[recruit_ai] reply generated phone=%s source=%s chars=%d", phone, source, len(reply))
     return reply

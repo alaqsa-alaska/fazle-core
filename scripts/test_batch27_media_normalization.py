@@ -33,10 +33,21 @@ async def test_image_ocr_preserves_marker_and_adds_text():
     assert out["meta"]["slip_type"] == "escort_slip"
 
 
-async def test_document_non_image_falls_back_to_placeholder_with_filename():
-    out = await mn.normalize_meta_media_message({"type": "document", "document": {"id": "m3", "mime_type": "application/pdf", "filename": "slip.pdf"}})
-    assert out["text"] == "[document message] slip.pdf"
-    assert out["meta"]["normalized"] is False
+async def test_pdf_document_extracts_text():
+    with patch.object(mn, "_download_meta_media", new=AsyncMock(return_value="/tmp/fake.pdf")), \
+         patch.object(mn, "process_document", new=AsyncMock(return_value={
+             "extracted_text": "candidate CV text",
+             "doc_type": "cv",
+             "confidence_score": 80,
+         })):
+        with patch("os.path.exists", return_value=False):
+            out = await mn.normalize_meta_media_message({
+                "type": "document",
+                "document": {"id": "m3", "mime_type": "application/pdf", "filename": "cv.pdf"},
+            })
+    assert out["text"] == "[document message] candidate CV text"
+    assert out["meta"]["normalized"] is True
+    assert out["meta"]["doc_type"] == "cv"
 
 
 async def test_missing_media_id_stays_placeholder():
@@ -54,8 +65,8 @@ async def main():
     await test_image_ocr_preserves_marker_and_adds_text()
     print("    ok")
 
-    print("[3] non-image document remains placeholder with filename")
-    await test_document_non_image_falls_back_to_placeholder_with_filename()
+    print("[3] PDF document extracts text")
+    await test_pdf_document_extracts_text()
     print("    ok")
 
     print("[4] missing media id stays placeholder")

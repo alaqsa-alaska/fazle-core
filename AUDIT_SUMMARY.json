@@ -1,0 +1,92 @@
+{
+  "audit_date": "2026-06-14T01:30:00Z",
+  "app_location": "/home/azim/core/",
+  "tech_stack": "Python 3 / FastAPI 0.115 / asyncpg / PostgreSQL (Docker) / uvicorn",
+  "runtime": "Python 3 (venv) — run.py → uvicorn app.main:app",
+  "process_manager": "systemd (fazle-core.service)",
+  "web_server": "Nginx → 127.0.0.1:8200",
+  "domain": "fazle.iamazim.com",
+  "database_host": "172.22.0.7:5432 (Docker: ai-postgres)",
+  "database_name": "postgres",
+  "total_tables": 208,
+  "total_inbound_messages": 6553,
+  "total_outbound_messages": 3692,
+  "total_employees": 171,
+  "total_contacts": 576,
+  "total_contact_roles_configured": 41,
+  "total_kb_entries_active": 164,
+  "total_drafts": 1972,
+  "drafts_pending": 51,
+  "total_escort_programs": 316,
+  "total_api_endpoints": 45,
+  "total_frontend_pages": 5,
+  "ollama_models_installed": ["qwen2.5:3b", "qwen3:8b"],
+  "primary_ai_provider": "GitHub Models (openai/gpt-4o-mini)",
+  "secondary_ai_provider": "Groq (llama-3.1-8b-instant)",
+  "auto_reply_enabled": false,
+  "safe_mode_active": true,
+  "recruitment_autoreply_enabled": true,
+  "draft_creation_enabled": true,
+  "bridges": {
+    "bridge1": {"number": "8801958122300", "label": "HR", "port": 8082, "status": "running"},
+    "bridge2": {"number": "8801880446111", "label": "OPS", "port": 8081, "status": "running"},
+    "meta": {"number": "8801958122322", "platform": "WhatsApp Cloud API + Messenger + FB", "status": "configured"}
+  },
+  "media_processor": {
+    "port": 8090,
+    "capabilities": ["whisper_transcription", "tesseract_ocr", "pdf_extraction"],
+    "whisper_model": "small",
+    "auto_trigger_on_inbound": false
+  },
+  "proposed_workflow_stages": 18,
+  "current_workflow_stages_covered": {
+    "stage_1_message_receive": 85,
+    "stage_2_save_raw_message": 65,
+    "stage_3_phone_normalize": 100,
+    "stage_4_bridge_detection": 80,
+    "stage_5_conversation_link": 5,
+    "stage_6_media_detection": 40,
+    "stage_7_media_processing": 20,
+    "stage_8_identity_detection": 65,
+    "stage_9_role_classification": 90,
+    "stage_10_permission_check": 60,
+    "stage_11_intent_detection": 80,
+    "stage_12_role_based_routing": 85,
+    "stage_13_knowledge_source": 40,
+    "stage_14_reply_generation": 80,
+    "stage_15_quality_gate": 60,
+    "stage_16_duplicate_cooldown": 85,
+    "stage_17_admin_review": 75,
+    "stage_18_send_save_skip": 85
+  },
+  "overall_coverage_percent": 66,
+  "total_estimated_effort_days": 46,
+  "fixes_applied": {
+    "date": "2026-06-14",
+    "fix1_social_engine": "DONE — SOCIAL_AUTO_REPLY_SINGLE_ENGINE=true, restarted (PID 337362)",
+    "fix2_message_columns": "DONE — 4 columns added, 10245 rows backfilled, _save_message() updated in app/main.py + bridge_poller, intent_detected written back after routing",
+    "fix3_env_permissions": "DONE — chmod 600 applied; GitHub token rotation still required manually",
+    "fix4_media_pipeline": "DONE — extracted_text now stored for audio (Whisper), image (OCR), document (PyMuPDF) in wbom_whatsapp_messages",
+    "fix5_escort_identity": "DONE — _lookup_escort_roster() added as Step 3.5 in detect_identity(), covers Assigned/Running/confirmed statuses"
+  },
+  "critical_gaps": [
+    "No conversation threading table (wbom_conversations) yet — conversation_key exists but no dedicated table",
+    "GitHub API tokens still need rotation on GitHub.com (chmod 600 applied but tokens were previously world-readable)",
+    "No admin_instructions table (per-contact special rules not implemented)",
+    "NID/personal data leak prevention relies on LLM prompt only — no code filter",
+    "Bridge webhook signature enforcement DISABLED (WEBHOOK_SIGNATURE_ENFORCEMENT=false)"
+  ],
+  "immediate_actions_status": [
+    "✅ Set SOCIAL_AUTO_REPLY_SINGLE_ENGINE=true and restart fazle-core — DONE",
+    "✅ Add conversation_key, receiver_number, intent_detected, extracted_text columns — DONE",
+    "✅ Restrict .env file permissions (chmod 600) — DONE (token rotation still needed)",
+    "✅ Wire extracted_text from media processors into inbound pipeline — DONE",
+    "✅ Add escort roster mobile lookup to identity_brain.detect_identity() — DONE"
+  ],
+  "alerts": [
+    "ALERT: Media processor consuming 31% CPU and 1.5GB RAM continuously — investigate",
+    "DEGRADED: Bridge1 SQLite mtime age > 5200s — HR bridge may be idle or disconnected",
+    "NOTE: 51 pending drafts awaiting admin review",
+    "NOTE: fazle_recruitment_sessions = 0 — no active recruitment sessions despite RECRUITMENT_AUTOREPLY_ENABLED=true"
+  ]
+}

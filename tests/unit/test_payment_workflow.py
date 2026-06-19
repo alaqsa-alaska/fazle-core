@@ -80,6 +80,40 @@ class TestCreateEscortPaymentDraft:
         # basic_salary=9000, daily_rate=9000/30=300, expected=5*300=1500
         assert float(draft["expected_amount"]) == pytest.approx(1500.0)
 
+    async def test_uses_shift_column_and_current_program_month_deductions(
+        self, test_db_pool, seed_employee, seed_escort_program
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.payment_workflow import create_escort_payment_draft
+
+        employee_id = seed_employee["employee_id"]
+        program_id = seed_escort_program["program_id"]
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE wbom_escort_programs
+                   SET end_date=CURRENT_DATE, day_count=2, status='Completed',
+                       food_bill=100, conveyance=200
+                   WHERE program_id=$1""",
+                program_id,
+            )
+            await conn.execute(
+                """INSERT INTO wbom_cash_transactions
+                       (employee_id, program_id, transaction_type, amount, payment_method,
+                        transaction_date, status)
+                   VALUES ($1,$2,'advance',300,'cash',CURRENT_DATE,'Completed')""",
+                employee_id, program_id,
+            )
+
+        result = await create_escort_payment_draft(
+            employee_id=employee_id,
+            escort_program_id=program_id,
+            override_days=2,
+        )
+        assert result["draft_id"]
+        # basic_salary 9000 / 30 * 2 - food 100 - conveyance 200 - advance 300
+        assert result["expected_amount"] == pytest.approx(0.0)
+
     async def test_advances_deducted_from_payment(
         self, test_db_pool, seed_employee, seed_escort_program
     ):
@@ -173,6 +207,24 @@ class TestFinalizePayment:
                 draft_id,
             )
         assert draft["status"] == "sent"
+
+    async def test_finalize_is_idempotent(
+        self, test_db_pool, seed_employee, seed_payment_draft
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.payment_workflow import finalize_payment
+
+        draft_id = seed_payment_draft["id"]
+        await finalize_payment(draft_id, 1500, "cash")
+        second = await finalize_payment(draft_id, 1500, "cash")
+        async with test_db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM wbom_cash_transactions WHERE idempotency_key=$1",
+                f"payment-draft:{draft_id}",
+            )
+        assert second["already_finalized"] is True
+        assert count == 1
 
     async def test_finalize_nonexistent_draft_raises(self, test_db_pool):
         import app.database as db_module
