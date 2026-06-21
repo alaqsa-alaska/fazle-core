@@ -398,7 +398,7 @@ async def job_daily_memory_review() -> dict:
            FROM wbom_whatsapp_messages
            WHERE direction = 'inbound'
              AND sender_number IS NOT NULL
-             AND created_at > NOW() - INTERVAL '24 hours'
+             AND received_at > NOW() - INTERVAL '24 hours'
            LIMIT 50"""
     )
     if not rows:
@@ -417,7 +417,7 @@ async def job_daily_memory_review() -> dict:
             """SELECT message_body, direction
                FROM wbom_whatsapp_messages
                WHERE sender_number = $1
-               ORDER BY created_at DESC
+               ORDER BY received_at DESC
                LIMIT 6""",
             phone,
         )

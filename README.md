@@ -8,7 +8,7 @@ admin review queues, scheduled jobs, and observability in one FastAPI service.
 **Repository:** `git@github.com:arshiyaazim/studious-system.git`
 **Live service:** `fazle-core.service` on port `8200`
 **Current branch:** `backup/vps-core-20260612`
-**Last verified:** 2026-06-13
+**Last verified:** 2026-06-21
 
 ## Current Operating Mode
 
@@ -19,11 +19,11 @@ customer auto-reply system.
 |---|---|---|
 | `AUTO_REPLY_ENABLED` | `false` | General replies and internal `admin_note` delivery are suppressed |
 | `RECRUITMENT_AUTOREPLY_ENABLED` | `true` | Recruitment replies may bypass global safe mode |
-| `AUTO_REPLY_SOURCES` | `bridge1,bridge2` | Meta inbound is persisted but not auto-replied |
+| `AUTO_REPLY_SOURCES` | `bridge1,bridge2,meta` | All three sources route to reply/draft pipeline |
 | `DRAFT_CREATION_ENABLED` | `true` | Suppressed/unsafe replies are stored for review |
 | `OUTBOUND_ENABLED` | `false` | Generic outbound worker is disabled |
 | `PRIMARY_AI_PROVIDER` | `github_models` | General and Chat Lab replies start with GitHub Models |
-| `OLLAMA_REPLY_DISABLED` | `true` | Ollama is not used for customer-facing reply fallback |
+| `OLLAMA_REPLY_DISABLED` | `false` | Ollama may be used as customer-facing reply fallback |
 
 Do not describe this deployment as fully autonomous. Recruitment is the only
 enabled auto-reply exception, and financial/operational actions still require
@@ -31,18 +31,21 @@ human review.
 
 ## Live Status
 
-Verified on 2026-06-13:
+Verified on 2026-06-21:
 
 - `fazle-core`, `nginx`, and `fail2ban` are active.
-- `/health` returns HTTP 200 and reports PostgreSQL, bridges, outbound queue,
-  disk, memory, Ollama, GitHub Models, and Groq as healthy.
+- `/health` returns HTTP 200 overall; PostgreSQL, bridges, outbound queue,
+  disk, memory, and Groq are healthy.
 - Bridge 1 and Bridge 2 heartbeats are current.
-- Meta Cloud API heartbeat is healthy; it was about two hours old at audit time.
-- 14 Docker infrastructure containers are running.
-- Disk usage is about 45%; approximately 10 GiB RAM is available.
-- Swap use is about 125 MiB of 3 GiB.
-- `location-where` is online, but currently shows repeated `401` requests,
-  9 lifetime restarts, and a sampled CPU value of 200%.
+- **Meta Cloud API webhook is stale** — last ingest 2026-06-15; manual
+  re-registration at Meta Developer Portal is required (see ARCHITECTURE.md).
+- **GitHub Models primary token is returning Unauthorized** — Groq is the
+  active fallback. Token requires manual rotation or model-name fix (see ARCHITECTURE.md).
+- 10 Docker infrastructure containers are running (loki, promtail, ollama, qdrant,
+  postgres, redis, minio, prometheus, cadvisor, node-exporter).
+- Disk usage is about 52%; approximately 12.2 GiB RAM is available.
+- `locationwhere-backend` (PM2) is online at port 8310; 74 lifetime restarts
+  recorded — monitor for 401 errors and CPU spikes.
 
 See [audit-report-2026-06-10.md](audit-report-2026-06-10.md) for the full
 current-state review.
@@ -87,8 +90,8 @@ Free-form intent classification uses:
 
 ```text
 Groq llama-3.1-8b-instant
-  -> GitHub Models openai/gpt-4o-mini
-  -> local Ollama qwen2.5:3b
+  -> GitHub Models openai/gpt-4.1   (currently Unauthorized — see ARCHITECTURE.md)
+  -> local Ollama qwen3:8b
   -> unknown
 ```
 

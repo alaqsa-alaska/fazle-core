@@ -272,10 +272,10 @@ def _fetch_new_messages(
         con = sqlite3.connect(f"file:{messages_db}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
         con.row_factory = sqlite3.Row
 
-        # Convert aware datetime to naive UTC string for SQLite comparison
-        # SQLite timestamps stored as '2026-04-23 06:44:29+02:00' (ISO with tz)
-        # Use datetime cast in SQLite to handle timezone-aware comparison
-        ts_iso = since_ts.isoformat()
+        # Normalize cursor boundary to UTC so bridge-local timezone offsets
+        # cannot cause false "older/newer" comparisons in SQLite filtering.
+        ts_utc = since_ts.astimezone(timezone.utc).replace(microsecond=0)
+        ts_iso = ts_utc.isoformat(sep=" ")
 
         rows = con.execute(
             """

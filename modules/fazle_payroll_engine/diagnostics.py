@@ -190,7 +190,8 @@ async def _run_health_checks() -> None:
         last_hour = int(r["last_hour_count"] or 0)
         obs.gauge("fpe_bridge_gap_minutes",      gap_min,          labels={"source": source})
         obs.gauge("fpe_bridge_last_hour_count",  float(last_hour), labels={"source": source})
-        if gap_min > _GAP_ALERT_MINS:
+        # Alert only when a bridge is truly idle for the full recent window.
+        if gap_min > _GAP_ALERT_MINS and last_hour == 0:
             log.warning(
                 "[fpe.health] ALERT ingestion_gap source=%s gap_minutes=%.1f last_hour=%d",
                 source, gap_min, last_hour,
