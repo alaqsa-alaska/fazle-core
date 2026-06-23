@@ -383,8 +383,10 @@ _TRANSPORT_RATES: list[tuple[list[str], int]] = [
     (["dhaka", "narayanganj", "bhairab", "ashuganj", "kaliganj",
        "rupganj", "rupshi", "siddhirganj", "shah cement", "mir cement",
        "shah_cement", "mir_cement"], 600),
-    # ₺700 group — Faridpur / Mongla
-    (["faridpur", "mongla"], 700),
+    # ₺700 — Faridpur
+    (["faridpur"], 700),
+    # ₺800 — Mongla (PAY-03; management decision 2026-06-23)
+    (["mongla"], 800),
     # ₺900 group — Barishal / coastal / river routes
     (["barishal", "barisal", "bhola", "jhalokathi", "jhalokati",
        "nagarbari", "aricha"], 900),
