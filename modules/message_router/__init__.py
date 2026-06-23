@@ -445,7 +445,7 @@ async def process_message(
     # Phase 4 — Hybrid RAG enrichment: enrich general queries with KB context
     try:
         from modules.rag import search as _rag_search
-        _rag_hits = await _rag_search(text, k=3)
+        _rag_hits = await _rag_search(text, k=3, role=role_str)
         if _rag_hits:
             _rag_lines = [
                 f"- {h.get('title', '')}: {(h.get('text') or '').strip()[:300]}"

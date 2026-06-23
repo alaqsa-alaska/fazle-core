@@ -122,6 +122,22 @@ These are not decisions — they are unresolved schema questions that require a 
 
 ---
 
+## Phase 3 — Visibility Engine Authorization (Session 6 — 2026-06-23)
+
+**Authorization type:** Production code change — per-file authorization required (GOV-03)
+
+| ID | File / Change | Authorization | Date |
+|---|---|---|---|
+| P3-01 | `modules/rag/__init__.py` | Add `role: str = "candidate"` parameter to `search()`. Apply `allowed_roles` filter at BM25 and Qdrant query time. Backward-compatible default. | 2026-06-23 |
+| P3-02 | `modules/recruitment_ai/__init__.py` | Update `_safe_rag_chunks()` call site to pass `role="candidate"` explicitly | 2026-06-23 |
+| P3-03 | `modules/message_router/__init__.py` | Update Step 15 `rag.search()` call to pass resolved `role_str` | 2026-06-23 |
+| P3-04 | `fazle_knowledge_base` table (DB) | Tag all active KB rows with `allowed_roles` via existing metadata JSON field — no DDL change required | 2026-06-23 |
+
+**Scope:** Role-aware KB filtering in RAG path only. No changes to prompt builders, draft logic, identity brain, or outbound systems.
+**Rollback:** Set `role="candidate"` at all call sites → current behavior restored immediately.
+
+---
+
 ## Change Log
 
 | Date | Change | Authorized By |

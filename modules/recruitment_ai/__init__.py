@@ -205,7 +205,7 @@ async def _safe_rag_chunks(text: str, k: int = 5) -> tuple[str, list[str]]:
     """Return (formatted_chunks, source_list) for prompt enrichment. Never raises."""
     try:
         from modules.rag import search as rag_search
-        chunks = await rag_search(text, k=k)
+        chunks = await rag_search(text, k=k, role="candidate")
         if not chunks:
             return "", []
         parts: list[str] = []
