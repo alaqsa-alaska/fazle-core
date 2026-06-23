@@ -152,19 +152,36 @@ Stored in `fazle_recruitment_sessions.score_bucket`.
 
 ---
 
-## `fazle_recruitment_sessions` Table
+## `fazle_recruitment_sessions` — Full Schema (Wave-4)
 
-Key columns:
+**Source:** `db/migrations/003b_recruitment_sessions_fix.sql` (supersedes 003)
+**UNIQUE index:** `(phone) WHERE funnel_stage IN ('collecting', 'new')` — one active session per phone
 
-| Column | Notes |
-|---|---|
-| `phone` | Canonical 8801XXXXXXXXX — sender phone |
-| `collection_step` | Current step (index in `COLLECTION_STEPS`) |
-| `funnel_stage` | `open` → `collecting` → `complete` |
-| `source_message` | The message that triggered the session |
-| `source_bridge` | Bridge where the session was initiated |
-| `score` | 0–100 numeric score |
-| `score_bucket` | `hot`, `warm`, or `cold` |
+| Column | Type | Nullable | Default | Notes |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | NOT NULL | auto | PK |
+| `phone` | TEXT | NOT NULL | — | Sender phone (canonical 8801XXXXXXXXX) |
+| `source_bridge` | TEXT | NOT NULL | `'bridge1'` | Bridge where session was initiated |
+| `source_message` | TEXT | — | NULL | The text message that triggered the session |
+| `collection_step` | TEXT | NOT NULL | `'name'` | Current step: `name\|age\|area\|job_preference\|experience\|phone_confirm` |
+| `funnel_stage` | TEXT | NOT NULL | `'collecting'` | Session lifecycle: `collecting\|new\|scored\|abandoned` |
+| `full_name` | TEXT | — | NULL | Collected at `name` step |
+| `age` | INTEGER | — | NULL | Collected at `age` step; validated 18–55 (BR-25) |
+| `area` | TEXT | — | NULL | Collected at `area` step |
+| `job_preference` | TEXT | — | NULL | Collected at `job_preference` step; normalized to `VALID_POSITIONS` |
+| `experience_years` | INTEGER | — | 0 | Collected at `experience` step |
+| `confirmed_phone` | TEXT | — | NULL | Collected at `phone_confirm` step |
+| `score` | INTEGER | — | NULL | 0–100; computed after `phone_confirm` completes |
+| `score_bucket` | TEXT | — | NULL | `hot\|warm\|cold` (set with `score`) |
+| `candidate_id` | INTEGER | — | NULL | FK → `wbom_candidates(candidate_id)` ON DELETE SET NULL |
+| `created_at` | TIMESTAMPTZ | NOT NULL | NOW() | Session creation time |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | NOW() | Last step advance time |
+
+**Note:** Migration 003 created this table with incorrect column names (it had `step` instead of `collection_step`, `name` instead of `full_name`, etc.). Migration 003b dropped and recreated it with the correct schema. The current authoritative schema is from 003b.
+
+**Session TTL:** `SESSION_TTL = timedelta(hours=24)` — sessions in `collecting` or `new` stage older than 24 hours are treated as expired by `get_active_session()`.
+
+**Indexes:** phone (btree), funnel_stage (btree), unique partial on phone where active.
 
 ---
 
