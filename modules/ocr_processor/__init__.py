@@ -328,7 +328,12 @@ def _classify_slip(text: str) -> str:
     t = text.lower()
     escort_kw = ["escort", "এস্কর্ট", "vessel", "ভেসেল", "mother vessel", "lighter",
                  "assignment", "নিয়োগ", "duty slip", "ডিউটি স্লিপ", "escort slip"]
-    release_kw = ["release", "রিলিজ", "completion", "সমাপ্ত", "discharge", "cleared"]
+    # Release slips always contain escort vocabulary (vessel, lighter, escort name),
+    # so release_kw must be checked FIRST and wins on tie.
+    release_kw = ["release", "রিলিজ", "completion", "সমাপ্ত", "discharge", "cleared",
+                  "release slip", "রিলিজ স্লিপ", "ছাড়পত্র", "food bill", "খাবার বিল",
+                  "conveyance", "যাতায়াত", "duty days", "মোট দিন", "days:", "end of duty",
+                  "duty end", "total days", "settlement", "clearance", "relieved"]
     payment_kw = ["payment", "পেমেন্ট", "salary", "বেতন", "advance", "অ্যাডভান্স",
                   "paid", "পরিশোধ", "bkash", "বিকাশ", "nagad", "নগদ", "amount", "টাকা"]
 
@@ -339,10 +344,13 @@ def _classify_slip(text: str) -> str:
     best = max(escort_score, release_score, payment_score)
     if best == 0:
         return "unknown"
-    if escort_score == best:
-        return "escort_slip"
+    # Release checked before escort: release slips always contain escort keywords
+    # (vessel, lighter, escort name), so they tie or score lower on escort_kw
+    # even though they are genuine release documents.
     if release_score == best:
         return "release_slip"
+    if escort_score == best:
+        return "escort_slip"
     return "payment_slip"
 
 

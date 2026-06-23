@@ -40,7 +40,7 @@ from modules.knowledge_base import get_reply as kb_get_reply
 from modules.recruitment_flow import (
     recruitment_eligibility,
 )
-from modules.recruitment_ai import generate_recruitment_reply
+from modules.conversation_layer import generate_recruitment_reply
 from modules.admin_commands import is_admin_command, process_admin_command, list_payment_drafts
 from modules.admin_commands.nl_router import is_nl_admin_query, process_nl_admin_query
 from modules.payment_workflow import is_advance_request

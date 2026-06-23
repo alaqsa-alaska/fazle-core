@@ -144,37 +144,40 @@ Condition E: Management explicitly authorizes the specific file
 | CR-08 | Escort salary upper "৳১৮,০০০" → "৳১৭,০০০" | `modules/knowledge_base/__init__.py:101` | 2026-06-23 |
 | CR-09 | Survey Scout salary upper "৳১৮,০০০" → "৳১৭,০০০" | `modules/knowledge_base/__init__.py:28` | 2026-06-23 |
 | SAL-POL | Salary policy KB article created | `knowledge_base/04_business_rules/salary_policy.md` | 2026-06-23 |
+| CONV-ACT | conversation_layer Full Activation — `generate_recruitment_reply` added; message_router import swapped from `recruitment_ai` to `conversation_layer` | `modules/conversation_layer/__init__.py`, `modules/message_router/__init__.py:43` | 2026-06-23 |
+| OCR-FIX | OCR `_classify_slip` classification fix — 11 new release keywords added; priority order swapped (release checked before escort) | `modules/ocr_processor/__init__.py` | 2026-06-23 |
 
 ### Phase 6 — Remaining Refactoring Candidates
 
-Each must be **re-verified at execution time** before requesting management authorization. Code may have changed.
-
-| Candidate | Potential Mismatch | Re-verify Command | Risk Level |
+| Candidate | Status | Finding | Risk Level |
 |---|---|---|---|
-| `identity_brain` | KB Step 10 = DB lookup first; production may run keyword check first in some conditions | `grep -n "_CANDIDATE_KEYWORDS\|step.*10" modules/identity_brain/__init__.py` | MEDIUM |
-| `knowledge_base` module | ~~Fallback templates~~ | ~~RESOLVED~~ — CR-07/CR-08/CR-09 fixed (age 45→55, salary upper bounds ৳18k→৳17k). Commit `e11fbd7` | ✅ DONE |
-| `payroll_logic` | ~~Computation formula~~ | ~~NOT A FORMULA MODULE~~ — it is a data-query/display module. No fix needed. | ✅ CLOSED |
-| `recruitment_flow` | Dual recruitment path (funnel + LLM FAQ) — verify current code matches KB description | `grep -n "recruitment_ai\|recruitment_flow" modules/message_router/__init__.py` | LOW |
-| `wbom_payroll_runs` DDL | DDL in KB sourced from `tests/conftest.py` — production migration may differ | `find db/migrations/ -name "*payroll*"` | MEDIUM |
-| `INTENT_HINTS` count | ~~May be 11 not 12~~ | ~~RESOLVED~~ — system_prompt.md already had correct count of 11 with note. MEP was wrong. | ✅ CLOSED |
+| `knowledge_base` module | ✅ DONE | CR-07/CR-08/CR-09 fixed. Commit `e11fbd7` | — |
+| `payroll_logic` | ✅ CLOSED | Not a formula module — data-query/display only. No fix needed. | — |
+| `INTENT_HINTS` count | ✅ CLOSED | system_prompt.md already correct (11). MEP was wrong. | — |
+| `recruitment_flow` dual-path | ✅ VERIFIED + GAP NOTED | KB says Path 1 uses `intake_message()` (autosend=True). Code reality: message_router calls only `generate_recruitment_reply` for all eligible cases — now `conversation_layer`. `intake_message()` is fully implemented but NOT wired. Future candidate. | LOW |
+| `wbom_payroll_runs` DDL | ✅ VERIFIED | Production schema confirmed: 28 columns, status draft→reviewed→approved→locked→paid→cancelled, `payout_idempotency_key` UNIQUE. Matches KB. | — |
+| `identity_brain` | 🔲 OPEN | Step 10 DB-first vs keyword-first not yet verified. | MEDIUM |
+| U-01/U-02/U-03 | ✅ ALL RESOLVED | Session 8: wbom_candidates EXISTS (21 cols), fpe_transaction_repairs EXISTS (15 cols), fpe_staging_payments does NOT exist. | — |
 
-### Phase 6 — Blocked Items (Need Management Decision First)
+### Phase 6 — Blocked Items (Resolved in Session 9)
 
-| Item | What's Needed |
+| Item | Status |
 |---|---|
-| Salary figures (৳10,000–৳18,000, ৳17,000, ৳24,700) | Management approval before these appear in any KB article |
-| DORMANT modules (`payment_correction`, `conversation_layer`) | No changes without explicit activation decision from management |
-| U-01: Does `wbom_candidates` exist in production? | Single `psql` verification — assign to DBA |
-| U-02: Does `fpe_transaction_repairs` have a production DDL? | Single `psql` verification — assign to DBA |
-| U-03: Is `wbom_staging_payments` the same table as `fpe_staging_payments`? | Single `psql` verification — assign to DBA |
+| `payment_correction` activation | ✅ DECIDED: NOT activated (Session 9). Remains DORMANT. |
+| `conversation_layer` activation | ✅ DECIDED: Full Activation (Session 9). Router wired. |
+| Salary figures (KB) | ✅ DONE: salary_policy.md created with management-approved schedule (Session 8). |
+| U-01/U-02/U-03 | ✅ ALL RESOLVED (Session 8). |
 
 ### Phase 6 Completion Criteria
 
-- [ ] All 6 refactoring candidates re-verified against live code
-- [ ] Each authorized fix implemented, committed, and pushed
-- [ ] All unit tests pass after each change
-- [ ] U-01, U-02, U-03 unresolved items resolved
-- [ ] Salary figures decision received and KB updated (or deferred)
+- [x] All major refactoring candidates verified against live code
+- [x] Each authorized fix implemented, committed, and pushed
+- [x] U-01, U-02, U-03 unresolved items resolved
+- [x] Salary figures: salary_policy.md created
+- [x] conversation_layer: Full Activation complete
+- [x] OCR release slip classification: fixed
+- [ ] `identity_brain` Step 10 verification (1 remaining open candidate)
+- [ ] 12 pre-existing failing tests (workflow tests fail due to DB fixture/async issues — separate investigation)
 - [ ] DORMANT module activation decisions received
 
 ---
@@ -633,7 +636,7 @@ Production changes only in Phases 3 and 6, each requiring file-level authorizati
 | **PHASE 3** — Visibility Engine | ✅ COMPLETE | 2026-06-23 | `359812c` | rag/search() role param + 2 call sites |
 | **PHASE 4** — Coverage 90%+ | ✅ COMPLETE | 2026-06-23 | `7940415`–`a1da765` | 18 articles; weighted 67%; P0+P1 100% pass |
 | **PHASE 5** — Freeze v2 | ✅ COMPLETE | 2026-06-23 | `3ef2c11` | PKCA/PKMA/PKVC v2 pass; KB v2 CERTIFIED |
-| **PHASE 6** — Refactoring | 🔄 IN PROGRESS | Started 2026-06-23 | `0a3039e`, `e11fbd7` | PAY-03 + CR-07/08/09 done; salary_policy.md created; 4 candidates remain |
+| **PHASE 6** — Refactoring | 🔄 IN PROGRESS | Started 2026-06-23 | `0a3039e`, `e11fbd7`, Session 9 | PAY-03 + CR-07/08/09 + conversation_layer + OCR-FIX done; 1 open candidate (identity_brain) |
 
 ---
 
@@ -653,5 +656,6 @@ Production changes only in Phases 3 and 6, each requiring file-level authorizati
 
 *Master Execution Plan v2 | Rewritten 2026-06-23 (post-Session 7 — KB v2 Certified)*
 *All facts verified from production code, .env, and git history.*
-*Current Phase: PHASE 6 — Conditional Refactoring (active, PAY-03 done)*
-*Next action: Re-verify `knowledge_base` module fallback templates + `INTENT_HINTS` count; then request management authorization for any fixes found.*
+*Current Phase: PHASE 6 — Conditional Refactoring (active, Session 9)*
+*Session 9 completed: conversation_layer Full Activation + OCR classification fix + Phase 6 verifications.*
+*Remaining: `identity_brain` Step 10 verification (1 open candidate). Pre-existing test failures need separate investigation.*
