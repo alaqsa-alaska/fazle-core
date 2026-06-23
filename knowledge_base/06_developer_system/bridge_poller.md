@@ -1,8 +1,8 @@
 # Bridge Poller
 **KB Article ID:** DEV-06-BRIDGE-POLLER
-**Source:** `modules/bridge_poller/__init__.py` (read 2026-06-23)
+**Source:** `modules/bridge_poller/__init__.py` (read 2026-06-23; ESX-WIRE update 2026-06-23 Session 10; routing update 2026-06-23 Session 11)
 **Visibility:** Developer only
-**Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+**Certified:** 2026-06-23 (Wave-4, W4-AUTH); updated Session 10/11
 
 ---
 
@@ -120,6 +120,103 @@ Images outside these bounds are skipped with a logged reason (`unsupported_ext`,
 
 ---
 
+## Image OCR Pipeline (ESX-WIRE — Session 10)
+
+**Authorization:** Session 10, ESX-WIRE (management_decisions.md)
+
+Eligible images enter a two-step pipeline:
+
+```
+Eligible image file
+    ↓
+STEP 1 — classify_from_context(text, media_type)
+    Lightweight: checks surrounding text for slip signals.
+    Result: "probable_slip" | other
+    ↓ (probable_slip only)
+STEP 2 — escort_slip_extractor.extract_escort_slip(file_path, source_label)
+    3-pass OCR merge (media-processor + tesseract CLI + ImageMagick-preprocessed)
+    Returns: EscortSlipResult (TypedDict)
+    ↓
+completion_date is not None?
+    ├── YES → TWO-DATE RULE: supervisor stamped second date → Release Slip
+    │       Translate EscortSlipResult → compat dict
+    │       → escort_lifecycle.handle_ocr_release_slip(compat, source, phone)
+    │       → Admin notified via bridge2 admin number
+    │       → escort_reply sent back to sender
+    │
+    ├── NO (doc_type==unknown OR conf_pct < 10) → Unknown document
+    │       If sender has active escort program → notify admin, ask for clearer photo
+    │       If no active program → skip (continue)
+    │
+    └── NO (assignment slip, not release) → use raw_ocr_text for normal routing
+```
+
+### EscortSlipResult → compat dict translation
+
+`handle_ocr_release_slip()` expects a specific dict shape. The translation layer:
+
+| EscortSlipResult field | compat dict key | Notes |
+|---|---|---|
+| `escort_name` | `employee_name` | |
+| `lighter_vessel` or `mother_vessel` | `vessel` | lighter preferred |
+| `completion_date` | `date` | the release date (second date) |
+| `release_place` | `location` | |
+| `confidence` × 100 | `confidence_score` | 0–100 int |
+| `raw_ocr_text` | `raw_text` | |
+| `master_mobile` | `master_mobile` | extra field |
+| `start_date` | `start_date` | extra field |
+| hardcoded `"release_slip"` | `slip_type` | **required** — function returns None if missing |
+
+### TWO-DATE RULE (critical)
+
+The physical escort slip is **identical** for assignment and release. Only the presence of a second (completion) date distinguishes them:
+- ONE date (`completion_date is None`) → assignment slip → ongoing duty
+- TWO dates (`completion_date is not None`) → supervisor stamped release → duty completed
+
+This is a structural detector — no keyword matching needed.
+
+### Escort reply text (bangla) on successful release
+
+- High confidence, no missing fields: `"✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"`
+- Missing fields or conf < 60%: `"✅ আপনার রিলিজ স্লিপ পাওয়া গেছে। কিছু তথ্য স্পষ্ট নয়। অ্যাডমিন যাচাই করছেন…"`
+
+### Save behavior
+
+`extract_escort_slip()` saves to `escort_slip_extractions` table automatically (default: `save_to_db=True`).
+
+---
+
+## Social Daemon Routing (SOCIAL_AUTO_REPLY_SINGLE_ENGINE)
+
+**Controlled by:** `os.getenv("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "true")` — read per-call, not cached.
+
+**Current production setting (Session 11):** `true`
+
+When `true` and social daemon heartbeat is fresh (< 300 s):
+
+```
+Inbound DM
+    ↓
+social_auto_reply.ingest_social_event(platform=bridge_name, ...)
+    ↓ saved to social_inbox_events
+intent classification (classify_message)
+    ├── escalation_intent → status='needs_admin'
+    ├── NOT recruiting_intent → status='ignored' (NO reply sent)
+    └── recruiting_intent → proceeds to social daemon reply pipeline
+    ↓
+continue   ← legacy router SKIPPED for this message
+```
+
+When `true` but social daemon heartbeat is STALE (> 300 s):
+- Logs error: `"[social] daemon heartbeat stale >300s — falling through to legacy router"`
+- Falls through to `process_bridge_inbound()` (legacy path, full intent routing)
+
+When `false`:
+- Skips social daemon entirely
+- Goes directly to `process_bridge_inbound()` for all messages
+
+---
+
 ## Outgoing Message Scan — `[RELEASE CONFIRMED]`
 
 A second scan runs on outgoing messages (`is_from_me = 1`) to detect admin `[RELEASE CONFIRMED]` messages. When found, `escort_lifecycle.handle_admin_release_confirmation()` is called to close the escort program and create attendance + settlement records.
@@ -169,9 +266,19 @@ wbom_whatsapp_messages INSERT (ALWAYS for DMs)
     ↓
 contact_sync.upsert_contact_from_message()
     ↓
-message_router.process_message()
+Is message an image? (eligible OCR file)
+    ├── YES → ESX-WIRE image path (see "Image OCR Pipeline" section above)
+    │          classify_from_context() → extract_escort_slip() → handle_ocr_release_slip()
+    │          result text set; falls through to routing below
+    │
+    └── NO → text message, proceed as-is
     ↓
-result → draft creation or auto-send via outbound queue
+SOCIAL_AUTO_REPLY_SINGLE_ENGINE enabled AND social daemon healthy?
+    ├── YES → ingest_social_event() → social daemon handles reply → SKIP legacy path
+    │
+    └── NO → process_bridge_inbound() (legacy message_router path)
+                ↓
+            result → draft creation or auto-send via outbound queue
 ```
 
 ---
