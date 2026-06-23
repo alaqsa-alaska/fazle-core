@@ -106,6 +106,14 @@ These are not decisions — they are unresolved schema questions that require a 
 
 ---
 
+## Wave-3 KB Enrichment Authorization (Session 5 — 2026-06-23)
+
+| ID | Authorization | Scope | Date |
+|---|---|---|---|
+| W3-AUTH | Wave-3 Phase 1 KB Enrichment authorized | KB-only — NO production code changes. Covers TASK 1-B (system_prompt.md), TASK 1-D (workflow_engine.md), TASK 1-E (escort_roster_system.md), TASK 1-F (runtime_gateway_flags.md), TASK 1-P2-A (visibility_rules.md) | 2026-06-23 |
+
+---
+
 ## Change Log
 
 | Date | Change | Authorized By |
@@ -113,3 +121,4 @@ These are not decisions — they are unresolved schema questions that require a 
 | 2026-06-22 | All entries above created from Session 1 governance decisions | Management |
 | 2026-06-23 | Phase 4 authorization entries added (P4-01 through P4-04) | Management |
 | 2026-06-23 | Conflict resolutions CR-01 through CR-06 added; all implemented same session | Management |
+| 2026-06-23 | Wave-3 Phase 1 KB enrichment authorized (W3-AUTH); execution begins TASK 1-B | Management |
