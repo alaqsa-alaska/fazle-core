@@ -114,3 +114,95 @@ Document the lifecycle of a payment/advance draft and when it expires.
 
 **Source Module:** `modules/payment_workflow`
 **PKCA Report:** 09_state_machine_coverage_report.md (SM-03)
+
+---
+
+## Management-Approved Rate Schedule
+
+**Authority:** `management_decisions.md` — these rates are policy. Where code differs, the gap is documented below; do not resolve silently.
+**Management Authority:** All rates approved 2026-06-22.
+
+### PAY-01 — Escort Duty Daily Rate
+
+**Decision:** Escort payment formula = `12,000 ÷ 30 × duty_days` = **৳400/day**
+
+| Constant | Module | Value |
+|---|---|---|
+| `DEFAULT_DAILY_RATE` | `modules/payment_workflow/__init__.py` | `400` |
+| `DEFAULT_PER_PROGRAM_RATE` | `modules/payroll/__init__.py` | `400.0` |
+
+Both constants were updated as part of CR-05 conflict resolution (2026-06-23). The formula applies to all escort duty payment calculations.
+
+**Gross formula:** `duty_days × (basic_salary / 30)`, fallback to `duty_days × DEFAULT_DAILY_RATE` if employee has no basic_salary set.
+
+---
+
+### PAY-02 — Formula Unification
+
+**Decision:** Payroll and escort payment must use the same daily rate formula. No separate calculation between escort path and payroll batch path.
+
+**Implementation status:** Achieved via CR-05 — both `payment_workflow.DEFAULT_DAILY_RATE` and `payroll.DEFAULT_PER_PROGRAM_RATE` set to 400. Values are identical.
+
+---
+
+### PAY-03 — Mongla Transport Rate
+
+**Decision:** Mongla transport allowance = **৳800 per assignment** (fixed, not variable)
+
+**Production code status — gap exists:** `modules/escort_lifecycle/__init__.py` `_TRANSPORT_RATES` table groups Mongla with Faridpur at **৳700**. The code comment says "management-approved rates" but was updated 2026-05-29, before this PAY-03 decision (2026-06-22).
+
+| Location | Management Decision | Code Value | Status |
+|---|---|---|---|
+| Mongla | ৳800 | ৳700 (grouped with Faridpur) | **GAP — code must be updated** |
+
+**Required code change (NOT yet authorized under GOV-03):** Mongla must be split out of the Faridpur/Mongla group and set to ৳800 per assignment. Separate production authorization required.
+
+Additional note: the `escort_calculation_config` DB table may hold different rates again (code comment: "e.g. Mongla ৳1500 vs code ৳1000"). That table is not currently used for draft calculation — code uses `_TRANSPORT_RATES` hardcoded table only.
+
+---
+
+### PAY-04 — Food Cost Rate
+
+**Decision:** Food cost = **৳150/day**
+
+**Production code:** `modules/escort_lifecycle/__init__.py` — `food_est = (duty_days * 150)` — **confirmed matching** the management decision.
+
+The ৳150/day food estimate appears in payment draft generation as a pre-confirmation estimate. The actual food bill is parsed from the `food_bill` field in the `[RELEASE CONFIRMED]` admin message and stored in `wbom_escort_programs.food_bill`.
+
+---
+
+### CR-05 — Daily Rate Conflict Resolution
+
+**Conflict (Three-Way):** Three values existed for the escort daily rate:
+1. ৳800/day — hardcoded in an older code path
+2. ৳1,200/day — hardcoded in another code path
+3. ৳400/day (`12,000 ÷ 30`) — PAY-01 management formula
+
+**Resolution (2026-06-23):** PAY-01 formula confirmed. Both constants unified to 400:
+- `payroll.DEFAULT_PER_PROGRAM_RATE = 400.0`
+- `payment_workflow.DEFAULT_DAILY_RATE = 400`
+
+**Source files updated:** `modules/payroll/__init__.py`, `modules/payment_workflow/__init__.py`
+
+---
+
+### Full Rate Reference
+
+| Rate | Management Decision | Code Status |
+|---|---|---|
+| Escort daily rate | ৳400/day (12,000 ÷ 30) | ✅ Matches — both constants = 400 (CR-05) |
+| Formula unification | Single rate for escort + payroll | ✅ Achieved — same value 400 in both modules |
+| Mongla transport | ৳800 per assignment | ⚠️ Gap — code has ৳700 (grouped with Faridpur) |
+| Food cost | ৳150/day | ✅ Matches — `duty_days × 150` in escort_lifecycle |
+
+**All transport rates in production code** (`_TRANSPORT_RATES`, `modules/escort_lifecycle/__init__.py`, last updated 2026-05-29):
+
+| Destination Group | Code Rate | Management Override |
+|---|---|---|
+| Dhaka / Narayanganj area (13 keywords) | ৳600 | None |
+| Faridpur / Mongla | ৳700 | PAY-03: Mongla → ৳800 (gap) |
+| Barishal / coastal / river routes | ৳900 | None |
+| Noapara / Jessore / Khulna | ৳1,000 | None |
+| Default (unmatched location) | ৳600 | None |
+
+**Wave:** Wave-4, W4-AUTH (2026-06-23)
