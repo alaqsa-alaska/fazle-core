@@ -309,6 +309,31 @@ FK: `final_transaction_id` → `wbom_cash_transactions.transaction_id`.
 
 ---
 
+## Session 11 — Production Full Activation (2026-06-23)
+
+### Management Authorization (Session 11)
+
+User instruction: "start now. execute all. one by one." — blanket authorization for all production activation steps listed below. Each flag authorized individually.
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S11-01 | `PRIMARY_AI_PROVIDER=groq` | GitHub Models rate-limited (429 Too Many Requests). Switch primary to Groq (llama-3.1-8b-instant, confirmed at 135ms). GitHub Models remains fallback. | 2026-06-23 |
+| S11-02 | `AUTO_REPLY_ENABLED=true` | Activate live WhatsApp auto-reply. System will send AI-generated responses to all inbound messages on bridge1, bridge2. `DRAFT_QUALITY_GATE=true` remains — replies go through quality gate before sending. | 2026-06-23 |
+| S11-03 | `SOCIAL_AUTO_REPLY_SINGLE_ENGINE=true` | Route inbound bridge messages through social daemon (system_agent port 8300). Health verified before enabling. | 2026-06-23 |
+| S11-04 | `AGENT_PROACTIVE_OUTBOUND_ENABLED=true` | Enable proactive outbound messages from system_agent. Requires removal of dry-run mode from fazle-agent.service. | 2026-06-23 |
+
+### Files Authorized for Change (Session 11)
+
+| ID | File | Change |
+|---|---|---|
+| S11-01 | `.env` | `PRIMARY_AI_PROVIDER=groq` |
+| S11-02 | `.env` | `AUTO_REPLY_ENABLED=true` |
+| S11-03 | `.env` | `SOCIAL_AUTO_REPLY_SINGLE_ENGINE=true` |
+| S11-04 | `.env` | `AGENT_PROACTIVE_OUTBOUND_ENABLED=true` |
+| S11-04 | `/etc/systemd/system/fazle-agent.service` | Remove dry-run environment variable if present |
+
+---
+
 ## Change Log
 
 | Date | Change | Authorized By |
@@ -327,3 +352,4 @@ FK: `final_transaction_id` → `wbom_cash_transactions.transaction_id`.
 | 2026-06-23 | CR-07/CR-08/CR-09: knowledge_base fallback fixed (age 45→55, escort upper ৳18k→৳17k, survey scout ৳18k→৳17k); salary_policy.md created; DORMANT module impact analyzed | Management |
 | 2026-06-23 | Session 9: conversation_layer Full Activation; OCR classification fix (_classify_slip release priority); Phase 6 verifications complete; payment_correction deferred | Management |
 | 2026-06-23 | Session 10: escort_slip_extractor wired into bridge_poller (ESX-WIRE); replaces ocr_processor in image path | Management |
+| 2026-06-23 | Session 11: Production activation — AUTO_REPLY_ENABLED=true, SOCIAL_AUTO_REPLY_SINGLE_ENGINE=true, AGENT_PROACTIVE_OUTBOUND_ENABLED=true; PRIMARY_AI_PROVIDER=groq (GitHub Models rate-limited); fazle-agent dry-run removed | Management |
