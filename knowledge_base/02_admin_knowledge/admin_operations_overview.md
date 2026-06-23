@@ -143,3 +143,60 @@ All 37 WhatsApp admin commands, their syntax, required RBAC role, and action.
 **Source Module:** `modules/admin_commands`, `modules/rbac`, `modules/scheduler`
 **PKCA Report:** 12_command_coverage_report.md
 **Management Authority:** Production evidence; documented 2026-06-22
+
+---
+
+## Employee Management — API (Wave-4)
+
+**Source:** `modules/admin_employees/__init__.py`
+**Endpoint prefix:** `/api/admin/employees`
+**Auth:** `X-Internal-Key` header
+
+### `EmployeeCreate` — 11 User Fields + 3 Auto-Set
+
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `employee_name` | ✅ | — | Non-blank after strip |
+| `employee_mobile` | ✅ | — | **Immutable identity anchor** — normalized to FPE 11-digit on insert; uniqueness enforced (409 if duplicate) |
+| `designation` | | `"Staff"` | Cleaned, defaults to Staff if blank |
+| `joining_date` | | `null` | ISO date string `YYYY-MM-DD` |
+| `bkash_number` | | `null` | bKash payment number |
+| `nagad_number` | | `null` | Nagad payment number |
+| `basic_salary` | | `null` | Base monthly salary (float) |
+| `nid_number` | | `null` | National ID number |
+| `emergency_contact` | | `null` | Emergency contact phone |
+| `address` | | `null` | Home/work address |
+| `bank_account` | | `null` | Bank account number |
+| `status` | auto | `'Active'` | Auto-set on create |
+| `created_at` | auto | `NOW()` | Auto-set on create |
+| `updated_at` | auto | `NOW()` | Auto-set on create |
+
+### Critical Rules
+
+**Mobile immutability:** `employee_mobile` is the identity anchor and is **never editable after creation**. `EmployeeUpdate` does not include `employee_mobile`. Changing mobile requires creating a new employee record.
+
+**FPE auto-seed:** After every successful `POST /api/admin/employees`, `match_or_create_employee()` from `fazle_payroll_engine.employee` is called to pre-seed the FPE employee record. This call is **non-fatal** — FPE seed failure is logged but does not roll back the `wbom_employees` insert.
+
+**Soft deactivation:** Setting `status='Inactive'` via `PATCH /api/admin/employees/{id}` propagates to `fpe_employees` (by phone lookup). Physical deletion never occurs.
+
+**Duplicate guard:** If a record with the same `employee_mobile` already exists → HTTP 409 Conflict.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/admin/employees` | Create employee (11 user fields + FPE auto-seed) |
+| `GET` | `/api/admin/employees` | Paginated list with search |
+| `GET` | `/api/admin/employees/{id}` | Single employee detail |
+| `PATCH` | `/api/admin/employees/{id}` | Partial update (10 editable fields; mobile excluded) |
+| `DELETE` | `/api/admin/employees/{id}` | Soft-deactivate (status → Inactive; propagates to FPE) |
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-19 | Initial: role-centric admin source of truth | KSP |
+| 2026-06-22 | Wave-1: Complete command reference, RBAC roles, scheduler commands | KSP Wave-1 |
+| 2026-06-23 | Wave-4: Added Employee Management API section (13 fields, mobile immutability, FPE auto-seed, soft deactivation) | W4-AUTH |
