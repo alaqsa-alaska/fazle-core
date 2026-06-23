@@ -77,9 +77,41 @@ These are not decisions — they are unresolved schema questions that require a 
 
 | ID | Question | Risk | Target Version |
 |---|---|---|---|
-| U-01 | Does `wbom_candidates` exist in current production schema? | Low | KB v1.0.x |
-| U-02 | Does `fpe_transaction_repairs` have a DDL anywhere in production? | Low | KB v1.0.x |
-| U-03 | Is `wbom_staging_payments` the same table as `fpe_staging_payments`, or two separate tables? | Low | KB v1.0.x |
+| U-01 | Does `wbom_candidates` exist in current production schema? | ✅ RESOLVED 2026-06-23 — EXISTS. 21 columns. See schema below. |
+| U-02 | Does `fpe_transaction_repairs` have a DDL anywhere in production? | ✅ RESOLVED 2026-06-23 — EXISTS. 15 columns. FKs to `fpe_cash_transactions`. See schema below. |
+| U-03 | Is `wbom_staging_payments` the same table as `fpe_staging_payments`, or two separate tables? | ✅ RESOLVED 2026-06-23 — `wbom_staging_payments` EXISTS (16 columns). `fpe_staging_payments` does NOT EXIST. They are NOT the same — only one table exists. |
+
+---
+
+## Unresolved Items — Resolution Record (2026-06-23)
+
+Verified via `docker exec ai-postgres psql` on 2026-06-23.
+
+### U-01: `wbom_candidates` — EXISTS ✅
+
+21 columns. UNIQUE phone. 3 FK references from `fazle_recruitment_sessions`, `wbom_candidate_conversations`, `wbom_recruitment_reminders`.
+
+Key columns: `candidate_id`, `phone` (UNIQUE), `full_name`, `age`, `area`, `job_preference`, `experience_years`, `funnel_stage` (CHECK: new/collecting/scored/assigned/contacted/interviewed/hired/rejected/dropped), `collection_step`, `score` (0–100), `score_bucket` (hot/warm/cold), `assigned_recruiter`, `source`.
+
+**KB action:** Add `wbom_candidates` schema to `recruitment_flow_system.md` — this table is the permanent candidate record (distinct from `fazle_recruitment_sessions` which is the temporary intake session).
+
+### U-02: `fpe_transaction_repairs` — EXISTS ✅
+
+15 columns. 3 FKs to `fpe_cash_transactions` (original txn, reversal txn, new txn). Tracks re-attribution of transactions to different employees.
+
+Key columns: `transaction_id` (original), `old_employee_id`, `new_employee_id`, `repair_reason`, `match_method`, `reversal_txn_id`, `new_txn_id`, `review_needed`, `dry_run`, `repaired_by`.
+
+**KB action:** Add `fpe_transaction_repairs` schema to `fpe_overview.md` — documents the repair/re-attribution audit trail.
+
+### U-03: `wbom_staging_payments` vs `fpe_staging_payments` — ONE TABLE ONLY ✅
+
+`wbom_staging_payments` EXISTS (16 columns). `fpe_staging_payments` does NOT EXIST.
+These are NOT two separate tables — only `wbom_staging_payments` is in production.
+
+16 columns: `staging_id`, `message_id`, `sender_number`, `extracted_name`, `extracted_mobile`, `amount`, `payment_method`, `transaction_type`, `matched_employee_id`, `name_match_ratio`, `status` (default 'pending'), `approved_by`, `approved_at`, `created_at`, `final_transaction_id`, `idempotency_key`.
+FK: `final_transaction_id` → `wbom_cash_transactions.transaction_id`.
+
+**KB action:** Update `database_rules.md` entry for C-02 — table name is `wbom_staging_payments` (not `fpe_staging_payments`). Correct domain assignment stands (CASH/FPE).
 
 ---
 
