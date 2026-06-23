@@ -141,17 +141,33 @@ If all scores = 0 → `unknown`. Highest-scoring type wins. Ties: escort > relea
 
 ---
 
-## Confidence Scoring
+## Confidence Scoring — Actual Algorithm (Wave-4)
 
-**Source Function:** `_compute_confidence(text, fields)`
-**Range:** 0–100 (heuristic, not ML-based)
+**Source Function:** `_compute_confidence(text, fields)` in `modules/ocr_processor/__init__.py`
+**Range:** 0–100 (heuristic, not ML-based). Clamped: `min(100, max(0, score))`.
 
-**Scoring logic:**
-- Based on number of populated fields vs expected fields for slip_type
-- Low confidence (< 40) → reply includes warning: `[⚠️ কম নির্ভরযোগ্য — যাচাই করুন]`
-- Confidence is NEVER exposed to the customer in plain form — only the warning suffix is shown when low
+**Scoring components (summed):**
 
-**Document confidence:** `min(100, max(10, len(extracted_text.split()) * 2))` — rough word-count proxy
+| Component | Condition | Points |
+|---|---|---|
+| Text volume | ≥ 20 words | +30 |
+| Text volume | ≥ 10 words (< 20) | +20 |
+| Text volume | ≥ 5 words (< 10) | +10 |
+| Text volume | < 5 words (and text ≥ 20 chars) | +0 |
+| Minimum floor | text < 20 chars | returns 10 immediately |
+| Field extraction | `(extracted_fields / total_fields) × 40` | 0–40 |
+| Valid date | `fields["date"]` passes `_is_garbage_date()` check | +10 |
+| Garbage date | `fields["date"]` fails `_is_garbage_date()` check | -20 |
+| Clean text | `alpha_chars / total_chars ≥ 0.3` | +20 |
+| Noise penalty | `alpha_chars / total_chars < 0.3` (heavy noise) | -20 |
+
+**Low confidence threshold:** `< 40` → reply suffix appended: `" [⚠️ কম নির্ভরযোগ্য — যাচাই করুন]"`
+
+**Escort lifecycle check:** `escort_lifecycle` also reads `confidence_score` and appends `"⚠️ LOW OCR CONFIDENCE: {conf}/100 — verify all fields"` warning when `conf < 40`.
+
+**Document confidence (different formula):** `min(100, max(10, len(extracted_text.split()) * 2))` — word-count proxy only.
+
+**Confidence is NEVER exposed raw to customers** — only the warning suffix appears when low.
 
 ---
 

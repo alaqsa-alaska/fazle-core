@@ -1,4 +1,10 @@
 # Identity Brain
+**KB Article ID:** DEV-06-IDENTITY-BRAIN
+**Sources:** `modules/identity_brain/__init__.py` (393 lines — read 2026-06-23), `modules/role_classifier/__init__.py`
+**Visibility:** Developer / Admin only — do NOT set `safe_for_customer=True`
+**Certified:** 2026-06-23 (Wave-3, W3P2-AUTH)
+
+---
 
 ## Purpose
 Implementation-facing identity engine rules. Every inbound message must resolve to a role before any AI answer, draft creation, or backend write.
@@ -42,26 +48,114 @@ When the primary phone lookup in `wbom_employees` fails, the system tries four s
 
 **Validation:** Phone lookup always tries three variants simultaneously: `01XXXXXXXXX`, `880XXXXXXXXX`, `+880XXXXXXXXX`
 
-**Source Module:** `modules/identity_brain`
-**Source Function:** `resolve_identity()`, `_ROLE_PRIORITY`
+**Source Module:** `modules/identity_brain/__init__.py`
+**Source Function:** `detect_identity(phone, text="")` (393 lines — read 2026-06-23)
 **PKCA Report:** 11_identity_coverage_report.md
 **Management Authority:** Production evidence; documented 2026-06-22
+
+**CORRECTION — Admin Detection:** Step 1 in the table above references `fazle_admins`. The actual code uses `app.config.get_settings()` — reads admin phone lists from environment settings (`ADMIN_NUMBERS`, bridge admin numbers). No `fazle_admins` table is queried. The `fazle_contact_roles` seed rule (Step 2) can also grant admin role.
+
+**CORRECTION — Step 10 (Candidate):** The table above cites `fazle_recruitment_sessions`. In the actual `identity_brain` module, candidate detection runs at Step 5 via `_is_candidate_text()` using `_CANDIDATE_KEYWORDS` on the message text. There is no `fazle_recruitment_sessions` lookup in `detect_identity()`. The session table is managed by `modules/recruitment_flow` — separate from identity detection.
+
+---
+
+## Identity Brain Module Constants
+
+Source: `modules/identity_brain/__init__.py` — all values read directly from code 2026-06-23
+
+### `_ROLE_PRIORITY` — Numeric Priority Weights
+
+Used by callers to compare signals when resolving ambiguous identities. Higher value = higher authority.
+
+```python
+_ROLE_PRIORITY: dict[str, int] = {
+    "admin":               200,
+    "family":              100,
+    "accountant":           95,
+    "vip_client":           92,
+    "client_escort_buyer":  90,
+    "employee":             88,
+    "supervisor":           80,
+    "repeat_client":        75,
+    "vendor":               70,
+    "candidate":            30,
+    "unknown":               0,
+}
+```
+
+**Note:** This is the `identity_brain` module's priority table. It is NOT the same as the `role_classifier` module's `ROLE_PRIORITY` dict (which has a different scale and set of roles). The `role_classifier` dict is documented in the Role Classifier section below.
+
+---
+
+### `_CANDIDATE_KEYWORDS` — Text-Hint Candidate Triggers
+
+10 Bengali/English terms that trigger candidate classification when no DB identity is found:
+
+```python
+_CANDIDATE_KEYWORDS = [
+    "চাকরি",      # job (Bengali)
+    "চাকরী",      # job (variant spelling)
+    "কাজ চাই",    # I want work
+    "job",         # English
+    "apply",       # English
+    "বেতন কত",    # how much is the salary
+    "নিয়োগ",     # recruitment/hiring
+    "recruitment", # English
+    "vacancy",     # English
+    "আবেদন",      # application/apply
+]
+```
+
+**Trigger logic:** `_is_candidate_text(text)` returns `True` if ANY keyword is found (case-insensitive substring match). Used ONLY when no other identity evidence exists — never overrides DB match.
+
+**Step in resolution:** Step 5 — only reached if Steps 1–4 (admin, seed, employee, contact) all produced no match.
+
+---
+
+### `_ESCORT_CONTENT_RE` — Escort-Buyer Content Pattern
+
+Regex pattern that identifies vessel/escort order content from an unknown sender, assigning `repeat_client`:
+
+```python
+_ESCORT_CONTENT_RE = re.compile(
+    r"\b(m\.?v\.?|mother\s*vessel|lighter|escort\s*lagbe|m\.?t\.|এমভি|"
+    r"destination|lighter\s*vessel)\b",
+    re.IGNORECASE,
+)
+```
+
+**Matched patterns (8 tokens):** `m.v.` / `mv`, `mother vessel`, `lighter`, `escort lagbe`, `m.t.` / `mt`, `এমভি`, `destination`, `lighter vessel`
+
+**Trigger condition:** Step 6 — reached only after Step 5 (candidate keyword check) fails. Unknown senders sending vessel/escort keywords are assigned `repeat_client` (confidence=40) rather than `candidate`.
+
+**Overlap with message_router:** `modules/message_router/_ESCORT_CONTENT_RE` uses the same pattern for routing decisions at Step 2. The two patterns serve different purposes: identity_brain assigns a role; message_router decides which workflow to invoke.
 
 ---
 
 ## Confidence Scoring
 
-Each resolved identity carries a confidence float (0.0–1.0):
+Each resolved identity carries two confidence fields in the returned dict:
+- `identity_confidence`: raw integer (0–100)
+- `confidence`: float (0.0–1.0) = `identity_confidence / 100`
 
-| Evidence Type | Confidence |
-|---|---|
-| `fazle_contact_roles` exact match | 1.0 |
-| `wbom_employees` primary phone match | 0.95 |
-| Secondary evidence (cash / attendance / roster) | 0.7 |
-| Contact DB match only | 0.5 |
-| Fallback / no match | 0.0 (unknown) |
+Actual values from code (source: `detect_identity()` call sites in `modules/identity_brain/__init__.py`):
 
-**Purpose:** Confidence affects routing decisions. Low-confidence identities may trigger draft-instead-of-autosend behavior.
+| Resolution Path | `identity_confidence` | `confidence` float | Source |
+|---|---|---|---|
+| Admin via settings | 100 | 1.00 | `_check_admin_settings()` |
+| Seed rule (fazle_contact_roles) | from DB `confidence` column | varies | `_lookup_seed()` |
+| Employee primary phone match | 88 | 0.88 | `_lookup_employee()` |
+| Employee via cash payment records | 86 | 0.86 | `_lookup_cash_identity()` |
+| Employee via attendance records | 86 | 0.86 | `_lookup_attendance_identity()` |
+| Employee via escort roster | 85 | 0.85 | `_lookup_escort_roster()` |
+| Contact DB match | 80 | 0.80 | `_lookup_contact()` |
+| Text-hint candidate (keyword match) | 50 | 0.50 | `_is_candidate_text()` |
+| Text-hint escort (vessel content) | 40 | 0.40 | `_ESCORT_CONTENT_RE` |
+| Unknown (no match) | 0 | 0.00 | `_unknown()` |
+
+**CORRECTION:** Prior versions of this article stated confidence values of 1.0/0.95/0.7/0.5. These were incorrect. The table above reflects actual integer constants in the code.
+
+**Purpose:** Confidence affects routing decisions. Low-confidence identities (≤ 50) may trigger draft-instead-of-autosend behavior when `AI_SAFE_MODE=true` (identity confidence < 50 → forced draft in `bridge_poller`; see `runtime_gateway_flags.md`).
 
 ---
 
@@ -210,3 +304,4 @@ Each resolved role injects a Bangla language-style directive into the LLM system
 |---|---|---|
 | 2026-06-22 | Wave-2B: Added role_classifier module documentation — ROLE_PRIORITY lookup (15 roles), _ROLE_PROMPTS (8 roles, Bangla prompt injection), get_user_context() function (7-key output dict), build_context_for_llm() function, visibility rules, cross references. Previous article was 103 lines (identity_brain resolution algorithm only). | KSP Wave-2B |
 | 2026-06-22 | PKVC correction: "14 roles" corrected to "15 roles" in revision history. Production `ROLE_PRIORITY` dict has 15 entries. | KSP PKVC |
+| 2026-06-23 | Wave-3 Phase 2 (W3P2-AUTH): Added Identity Brain Module Constants section — `_ROLE_PRIORITY` numeric table (11 entries), `_CANDIDATE_KEYWORDS` exact list (10 terms), `_ESCORT_CONTENT_RE` description; corrected confidence score table (actual code values); corrected admin detection mechanism (settings-based, not fazle_admins); corrected candidate step number (Step 5 text_hint, not Step 10 recruitment_sessions). Source: `modules/identity_brain/__init__.py` read directly. | Wave-3 Agent |

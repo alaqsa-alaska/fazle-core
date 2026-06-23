@@ -103,3 +103,85 @@ The AI parser supports 4 distinct client message formats for escort orders. All 
 **Source Module:** `modules/scheduler`
 **Source Function:** `job_stale_escort_reminder()`
 **PKCA Report:** 07_scheduler_coverage_report.md
+
+---
+
+## [RELEASE CONFIRMED] — Escort Release Closure (Wave-4)
+
+### Purpose
+
+When a release slip is processed via OCR, the system generates a draft `[RELEASE CONFIRMED]` message. The admin reviews the draft, corrects any errors, and sends it to the escort's WhatsApp. The bridge poller detects this outbound message and triggers `handle_admin_release_confirmation()` in `modules/escort_lifecycle`, which closes the program and creates attendance + payment records.
+
+**RELEASE command is deprecated.** As of Wave-4: `_cmd_release()` returns an error message instructing the admin to use the `[RELEASE CONFIRMED]` WhatsApp format instead.
+
+### `[RELEASE CONFIRMED]` Message Format
+
+The admin sends a message containing exactly this anchor text:
+```
+[RELEASE CONFIRMED]
+```
+
+**Full template (8 parsed fields):**
+```
+[RELEASE CONFIRMED]  ✅ OCR DRAFT
+Escort: মোঃ রফিকুল
+Lighter: Shah Amanat
+Release Point: Mongla
+Start Date: 10.06.2026
+End Date: 20.06.2026
+Shift: D
+Days: 11
+Conveyance: 800
+```
+
+### Parsed Fields — `parse_release_confirmation()`
+
+| Field in Dict | Parsed From | Regex Pattern |
+|---|---|---|
+| `end_date` | `End Date: DD.MM.YYYY` | `_RC_DATE_RE` |
+| `end_shift` | `Shift: D` or `Shift: N` | `_RC_SHIFT_RE` |
+| `release_point` | `Release Point: ...` | `_RC_POINT_RE` |
+| `day_count` | `Days: N` | `_RC_DAYS_RE` |
+| `conveyance` | `Conveyance: amount` | `_RC_CONV_RE` |
+| `food_bill` | `Food Bill: amount` | `_RC_FOOD_RE` |
+| `escort_name` | `Escort: name` | `_RC_ESCORT_RE` |
+| `lighter_vessel` | `Lighter: vessel_name` | `_RC_LIGHTER_RE` |
+
+**Detection:** `is_release_confirmation(text)` checks for `[RELEASE CONFIRMED]` anchor (case-insensitive).
+
+**Trigger:** `bridge_poller` detects outbound messages with `is_from_me=1` containing `[RELEASE CONFIRMED]`.
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Functions:** `is_release_confirmation()`, `parse_release_confirmation()`, `handle_admin_release_confirmation()`
+
+---
+
+## `wbom_escort_programs.remarks` — JSON Structure
+
+The `remarks` column in `wbom_escort_programs` stores a JSON object. It is initialized at draft creation and extended (merged) by ESCORTCONFIRM.
+
+**8 core fields:**
+
+| Field | Set By | Value |
+|---|---|---|
+| `sender_phone` | `save_escort_programs()` | Client phone who sent the escort order |
+| `source_bridge` | `save_escort_programs()` | `bridge1`, `bridge2`, or `meta` |
+| `escort_name` | `save_escort_programs()` | `null` initially; text string after ESCORTCONFIRM |
+| `escort_mobile` | `save_escort_programs()` | `null` initially; phone number after ESCORTCONFIRM |
+| `capacity` | `save_escort_programs()` | Lighter capacity (from parsed client order) |
+| `importer` | `save_escort_programs()` | Importer company name (from parsed order) |
+| `cargo_type` | `save_escort_programs()` | Cargo type (from parsed order) |
+| `confirmed_by` | `_cmd_escort_confirm()` | Admin phone who ran ESCORTCONFIRM |
+
+**Note:** The `remarks` column may contain corrupted JSON (text appended after the closing brace). `_safe_json()` in `escort_roster/db.py` handles fault-tolerant parsing by truncating at the last `}`.
+
+**Used by:** `_cmd_escort_confirm()` reads `sender_phone` and `source_bridge` to forward the assignment slip directly to the client's WhatsApp bridge.
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-22 | Initial Wave-2B escort state machine, ESCORTCONFIRM, parser formats, stale alert | KSP Wave-2B |
+| 2026-06-23 | Wave-4: Added [RELEASE CONFIRMED] format, 8 parsed fields, remarks JSON 8-field schema | W4-AUTH |

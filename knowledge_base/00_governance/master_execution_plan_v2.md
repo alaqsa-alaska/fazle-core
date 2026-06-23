@@ -705,9 +705,9 @@ python3 -m pytest tests/unit/test_reply_policy.py -q                  # test hea
 |---|---|---|---|---|
 | **Infrastructure** | ✅ LIVE | 2026-06-22 | 2026-06-22 | Hybrid RAG + structured_v2 + Phase 4 code |
 | **Conflicts** | ✅ RESOLVED | 2026-06-23 | 2026-06-23 | CR-01–CR-06; all committed `4c2b6f2` |
-| **PHASE 1** — Wave-3 P1 KB | ⏳ READY | — | — | Awaiting management Wave-3 authorization |
-| **PHASE 2** — Identity Brain | ⏳ PENDING | — | — | After Phase 1 |
-| **PHASE 3** — Visibility Engine | ⏳ PENDING | — | — | Requires production code authorization |
+| **PHASE 1** — Wave-3 P1 KB | ✅ COMPLETE | 2026-06-23 | 2026-06-23 | 5 articles, 1,492 lines; commits 43d8eec–81818ab |
+| **PHASE 2** — Identity Brain | ✅ COMPLETE | 2026-06-23 | 2026-06-23 | identity_brain.md (307), identity_integration.md (194 new); commit 510cd15 |
+| **PHASE 3** — Visibility Engine | ✅ COMPLETE | 2026-06-23 | 2026-06-23 | rag/search() role param + 2 call sites; commit 359812c |
 | **PHASE 4** — Coverage 90%+ | ⏳ PENDING | — | — | Can begin after Phase 1 |
 | **PHASE 5** — Freeze v2 | ⏳ PENDING | — | — | After Phase 4 |
 | **PHASE 6** — Refactoring | ⏳ CONDITIONAL | — | — | Phase 5 + per-module approval |

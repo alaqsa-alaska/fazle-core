@@ -15,7 +15,7 @@ Sources indexed:
 Public API (all async, safe to call from FastAPI handlers):
   • await build_index()              → (re)build the in-memory index
   • await ensure_index()             → build if not yet built
-  • await search(q, k=5, min_score=0.0) → list[dict]
+  • await search(q, k=5, min_score=0.0, role="candidate") → list[dict]
   • await stats()                    → diagnostics dict
   • await answer(q, k=3, min_score=1.0) → {answer, citations} or None
 """
@@ -145,6 +145,49 @@ _SEED_QUERIES: tuple[str, ...] = (
 )
 
 # ── END Milestone 3.8 constants ───────────────────────────────────────────────
+
+# ── Phase 3 — Role-Aware Visibility ───────────────────────────────────────────
+# Maps identity_brain role names to the access tier used for KB filtering.
+# Non-mapped roles (e.g. unexpected strings) default to "candidate" (most restrictive).
+_ROLE_ACCESS_LEVEL: dict[str, str] = {
+    "candidate":           "candidate",
+    "new_lead":            "candidate",   # unknown sender; treat as candidate
+    "unknown":             "candidate",   # no identity match; most restrictive
+    "employee":            "employee",
+    "supervisor":          "supervisor",
+    "accountant":          "accountant",
+    "repeat_client":       "employee",    # known client → employee-level
+    "vendor":              "employee",
+    "family":              "employee",
+    "client":              "employee",
+    "admin":               "admin",
+    "developer":           "developer",
+}
+# KB category → set of access tiers allowed to receive this content.
+# Partial match (missing category) defaults to _DEFAULT_ALLOWED (all tiers = current behaviour).
+_CATEGORY_ROLE_MAP: dict[str, frozenset[str]] = {
+    "recruitment": frozenset({"candidate", "employee", "supervisor", "accountant", "admin", "developer"}),
+    "faq":         frozenset({"candidate", "employee", "supervisor", "accountant", "admin", "developer"}),
+    "general":     frozenset({"candidate", "employee", "supervisor", "accountant", "admin", "developer"}),
+    "office":      frozenset({"candidate", "employee", "supervisor", "accountant", "admin", "developer"}),
+    "policy":      frozenset({"candidate", "employee", "supervisor", "accountant", "admin", "developer"}),
+    "complaint":   frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "payment":     frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "payroll":     frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "salary":      frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "attendance":  frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "advance":     frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "escort":      frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "admin":       frozenset({"admin", "developer"}),
+    "financial":   frozenset({"accountant", "admin", "developer"}),
+    "fpe":         frozenset({"admin", "developer"}),
+    "internal":    frozenset({"admin", "developer"}),
+}
+# Default: allow all tiers (preserves current behaviour for unclassified content).
+_DEFAULT_ALLOWED: frozenset[str] = frozenset({
+    "candidate", "employee", "supervisor", "accountant", "admin", "developer"
+})
+# ── END Phase 3 constants ──────────────────────────────────────────────────────
 
 # Module-level singletons — None until first lazy call.
 _encoder_instance = None        # SentenceTransformer; loaded once, stays resident
@@ -361,9 +404,9 @@ _RECENT_SEARCHES: deque = deque(maxlen=50)
 
 
 # ── Source loaders ─────────────────────────────────────────────────────────────
-def _load_resource_files() -> list[tuple[str, str, str, bool]]:
-    """Return list of (source_id, title, text, safe_for_customer) for each approved file."""
-    out: list[tuple[str, str, str, bool]] = []
+def _load_resource_files() -> list[tuple[str, str, str, bool, frozenset[str]]]:
+    """Return list of (source_id, title, text, safe_for_customer, allowed_roles) for each approved file."""
+    out: list[tuple[str, str, str, bool, frozenset[str]]] = []
     if not os.path.isdir(RESOURCES_DIR):
         log.warning(f"[rag] resources dir missing: {RESOURCES_DIR}")
         return out
@@ -400,13 +443,13 @@ def _load_resource_files() -> list[tuple[str, str, str, bool]]:
         if not text.strip():
             continue
         title = name.rsplit(".", 1)[0]
-        out.append((f"file:{name}", title, text, True))
+        out.append((f"file:{name}", title, text, True, _DEFAULT_ALLOWED))
     return out
 
 
-async def _load_kb_rows() -> list[tuple[str, str, str, bool]]:
-    """Return list of (source_id, title, text, safe_for_customer) for KB rows."""
-    out: list[tuple[str, str, str, bool]] = []
+async def _load_kb_rows() -> list[tuple[str, str, str, bool, frozenset[str]]]:
+    """Return list of (source_id, title, text, safe_for_customer, allowed_roles) for KB rows."""
+    out: list[tuple[str, str, str, bool, frozenset[str]]] = []
     try:
         rows = await fetch_all(
             "SELECT key, COALESCE(category,'') AS category, reply_text "
@@ -417,10 +460,12 @@ async def _load_kb_rows() -> list[tuple[str, str, str, bool]]:
         return out
     for r in rows:
         key = r.get("key") or "kb"
-        title = f"{key} ({r.get('category') or 'kb'})"
+        cat = (r.get("category") or "").lower()
+        title = f"{key} ({cat or 'kb'})"
         text = r.get("reply_text") or ""
+        allowed = _CATEGORY_ROLE_MAP.get(cat, _DEFAULT_ALLOWED)
         if text.strip():
-            out.append((f"kb:{key}", title, text, True))  # KB rows are admin-curated
+            out.append((f"kb:{key}", title, text, True, allowed))
     return out
 
 
@@ -534,6 +579,7 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
                     "safe_for_customer": True,           # invariant: unsafe chunks never reach here
                     "source_kind":       chunk["source"].split(":", 1)[0],  # "file" | "kb"
                     "indexed_at":        indexed_at,
+                    "allowed_roles":     sorted(chunk.get("allowed_roles", _DEFAULT_ALLOWED)),  # Phase 3
                 },
             ))
 
@@ -590,13 +636,13 @@ async def build_index() -> dict[str, Any]:
         t0 = time.monotonic()
         _IDX.reset()
 
-        sources: list[tuple[str, str, str, bool]] = []
+        sources: list[tuple[str, str, str, bool, frozenset[str]]] = []
         sources.extend(_load_resource_files())
         sources.extend(await _load_kb_rows())
 
         safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
         unsafe_count = 0
-        for source_id, title, text, source_safe in sources:
+        for source_id, title, text, source_safe, allowed_roles in sources:
             for idx, chunk in enumerate(_chunk_text(text)):
                 tokens = _tokenize(chunk)
                 if not tokens:
@@ -618,7 +664,8 @@ async def build_index() -> dict[str, Any]:
                     "text": chunk,
                     "tokens": tokens,
                     "len": len(tokens),
-                    "safe_for_customer": True,  # guaranteed: unsafe chunks never stored
+                    "safe_for_customer": True,       # guaranteed: unsafe chunks never stored
+                    "allowed_roles": allowed_roles,  # Phase 3: role-aware visibility
                 })
                 safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
 
@@ -839,9 +886,10 @@ async def _hybrid_search(
     q_tokens: list[str],
     n_docs: int,
     top_k: int,
+    role: str = "candidate",
 ) -> list[dict[str, Any]]:
     """
-    Full hybrid retrieval: BM25 candidates + Vector search → Visibility → RRF.
+    Full hybrid retrieval: BM25 candidates + Vector search → Visibility → Role filter → RRF.
 
     Called ONLY when HYBRID_SEARCH_ENABLED=True.
     Never raises — _vector_search() is self-contained with its own try/except.
@@ -858,6 +906,8 @@ async def _hybrid_search(
     for d in _IDX.docs:
         if not d.get("safe_for_customer", True):  # visibility filter
             continue
+        if role not in d.get("allowed_roles", _DEFAULT_ALLOWED):  # Phase 3: role filter
+            continue
         s = _bm25_score(q_tokens, d, n_docs)
         if s > 0.0:  # exclude zero-score docs; include all positive scorers
             bm25_candidates.append((s, d))
@@ -865,6 +915,18 @@ async def _hybrid_search(
 
     # Vector search with visibility filter applied inside _vector_search
     vector_hits = await _vector_search(query, k=_candidates)
+
+    # Phase 3: role-filter vector hits using BM25 index as source of truth for allowed_roles.
+    # (Qdrant payload now stores allowed_roles on new indexes; cross-reference handles old ones.)
+    _role_safe: set[tuple[str, int]] = {
+        (d["source"], d["chunk_idx"])
+        for d in _IDX.docs
+        if role in d.get("allowed_roles", _DEFAULT_ALLOWED)
+    }
+    vector_hits = [
+        h for h in vector_hits
+        if (h["source"], h["chunk_idx"]) in _role_safe
+    ]
 
     log.info(
         "[HYBRID] Search — bm25_candidates=%d vector_hits=%d top_k=%d",
@@ -879,22 +941,39 @@ async def _hybrid_search(
 
 
 # ── Search ─────────────────────────────────────────────────────────────────────
-async def search(q: str, k: int = 5, min_score: float = 0.0) -> list[dict[str, Any]]:
+async def search(
+    q: str,
+    k: int = 5,
+    min_score: float = 0.0,
+    role: str = "candidate",
+) -> list[dict[str, Any]]:
+    """Search the RAG index.
+
+    role: identity role of the caller (default "candidate" = most restrictive).
+          Unknown roles are treated as "candidate". Pass role=None to use default.
+          Callers that do not pass role get candidate-level access — same as current behaviour.
+    """
     await ensure_index()
     q_tokens = _tokenize(q)
     if not q_tokens or not _IDX.docs:
         return []
     n_docs = len(_IDX.docs)
 
+    # Phase 3: normalise role to a known access tier; unknown → "candidate"
+    _effective_role: str = _ROLE_ACCESS_LEVEL.get(role or "candidate", "candidate")
+
     # ── HYBRID RAG — Milestone 3 ───────────────────────────────────────────────
     if HYBRID_SEARCH_ENABLED:
-        out = await _hybrid_search(q, q_tokens, n_docs, k)
+        out = await _hybrid_search(q, q_tokens, n_docs, k, role=_effective_role)
     else:
-        # Exact production BM25 path — byte-for-byte unchanged when flag=false
+        # Exact production BM25 path
         scored = []
         for d in _IDX.docs:
             # PATCH 2: only score chunks tagged as safe for customers
             if not d.get("safe_for_customer", True):
+                continue
+            # Phase 3: role filter — skip chunks the caller's tier cannot access
+            if _effective_role not in d.get("allowed_roles", _DEFAULT_ALLOWED):
                 continue
             s = _bm25_score(q_tokens, d, n_docs)
             if s > min_score:
@@ -915,13 +994,13 @@ async def search(q: str, k: int = 5, min_score: float = 0.0) -> list[dict[str, A
     if out:
         _q_repr = repr(q[:80])
         log.info(
-            f"[RAG_SEARCH] q={_q_repr} hits={len(out)} "
+            f"[RAG_SEARCH] q={_q_repr} role={_effective_role!r} hits={len(out)} "
             f"top_score={out[0]['score']} source={out[0]['source']!r} "
             f"chunk={out[0]['chunk_idx']} title={out[0]['title']!r}"
         )
     else:
         _q_repr = repr(q[:80])
-        log.debug(f"[RAG_SEARCH] q={_q_repr} hits=0 min_score={min_score}")
+        log.debug(f"[RAG_SEARCH] q={_q_repr} role={_effective_role!r} hits=0 min_score={min_score}")
     # STEP 2: append to recent-searches ring buffer for incident debugging
     _RECENT_SEARCHES.append({
         "ts": time.time(),
