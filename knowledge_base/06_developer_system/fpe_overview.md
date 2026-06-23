@@ -297,7 +297,7 @@ All FPE tables use the `fpe_*` prefix. They are managed exclusively by FPE migra
 | `fpe_employees` | FPE employee directory | Yes (name, phone, merge) |
 | `fpe_employee_aliases` | Multi-phone/name per employee | Yes (additive only) |
 | `fpe_cash_transactions` | Verified transaction ledger | No (immutable; reversal creates new row) |
-| `fpe_employee_ledger` | Running totals per employee per month | Yes (updated per transaction) |
+| `fpe_employee_ledger` | Running totals per employee per month (11 columns — see schema below) | Yes (updated per transaction) |
 | `fpe_unmatched_messages` | Parse failures / review queue | Yes (review_status updates) |
 | `fpe_accounting_audit_logs` | Immutable accounting audit trail | No |
 | `fpe_sync_checkpoints` | Historical sync progress per bridge+JID | Yes |
@@ -307,6 +307,26 @@ All FPE tables use the `fpe_*` prefix. They are managed exclusively by FPE migra
 | `fazle_processing_locks` | Distributed advisory locks | Yes |
 | `fazle_bridge_heartbeats` | Per-bridge liveness heartbeats | Yes |
 | `fazle_message_queue` | Central inbound message queue | Yes |
+
+### `fpe_employee_ledger` — Column Schema (Wave-4)
+
+**Source:** `modules/fazle_payroll_engine/migrations/001_fpe_schema.sql`
+**UNIQUE constraint:** `(employee_id, accounting_period)` — one row per employee per month
+
+| Column | Type | Nullable | Default | Notes |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | NOT NULL | auto | PK |
+| `employee_id` | BIGINT | NOT NULL | — | FK → `fpe_employees(id)` |
+| `accounting_period` | TEXT | NOT NULL | — | `YYYY-MM` format |
+| `opening_balance` | NUMERIC(12,2) | NOT NULL | 0 | Carry-forward from prior period |
+| `total_earned` | NUMERIC(12,2) | NOT NULL | 0 | Sum of all earned amounts in period |
+| `total_paid` | NUMERIC(12,2) | NOT NULL | 0 | Sum of all paid amounts in period |
+| `total_advance` | NUMERIC(12,2) | NOT NULL | 0 | Sum of advance transactions in period |
+| `closing_balance` | NUMERIC(12,2) | NOT NULL | 0 | `opening_balance + total_earned - total_paid - total_advance` |
+| `txn_count` | INT | NOT NULL | 0 | Number of transactions contributing to period |
+| `last_updated` | TIMESTAMPTZ | NOT NULL | NOW() | Updated on every transaction write |
+
+**Behavior:** Updated by `accounting_worker` on every successful `create_transaction()` call. `closing_balance` represents outstanding balance (positive = owed to employee). Upserted with `ON CONFLICT (employee_id, accounting_period) DO UPDATE`.
 
 ---
 
