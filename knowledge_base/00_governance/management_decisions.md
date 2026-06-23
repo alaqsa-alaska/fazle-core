@@ -287,6 +287,28 @@ FK: `final_transaction_id` → `wbom_cash_transactions.transaction_id`.
 
 ---
 
+## Session 10 — escort_slip_extractor Wiring (2026-06-23)
+
+### Management Authorization (Session 10)
+
+| ID | Decision | Scope | Date |
+|---|---|---|---|
+| ESX-WIRE | `escort_slip_extractor` — **Wired into bridge_poller** | Replace `ocr_processor.process_image()` with `escort_slip_extractor.extract_escort_slip()` in bridge_poller image OCR path. Release detection: `completion_date is not None` (two-date rule). Admin draft via `handle_ocr_release_slip()` unchanged. | 2026-06-23 |
+
+### Files Authorized for Change (Session 10)
+
+| ID | File | Change | Date |
+|---|---|---|---|
+| ESX-WIRE | `modules/bridge_poller/__init__.py` | Image STEP 2: replace `_proc_img(file_path, None)` with `extract_escort_slip(file_path, source_label=bridge_name)`. Replace keyword-based `slip_type` check with `completion_date is not None` for release detection. Remove `slip_type == "duplicate"` case (not a concept in escort_slip_extractor). Use `raw_ocr_text` field name. | 2026-06-23 |
+
+### Technical Notes (Session 10)
+
+- `EscortSlipResult` → `handle_ocr_release_slip()` compat dict: `escort_name→employee_name`, `lighter_vessel→vessel`, `completion_date→date`, `release_place→location`, `confidence×100→confidence_score`, `raw_ocr_text→raw_text`
+- Unknown document threshold: `doc_type == "unknown_document" OR conf_pct < 10` (replaces `slip_type == "unknown"`)
+- Assignment slip path: uses `raw_ocr_text` (was `raw_text`) — field name corrected
+
+---
+
 ## Change Log
 
 | Date | Change | Authorized By |
@@ -304,3 +326,4 @@ FK: `final_transaction_id` → `wbom_cash_transactions.transaction_id`.
 | 2026-06-23 | KB v2.0 CERTIFIED (GOV-06); PAY-03 production fix (Mongla ৳700→৳800); outbound_delivery.md created | Management |
 | 2026-06-23 | CR-07/CR-08/CR-09: knowledge_base fallback fixed (age 45→55, escort upper ৳18k→৳17k, survey scout ৳18k→৳17k); salary_policy.md created; DORMANT module impact analyzed | Management |
 | 2026-06-23 | Session 9: conversation_layer Full Activation; OCR classification fix (_classify_slip release priority); Phase 6 verifications complete; payment_correction deferred | Management |
+| 2026-06-23 | Session 10: escort_slip_extractor wired into bridge_poller (ESX-WIRE); replaces ocr_processor in image path | Management |
