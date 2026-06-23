@@ -667,13 +667,36 @@ async def handle_admin_release_confirmation(
     )
 
 
+async def _lookup_active_program_by_phone(phone: str) -> Optional[dict]:
+    """DB READ ONLY: find active escort program by sender's phone number."""
+    if not phone or phone == "unknown":
+        return None
+    try:
+        row = await fetch_one(
+            """SELECT ep.program_id, ep.mother_vessel, ep.lighter_name,
+                      ep.program_date::text AS program_date,
+                      ep.location, ep.escort_name,
+                      ep.lighter_master_mobile
+               FROM wbom_escort_programs ep
+               WHERE regexp_replace(ep.escort_mobile, '\\D', '', 'g')
+                     LIKE '%' || RIGHT(regexp_replace($1, '\\D', '', 'g'), 11)
+               AND ep.status NOT IN ('Completed', 'Cancelled')
+               ORDER BY ep.program_date DESC LIMIT 1""",
+            phone,
+        )
+        return dict(row) if row else None
+    except Exception as _e:
+        log.debug(f"[release-ocr] program lookup failed for phone={phone}: {_e}")
+        return None
+
+
 async def handle_ocr_release_slip(
     ocr_result: dict,
     source: str = "bridge_poller",
     phone: str = "unknown",
 ) -> Optional[str]:
     """
-    Called when OCR identifies a release_slip.
+    Called when OCR identifies a release_slip (two-date rule or release keywords).
     Builds an admin review draft, saves it to fazle_draft_replies (DRAFT ONLY),
     and returns it as a string for the caller to forward to the admin bridge.
     Does NOT close the program and does NOT send automatically.
@@ -683,16 +706,44 @@ async def handle_ocr_release_slip(
     if ocr_result.get("slip_type") != "release_slip":
         return None
 
+    # DB lookup: find active escort program by sender phone — enriches OCR gaps
+    program = await _lookup_active_program_by_phone(phone)
+    if program:
+        log.info(f"[release-ocr] active program found: program_id={program.get('program_id')} for phone={phone}")
+        # Fill in any fields the OCR missed, using DB as authoritative source
+        if not ocr_result.get("employee_name") and program.get("escort_name"):
+            ocr_result = dict(ocr_result)
+            ocr_result["employee_name"] = program["escort_name"]
+        if not ocr_result.get("vessel") and program.get("lighter_name"):
+            ocr_result = dict(ocr_result) if not isinstance(ocr_result, dict) else ocr_result
+            ocr_result["vessel"] = program["lighter_name"]
+        if not ocr_result.get("location") and program.get("location"):
+            ocr_result["location"] = program["location"]
+
     draft = build_release_draft(ocr_result)
     escort = ocr_result.get("employee_name") or phone
     missing = [f for f in ("employee_name", "vessel", "date", "location")
                if not ocr_result.get(f)]
 
-    # DB READ ONLY: fuzzy match employee name for admin hint
-    db_match = await _fuzzy_employee_lookup(escort)
-    if db_match:
-        log.info(f"[release-ocr] fuzzy name match: {db_match}")
-        draft += f"\nDB match (verify): {db_match}"
+    # Append DB program context to admin draft
+    if program:
+        prog_lines = [
+            f"\n📋 DB Program (auto-matched by phone):",
+            f"  Program ID: {program.get('program_id')}",
+            f"  Mother Vessel: {program.get('mother_vessel', '?')}",
+            f"  Lighter: {program.get('lighter_name', '?')}",
+            f"  Start Date: {program.get('program_date', '?')}",
+            f"  Location: {program.get('location', '?')}",
+        ]
+        if program.get("lighter_master_mobile"):
+            prog_lines.append(f"  Lighter Master: {program['lighter_master_mobile']}")
+        draft += "\n".join(prog_lines)
+    else:
+        # Fallback: try name-based fuzzy lookup
+        db_match = await _fuzzy_employee_lookup(escort)
+        if db_match:
+            log.info(f"[release-ocr] fuzzy name match: {db_match}")
+            draft += f"\nDB name match (verify): {db_match}"
 
     # Save to draft_replies for admin queue (READ-ONLY DB lookup, NO financial write)
     draft_id = await create_draft_reply(
@@ -705,14 +756,21 @@ async def handle_ocr_release_slip(
             "ocr_employee": escort,
             "missing_fields": missing,
             "incomplete": bool(missing),
-            "db_match": db_match,
+            "program_id": program.get("program_id") if program else None,
+            "db_program_matched": bool(program),
             "confidence_score": ocr_result.get("confidence_score", 0),
             "draft_type": "release_slip",
         }),
         source_module="escort_lifecycle",
     )
     if draft_id:
-        log.info(f"[release-ocr] draft saved to DB for employee={escort} missing={missing}")
+        log.info(f"[release-ocr] draft #{draft_id} saved for escort={escort} missing={missing} program={bool(program)}")
 
-    log.info(f"[release-ocr] admin draft built for employee={escort}")
+    log.info(f"[release-ocr] admin draft built for escort={escort}")
     return draft
+
+
+async def check_active_program_for_phone(phone: str) -> bool:
+    """Return True if this phone has an active (non-completed) escort program."""
+    prog = await _lookup_active_program_by_phone(phone)
+    return prog is not None

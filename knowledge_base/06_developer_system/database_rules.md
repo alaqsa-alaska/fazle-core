@@ -138,9 +138,7 @@ Payroll runs are computed monthly per employee. The `daily_payroll_compute` sche
 | `wbom_payroll_run_items` | Physical Entity | Per-employee line items: component_type, amount, sign (+/-), source_table, source_id | Created with payroll run; immutable after locked |
 | `wbom_payroll_approval_log` | Audit Log | Immutable approval transitions: action, from_status, to_status, actor, reason, payload_json | Append-only; never modified |
 | `wbom_salary_records` | Physical Entity | Historical salary records per month: salary_month, amount, status, payment_date | Created on payroll completion; persistent salary history |
-| `wbom_staging_payments` | Staging | Pre-confirmation staging for WhatsApp-parsed payments: extracted_name, extracted_mobile, amount, matched_employee_id (FK), status (pending/approved/rejected) | Temporary; consumed when approved → becomes `wbom_cash_transactions` |
-
-**Unresolved Schema Question U-03:** `wbom_staging_payments` uses the WBOM namespace (suggesting core business entity) but functions as staging/transient. Domain assigned to CASH/FPE per Entity Ownership Audit (C-02). Naming conflict pending management clarification.
+| `wbom_staging_payments` | Staging | Pre-confirmation staging for WhatsApp-parsed payments: extracted_name, extracted_mobile, amount, matched_employee_id (FK), status (pending/approved/rejected), idempotency_key | Temporary; consumed when approved → becomes `wbom_cash_transactions`. `fpe_staging_payments` does NOT exist — this is the only staging table (U-03 resolved 2026-06-23). |
 
 ### Cross-Domain Dependencies
 
@@ -479,9 +477,9 @@ The learning loop: LLM generates reply → `llm_learning_memory` row created →
 
 | # | Table | Issue |
 |---|---|---|
-| U-01 | `wbom_candidates` | Referenced in migration 003 FK; not in current production schema (conftest). May be legacy-dropped or still present. Pending manual verification. |
-| U-02 | `fpe_transaction_repairs` | Created by standalone repair script (`tools/repair_fpe_transactions.py`); may not exist in production unless script was run. Pending verification. |
-| U-03 | `wbom_staging_payments` | WBOM namespace suggests core business entity but functionally is staging/transient. Domain assigned CASH/FPE per Entity Ownership Audit C-02. Naming conflict pending management clarification. |
+| U-01 | `wbom_candidates` | ✅ RESOLVED 2026-06-23 — EXISTS in production. 21 columns. Schema documented in `recruitment_flow_system.md`. |
+| U-02 | `fpe_transaction_repairs` | ✅ RESOLVED 2026-06-23 — EXISTS in production. 15 columns. Schema documented in `fpe_overview.md`. |
+| U-03 | `wbom_staging_payments` | ✅ RESOLVED 2026-06-23 — `wbom_staging_payments` EXISTS (16 cols). `fpe_staging_payments` does NOT exist. One table only. Domain assignment C-02 (CASH/FPE) stands. |
 
 ---
 

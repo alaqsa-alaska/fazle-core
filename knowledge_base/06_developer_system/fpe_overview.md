@@ -330,6 +330,33 @@ All FPE tables use the `fpe_*` prefix. They are managed exclusively by FPE migra
 
 ---
 
+### `fpe_transaction_repairs` — Re-Attribution Audit Trail (U-02, verified 2026-06-23)
+
+**Source:** Verified via `\d fpe_transaction_repairs` on production DB.
+**Purpose:** Immutable audit record of every time a payment transaction is re-attributed from one employee to another (e.g. OCR misread a name, transaction was matched to the wrong employee and later corrected by a repair tool).
+
+| Column | Type | Nullable | Default | Notes |
+|---|---|---|---|---|
+| `id` | BIGSERIAL | NOT NULL | auto | PK |
+| `transaction_id` | BIGINT | NOT NULL | — | FK → `fpe_cash_transactions.id` (original txn) |
+| `old_employee_id` | BIGINT | — | NULL | Employee the txn was incorrectly attributed to |
+| `new_employee_id` | BIGINT | — | NULL | Correct employee after repair |
+| `old_employee_name` | TEXT | — | NULL | Snapshot of old name at repair time |
+| `new_employee_name` | TEXT | — | NULL | Snapshot of new name at repair time |
+| `repair_reason` | TEXT | — | NULL | Human-readable reason for re-attribution |
+| `match_method` | TEXT | — | NULL | How the correct employee was found (phone / name / alias / manual) |
+| `reversal_txn_id` | BIGINT | — | NULL | FK → `fpe_cash_transactions.id` (counter-transaction created) |
+| `new_txn_id` | BIGINT | — | NULL | FK → `fpe_cash_transactions.id` (new corrected transaction) |
+| `review_needed` | BOOLEAN | NOT NULL | `false` | Flag for cases that need additional human review |
+| `review_note` | TEXT | — | NULL | Note for reviewer |
+| `dry_run` | BOOLEAN | NOT NULL | `false` | If true, repair was simulated only (no DB changes) |
+| `repaired_at` | TIMESTAMPTZ | NOT NULL | NOW() | When repair was executed |
+| `repaired_by` | TEXT | NOT NULL | `'repair_tool'` | Actor (repair tool name or admin phone) |
+
+**Relationship to ledger:** A repair creates a reversal transaction (`reversal_txn_id`) on the old employee's account and a new transaction (`new_txn_id`) on the correct employee's account. The `fpe_employee_ledger` is re-computed by the accounting worker after these transactions are inserted. The repair row itself is append-only — never modified after creation.
+
+---
+
 ## API Routes
 
 All routes are under `/api/fpe/`. Authentication: `X-Internal-Key` header (same as all other fazle-core routes).

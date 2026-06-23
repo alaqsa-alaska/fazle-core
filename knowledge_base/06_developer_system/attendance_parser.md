@@ -1,0 +1,146 @@
+# Attendance Parser Module
+
+**Source:** `modules/attendance_parser/__init__.py` (281 lines — read 2026-06-23)
+**Priority:** P3
+**See also:** `05_workflows/attendance_workflow.md` (operational flow)
+
+---
+
+## Purpose
+
+Extracts structured attendance fields from free-form WhatsApp text messages sent
+by supervisors or guards, then creates an admin-review draft. Admin approves
+before attendance is written to `wbom_attendance`.
+
+---
+
+## Supported Input Formats
+
+```
+"Jakir Day 24-04-2026"
+"Karim - Night shift - 24/04/26"
+"Name: Rahim, Shift: D, Date: 24.04.2026"
+"01712345678 Jakir D 24-04-2026"
+"হাজির — Rahim, ডিউটি, 24-04-2026"
+```
+
+---
+
+## Detection Gate
+
+`is_supervisor_attendance(text) → bool`
+
+Requires **both**:
+1. At least one attendance keyword: `হাজির`, `উপস্থিত`, `present`, `day`, `night`, `shift`, `ডিউটি`, `duty`, `d shift`, `n shift`
+2. At least one date pattern: `DD-MM-YYYY`, `DD/MM/YY`, `YYYY-MM-DD`
+
+False positives prevented by requiring the keyword+date combination.
+
+---
+
+## Field Extraction (`parse_attendance`)
+
+**Date:**
+- Tries `DD-MM-YYYY` pattern first, then `YYYY-MM-DD`
+- 2-digit year: `+ 2000`
+- Default: `date.today()` if no date found
+
+**Shift:**
+- Label-first: `shift: D`, `শিফট: N`
+- Inline fallback: standalone `D`, `N`, `day`, `night` token
+- Normalised to `"D"` or `"N"`; default `"D"` when absent
+
+**Mobile:** Bangladesh format regex `(880|0)1[3-9]\d{8}`
+
+**Name extraction (2-pass):**
+1. Label pattern: `name:`, `নাম:`, `কর্মী:` → capture next 1–25 chars
+2. Bare name heuristic: strip dates/mobiles/shift tokens → find 1–3 consecutive
+   words matching `^[A-Z][a-zA-Z]+$` or `^[ঀ-৿]+$`
+
+---
+
+## Draft Creation Flow
+
+```
+parse_attendance(text)
+   │
+   ▼
+create_attendance_draft(parsed, sender_phone, source)
+   │
+   ├── DB: lookup employee by mobile (wbom_employees.employee_mobile)
+   │        or by name (ILIKE first-word match, status=Active)
+   │
+   ├── if found:  draft includes employee_id + designation
+   │
+   └── if not found:  draft warns "⚠️ APPROVE করলে নতুন কর্মী তৈরি হবে"
+          │
+          ▼
+   create_draft_reply(intent="attendance", context=JSON{employee_id, shift, att_date})
+          │
+          ▼
+   Admin sees: "APPROVE <draft_id> | REJECT <draft_id>"
+          │
+          ▼
+   Admin APPROVE → wbom_attendance saved (ON CONFLICT UPDATE)
+```
+
+---
+
+## Draft Body Format
+
+```
+কর্মী: Md Rahim (Guard)
+আইডি: 42
+তারিখ: 24/04/2026
+শিফট: Day
+অবস্থান: —
+স্ট্যাটাস: Present
+```
+
+If employee not found in DB:
+```
+কর্মী (DB-তে নেই): Rahim
+তারিখ: 24/04/2026
+শিফট: Day
+⚠️ APPROVE করলে নতুন কর্মী তৈরি হবে
+```
+
+---
+
+## DB Tables
+
+| Table | Operation | When |
+|---|---|---|
+| `wbom_employees` | SELECT | Employee lookup (mobile or name) |
+| `fazle_draft_replies` | INSERT | Draft creation via `create_draft_reply()` |
+| `wbom_attendance` | INSERT/UPDATE | After admin APPROVE (handled by admin_commands) |
+
+---
+
+## API
+
+```python
+from modules.attendance_parser import (
+    is_supervisor_attendance,  # detection gate
+    parse_attendance,           # field extraction
+    create_attendance_draft,    # full draft creation (async)
+    save_supervisor_attendance, # deprecated alias → calls create_attendance_draft
+)
+```
+
+---
+
+## Kill-switch / Routing
+
+No separate kill-switch. Routing is controlled by `message_router`:
+- If `identity_brain` identifies sender as supervisor/guard role AND
+  `is_supervisor_attendance()` returns True → `create_attendance_draft()` called
+- Otherwise → normal intent routing
+
+---
+
+## Related
+
+- `05_workflows/attendance_workflow.md` — business workflow and state machine
+- `04_business_rules/attendance_business_rules.md` — 12-hour shift rules, confirmation windows
+- `modules/admin_commands/__init__.py` — `APPROVE`/`REJECT` command handlers

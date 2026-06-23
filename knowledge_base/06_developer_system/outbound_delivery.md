@@ -2,7 +2,9 @@
 **Module:** `modules/outbound/__init__.py`
 **Batch:** 15.1 + 15.2
 **Table:** `fazle_outbound_queue`
-**Status:** Production — controlled by `OUTBOUND_ENABLED` env var (default `false`)
+**Status:** Production — controlled by `OUTBOUND_ENABLED` env var
+**Current production value:** `OUTBOUND_ENABLED=true` (activated Session 11, 2026-06-23)
+**Source read:** `modules/outbound/__init__.py` (255 lines); schema verified from live DB 2026-06-23
 
 ---
 

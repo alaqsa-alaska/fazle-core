@@ -326,9 +326,22 @@ def _compute_confidence(text: str, fields: dict) -> int:
 
 def _classify_slip(text: str) -> str:
     t = text.lower()
+
+    # PRIMARY RULE: two dates = duty-completion (release) document.
+    # The physical slip is IDENTICAL for both assignment and release — the only
+    # structural difference is that the supervisor stamps a second date+signature
+    # when duty is completed. ONE date = still on duty. TWO dates = duty done.
+    date_patterns = re.findall(r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b', t)
+    has_two_dates = len(date_patterns) >= 2
+
     escort_kw = ["escort", "এস্কর্ট", "vessel", "ভেসেল", "mother vessel", "lighter",
                  "assignment", "নিয়োগ", "duty slip", "ডিউটি স্লিপ", "escort slip"]
-    release_kw = ["release", "রিলিজ", "completion", "সমাপ্ত", "discharge", "cleared"]
+    # Only words that actually appear on the physical slip or supervisor's stamp.
+    # NOT included: food bill, conveyance, duty days, settlement — those are
+    # system-calculated, not printed on the slip.
+    release_kw = ["release", "রিলিজ", "রিলিজ তারিখ", "release date",
+                  "completion", "সমাপ্ত", "discharge", "cleared",
+                  "ছাড়পত্র", "relieved", "স্বাক্ষর"]
     payment_kw = ["payment", "পেমেন্ট", "salary", "বেতন", "advance", "অ্যাডভান্স",
                   "paid", "পরিশোধ", "bkash", "বিকাশ", "nagad", "নগদ", "amount", "টাকা"]
 
@@ -336,13 +349,18 @@ def _classify_slip(text: str) -> str:
     release_score = sum(1 for k in release_kw if k in t)
     payment_score = sum(1 for k in payment_kw if k in t)
 
+    # TWO dates + any escort vocabulary → duty-completion document (release slip)
+    if has_two_dates and escort_score >= 1:
+        return "release_slip"
+
     best = max(escort_score, release_score, payment_score)
     if best == 0:
         return "unknown"
-    if escort_score == best:
-        return "escort_slip"
+    # Release score checked before escort: if explicit release words appear, prefer it
     if release_score == best:
         return "release_slip"
+    if escort_score == best:
+        return "escort_slip"
     return "payment_slip"
 
 

@@ -726,7 +726,7 @@ async def _poll_bridge(config: dict):
 
                 # ── Phase 22: 2-step OCR for images without pre-processed text ─
                 if msg.get("media_type") == "image" and not text and msg.get("filename"):
-                    from modules.ocr_processor import classify_from_context, process_image as _proc_img
+                    from modules.ocr_processor import classify_from_context
                     store_dir = os.path.dirname(messages_db)
                     file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
                     try:
@@ -759,35 +759,82 @@ async def _poll_bridge(config: dict):
                                 log.info("[IMG_SKIPPED_NOT_ELIGIBLE] bridge=%s msg_id=%s reason=%s", bridge_name, msg_id, reason)
                                 continue  # Not a probable slip/document image — safe terminal skip
 
-                        # STEP 2: Full OCR
-                        log.info(f"[{bridge_name}] probable slip image, running OCR: {file_path}")
+                        # STEP 2: Full extraction via escort_slip_extractor (3-pass OCR + field parsing)
+                        log.info(f"[{bridge_name}] probable slip image, running full extraction: {file_path}")
                         try:
-                            ocr_result = await _proc_img(file_path, None)
+                            from modules.escort_slip_extractor import extract_escort_slip as _extract_slip
+                            ocr_result = await _extract_slip(file_path, source_label=bridge_name)
                         except Exception as _ocr_err:
-                            log.error(f"[{bridge_name}] OCR error for {file_path}: {_ocr_err}")
+                            log.error(f"[{bridge_name}] extraction error for {file_path}: {_ocr_err}")
                             continue
 
-                        slip_type = ocr_result.get("slip_type", "unknown")
-                        if slip_type == "release_slip":
+                        # completion_date present → supervisor stamped second date → duty-completion document
+                        is_release = ocr_result.get("completion_date") is not None
+                        doc_type = ocr_result.get("document_type", "unknown_document")
+                        conf_pct = int(ocr_result.get("confidence", 0) * 100)
+
+                        if is_release:
+                            # Translate EscortSlipResult → compat dict for handle_ocr_release_slip
+                            compat = {
+                                "slip_type": "release_slip",
+                                "employee_name": ocr_result.get("escort_name"),
+                                "vessel": ocr_result.get("lighter_vessel") or ocr_result.get("mother_vessel"),
+                                "date": ocr_result.get("completion_date"),
+                                "location": ocr_result.get("release_place"),
+                                "confidence_score": conf_pct,
+                                "raw_text": ocr_result.get("raw_ocr_text", ""),
+                                "master_mobile": ocr_result.get("master_mobile"),
+                                "start_date": ocr_result.get("start_date"),
+                            }
                             from modules.escort_lifecycle import handle_ocr_release_slip
                             try:
-                                draft_txt = await handle_ocr_release_slip(ocr_result, source=bridge_name, phone=phone)
+                                draft_txt = await handle_ocr_release_slip(compat, source=bridge_name, phone=phone)
                                 if draft_txt:
                                     await _notify_admin_bridge({
                                         "admin_phone": _settings.admin_bridge2_number,
-                                        "text": f"📋 Release Slip OCR (from {phone}):\n\n{draft_txt}",
+                                        "text": f"📋 Release Slip (from {phone}):\n\n{draft_txt}",
                                         "bridge": "bridge2",
                                     })
+                                missing = ocr_result.get("missing_fields", [])
+                                if missing or conf_pct < 60:
+                                    escort_reply = (
+                                        "✅ আপনার রিলিজ স্লিপ পাওয়া গেছে।"
+                                        + (" কিছু তথ্য স্পষ্ট নয়।" if missing else "")
+                                        + " অ্যাডমিন যাচাই করছেন — অনুগ্রহ করে আপনার নাম ও আইডি নম্বর পাঠান।"
+                                    )
+                                else:
+                                    escort_reply = "✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"
+                                text = escort_reply
                             except Exception as _rs_err:
                                 log.error(f"[{bridge_name}] release slip handling error: {_rs_err}")
-                            continue  # Do not route normally
+                                continue
+                            # Fall through to normal routing to send escort_reply
 
-                        elif slip_type not in ("unknown", "duplicate"):
-                            # escort_slip or payment_slip — use OCR text as message text
-                            text = ocr_result.get("raw_text") or f"[image: {slip_type}]"
-                            _extracted_text = ocr_result.get("raw_text") or ""
+                        elif doc_type == "unknown_document" or conf_pct < 10:
+                            # If sender has active escort program, flag to admin — may be unclear release slip
+                            try:
+                                from modules.escort_lifecycle import check_active_program_for_phone
+                                has_program = await check_active_program_for_phone(phone)
+                                if has_program:
+                                    await _notify_admin_bridge({
+                                        "admin_phone": _settings.admin_bridge2_number,
+                                        "text": (
+                                            f"⚠️ অস্পষ্ট ছবি (OCR ব্যর্থ) from {phone}\n"
+                                            "এই নম্বরে সক্রিয় এস্কর্ট প্রোগ্রাম আছে — রিলিজ স্লিপ হতে পারে।\n"
+                                            "ম্যানুয়ালি যাচাই করুন অথবা এস্কর্টকে স্পষ্ট ছবি পাঠাতে বলুন।"
+                                        ),
+                                        "bridge": "bridge2",
+                                    })
+                                    text = "ছবিটি স্পষ্ট নয়। অনুগ্রহ করে ভালো আলোতে আবার ছবি তুলে পাঠান।"
+                                else:
+                                    continue  # Unknown image, no active program — skip
+                            except Exception:
+                                continue
+
                         else:
-                            continue  # Unknown or duplicate — skip routing
+                            # escort slip (assignment, not release) — use extracted text for routing
+                            text = ocr_result.get("raw_ocr_text") or f"[image: {doc_type}]"
+                            _extracted_text = ocr_result.get("raw_ocr_text") or ""
                     finally:
                         await _mark_processed(msg_id, bridge_name, phone)
                         log.info("[IMG_MARK_PROCESSED_FINAL] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
