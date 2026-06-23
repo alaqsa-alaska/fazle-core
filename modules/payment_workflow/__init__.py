@@ -33,7 +33,7 @@ from app.config import get_settings
 log = logging.getLogger("fazle.payment")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-DEFAULT_DAILY_RATE = 1200  # ৳1200/day for escort duty
+DEFAULT_DAILY_RATE = 400  # ৳400/day for escort duty (PAY-01: 12,000 ÷ 30)
 
 
 # ── Escort payment draft ───────────────────────────────────────────────────────

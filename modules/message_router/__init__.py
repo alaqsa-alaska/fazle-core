@@ -442,8 +442,25 @@ async def process_message(
 
     # ── 15. AI FALLBACK ────────────────────────────────────────────────────────
     db_ctx = await get_contact_context(sender)
+    # Phase 4 — Hybrid RAG enrichment: enrich general queries with KB context
+    try:
+        from modules.rag import search as _rag_search
+        _rag_hits = await _rag_search(text, k=3)
+        if _rag_hits:
+            _rag_lines = [
+                f"- {h.get('title', '')}: {(h.get('text') or '').strip()[:300]}"
+                for h in _rag_hits
+                if (h.get("text") or "").strip()
+            ]
+            if _rag_lines:
+                db_ctx = (db_ctx + "\n\nKB Context:\n" + "\n".join(_rag_lines)).strip()
+                log.info("[router] RAG enrichment added hits=%d sender=%s", len(_rag_hits), sender)
+    except Exception as _rag_err:
+        log.debug("[router] rag enrichment skipped: %s", _rag_err)
     reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
-    return reply, None
+    # Phase 4 Step 4 — strip artifact prefixes from structured prompt output
+    from shared.reply_policy import clean_general_reply as _clean_reply
+    return _clean_reply(reply), None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

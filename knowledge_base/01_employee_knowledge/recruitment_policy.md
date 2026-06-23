@@ -15,7 +15,7 @@ This article is visible to job candidates and may be used by WhatsApp, Messenger
 - Female Marketing Officer
 
 ## Candidate Eligibility
-- Age: 18 to 45 years.
+- Age: 18 to 55 years.
 - Physical condition: must be physically fit and able to perform field duty.
 - Education: minimum class 8 preferred; SSC gets preference.
 - Educational exception: candidates may apply without formal certificates if they can read and write Bangla and are physically fit.
@@ -103,3 +103,4 @@ Use clear, encouraging, professional Bangla. Avoid overpromising. Do not use emo
 
 ## Revision History
 - 2026-06-19: Created using management-resolved joining fee, training duration, and candidate auto-reply policies.
+- 2026-06-22: Age range updated 18–45 → 18–55 per management decision BR-25 (Wave-1). Production code source: `modules/recruitment_flow._parse_age()`.

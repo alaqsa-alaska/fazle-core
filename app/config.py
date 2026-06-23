@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:3b"
+    ollama_model: str = "qwen3:8b"
 
     # GitHub Models (OpenAI-compatible — https://models.github.ai/inference)
     github_token: str = ""
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     groq_model_name: str = "llama-3.1-8b-instant"
 
     # Bridges
-    bridge1_url: str = "http://localhost:8080"
+    bridge1_url: str = "http://localhost:8082"
     bridge1_number: str = ""
     bridge1_label: str = "HR"
 
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # Meta WhatsApp
     meta_phone_number_id: str = ""
     meta_api_token: str = ""
-    meta_api_url: str = "https://graph.facebook.com/v22.0"
+    meta_api_url: str = "https://graph.facebook.com/v23.0"
     meta_app_secret: str = ""
     meta_verify_token: str = ""
     # Webhook auth rolls out in audit mode first so existing QR bridge sessions
@@ -100,11 +100,11 @@ class Settings(BaseSettings):
     # Per-source auto-reply: comma-separated source names allowed to reply.
     # Sources NOT listed here are sync-only: messages are saved but no reply
     # and no draft is created.
-    auto_reply_sources: str = "bridge1,meta"
+    auto_reply_sources: str = "bridge1,bridge2,meta"
 
     # When False, _save_draft() is a no-op — no entries created in
     # fazle_draft_replies from inbound message processing.
-    draft_creation_enabled: bool = False
+    draft_creation_enabled: bool = True
 
     # Facebook Page credentials (Messenger + comments auto-reply)
     fb_page_access_token: str = ""

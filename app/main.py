@@ -930,7 +930,7 @@ async def _handle_meta_message(msg: dict, value: dict):
 
     if message_id:
         existing = await fetch_one(
-            """SELECT id FROM wbom_whatsapp_messages
+            """SELECT 1 FROM wbom_whatsapp_messages
                WHERE platform='meta' AND direction='inbound' AND source_message_ref=$1
                LIMIT 1""",
             message_id,

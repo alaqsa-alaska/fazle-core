@@ -1,4 +1,4 @@
-﻿# Payment Workflow
+# Payment Workflow
 
 ## Flow
 Payment Request -> Identity Verification -> Duty/Slip Verification -> Method/Number Confirmation -> Draft/Admin Message -> Accountant WhatsApp -> Payment Complete -> Ledger Update.
@@ -12,3 +12,89 @@ Employee ID or name, phone/payment number, method, amount, purpose, admin sender
 ## Cross References
 - ../04_business_rules/payment_business_rules.md
 - cash_workflow.md
+
+---
+
+## Payment Draft State Machine
+
+### Purpose
+All payment and advance requests create a draft in `fazle_payment_drafts`. The draft follows a defined lifecycle.
+
+### States
+
+```
+pending → sent (admin PAID or ADVANCE command → finalize_payment() → accountant notified)
+        → rejected (admin REJECT command)
+        → expired (24-hour TTL; combined_draft_cleanup job runs hourly)
+```
+
+| State | Trigger | Next Action |
+|---|---|---|
+| `pending` | Created by payment_workflow | Admin reviews and approves or rejects |
+| `sent` | Admin runs PAID/ADVANCE | Accountant notified via bridge1; ledger updated |
+| `rejected` | Admin runs REJECT | Requester optionally notified |
+| `expired` | 24h TTL passed | No further action; admin must re-request if needed |
+
+**Business Rule:** A payment draft never auto-sends. It always requires explicit admin action (PAID or ADVANCE command).
+
+**Source Module:** `modules/payment_workflow`, `modules/admin_commands`, `modules/scheduler`
+**PKCA Report:** 09_state_machine_coverage_report.md (SM-03)
+**Management Authority:** Production evidence; documented 2026-06-22
+
+---
+
+## Employee Payment Verification (5-Step)
+
+### Purpose
+New employees requesting payment method setup go through a 5-step identity verification session before payment is processed.
+
+### Verification Steps
+
+| Step | Session State | Employee Action | System Action |
+|---|---|---|---|
+| 1 | `STEP_SELFIE` (`pending_selfie`) | Employee sends selfie image | System stores image; advances session |
+| 2 | `STEP_SLIP` (`pending_slip`) | Employee sends duty slip or release slip | System validates slip presence; advances session |
+| 3 | `STEP_METHOD` (`pending_payment_method`) | Employee confirms bKash/Nagad/cash + number | System stores payment method |
+| 4 | `STEP_DONE` (`verified`) | Session complete | Admin can now process payment |
+| — | `rejected` | Identity mismatch detected | Session closed; admin notified |
+
+**Business Rule:** Verification session is stored in `fazle_draft_replies` with `intent='verification'`. Identity mismatch (selfie vs employee records) triggers rejection and admin notification.
+
+**Source Module:** `modules/employee_verification`
+**Source Function:** `run_verification_step()`, `STEP_SELFIE`, `STEP_SLIP`, `STEP_METHOD`, `STEP_DONE`
+**PKCA Report:** 09_state_machine_coverage_report.md (SM-06)
+
+---
+
+## PAID and ADVANCE Commands
+
+| Command | Syntax | Required Role |
+|---|---|---|
+| PAID | `PAID <draft_id> <amount> bkash\|nagad\|cash [ref=X]` | accountant |
+| ADVANCE | `ADVANCE <draft_id> <amount> bkash\|nagad\|cash [ref=X]` | accountant |
+| REJECT | `REJECT <draft_id>` | operator |
+
+**Example:**
+```
+PAID 165 12000 bkash ref=TX12345
+ADVANCE 166 1000 nagad
+```
+
+**Source Module:** `modules/admin_commands`
+**Source Function:** `_cmd_paid()`, `_cmd_advance()`
+**PKCA Report:** 12_command_coverage_report.md
+
+---
+
+## Payment Reconciliation
+
+**Business Rule:** Every hour, the `payment_reconciliation` scheduler job re-attempts to match unmatched staging payments in `wbom_staging_payments` against employee records.
+
+- Matching method: mobile phone tail (last 11 digits)
+- Tries both `extracted_mobile` and `sender_number`
+- Result logged to `fazle_reconciliation_log`
+- Max 50 unmatched records per run
+
+**Source Module:** `modules/scheduler`
+**Source Function:** `job_payment_reconciliation()`
+**PKCA Report:** 07_scheduler_coverage_report.md

@@ -137,10 +137,6 @@ async def _scan_bridge_chat(bridge: dict, chat_jid: str) -> dict:
         missing_count = len(missing_ids)
 
         if missing_ids:
-            log.warning(
-                "[fpe.gapscan] bridge=%s jid=%s missing=%d (archive=%d sqlite=%d)",
-                bridge["name"], chat_jid, missing_count, archive_count, sqlite_count,
-            )
             obs.inc(
                 "fpe_gap_scan_missing_total",
                 missing_count,
@@ -156,6 +152,20 @@ async def _scan_bridge_chat(bridge: dict, chat_jid: str) -> dict:
                 fpe_id = await _ingest_sqlite_row(row, bridge, chat_jid, lid_map)
                 if fpe_id is not None:
                     backfilled += 1
+
+            actionable_missing = max(missing_count - skipped_no_content, 0)
+            if actionable_missing > 0:
+                log.warning(
+                    "[fpe.gapscan] bridge=%s jid=%s missing=%d actionable=%d skipped_empty=%d (archive=%d sqlite=%d)",
+                    bridge["name"], chat_jid, missing_count, actionable_missing,
+                    skipped_no_content, archive_count, sqlite_count,
+                )
+            else:
+                log.debug(
+                    "[fpe.gapscan] bridge=%s jid=%s missing=%d all_empty_or_media skipped_empty=%d (archive=%d sqlite=%d)",
+                    bridge["name"], chat_jid, missing_count, skipped_no_content,
+                    archive_count, sqlite_count,
+                )
             obs.inc(
                 "fpe_gap_scan_backfilled_total",
                 backfilled,

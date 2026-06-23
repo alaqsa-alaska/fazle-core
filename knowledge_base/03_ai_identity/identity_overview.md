@@ -1,4 +1,4 @@
-﻿# AI Identity Overview
+# AI Identity Overview
 
 ## Purpose
 Define the role-centric identity foundation for all AI answers, workflows, permissions, and frontend/backend role management.
@@ -40,3 +40,74 @@ The AI must answer by role and visibility first, then by topic. Domain-only retr
 
 ## Revision History
 - 2026-06-19: Created as dedicated identity domain.
+- 2026-06-22: Enriched with production resolution algorithm, evidence sources, and confidence scoring (Wave-1).
+
+---
+
+## Identity Resolution Algorithm (Production)
+
+### Purpose
+The production identity engine resolves each contact to a single role using an 11-step priority algorithm. The first step that produces a match wins.
+
+### Ordered Resolution Steps
+
+| Step | Resolved Role | Evidence Source | Table |
+|---|---|---|---|
+| 0 (pre-check) | blocked | `fazle_contact_roles` where role='blocked' | Hard silent-skip; no further processing |
+| 1 | admin | `fazle_admins` OR `fazle_contact_roles` where role='admin' | `fazle_admins`, `fazle_contact_roles` |
+| 2 | family | `fazle_contact_roles` where role='family' | `fazle_contact_roles` |
+| 3 | accountant | `fazle_contact_roles` where role='accountant' | `fazle_contact_roles` |
+| 4 | vip_client | `fazle_contact_roles` where role='vip_client' | `fazle_contact_roles` |
+| 5 | client_escort_buyer | `fazle_contact_roles` where role='client_escort_buyer' | `fazle_contact_roles` |
+| 6 | repeat_client | Repeat payment history | `wbom_cash_transactions` |
+| 7 | vendor | `fazle_contact_roles` where role='vendor' | `fazle_contact_roles` |
+| 8 | employee | Phone match (primary + 4 secondary sources) | See below |
+| 9 | supervisor | `fazle_contact_roles` where role='supervisor' | `fazle_contact_roles` |
+| 10 | candidate | Active recruitment session | `fazle_recruitment_sessions` |
+| 11 | unknown | No match found | Fallback |
+
+### Employee Secondary Evidence (Step 8)
+
+Primary: `wbom_employees` — phone match on 3 variants (01X, 880X, +880X)
+
+If primary fails, try secondary sources in order:
+- Secondary A: `wbom_cash_transactions` — any payment record with this phone
+- Secondary B: `wbom_attendance` — any attendance record with this phone
+- Secondary C: `escort_roster_entries` — any roster entry with this phone
+- Secondary D: `wbom_contacts` — contact book match
+
+**Source Module:** `modules/identity_brain`
+**Source Function:** `resolve_identity()`, `_ROLE_PRIORITY`
+**PKCA Report:** 11_identity_coverage_report.md
+**Management Authority:** Production evidence; documented 2026-06-22
+
+---
+
+## Identity Confidence Scoring
+
+| Evidence Type | Confidence Score |
+|---|---|
+| Direct seed record (`fazle_contact_roles`) | 1.0 |
+| `wbom_employees` primary phone match | 0.95 |
+| Secondary evidence (cash / attendance / roster) | 0.7 |
+| Contact book match only | 0.5 |
+| No evidence / fallback (unknown) | 0.0 |
+
+**Business Rule:** Low-confidence identities (< 0.7) may cause the system to create a draft for admin review rather than auto-send, even for normally safe intents.
+
+---
+
+## Phone Normalization
+
+When looking up any contact, the system always tries three phone format variants simultaneously:
+
+| Variant | Example |
+|---|---|
+| Local | `01711234567` (11 digits) |
+| International without + | `8801711234567` (13 digits) |
+| International with + | `+8801711234567` |
+
+**Canonical storage format:** `8801XXXXXXXXXX` (13 digits, no `+`)
+
+**Source Module:** `modules/phone_normalizer`
+**PKCA Report:** 11_identity_coverage_report.md

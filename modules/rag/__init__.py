@@ -22,12 +22,14 @@ Public API (all async, safe to call from FastAPI handlers):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import os
 import re
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from app.database import fetch_all
@@ -46,6 +48,176 @@ MIN_TOKEN_LEN = 2
 # BM25 params
 _K1 = 1.5
 _B = 0.75
+
+# ── HYBRID RAG — Milestone 1 Scaffold ─────────────────────────────────────────
+# All new symbols are inert while HYBRID_SEARCH_ENABLED=false (the default).
+# Imports of sentence_transformers and qdrant_client are deferred inside each
+# lazy function so no import-time side effects occur when the flag is off.
+# No existing function (build_index, search, answer, rebuild_index) is modified.
+
+HYBRID_SEARCH_ENABLED: bool = os.getenv("HYBRID_SEARCH_ENABLED", "false").lower() == "true"
+
+QDRANT_STORE_PATH: str = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "store", "qdrant",
+)
+QDRANT_COLLECTION_NAME: str = "fazle_rag_chunks"
+VECTOR_DIM: int = 384           # paraphrase-multilingual-MiniLM-L12-v2
+EMBEDDING_MODEL_NAME: str = "paraphrase-multilingual-MiniLM-L12-v2"
+_QDRANT_UPSERT_BATCH: int = 100  # points per client.upsert() call
+
+# ── Milestone 3.6 — Qdrant Server Mode support ────────────────────────────────
+# When QDRANT_HOST is set, _get_qdrant_client() uses server mode.
+# When unset (default), embedded file-based mode is used (original behaviour).
+# Do NOT set these without management approval of production .env change.
+_QDRANT_HOST: str = os.getenv("QDRANT_HOST", "")
+_QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
+
+# ── Milestone 3.8 — Runtime Optimization ──────────────────────────────────────
+# Query embedding cache: exact-match only. Zero quality change.
+# Bounded LRU to prevent unbounded RAM growth. Configurable via env var.
+_EMBEDDING_CACHE_MAX_SIZE: int = int(os.getenv("EMBEDDING_CACHE_MAX_SIZE", "2000"))
+
+
+class _EmbeddingLRUCache:
+    """Bounded LRU cache: sha1(query_bytes) → ndarray[384].
+
+    Thread-safe for single-writer / concurrent-reader access under Python GIL.
+    OrderedDict move_to_end + popitem(last=False) gives O(1) LRU eviction.
+    """
+    __slots__ = ("_cache", "_maxsize")
+
+    def __init__(self, maxsize: int) -> None:
+        self._cache: OrderedDict[bytes, Any] = OrderedDict()
+        self._maxsize: int = maxsize
+
+    def get(self, key: bytes) -> Optional[Any]:
+        if key not in self._cache:
+            return None
+        self._cache.move_to_end(key)
+        return self._cache[key]
+
+    def put(self, key: bytes, value: Any) -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)  # evict least-recently-used
+            self._cache[key] = value
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+_query_embedding_cache: _EmbeddingLRUCache = _EmbeddingLRUCache(
+    maxsize=_EMBEDDING_CACHE_MAX_SIZE
+)
+
+# Dedicated 1-thread executor for MiniLM encoding.
+# CPU-bound encoding uses exactly 1 thread to prevent cross-call contention
+# on this shared-VPS AMD EPYC (8-thread default caused 200ms+ spikes).
+# Qdrant network I/O uses the default asyncio thread pool (I/O-bound, different resource).
+_encoding_executor: ThreadPoolExecutor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="rag-encoder",
+)
+
+# Production-approved seed queries pre-loaded into the embedding cache at build time.
+# Append-only. Never remove an entry that may still appear in real WhatsApp traffic.
+# Covers the highest-frequency intents observed across Recruitment / Payroll /
+# Attendance / Escort / Office-Address categories.
+_SEED_QUERIES: tuple[str, ...] = (
+    # Recruitment (Bangla)
+    "কোন পদে নিয়োগ চলছে", "নিয়োগ বিজ্ঞপ্তি", "চাকরির সুযোগ",
+    "কোন পদে লোক নেওয়া হচ্ছে", "নিয়োগ হচ্ছে", "পদ শূন্য",
+    # Payroll (Bangla)
+    "বেতন কত", "বেতন কবে পাব", "বেতন কখন দেবে", "মাসিক বেতন",
+    # Payroll (English)
+    "salary", "salary amount", "salary payment date",
+    # Attendance / Leave
+    "হাজিরা", "ছুটি", "অনুপস্থিতি", "attendance",
+    # Escort
+    "এসকর্ট ডিউটি", "এসকর্ট কাজ", "এসকর্ট নিয়ম", "escort duty",
+    # Office / Address
+    "অফিসের ঠিকানা", "অফিস কোথায়", "কোম্পানির ঠিকানা", "office address",
+    # Cross-language common
+    "recruitment", "নিয়োগ",
+)
+
+# ── END Milestone 3.8 constants ───────────────────────────────────────────────
+
+# Module-level singletons — None until first lazy call.
+_encoder_instance = None        # SentenceTransformer; loaded once, stays resident
+_qdrant_client_instance = None  # QdrantClient; server or embedded, opened once
+
+
+def _get_encoder():
+    """
+    Load SentenceTransformer model once (blocking).
+    Must be called from a thread-pool executor — never called at import time or
+    during normal service operation while HYBRID_SEARCH_ENABLED=false.
+    Model download (~118 MB) happens only on the very first call; cached afterwards.
+    """
+    global _encoder_instance
+    if _encoder_instance is None:
+        from sentence_transformers import SentenceTransformer  # deferred import
+        log.info("[rag] loading embedding model %r ...", EMBEDDING_MODEL_NAME)
+        _encoder_instance = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        log.info("[rag] embedding model loaded OK")
+    return _encoder_instance
+
+
+def _get_qdrant_client():
+    """
+    Open QdrantClient in server mode (QDRANT_HOST set) or embedded fallback.
+    Server mode: QdrantClient(host=..., port=...) — no file lock, low latency.
+    Embedded fallback: QdrantClient(path=...) — original behaviour, always safe.
+    If server is unreachable, logs warning and falls back to embedded automatically.
+    Must only be called when HYBRID_SEARCH_ENABLED=true.
+    """
+    global _qdrant_client_instance
+    if _qdrant_client_instance is None:
+        from qdrant_client import QdrantClient  # deferred import
+        if _QDRANT_HOST:
+            try:
+                client = QdrantClient(host=_QDRANT_HOST, port=_QDRANT_PORT)
+                client.get_collections()  # connectivity probe — raises if unreachable
+                _qdrant_client_instance = client
+                log.info("[rag] Qdrant client → server mode %s:%d", _QDRANT_HOST, _QDRANT_PORT)
+            except Exception as exc:
+                log.warning(
+                    "[HYBRID] Falling back to embedded Qdrant. server=%s:%d error_type=%s error=%s",
+                    _QDRANT_HOST, _QDRANT_PORT, type(exc).__name__, exc,
+                )
+                os.makedirs(QDRANT_STORE_PATH, exist_ok=True)
+                _qdrant_client_instance = QdrantClient(path=QDRANT_STORE_PATH)
+                log.info("[rag] Qdrant client → embedded mode %r", QDRANT_STORE_PATH)
+        else:
+            os.makedirs(QDRANT_STORE_PATH, exist_ok=True)
+            _qdrant_client_instance = QdrantClient(path=QDRANT_STORE_PATH)
+            log.info("[rag] Qdrant client → embedded mode %r", QDRANT_STORE_PATH)
+    return _qdrant_client_instance
+
+
+def _qdrant_ensure_collection() -> None:
+    """
+    Create the fazle_rag_chunks collection if it does not already exist.
+    Idempotent — safe to call on every build_index() when flag is true.
+    Must only be called when HYBRID_SEARCH_ENABLED=true.
+    """
+    from qdrant_client.models import VectorParams, Distance  # deferred import
+    client = _get_qdrant_client()
+    existing = [c.name for c in client.get_collections().collections]
+    if QDRANT_COLLECTION_NAME not in existing:
+        client.create_collection(
+            collection_name=QDRANT_COLLECTION_NAME,
+            vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
+        )
+        log.info("[rag] Qdrant collection %r created", QDRANT_COLLECTION_NAME)
+    else:
+        log.debug("[rag] Qdrant collection %r already exists", QDRANT_COLLECTION_NAME)
+
+# ── END HYBRID RAG Milestone 1 Scaffold ───────────────────────────────────────
 
 # ── PATCH 1: Ingestion exclude-lists ──────────────────────────────────────────
 # Directories (relative to RESOURCES_DIR) that must never be indexed
@@ -252,6 +424,165 @@ async def _load_kb_rows() -> list[tuple[str, str, str, bool]]:
     return out
 
 
+# ── HYBRID RAG — Milestone 2: Vector Index Build Path ─────────────────────────
+
+async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
+    """
+    Build the Qdrant vector index from BM25-verified safe chunks.
+
+    CONTRACT:
+      - Called ONLY after BM25 build has already succeeded.
+      - Called ONLY when HYBRID_SEARCH_ENABLED=True.
+      - Never raises — all exceptions are caught, logged, and swallowed.
+      - BM25 search continues uninterrupted if this function fails at any point.
+      - Runs under the caller's _IDX.lock for index consistency.
+      - All heavy imports are deferred (no import-time side effects).
+      - Temporary allocations (texts, vectors, points) are explicitly released.
+
+    Sequence:
+      1. Validate input
+      2. Load encoder singleton via thread-pool executor (non-blocking)
+      3. Encode all chunk texts via thread-pool executor (CPU-bound)
+      4. Drop existing Qdrant collection only if it exists (never delete blindly)
+      5. Recreate collection fresh
+      6. Build PointStruct list with deterministic UUIDs
+      7. Upsert in batches of _QDRANT_UPSERT_BATCH
+      8. Release temporary allocations
+      9. Log completion metrics
+    """
+    if not safe_chunks:
+        log.info("[HYBRID] no safe chunks available — Qdrant build skipped")
+        return
+
+    t_start: float = time.monotonic()
+    log.info("[HYBRID] Build started — chunks=%d", len(safe_chunks))
+
+    try:
+        loop = asyncio.get_running_loop()
+
+        # ── Step 1: Load encoder singleton ────────────────────────────────────
+        # _get_encoder() is blocking (may load ~118 MB model on first call).
+        # Uses dedicated _encoding_executor (1 thread) — same thread as query
+        # encoding so the model stays warm and no context switch occurs.
+        encoder = await loop.run_in_executor(_encoding_executor, _get_encoder)
+        t_encoder_done: float = time.monotonic()
+        log.info(
+            "[HYBRID] Encoder loaded — elapsed_ms=%d",
+            int((t_encoder_done - t_start) * 1000),
+        )
+
+        # ── Step 2: Encode all chunk texts (CPU-bound) ─────────────────────────
+        texts: list[str] = [c["text"] for c in safe_chunks]
+
+        def _encode_sync(enc: Any, chunk_texts: list[str]) -> Any:
+            """Synchronous encode helper — executed in thread-pool executor."""
+            return enc.encode(
+                chunk_texts,
+                batch_size=32,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
+
+        vectors = await loop.run_in_executor(_encoding_executor, _encode_sync, encoder, texts)
+        del texts  # release string list; vectors now held in numpy array
+        t_encode_done: float = time.monotonic()
+        log.info(
+            "[HYBRID] Encoding complete — chunks=%d shape=%s encode_ms=%d",
+            len(safe_chunks),
+            list(vectors.shape),
+            int((t_encode_done - t_encoder_done) * 1000),
+        )
+
+        # ── Step 3: Safe Qdrant collection rebuild ─────────────────────────────
+        log.info("[HYBRID] Qdrant rebuild started")
+        client = _get_qdrant_client()
+
+        # Verify collection exists BEFORE deleting — never delete accidentally.
+        existing_names: list[str] = [
+            c.name for c in client.get_collections().collections
+        ]
+        if QDRANT_COLLECTION_NAME in existing_names:
+            client.delete_collection(QDRANT_COLLECTION_NAME)
+            log.info("[HYBRID] Qdrant collection dropped — rebuilding fresh")
+
+        _qdrant_ensure_collection()
+        log.info("[HYBRID] Qdrant collection ready")
+
+        # ── Step 4: Build PointStruct list with deterministic UUIDs ───────────
+        # Deferred imports — only executed when HYBRID_SEARCH_ENABLED=True.
+        from qdrant_client.models import PointStruct  # noqa: PLC0415
+        import uuid as _uuid                           # noqa: PLC0415
+
+        indexed_at: float = time.time()
+        points: list[PointStruct] = []
+
+        for chunk, vec in zip(safe_chunks, vectors):
+            # Deterministic UUID: same source+chunk_idx always → same UUID.
+            # Enables upsert semantics and future incremental sync.
+            point_id: str = str(_uuid.uuid5(
+                _uuid.NAMESPACE_DNS,
+                f"{chunk['source']}:{chunk['chunk_idx']}",
+            ))
+            points.append(PointStruct(
+                id=point_id,
+                vector=vec.tolist(),  # numpy float32 row → Python list[float]
+                payload={
+                    "source":            chunk["source"],
+                    "title":             chunk["title"],
+                    "chunk_idx":         chunk["chunk_idx"],
+                    "text":              chunk["text"],
+                    "safe_for_customer": True,           # invariant: unsafe chunks never reach here
+                    "source_kind":       chunk["source"].split(":", 1)[0],  # "file" | "kb"
+                    "indexed_at":        indexed_at,
+                },
+            ))
+
+        total_points: int = len(points)
+        del vectors  # release numpy array — payload data now serialised in points list
+
+        # ── Step 5: Upsert in batches ──────────────────────────────────────────
+        t_upsert_start: float = time.monotonic()
+        for i in range(0, total_points, _QDRANT_UPSERT_BATCH):
+            client.upsert(
+                collection_name=QDRANT_COLLECTION_NAME,
+                points=points[i : i + _QDRANT_UPSERT_BATCH],
+            )
+        t_upsert_done: float = time.monotonic()
+        log.info(
+            "[HYBRID] Upsert completed — points=%d upsert_ms=%d",
+            total_points,
+            int((t_upsert_done - t_upsert_start) * 1000),
+        )
+
+        del points  # release serialised point list
+
+        # ── Step 6: Final metrics ──────────────────────────────────────────────
+        log.info(
+            "[HYBRID] Build completed — points=%d total_ms=%d "
+            "encode_ms=%d upsert_ms=%d",
+            total_points,
+            int((time.monotonic() - t_start) * 1000),
+            int((t_encode_done - t_encoder_done) * 1000),
+            int((t_upsert_done - t_upsert_start) * 1000),
+        )
+
+        # ── Step 7: Seed embedding cache with common queries ───────────────────
+        # Encoder is already warm; seeding adds <500ms at build time and ensures
+        # zero cold-encoding latency for the first production request.
+        await _seed_embedding_cache()
+
+    except Exception as exc:
+        # Hybrid failure is non-fatal. BM25 is already committed.
+        # Log full error type and message for diagnosis; never crash production.
+        log.error(
+            "[HYBRID] FAILED — BM25 index still active and serving requests. "
+            "error_type=%s error=%s",
+            type(exc).__name__,
+            exc,
+        )
+
+# ── END HYBRID RAG Milestone 2: Vector Index Build Path ───────────────────────
+
 # ── Build ──────────────────────────────────────────────────────────────────────
 async def build_index() -> dict[str, Any]:
     """(Re)build the in-memory RAG index. Safe under concurrency."""
@@ -263,6 +594,7 @@ async def build_index() -> dict[str, Any]:
         sources.extend(_load_resource_files())
         sources.extend(await _load_kb_rows())
 
+        safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
         unsafe_count = 0
         for source_id, title, text, source_safe in sources:
             for idx, chunk in enumerate(_chunk_text(text)):
@@ -288,6 +620,7 @@ async def build_index() -> dict[str, Any]:
                     "len": len(tokens),
                     "safe_for_customer": True,  # guaranteed: unsafe chunks never stored
                 })
+                safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
 
         # document frequencies
         for d in _IDX.docs:
@@ -304,6 +637,11 @@ async def build_index() -> dict[str, Any]:
             f"unsafe={unsafe_count} vocab={len(_IDX.df)} "
             f"avgdl={_IDX.avgdl:.1f} in {_IDX.build_ms}ms"
         )
+        # BM25 build is complete and committed. Attempt Hybrid vector build only
+        # if the flag is enabled. If Hybrid fails, BM25 serves requests normally.
+        if HYBRID_SEARCH_ENABLED:
+            await _build_qdrant_index(safe_chunks)
+        del safe_chunks  # release list container; dicts remain in _IDX.docs
         return await _stats_locked()
 
 
@@ -332,6 +670,214 @@ def _bm25_score(q_tokens: list[str], doc: dict[str, Any], n_docs: int) -> float:
     return score
 
 
+# ── HYBRID RAG — Milestone 3: Search Helpers ──────────────────────────────────
+
+async def _vector_search(query: str, k: int) -> list[dict[str, Any]]:
+    """
+    Encode query (with LRU cache) and search Qdrant for nearest neighbours.
+
+    CONTRACT:
+      - Called ONLY when HYBRID_SEARCH_ENABLED=True.
+      - Never raises — all exceptions are caught, logged, and [] returned.
+      - Applies visibility filter before returning: only safe_for_customer=True.
+      - Cache hit: <1ms (no encoding). Cache miss: encoding via _encoding_executor.
+      - Qdrant I/O uses default executor (I/O-bound, separate resource).
+    """
+    try:
+        loop = asyncio.get_running_loop()
+
+        # ── Embedding cache lookup ─────────────────────────────────────────────
+        _cache_key = hashlib.sha1(query.encode()).digest()
+        _cached = _query_embedding_cache.get(_cache_key)
+
+        if _cached is not None:
+            qvec = _cached
+        else:
+            # Cache miss — encode via dedicated 1-thread CPU executor
+            encoder = await loop.run_in_executor(_encoding_executor, _get_encoder)
+
+            def _encode_query(enc: Any, text: str) -> Any:
+                return enc.encode(
+                    [text],
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                )[0]
+
+            qvec = await loop.run_in_executor(_encoding_executor, _encode_query, encoder, query)
+            _query_embedding_cache.put(_cache_key, qvec)
+
+        # ── Qdrant ANN search (I/O-bound → default executor) ──────────────────
+        client = _get_qdrant_client()
+
+        def _qdrant_search(cli: Any, qv: Any, limit: int) -> Any:
+            return cli.search(
+                collection_name=QDRANT_COLLECTION_NAME,
+                query_vector=qv.tolist(),
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,  # payload only — stored vectors not needed
+            )
+
+        raw_hits = await loop.run_in_executor(None, _qdrant_search, client, qvec, k)
+
+        results: list[dict[str, Any]] = []
+        for h in raw_hits:
+            payload = h.payload or {}
+            # Visibility filter — applied BEFORE fusion, never after.
+            # Qdrant payload has safe_for_customer=True for all indexed chunks
+            # (set by _build_qdrant_index CONTRACT), but we re-verify defensively.
+            if not payload.get("safe_for_customer", False):
+                continue
+            results.append({
+                "source":       payload.get("source", ""),
+                "title":        payload.get("title", ""),
+                "chunk_idx":    payload.get("chunk_idx", 0),
+                "text":         payload.get("text", ""),
+                "vector_score": h.score,
+            })
+        return results
+
+    except Exception as exc:
+        log.warning(
+            "[HYBRID] Vector search failed — BM25 continues alone. "
+            "error_type=%s error=%s",
+            type(exc).__name__,
+            exc,
+        )
+        return []
+
+
+async def _seed_embedding_cache() -> None:
+    """Pre-encode _SEED_QUERIES into the embedding cache.
+
+    Called once at the end of _build_qdrant_index(), after the encoder is
+    already loaded. Subsequent requests for any seeded query cost <1ms.
+    Idempotent — skips any query already in the cache.
+    """
+    if not HYBRID_SEARCH_ENABLED:
+        return
+    encoder = _get_encoder()  # singleton already resident after build; no I/O
+    loop = asyncio.get_running_loop()
+    seeded = 0
+
+    def _encode_one(enc: Any, text: str) -> Any:
+        return enc.encode([text], show_progress_bar=False, convert_to_numpy=True)[0]
+
+    for q in _SEED_QUERIES:
+        key = hashlib.sha1(q.encode()).digest()
+        if _query_embedding_cache.get(key) is not None:
+            continue  # already seeded or already hit — skip
+        vec = await loop.run_in_executor(_encoding_executor, _encode_one, encoder, q)
+        _query_embedding_cache.put(key, vec)
+        seeded += 1
+
+    log.info(
+        "[HYBRID] Embedding cache seeded — new=%d total=%d maxsize=%d",
+        seeded,
+        len(_query_embedding_cache),
+        _EMBEDDING_CACHE_MAX_SIZE,
+    )
+
+
+def _rrf_fuse(
+    bm25_candidates: list[tuple[float, dict[str, Any]]],
+    vector_hits: list[dict[str, Any]],
+    k_rrf: int = 60,
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """
+    Standard Reciprocal Rank Fusion (k=60, no tuning).
+
+    Formula (1-indexed rank):
+      rrf_score(doc) = 1/(60 + bm25_rank) + 1/(60 + vector_rank)
+
+    bm25_candidates: sorted (bm25_score, doc_dict) pairs, highest first.
+    vector_hits: sorted by vector cosine score, highest first.
+    Returns top_k results in search() output format {score, source, ...}.
+    """
+    rrf_scores: dict[tuple[str, int], float] = {}
+    doc_map: dict[tuple[str, int], dict[str, Any]] = {}
+
+    for rank, (_, doc) in enumerate(bm25_candidates):
+        key = (doc["source"], doc["chunk_idx"])
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k_rrf + rank + 1)
+        if key not in doc_map:
+            doc_map[key] = doc
+
+    for rank, vhit in enumerate(vector_hits):
+        key = (vhit["source"], vhit["chunk_idx"])
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k_rrf + rank + 1)
+        if key not in doc_map:
+            # Chunk reached by vector but not by BM25 — still safe (visibility
+            # filter was applied in _vector_search before fusion).
+            doc_map[key] = {
+                "source":            vhit["source"],
+                "title":             vhit["title"],
+                "chunk_idx":         vhit["chunk_idx"],
+                "text":              vhit["text"],
+                "tokens":            [],   # internal BM25 field — not used in output
+                "len":               0,
+                "safe_for_customer": True,
+            }
+
+    ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    out: list[dict[str, Any]] = []
+    for (source, chunk_idx), rrf_score in ranked[:top_k]:
+        doc = doc_map[(source, chunk_idx)]
+        out.append({
+            "score":     round(rrf_score, 6),
+            "source":    doc["source"],
+            "title":     doc["title"],
+            "chunk_idx": doc["chunk_idx"],
+            "text":      doc["text"],
+        })
+    return out
+
+
+async def _hybrid_search(
+    query: str,
+    q_tokens: list[str],
+    n_docs: int,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """
+    Full hybrid retrieval: BM25 candidates + Vector search → Visibility → RRF.
+
+    Called ONLY when HYBRID_SEARCH_ENABLED=True.
+    Never raises — _vector_search() is self-contained with its own try/except.
+    If vector search returns [], RRF produces BM25-only ranking (graceful degrade).
+
+    Note: min_score is intentionally not applied here. BM25 min_score is a
+    BM25-domain threshold; RRF scores (max ~0.033) are on a different scale.
+    RRF rank cutoff is enforced by top_k alone.
+    """
+    _candidates = max(top_k * 3, 20)  # over-fetch for better fusion coverage
+
+    # BM25 candidate collection — no min_score (RRF handles ranking quality)
+    bm25_candidates: list[tuple[float, dict[str, Any]]] = []
+    for d in _IDX.docs:
+        if not d.get("safe_for_customer", True):  # visibility filter
+            continue
+        s = _bm25_score(q_tokens, d, n_docs)
+        if s > 0.0:  # exclude zero-score docs; include all positive scorers
+            bm25_candidates.append((s, d))
+    bm25_candidates.sort(key=lambda x: x[0], reverse=True)
+
+    # Vector search with visibility filter applied inside _vector_search
+    vector_hits = await _vector_search(query, k=_candidates)
+
+    log.info(
+        "[HYBRID] Search — bm25_candidates=%d vector_hits=%d top_k=%d",
+        min(len(bm25_candidates), _candidates),
+        len(vector_hits),
+        top_k,
+    )
+
+    return _rrf_fuse(bm25_candidates[:_candidates], vector_hits, k_rrf=60, top_k=top_k)
+
+# ── END HYBRID RAG Milestone 3 Search Helpers ─────────────────────────────────
+
+
 # ── Search ─────────────────────────────────────────────────────────────────────
 async def search(q: str, k: int = 5, min_score: float = 0.0) -> list[dict[str, Any]]:
     await ensure_index()
@@ -339,24 +885,32 @@ async def search(q: str, k: int = 5, min_score: float = 0.0) -> list[dict[str, A
     if not q_tokens or not _IDX.docs:
         return []
     n_docs = len(_IDX.docs)
-    scored = []
-    for d in _IDX.docs:
-        # PATCH 2: only score chunks tagged as safe for customers
-        if not d.get("safe_for_customer", True):
-            continue
-        s = _bm25_score(q_tokens, d, n_docs)
-        if s > min_score:
-            scored.append((s, d))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    out = []
-    for s, d in scored[:k]:
-        out.append({
-            "score": round(s, 4),
-            "source": d["source"],
-            "title": d["title"],
-            "chunk_idx": d["chunk_idx"],
-            "text": d["text"],
-        })
+
+    # ── HYBRID RAG — Milestone 3 ───────────────────────────────────────────────
+    if HYBRID_SEARCH_ENABLED:
+        out = await _hybrid_search(q, q_tokens, n_docs, k)
+    else:
+        # Exact production BM25 path — byte-for-byte unchanged when flag=false
+        scored = []
+        for d in _IDX.docs:
+            # PATCH 2: only score chunks tagged as safe for customers
+            if not d.get("safe_for_customer", True):
+                continue
+            s = _bm25_score(q_tokens, d, n_docs)
+            if s > min_score:
+                scored.append((s, d))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        out = []
+        for s, d in scored[:k]:
+            out.append({
+                "score": round(s, 4),
+                "source": d["source"],
+                "title": d["title"],
+                "chunk_idx": d["chunk_idx"],
+                "text": d["text"],
+            })
+    # ── END HYBRID RAG Milestone 3 ─────────────────────────────────────────────
+
     # PATCH 7: source traceability — log every search with top hit details
     if out:
         _q_repr = repr(q[:80])
@@ -440,6 +994,7 @@ async def rebuild_index() -> dict[str, Any]:
         sources: list[tuple[str, str, str, bool]] = []
         sources.extend(_load_resource_files())
         sources.extend(await _load_kb_rows())
+        safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
         unsafe_count = 0
         for source_id, title, text, source_safe in sources:
             for idx, chunk in enumerate(_chunk_text(text)):
@@ -463,6 +1018,7 @@ async def rebuild_index() -> dict[str, Any]:
                     "len": len(tokens),
                     "safe_for_customer": True,
                 })
+                safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
         for d in _IDX.docs:
             for t in set(d["tokens"]):
                 _IDX.df[t] += 1
@@ -476,6 +1032,11 @@ async def rebuild_index() -> dict[str, Any]:
             f"[rag] rebuild done docs={len(_IDX.docs)} safe={safe_count} "
             f"unsafe={unsafe_count} vocab={len(_IDX.df)} in {_IDX.build_ms}ms"
         )
+        # BM25 rebuild is complete and committed. Attempt Hybrid vector rebuild only
+        # if the flag is enabled. If Hybrid fails, BM25 serves requests normally.
+        if HYBRID_SEARCH_ENABLED:
+            await _build_qdrant_index(safe_chunks)
+        del safe_chunks  # release list container; dicts remain in _IDX.docs
         return await _stats_locked()
 
 

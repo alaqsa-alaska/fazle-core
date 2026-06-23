@@ -201,6 +201,27 @@ def enforce_recruitment_reply_policy(message: str, reply: str, source_context: s
         return _SAFE_FALLBACK
     return cleaned
 
+async def _safe_rag_chunks(text: str, k: int = 5) -> tuple[str, list[str]]:
+    """Return (formatted_chunks, source_list) for prompt enrichment. Never raises."""
+    try:
+        from modules.rag import search as rag_search
+        chunks = await rag_search(text, k=k)
+        if not chunks:
+            return "", []
+        parts: list[str] = []
+        sources: list[str] = []
+        for i, chunk in enumerate(chunks, 1):
+            title = chunk.get("title") or chunk.get("source") or f"chunk_{i}"
+            body = (chunk.get("text") or "").strip()
+            if body:
+                parts.append(f"[{i}] {title}: {body[:400]}")
+                sources.append(chunk.get("source", f"chunk_{i}"))
+        return "\n".join(parts), sources
+    except Exception as exc:
+        log.debug("[recruit_ai] rag enrichment skipped: %s", exc)
+        return "", []
+
+
 async def generate_recruitment_reply(
     *,
     phone: str,
@@ -216,6 +237,11 @@ async def generate_recruitment_reply(
     kb_context = build_recruitment_source_context(text)
     if not kb_context:
         return _SAFE_FALLBACK
+    # Phase 4 — Hybrid RAG enrichment + source tracing
+    rag_chunks, rag_sources = await _safe_rag_chunks(text)
+    if rag_chunks:
+        kb_context = f"{kb_context}\n\n## Related Knowledge Base\n{rag_chunks}"
+        log.info("[recruit_ai] rag_sources=%s phone=%s", rag_sources, phone)
     reply = await ai.generate_recruitment_reply(
         user_message=text,
         kb_context=kb_context,
@@ -224,5 +250,8 @@ async def generate_recruitment_reply(
         source=source,
     )
     reply = enforce_recruitment_reply_policy(text, reply, kb_context)
-    log.info("[recruit_ai] reply generated phone=%s source=%s chars=%d", phone, source, len(reply))
+    log.info(
+        "[recruit_ai] reply phone=%s source=%s chars=%d rag_sources=%d",
+        phone, source, len(reply), len(rag_sources),
+    )
     return reply

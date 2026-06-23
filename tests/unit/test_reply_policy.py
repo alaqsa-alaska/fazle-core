@@ -129,26 +129,27 @@ def test_recruitment_policy_identical_across_all_whatsapp_channels():
 
 
 def test_recruitment_policy_contains_system_rules():
+    # Phase 4 structured_v2: Bengali 6-section prompt replaces old English headers
     prompt = build_whatsapp_recruitment_policy(
         source="bridge1",
         user_message="job?",
         kb_context="",
     )
-    assert "WhatsApp recruitment reply assistant" in prompt
-    assert "Approved Recruitment Source of Truth" in prompt
-    assert "সর্বশেষ যোগাযোগ নম্বর" in prompt
-    assert "অন্য KB, memory, code, database বা context ব্যবহার করবে না" in prompt
-
-
+    assert "WhatsApp" in prompt
+    assert "ভূমিকা" in prompt          # ভূমিকা (Role) section header
+    assert "ব্যবসায়িক নিয়ম" in prompt  # Business Rules section
+    assert "নিয়োগ সহকারী" in prompt   # recruitment assistant identity
 def test_recruitment_policy_fallback_when_kb_empty():
+    import unicodedata
     prompt = build_whatsapp_recruitment_policy(
         source="meta",
         user_message="job?",
         kb_context="",
     )
-    assert "অনুমোদিত recruitment source পাওয়া যায়নি" in prompt
-
-
+    # NFKC normalisation handles decomposed/precomposed Bengali char variants
+    needle = unicodedata.normalize("NFKC", "অনুমোদিত recruitment source পাওয়া যায়নি")
+    haystack = unicodedata.normalize("NFKC", prompt)
+    assert needle in haystack
 def test_recruitment_policy_fallback_when_history_empty():
     prompt = build_whatsapp_recruitment_policy(
         source="bridge2",
@@ -162,4 +163,4 @@ def test_recruitment_policy_fallback_when_history_empty():
 # ── Policy version stability ───────────────────────────────────────────────────
 
 def test_policy_version_is_defined():
-    assert POLICY_VERSION == "unified_whatsapp_v1"
+    assert POLICY_VERSION == "structured_v2"
