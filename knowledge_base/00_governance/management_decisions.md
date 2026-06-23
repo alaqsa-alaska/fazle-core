@@ -114,6 +114,14 @@ These are not decisions — they are unresolved schema questions that require a 
 
 ---
 
+## Wave-3 Phase 2 Authorization (Session 6 — 2026-06-23)
+
+| ID | Authorization | Scope | Date |
+|---|---|---|---|
+| W3P2-AUTH | Wave-3 Phase 2 Identity Brain Integration authorized | KB-only — NO production code changes. Covers TASK 2-A (identity_brain.md enrichment), TASK 2-B (visibility_rules.md Phase 3 section — confirmed complete in Phase 1), TASK 2-C (identity_integration.md new article) | 2026-06-23 |
+
+---
+
 ## Change Log
 
 | Date | Change | Authorized By |
@@ -122,3 +130,4 @@ These are not decisions — they are unresolved schema questions that require a 
 | 2026-06-23 | Phase 4 authorization entries added (P4-01 through P4-04) | Management |
 | 2026-06-23 | Conflict resolutions CR-01 through CR-06 added; all implemented same session | Management |
 | 2026-06-23 | Wave-3 Phase 1 KB enrichment authorized (W3-AUTH); execution begins TASK 1-B | Management |
+| 2026-06-23 | Wave-3 Phase 2 Identity Brain Integration authorized (W3P2-AUTH); execution begins TASK 2-A | Management |
