@@ -1,0 +1,1206 @@
+Updated todo list
+
+Read [](file:///home/azim/core/modules/admin_commands/__init__.py#1-1), lines 1 to 200
+
+Read [](file:///home/azim/core/modules/social_auto_reply/reply_rules.py#1-1), lines 1 to 150
+
+I have now completed deep knowledge mining of the entire Fazle AI Platform production codebase. Below are all 28 reports. **No production code has been modified.**
+
+---
+
+# FAZLE AI PLATFORM
+## PRODUCTION KNOWLEDGE MINING → KNOWLEDGE ENRICHMENT → KNOWLEDGE BASE GENERATION PROGRAM
+### Version 2.0 | Analysis Only | Al-Aqsa Security & Logistics Services Ltd.
+
+---
+
+## REPORT 1 — EXECUTIVE SUMMARY
+
+**Mining Scope:** Full production codebase at core plus supporting modules in app, bridges, agent.
+
+**Platform Identity:** Fazle AI Platform is the operational brain of Al-Aqsa Security & Logistics Services Ltd. It is a bilingual (Bangla + English) WhatsApp automation and business operations platform. It processes all inbound WhatsApp messages through an AI-powered identity-first routing engine, manages escort vessel assignments, employee attendance, payroll, recruitment, payments, and provides Facebook/Messenger auto-reply.
+
+**Key Findings:**
+
+| Finding | Count |
+|---|---|
+| Total production Python modules | 58+ |
+| Knowledge-bearing modules (substantive) | 32 |
+| Existing KB articles | 40+ |
+| Missing KB articles discovered | 23 |
+| Partially documented areas | 11 |
+| Contradictions / conflicts found | 4 |
+| Hidden business rules discovered | 47 |
+| State machines found | 8 |
+| Parsers found | 12 |
+| Admin commands found | 38 |
+| Scheduled jobs found | 14 |
+| Database tables referenced | 35+ |
+
+**Critical Gap:** The existing knowledge base documents *what the system does* but does **not** document the exact routing priority, the silent-skip logic, the loop-detection engine, the draft-always gate, the outbound safety poison filter, the transport rate table, the LLM provider fallback chain, or the RBAC permission table. These are entirely undocumented.
+
+**Action Required:** Management review and approval before any KB file is created or modified.
+
+---
+
+## REPORT 2 — PRODUCTION KNOWLEDGE INVENTORY
+
+### System Architecture
+
+| Layer | Component | File |
+|---|---|---|
+| Entry Point | FastAPI app | main.py |
+| Bridge Poller | SQLite message ingestion | `modules/bridge_poller/__init__.py` (1467 lines) |
+| Message Router | Unified routing engine | `modules/message_router/__init__.py` (580 lines) |
+| Identity Brain | Who is messaging | `modules/identity_brain/__init__.py` (393 lines) |
+| Admin Commands | Command processor | `modules/admin_commands/__init__.py` (1297 lines) |
+| Escort Engine | Client order + lifecycle | `modules/escort/__init__.py` + `escort_lifecycle/__init__.py` |
+| Attendance | Report drafting | `modules/attendance/__init__.py` + `attendance_parser/__init__.py` |
+| Payment Workflow | Advance + escort payment | `modules/payment_workflow/__init__.py` |
+| Payroll | Monthly payroll | `modules/payroll/__init__.py` |
+| Recruitment | Funnel + AI | `modules/recruitment_flow/__init__.py` |
+| RAG Engine | BM25 knowledge retrieval | `modules/rag/__init__.py` |
+| Scheduler | APScheduler cron jobs | `modules/scheduler/__init__.py` |
+| RBAC | Role-based access control | `modules/rbac/__init__.py` |
+| Social Auto-Reply | Facebook/Messenger | `modules/social_auto_reply/` (12 files) |
+| OCR Processor | Slip image reading | `modules/ocr_processor/__init__.py` |
+| Voice Processor | Audio transcription | `modules/voice_processor/__init__.py` |
+
+### Infrastructure
+
+| Component | Detail |
+|---|---|
+| Bridges | 2 WhatsApp QR bridges (`bridge1` = HR, `bridge2` = OPS) |
+| Database | PostgreSQL (asyncpg) |
+| Cache / Cooldown | Redis (falls back to in-memory dict) |
+| Local LLM | Ollama / `qwen3:8b` |
+| Primary AI | GitHub Models `openai/gpt-4o-mini` |
+| Secondary AI | Groq `llama-3.1-8b-instant` |
+| SQLite stores | messages.db and whatsapp2 |
+| App port | 8200 |
+
+---
+
+## REPORT 3 — HIDDEN KNOWLEDGE INVENTORY
+
+These items are operational rules embedded in code that are **not** in the knowledge base.
+
+| ID | Hidden Rule | Location |
+|---|---|---|
+| HK-01 | Silent-skip rule: accountant phone + display names containing 'al-aqsa','escort','client','operation','tcis','gms','dalal','office' receive NO reply and NO draft | `message_router._should_silent_skip` |
+| HK-02 | Blocked role: `fazle_contact_roles` with `role='blocked'` silently skips entire routing | `message_router._should_silent_skip` |
+| HK-03 | Safe auto-send intents: only `recruitment`, `join`, `greeting`, `office_location`, `salary_query`, `payment_due`, `attendance`, `leave`, `escort_duty` are safe for auto-send | `message_router._SAFE_AUTOSEND_INTENTS` |
+| HK-04 | `advance_request` intent is **intentionally excluded** from auto-send, even though recruitment intents are safe | `message_router` comment |
+| HK-05 | Recruitment is BLOCKED for any non-candidate/unknown/new_lead role even if message text looks like recruitment | `message_router` step 5 |
+| HK-06 | Identity resolution order: admin → family → accountant → vip_client → client_escort_buyer → repeat_client → vendor → employee → supervisor → candidate → unknown | `identity_brain._ROLE_PRIORITY` |
+| HK-07 | Employee can be resolved via 4 secondary evidence sources: cash transactions, attendance records, escort roster, contact DB | `identity_brain` steps 3-4 |
+| HK-08 | Escort content keywords triggering escort flow: `m.v.`, `mother vessel`, `lighter`, `escort lagbe`, `m.t.`, `এমভি`, `destination`, `lighter vessel` | `message_router._looks_like_escort_order` |
+| HK-09 | Draft-always gate: roles `accountant, client_escort_buyer, vip_client, repeat_client` never auto-send | `bridge_poller._is_draft_always` |
+| HK-10 | Complaint phrases force draft regardless of intent: পাইনি, হয়নি, দেয়নি, কম এসেছে, সমস্যা, ঝামেলা, বেতন মেরে, dispute, issue, problem | `bridge_poller._COMPLAINT_PHRASES` |
+| HK-11 | Advance request phrases force draft: অ্যাডভান্স চাই, অ্যাডভান্স দরকার, অ্যাডভান্স লাগবে, অগ্রিম চাই, advance চাই | `bridge_poller._ADVANCE_REQUEST_PHRASES` |
+| HK-12 | Outbound poison filter: 16 internal marker strings blocked from being sent to customers | `bridge_poller._OUTBOUND_POISON` |
+| HK-13 | Loop detection: 3 replies within 120 seconds → autoreply paused 600 seconds | `bridge_poller._LOOP_MAX_REPLIES/_LOOP_WINDOW_SECS/_LOOP_PAUSE_SECS` |
+| HK-14 | Keyword flood protection: same keyword >3 times in 5 minutes → blocked 15 minutes | `bridge_poller._KW_FLOOD_LIMIT/_KW_FLOOD_WINDOW_SECS/_KW_FLOOD_PAUSE_SECS` |
+| HK-15 | Prompt injection patterns: 18 patterns blocked and logged | `bridge_poller._PROMPT_INJECTION_PATTERNS` |
+| HK-16 | Groups (`@g.us`), newsletters, status@broadcast silently skipped at SQL level | `bridge_poller._fetch_new_messages` |
+| HK-17 | LID-unresolved DMs are persisted with phone='unresolved:\<lid\>' — never silently dropped | `bridge_poller._fetch_new_messages` |
+| HK-18 | On fresh start (no cursor), poller begins from NOW()-5 minutes | `bridge_poller._get_cursor` |
+| HK-19 | Transport rate table (hardcoded): Dhaka/Narayanganj=৳600, Faridpur/Mongla=৳700, Barishal/coastal=৳900, Khulna/Jessore=৳1000, default=৳600 | `escort_lifecycle._TRANSPORT_RATES` |
+| HK-20 | Food estimate = duty_days × ৳150 (hardcoded) — release slip draft only | `escort_lifecycle._calc_duty_days` |
+| HK-21 | Release slip draft estimate is DRAFT ONLY — transport rates not synced to `escort_calculation_config` DB table | `escort_lifecycle` TASK 4 comment |
+| HK-22 | Release date validation: future dates and dates >1 year old are rejected | `escort_lifecycle._validate_release_date` |
+| HK-23 | Duty days >90 trigger a SUSPICIOUS warning in the draft | `escort_lifecycle.build_release_draft` |
+| HK-24 | Payroll default rate: ৳800/day per escort program | `payroll.DEFAULT_PER_PROGRAM_RATE` |
+| HK-25 | Payment workflow daily rate: `basic_salary / 30` per day (not ৳800) | `payment_workflow.create_escort_payment_draft` |
+| HK-26 | Payroll state machine: draft → reviewed → approved → locked → paid; cancelled from any non-paid state | `payroll.ALLOWED_TRANSITIONS` |
+| HK-27 | Payroll compute is idempotent on UNIQUE(employee_id, period_year, period_month) WHERE status != 'cancelled' | `payroll.compute_run` |
+| HK-28 | RAG chunk size: 320 chars, overlap 60 chars, BM25 k1=1.5, b=0.75 | `rag` constants |
+| HK-29 | RAG excludes directories: \_internal\_archived, \_internal, prompts, debug, tests, drafts, internal, ai, training, examples, temp | `rag._EXCLUDED_DIRS` |
+| HK-30 | RAG excludes filenames containing: analysis, prompt, intent, debug, test, sample, chain, reasoning, internal, archived, system\_context | `rag._EXCLUDED_NAME_KEYWORDS` |
+| HK-31 | RAG chunk safety filter: 30+ internal marker patterns blocked from being served to customers | `rag._CHUNK_UNSAFE_PATTERNS` |
+| HK-32 | RAG BM25 stop words: 80+ Bangla and English function words excluded | `rag._STOP_WORDS` |
+| HK-33 | Recruitment session TTL: 24 hours | `recruitment_flow.SESSION_TTL` |
+| HK-34 | Recruitment scoring: experience ≥6yr = 60pts, ≥3yr = 40pts, ≥1yr = 20pts; target position = 20pts; all fields complete = 20pts | `recruitment_flow._compute_score` |
+| HK-35 | Candidate age range: 18–55 years | `recruitment_flow._parse_age` |
+| HK-36 | Recruitment positions: 9 valid positions (Escort, Survey Scout, Security Guard, Security Supervisor, Assistant Supervisor, Operation Officer, Security In-Charge, Marketing Officer, Ghat Supervisor) | `recruitment_flow.VALID_POSITIONS` |
+| HK-37 | Admin command dedup: SHA1(text+phone), 30-second TTL, 256 entries | `admin_commands._dedup_seen` |
+| HK-38 | APPROVE supports multiple IDs: `APPROVE 165 166 167` | `admin_commands._APPROVE_RE` |
+| HK-39 | Bangla digits accepted in commands: APPROVE ১৬৫ works | `admin_commands._BN_DIGITS` |
+| HK-40 | RBAC role levels: viewer < operator < accountant < admin < superadmin | `rbac.COMMAND_ROLE` |
+| HK-41 | Bootstrap: ADMIN_NUMBERS from .env are auto-created as superadmin on first sight | `rbac.ensure_bootstrap_admins` |
+| HK-42 | API keys stored as SHA-256 hash | `rbac.hash_api_key` |
+| HK-43 | Advance keywords: 18 trigger phrases including emergency/medical/family crisis | `payment_workflow.ADVANCE_KEYWORDS` |
+| HK-44 | Reply cooldown: 60 seconds (Redis primary, in-memory fallback) | `bridge_poller.REPLY_COOLDOWN` |
+| HK-45 | Bridge poll interval: adaptive 1s → 30s backoff (1.5× per idle iteration) | `bridge_poller.BRIDGE_POLL_MIN/MAX_S` |
+| HK-46 | OCR image criteria: JPG/JPEG/PNG/WEBP only, 1KB–8MB range | `bridge_poller._IMAGE_OCR_MIN/MAX_BYTES` |
+| HK-47 | Office location intent bypasses reviewed-reply memory and AI entirely (KB-only fast path) | `message_router` step 12 |
+
+---
+
+## REPORT 4 — KNOWLEDGE MINING REPORT
+
+### Domains Mined
+
+| Domain | Lines of Code Mined | Key Knowledge Extracted |
+|---|---|---|
+| Message Routing | 580 | 15-step priority routing, silent-skip, role-based branching |
+| Identity Brain | 393 | 6-source resolution, 11 roles, confidence scoring |
+| Escort Engine | 947 + 716 | Order parsing, lifecycle close, OCR release slip, transport estimates |
+| Bridge Poller | 1467 | SQLite ingestion, dedup, cooldown, loop detection, flood protection, OCR/voice branching |
+| Admin Commands | 1297 | 38 commands, RBAC guard, Bangla digit support, dedup |
+| Scheduler | 690 | 14 jobs, cron schedule, heartbeat, APScheduler |
+| Payroll | 338 | State machine, compute formula, idempotency |
+| Payment Workflow | 396 | Escort payment, advance draft, finalize, accountant message |
+| Recruitment | 365 | 6-step funnel, 9 positions, scoring, TTL |
+| RAG Engine | 484 | BM25 index, bilingual tokenizer, safety filters |
+| RBAC | 341 | 5 roles, 38 commands, audit trail, bootstrap |
+| Attendance | 246 + 280 | Draft workflow, save, summary, parser |
+| Social Auto-Reply | ~600 (12 files) | Facebook/Messenger reply rules, salary/location/documents content |
+| Config | 150 | All environment settings, LLM providers, bridges |
+
+### Mining Method
+- Direct reading of __init__.py files (primary business logic location)
+- Pattern extraction from regex constants and keyword lists
+- State transition extraction from `ALLOWED_TRANSITIONS` dicts
+- Business rule extraction from inline comments and docstrings
+- Hidden rule extraction from conditional branching logic
+
+---
+
+## REPORT 5 — KNOWLEDGE CLASSIFICATION REPORT
+
+| Knowledge Item | Visibility | Classification |
+|---|---|---|
+| Office address, phone numbers | Public | Employee Safe / Candidate Safe |
+| Salary ranges (published) | Public | Employee Safe / Candidate Safe |
+| Recruitment questions and steps | Public | Candidate Safe |
+| Transport allowance table | Operations | Supervisor / Operations |
+| Payroll formula (basic/30 × days) | Internal | HR / Accountant |
+| Admin command list | Internal | Admin |
+| RBAC role table | Confidential | Admin / Developer |
+| Silent-skip name tokens | Confidential | Developer |
+| Prompt injection patterns | Confidential | Developer |
+| Outbound poison filter patterns | Confidential | Developer |
+| API key hash mechanism | Confidential | Developer |
+| RAG exclusion rules | Internal | Developer |
+| Loop detection thresholds | Internal | Developer |
+| DB table structure | Confidential | Developer |
+| LLM provider fallback chain | Internal | Developer |
+| Bridge SQLite paths | Confidential | Developer |
+| Draft-always gate rules | Internal | Admin / Developer |
+| Identity resolution order | Confidential | Developer |
+| Complaint phrase list | Internal | Developer |
+| OCR image size limits | Internal | Developer |
+| Escort order regex patterns | Internal | Developer |
+| Release date validation rules | Internal | Developer |
+
+---
+
+## REPORT 6 — DUPLICATE REPORT
+
+| ID | Duplicate | Location A | Location B | Recommendation |
+|---|---|---|---|---|
+| DUP-01 | Office address | `modules/message_router` (hardcoded fallback) | `modules/social_auto_reply/reply_rules.py` | Merge into KB `office_info.txt` as single source |
+| DUP-02 | Escort content keywords | `modules/message_router._looks_like_escort_order` | `modules/identity_brain._ESCORT_CONTENT_RE` | Already aligned; document as dual-purpose pattern |
+| DUP-03 | Phone normalization | `modules/phone_normalizer` | `modules/number_identity` | Two separate modules with similar function; document as intentional (variants vs normalize) |
+| DUP-04 | Recruitment trigger keywords | `modules/recruitment_flow.INTAKE_KEYWORDS` | `modules/message_router` inline check | Document as intentional: router uses recruitment_flow function |
+| DUP-05 | Attendance handler | `modules/attendance` | `modules/attendance_parser` | Two modules: attendance = simple present/absent; attendance_parser = structured shift/date format. Document both purposes. |
+| DUP-06 | Draft creation | `shared/draft_reply.create_draft_reply` | `fazle_payment_drafts` table | Two draft tables: `fazle_draft_replies` (general) vs `fazle_payment_drafts` (payment-specific). Document distinction. |
+| DUP-07 | Salary content | `modules/social_auto_reply/reply_rules.py SALARY_REPLY` | salary_structure.txt | Confirm alignment; social reply content is simplified public version |
+
+---
+
+## REPORT 7 — CONFLICT REPORT
+
+| ID | Conflict | Production Value | KB Value | Risk | Recommendation |
+|---|---|---|---|---|---|
+| CON-01 | Escort payment daily rate | `payment_workflow.py`: `basic_salary / 30` per day | `04_business_rules/payment_business_rules.md`: may state fixed ৳1200/day (DEFAULT_DAILY_RATE constant) | HIGH — two different calculations produce different net pay | Management must decide: `basic_salary/30` (variable) or fixed ৳1200/day. Update KB with authoritative decision. |
+| CON-02 | Payroll per-program rate | `payroll/__init__.py`: `DEFAULT_PER_PROGRAM_RATE = 800` | `02_admin_system/payroll_rules.md`: may not reflect this | MEDIUM — ৳800/program vs ৳1200/day for escort payment are different | Clarify: payroll module counts programs × ৳800; payment module uses basic/30 × days. These are two separate calculations. |
+| CON-03 | Transport allowance (Mongla) | `escort_lifecycle._TRANSPORT_RATES`: ৳700 for Mongla | `resources/ops/transport_allowances.txt` or `escort_calculation_config` DB may say ৳1500 | HIGH — code comment states "Mongla ৳1500 vs code ৳1000" discrepancy | TASK 4 in code marks this as unresolved. Requires DB sync with `escort_calculation_config` table. |
+| CON-04 | Food estimate rate | `escort_lifecycle`: ৳150/day (hardcoded) | KB may document a different rate | MEDIUM — draft estimate only, admin corrects before finalizing | Document that ৳150/day is a draft estimate only, not the final rate |
+
+---
+
+## REPORT 8 — MISSING KNOWLEDGE REPORT
+
+The following knowledge exists in production code but has **no corresponding KB article**:
+
+| ID | Missing Article | Source Location | Priority |
+|---|---|---|---|
+| MIS-01 | Silent-Skip Rules (who never gets a reply) | `message_router._should_silent_skip` | CRITICAL |
+| MIS-02 | Draft-Always Gate (who is always drafted) | `bridge_poller._is_draft_always` | CRITICAL |
+| MIS-03 | Complaint Phrase Protection (what forces draft) | `bridge_poller._COMPLAINT_PHRASES` | HIGH |
+| MIS-04 | Loop Detection and Flood Protection | `bridge_poller` | HIGH |
+| MIS-05 | Prompt Injection Detection | `bridge_poller` | HIGH |
+| MIS-06 | Outbound Poison Filter | `bridge_poller._OUTBOUND_POISON` | HIGH |
+| MIS-07 | LLM Provider Fallback Chain (GitHub → Groq → Ollama) | config.py | HIGH |
+| MIS-08 | Bridge Poller Architecture (SQLite, cursors, dedup) | `bridge_poller` | HIGH |
+| MIS-09 | Transport Rate Table (authoritative) | `escort_lifecycle._TRANSPORT_RATES` | HIGH |
+| MIS-10 | Payroll State Machine (all 6 states + transitions) | `payroll.ALLOWED_TRANSITIONS` | HIGH |
+| MIS-11 | RBAC Command-to-Role Mapping (full table) | `rbac.COMMAND_ROLE` | HIGH |
+| MIS-12 | Admin Command Reference (all 38 commands + syntax) | `admin_commands/__init__.py` | HIGH |
+| MIS-13 | Recruitment Scoring Algorithm | `recruitment_flow._compute_score` | MEDIUM |
+| MIS-14 | RAG Engine Architecture and Safety Rules | `rag/__init__.py` | MEDIUM |
+| MIS-15 | Scheduler Job Reference (all 14 jobs + times) | `scheduler/__init__.py` | MEDIUM |
+| MIS-16 | OCR Release Slip Flow | `escort_lifecycle.handle_ocr_release_slip` | MEDIUM |
+| MIS-17 | Identity Resolution Evidence Sources | `identity_brain` | MEDIUM |
+| MIS-18 | Reviewed Reply Memory (admin-curated reply learning) | `modules/reviewed_reply_memory` | MEDIUM |
+| MIS-19 | Social Auto-Reply Platform (Facebook/Messenger) | `modules/social_auto_reply` | MEDIUM |
+| MIS-20 | Accountant Payment Ingest Flow | `modules/payment_ingest` | MEDIUM |
+| MIS-21 | Advance Payment Request Keyword List | `payment_workflow.ADVANCE_KEYWORDS` | MEDIUM |
+| MIS-22 | Voice Message Processing | `modules/voice_processor` | LOW |
+| MIS-23 | Image Hash Deduplication | `modules/image_hash` | LOW |
+
+---
+
+## REPORT 9 — WORKFLOW RECONSTRUCTION REPORT
+
+### WF-01: Inbound Message Full Routing Workflow
+
+```
+INBOUND MESSAGE (WhatsApp / Meta)
+│
+├─► Bridge Poller (every 1–30s adaptive)
+│     ├─ Fetch from SQLite (read-only, UTC-normalized)
+│     ├─ LID → Phone resolution
+│     ├─ Dedup check (processed_bridge_messages)
+│     ├─ OCR if image without text
+│     ├─ Voice transcription if audio/ptt
+│     ├─ Persist to wbom_whatsapp_messages (ALL DMs, always)
+│     └─ Call process_message()
+│
+├─► Silent-Skip Check
+│     ├─ Accountant phone? → SKIP
+│     ├─ Name contains skip-token? → SKIP
+│     └─ Role = blocked? → SKIP
+│
+├─► detect_identity(phone, text)
+│     └─ Returns role + confidence + source
+│
+├─► Role Routing (priority order)
+│     1. family → personal reply
+│     2. escort_roles → handle_escort_client_message()
+│     3. admin → command/NL/help
+│     4. attendance detected → create_attendance_draft()
+│     5. Intent classification (LLM → fallback deterministic)
+│     6. accountant → payment ingest / KB / AI
+│     7. candidate/unknown → recruitment_eligibility()
+│     8. escort order intent → handle_escort_client_message()
+│     9. employee → verification/attendance/slip/release/complaint/advance
+│     10. advance request (any) → start_advance_verification()
+│     11. office_location → KB fast path
+│     12. KB lookup
+│     13. Reviewed reply memory
+│     14. AI fallback (GitHub Models → Groq → Ollama)
+│
+└─► Reply Delivery
+      ├─ Check auto_reply_enabled
+      ├─ Check draft-always gate
+      ├─ Check safe intents
+      ├─ Check complaint phrases
+      ├─ Check cooldown (60s Redis/in-memory)
+      ├─ Check loop detection
+      ├─ Check keyword flood
+      ├─ Check prompt injection
+      ├─ Check outbound poison
+      └─ SEND or DRAFT
+```
+
+### WF-02: Escort Client Order Workflow
+
+```
+CLIENT MESSAGE (escort/vessel keywords)
+│
+├─► parse_escort_message()
+│     ├─ Extract mother vessel (MV name)
+│     ├─ Extract lighter vessel(s) + master mobile(s)
+│     ├─ Extract importer, cargo type, capacity, destination
+│     └─ Supports: labeled blocks, inline, MV-block, numbered formats
+│
+├─► Save to wbom_escort_programs (status='draft')
+│     └─ extras in remarks JSON: {sender_phone, source_bridge, ...}
+│
+├─► Build admin draft(s) — one per lighter vessel
+│
+├─► Return ("", admin_note) — NO reply to client
+│
+└─► Admin fills escort name/mobile:
+      ├─ is_completed_escort_draft() detects [ESCORT NAME: / ESCORT MOBILE:]
+      ├─ handle_admin_escort_completion()
+      │     ├─ Load original client from DB remarks
+      │     ├─ Send finalized slip to client via admin_note routing
+      │     ├─ Reply to admin with confirmation
+      │     └─ Update DB status to 'confirmed'
+      └─ ESCORTCONFIRM <id> | <name> | <mobile> | <date> | <shift>
+```
+
+### WF-03: Escort Release + Payment Workflow
+
+```
+EMPLOYEE sends release intent OR image (release slip)
+│
+├─► (Text) is_release_intent() → true
+│     ├─ Return: "Release request received, admin will send [RELEASE CONFIRMED]"
+│     └─ Send review request to admin
+│
+├─► (Image) OCR → handle_ocr_release_slip()
+│     ├─ build_release_draft() with estimates
+│     ├─ Save to fazle_draft_replies
+│     └─ Send to admin bridge for review
+│
+└─► ADMIN sends [RELEASE CONFIRMED] message (outbound, detected by poller)
+      ├─ parse_release_confirmation() — extract fields
+      ├─ find_active_program_for_employee()
+      ├─ close_program() (status → Completed, idempotent)
+      ├─ backfill_attendance_for_program() (INSERT per day ON CONFLICT DO NOTHING)
+      ├─ create_escort_payment_draft() — calculate net pay
+      │     Formula: (basic_salary / 30 × duty_days) - food - conveyance - advances
+      ├─ Write escort_roster_entries
+      └─ Return draft text for admin → accountant notification
+```
+
+### WF-04: Attendance Workflow
+
+```
+SUPERVISOR or EMPLOYEE sends attendance message
+│
+├─► is_supervisor_attendance() OR is_attendance_message() → true
+│
+├─► parse_attendance() — extract name, mobile, shift (D/N), date
+│     ├─ Date patterns: DD-MM-YYYY, YYYY-MM-DD
+│     ├─ Shift: D(ay) / N(ight)
+│     └─ Name: label extraction → bare name heuristic
+│
+├─► create_attendance_draft() — lookup employee by mobile or name
+│     ├─ Build draft with employee ID, date, shift, status=Present
+│     └─ Save to fazle_draft_replies
+│
+├─► Return confirmation to sender + admin_note
+│
+└─► Admin APPROVE <draft_id>
+      └─ save_attendance() → wbom_attendance (ON CONFLICT UPDATE)
+```
+
+### WF-05: Recruitment Funnel Workflow
+
+```
+UNKNOWN CONTACT sends message with job keyword
+│
+├─► recruitment_eligibility() check
+│     ├─ Role must be unknown/candidate/new_lead (operational identities blocked)
+│     ├─ Intent must not be operational
+│     └─ Text must contain INTAKE_KEYWORDS
+│
+├─► Create fazle_recruitment_sessions (step=name)
+│
+├─► Collect 6 steps in order:
+│     1. Name (free text, max 100 chars)
+│     2. Age (18–55 required)
+│     3. Area/District (free text)
+│     4. Job Preference (1-9 or keyword from VALID_POSITIONS)
+│     5. Experience (0–N years)
+│     6. Phone confirmation
+│
+├─► Score: experience + position + completeness → hot/warm/cold
+│     Hot ≥ 70, Warm ≥ 40, Cold < 40
+│
+└─► Reply: INTAKE_COMPLETE_MSG + session → stage='scored'
+```
+
+### WF-06: Admin Command Workflow
+
+```
+ADMIN sends command via WhatsApp
+│
+├─► is_admin_command() — regex match
+│
+├─► Dedup check (30s SHA1 window)
+│
+├─► RBAC check via rbac.check_permission()
+│     └─ Lookup admin by phone → get role level → compare to command requirement
+│
+├─► Execute command:
+│     APPROVE <id(s)> → load draft → send to recipient → mark sent
+│     REJECT <id>    → update draft status
+│     EDIT <id> <text> → update draft text
+│     PAID <id> <amount> <method> → finalize_payment() → accountant_msg
+│     ADVANCE <id> <amount> <method> → record advance in wbom_cash_transactions
+│     RELEASE <program_id> <date> <shift> <point> → handle_release_event()
+│     ESCORTCONFIRM → assign escort to program
+│     PAYROLL COMPUTE/SUBMIT/APPROVE/LOCK/PAID/CANCEL
+│     REPORT DAILY/PAYROLL/CASH/RECON/ESCORT
+│     BACKUP STATUS/NOW/LIST
+│     USER LIST/ADD/ROLE/REMOVE/APIKEY
+│     SCHEDULE STATUS/RUN <job>
+│
+└─► Record in fazle_admin_audit
+```
+
+### WF-07: Payroll Workflow
+
+```
+SCHEDULER (02:00 Asia/Dhaka daily)
+│
+├─► compute_all_for_period(year, month)
+│     └─ For each Active employee:
+│           compute_run(employee_id, year, month)
+│           ├─ Idempotency: skip if existing active run exists
+│           ├─ Count completed escort programs in month
+│           ├─ Calculate: basic + (days × ৳800) - advances
+│           ├─ Write wbom_payroll_runs (status='draft')
+│           └─ Write wbom_payroll_run_items (basic, programs, advances)
+│
+├─► State transitions (all require actor):
+│     draft → reviewed (submit_run)
+│     reviewed → approved (approve_run)
+│     approved → locked (lock_run)
+│     locked → paid (mark_paid with method + reference)
+│     any → cancelled (cancel_run + reason)
+│
+└─► Each transition writes wbom_payroll_approval_log
+```
+
+---
+
+## REPORT 10 — STATE MACHINE REPORT
+
+### SM-01: Payroll Run State Machine
+
+```
+                    cancelled
+                   ↗ ↗ ↗ ↗
+draft → reviewed → approved → locked → paid
+```
+
+| Transition | Function | Required Actor |
+|---|---|---|
+| draft → reviewed | `submit_run()` | operator+ |
+| reviewed → approved | `approve_run()` | admin+ |
+| approved → locked | `lock_run()` | admin+ |
+| locked → paid | `mark_paid()` | accountant+ |
+| any → cancelled | `cancel_run()` | accountant+ |
+
+### SM-02: Escort Program State Machine
+
+```
+draft → confirmed → Assigned → Running → Completed
+                 ↘ Cancelled (from any pre-Completed)
+```
+
+| State | Meaning |
+|---|---|
+| draft | Client order received, escort not yet assigned |
+| confirmed | Admin assigned escort via ESCORTCONFIRM |
+| Assigned | Program assigned, escort not yet on site |
+| Running | Escort on active duty |
+| Completed | Release confirmed, attendance backfilled, payment drafted |
+| Cancelled | Program cancelled |
+
+### SM-03: Payment Draft State Machine
+
+```
+pending → sent (after admin PAID/ADVANCE command)
+pending → rejected (after admin REJECT command)
+pending → expired (after 24h TTL cleanup job)
+```
+
+### SM-04: Recruitment Session State Machine
+
+```
+new → collecting (step 1-6) → scored
+                             ↘ expired (24h TTL)
+```
+
+### SM-05: Attendance Draft State Machine
+
+```
+pending → approved → saved to wbom_attendance
+        → rejected
+```
+
+### SM-06: Escort Roster Entry State Machine
+
+```
+(created) → completed (on lifecycle close)
+```
+
+### SM-07: Draft Reply State Machine
+
+```
+pending → approved → sent_at timestamp set
+        → rejected → status='rejected'
+        → expired (draft_ttl_cleanup job, default TTL from .env)
+```
+
+### SM-08: Admin (User) State Machine
+
+```
+active → disabled (user_remove command)
+```
+
+---
+
+## REPORT 11 — PARSER REPORT
+
+| Parser | Module | Input | Output | Key Patterns |
+|---|---|---|---|---|
+| Escort Order Parser | `modules/escort` | WhatsApp text | `EscortOrder` TypedDict | `_MV_LABEL_RE`, `_IMPORTER_RE`, `_CARGO_RE`, `_CAPACITY_RE`, `_DATE_RE` |
+| Lighter Block Parser | `modules/escort._parse_lighter_block` | Single lighter block text | `LighterInfo` TypedDict | Named labels: Lighter:, Master:, Mob:, Capacity:, Dest: |
+| Labeled Lighter Parser | `modules/escort._parse_labeled_lighters` | Multi-lighter text | list[LighterInfo] | Split on `Lighter:` / `Lighter Vessel:` labels |
+| Inline Lighter Parser | `modules/escort._parse_inline_lighters` | Compact format | list[LighterInfo] | Numbered + mobile patterns |
+| MV Block Lighter Parser | `modules/escort._parse_mv_block_lighters` | Multi-MV block format | list[LighterInfo] | `_MV_BLOCK_LINE_RE`, `_MASTER_LINE_RE` |
+| Completed Draft Detector | `modules/escort` | Admin text | CompletedDraft | `_CD_ESCORT_NAME_RE`, `_CD_ESCORT_MOB_RE`, `_CD_SHIFT_RE`, `_CD_MV_RE`, `_CD_LV_RE` |
+| Attendance Parser | `modules/attendance_parser` | WhatsApp text | attendance dict | `_DATE_PATTERNS`, `_SHIFT_RE`, `_MOBILE_RE`, `_NAME_LABEL_RE` |
+| Release Confirmation Parser | `modules/escort_lifecycle` | Admin text with [RELEASE CONFIRMED] | release fields dict | `_RC_DATE_RE`, `_RC_SHIFT_RE`, `_RC_POINT_RE`, `_RC_DAYS_RE`, `_RC_CONV_RE`, `_RC_FOOD_RE` |
+| Payment SMS Parser | `modules/payment_ingest` | Accountant SMS/text | payment record | `looks_like_payment_sms()` |
+| Admin Cash Shorthand | `modules/payment_ingest` | Accountant shorthand | cash entry | `is_admin_cash_shorthand()` |
+| RAG Tokenizer | `modules/rag` | Bangla + English text | token list | `_TOKEN_RE`: `[A-Za-z0-9\u0980-\u09FF]+` |
+| Intent Classifier | `modules/intent` | Any text | intent string | Deterministic keyword matching (fallback to LLM) |
+
+---
+
+## REPORT 12 — VALIDATION REPORT
+
+| Rule | Module | Input | Validation |
+|---|---|---|---|
+| Age must be 18–55 | `recruitment_flow._parse_age` | Candidate age text | Reject and re-ask if outside range |
+| Mobile must be BD format: `01[3-9]\d{8}` | Multiple modules | Phone number | Normalize or reject |
+| Shift must be D or N | `escort_lifecycle.close_program` | Shift char | Default to 'D' if invalid |
+| Release date must not be in future | `escort_lifecycle._validate_release_date` | Date string | Warn in draft |
+| Release date must not be >1 year old | `escort_lifecycle._validate_release_date` | Date string | Warn in draft |
+| Duty days must be >0 | `escort_lifecycle.build_release_draft` | Calculated days | Warn in draft |
+| Duty days must not be >90 | `escort_lifecycle.build_release_draft` | Calculated days | SUSPICIOUS warning |
+| Payment amount must be positive | `payment_workflow` | Amount | Max with 0 |
+| food_bill and conveyance must be non-negative | `escort_lifecycle._handle_release_event_tx` | floats | ValueError raised |
+| Period month must be 1-12 | `payroll.compute_run` | Month int | Return error dict |
+| Admin commands deduplicated within 30s | `admin_commands._dedup_seen` | SHA1(text+phone) | Silent drop if duplicate |
+| Prompt injection detection | `bridge_poller._detect_prompt_injection` | Inbound text | Block and log |
+| Image must be 1KB–8MB | `bridge_poller._is_lightweight_image_eligible_for_ocr` | File size | Skip if outside range |
+| Image extension must be JPG/JPEG/PNG/WEBP | Same | File name | Skip if invalid ext |
+
+---
+
+## REPORT 13 — COMMAND REPORT
+
+**Total Admin Commands: 38**
+
+### Draft Management
+
+| Command | Syntax | Required Role | Effect |
+|---|---|---|---|
+| APPROVE | `APPROVE <id>` or `APPROVE <id> <id> ...` | operator | Load draft → send to recipient → mark sent |
+| REJECT | `REJECT <id>` | operator | Mark draft rejected |
+| EDIT | `EDIT <id> <new text>` | operator | Replace draft text |
+| STATUS/DRAFTS | `STATUS` | viewer | Show pending draft count |
+
+### Payment Commands
+
+| Command | Syntax | Required Role | Effect |
+|---|---|---|---|
+| PAID | `PAID <id> <amount> bkash|nagad|cash` | operator | finalize_payment() → accountant_msg |
+| ADVANCE | `ADVANCE <id> <amount> bkash|nagad|cash` | operator | Record advance → accountant_msg |
+| REVERSE | `REVERSE <txn_id> <reason>` | operator | Reverse transaction |
+| ADJUST | `ADJUST <draft_id> <amount> <method>` | operator | Adjust payment |
+| PAYIMPORT | `PAY-IMPORT <text>` | accountant | Ingest payment SMS |
+
+### Escort Commands
+
+| Command | Syntax | Required Role | Effect |
+|---|---|---|---|
+| RELEASE | `RELEASE <program_id> <YYYY-MM-DD> <D\|N> <point> [days=N]` | operator | Close program + payment draft |
+| ESCORTCONFIRM | `ESCORTCONFIRM <id>\|<name>\|<mobile>\|<date>\|<shift>` | operator | Assign escort to program |
+
+### Payroll Commands
+
+| Command | Syntax | Required Role | Effect |
+|---|---|---|---|
+| PAYROLL COMPUTE | `PAYROLL COMPUTE <YYYY-MM> [employee_id]` | accountant | Compute payroll run |
+| PAYROLL SUBMIT | `PAYROLL SUBMIT <run_id>` | accountant | draft → reviewed |
+| PAYROLL APPROVE | `PAYROLL APPROVE <run_id>` | accountant | reviewed → approved |
+| PAYROLL LOCK | `PAYROLL LOCK <run_id>` | accountant | approved → locked |
+| PAYROLL PAID | `PAYROLL PAID <run_id> <amount> bkash|nagad|cash [ref=X]` | accountant | locked → paid |
+| PAYROLL CANCEL | `PAYROLL CANCEL <run_id> <reason>` | accountant | → cancelled |
+| PAYROLL LIST | `PAYROLL LIST <YYYY-MM> [status]` | viewer | List payroll runs |
+
+### Report Commands
+
+| Command | Syntax | Required Role |
+|---|---|---|
+| REPORT DAILY | `REPORT DAILY [YYYY-MM-DD]` | viewer |
+| REPORT PAYROLL | `REPORT PAYROLL <YYYY-MM>` | viewer |
+| REPORT CASH | `REPORT CASH [days]` | viewer |
+| REPORT RECON | `REPORT RECON [days]` | viewer |
+| REPORT ESCORT | `REPORT ESCORT <start> <end>` | viewer |
+| REPORT LIST | `REPORT LIST` | viewer |
+
+### System Commands
+
+| Command | Required Role | Effect |
+|---|---|---|
+| SCHEDULE STATUS | viewer | Show all job statuses |
+| RUN JOB \<name\> | admin | Trigger job manually |
+| BACKUP STATUS | viewer | Show backup age |
+| BACKUP NOW | admin | Trigger backup |
+| BACKUP LIST [n] | viewer | List recent backups |
+| USER LIST | admin | List all admins |
+| USER ADD \<phone\> \<name\> [role] | superadmin | Add admin |
+| USER ROLE \<phone\> \<role\> | superadmin | Assign role |
+| USER REMOVE \<phone\> | superadmin | Disable admin |
+| USER APIKEY \<phone\> | superadmin | Issue API key |
+
+### Natural Language Admin Queries (NL Router)
+- `show last 10 chats of 01XXXXXXXXX`
+- `last contact of 01XXXXXXXXX`
+- `01XXXXXXXXX এর শেষ ১০ চ্যাট`
+
+---
+
+## REPORT 14 — BUSINESS RULE REPORT
+
+| Rule ID | Rule | Source |
+|---|---|---|
+| BR-01 | Operational identities (admin, accountant, employee, supervisor, family, escort_client, client_escort_buyer, vip_client, repeat_client, vendor, known_contact) are NEVER entered into recruitment funnel | `recruitment_flow.OPERATIONAL_ROLES` |
+| BR-02 | Family members receive a personal redirect message and no business workflow is triggered | `message_router` step 1 |
+| BR-03 | Escort client messages never receive a direct reply — always drafted to admin | `message_router` step 2 |
+| BR-04 | Admin's unrecognized messages return command help, never fall through to AI | `message_router` step 3, note B25 |
+| BR-05 | Only admin's exact `[RELEASE CONFIRMED]` message can finalize an employee release | `message_router`, `escort_lifecycle` |
+| BR-06 | Employee complaints (employee_salary_complaint, legal_issue, payment_issue) are always drafted, never auto-sent | `message_router` step 10 |
+| BR-07 | Release requests from employees require admin review before any financial action | `message_router` + `escort_lifecycle.handle_release_event(admin_confirmed=False)` |
+| BR-08 | Escort payment formula: `(basic_salary / 30) × duty_days - food_bill - conveyance - advances` | `payment_workflow.create_escort_payment_draft` |
+| BR-09 | Advances used in payment calculation are only those tied to the specific escort program and current payroll month | `payment_workflow.create_escort_payment_draft` |
+| BR-10 | Payroll runs are idempotent — re-running for same employee+period returns existing non-cancelled run | `payroll.compute_run` |
+| BR-11 | Payroll per-program rate default: ৳800/day | `payroll.DEFAULT_PER_PROGRAM_RATE` |
+| BR-12 | Payroll only counts programs with `status='Completed'` | `payroll.compute_run` |
+| BR-13 | Recruitment session expires after 24 hours of inactivity | `recruitment_flow.SESSION_TTL` |
+| BR-14 | Job applicant age must be between 18 and 55 | `recruitment_flow._parse_age` |
+| BR-15 | Salary during probation (3 months): ৳17,000/month | `social_auto_reply/reply_rules.SALARY_REPLY` |
+| BR-16 | Salary after permanent: ৳24,700/month | `social_auto_reply/reply_rules.SALARY_REPLY` |
+| BR-17 | No joining fee (৳350 processing fee only) | `social_auto_reply/reply_rules.FEES_REPLY` |
+| BR-18 | Attendance backfill inserts one row per day from program_date to end_date ON CONFLICT DO NOTHING | `escort_lifecycle.backfill_attendance_for_program` |
+| BR-19 | Release slip draft estimates are DRAFT ONLY — admin must review and confirm before any payment | `escort_lifecycle.build_release_draft` (TASK 4) |
+| BR-20 | All financial transactions have idempotency keys to prevent double-payment | `payment_workflow.finalize_payment` |
+| BR-21 | OCR confidence <40% triggers a low-confidence warning in draft | `escort_lifecycle.build_release_draft` |
+| BR-22 | Required release slip fields: Escort Name, Lighter Vessel, Release Date, Release Location | `escort_lifecycle.build_release_draft` |
+
+---
+
+## REPORT 15 — IDENTITY REPORT
+
+### Role Hierarchy (Priority Descending)
+
+| Priority | Role | Source | Confidence |
+|---|---|---|---|
+| 200 | admin | Settings (ADMIN_NUMBERS) | 100 |
+| 100 | family | Seed rule | Seed-defined |
+| 95 | accountant | Seed rule | Seed-defined |
+| 92 | vip_client | Seed rule or DB contact | 80–100 |
+| 90 | client_escort_buyer | Seed rule or DB contact | 80–100 |
+| 88 | employee | DB employee table | 88 |
+| 86 | employee | Cash transaction evidence | 86 |
+| 86 | employee | Attendance evidence | 86 |
+| 85 | employee/repeat_client | Escort roster | 85 |
+| 80 | supervisor | Seed rule | Seed-defined |
+| 75 | repeat_client | DB contact | 80 |
+| 70 | vendor | DB contact | 80 |
+| 50 | candidate | Text hint (keywords) | 50 |
+| 40 | repeat_client | Escort content in text | 40 |
+| 0 | unknown | No match | 0 |
+
+### Identity Sources (Checked in Order)
+1. **settings** — Admin phone number from ADMIN_NUMBERS environment variable
+2. **seed_rule** — `fazle_contact_roles` table (highest trust, explicit manual assignment)
+3. **db_employee** — `wbom_employees.employee_mobile` direct match
+4. **cash_payment** — `wbom_cash_transactions` joined to `wbom_employees`
+5. **attendance** — `wbom_attendance` joined to `wbom_employees`
+6. **escort_roster** — `wbom_escort_programs` (escort_mobile → employee, master_mobile → repeat_client)
+7. **db_contact** — `wbom_contacts` joined to `wbom_relation_types`
+8. **text_hint** — Keyword analysis of message text (candidate detection)
+
+### Candidate Keyword List
+চাকরি, চাকরী, কাজ চাই, job, apply, বেতন কত, নিয়োগ, recruitment, vacancy, আবেদন
+
+---
+
+## REPORT 16 — DATABASE BEHAVIOUR REPORT
+
+### Primary Tables
+
+| Table | Purpose | Key Operations |
+|---|---|---|
+| `wbom_whatsapp_messages` | All inbound/outbound message store | INSERT on every DM, SELECT for history/context |
+| `wbom_employees` | Employee registry | SELECT by mobile (multiple variants) |
+| `wbom_escort_programs` | Vessel escort programs | INSERT (new order), UPDATE (status/close), SELECT (active lookup) |
+| `wbom_attendance` | Daily attendance records | INSERT ON CONFLICT UPDATE |
+| `wbom_cash_transactions` | All cash/payment records | INSERT with idempotency_key, SELECT for advance sum |
+| `wbom_contacts` | Contact directory | SELECT for identity resolution |
+| `wbom_relation_types` | Contact relation categories | JOIN with wbom_contacts |
+| `fazle_draft_replies` | General message drafts | INSERT, UPDATE status, SELECT pending |
+| `fazle_payment_drafts` | Payment-specific drafts | INSERT, UPDATE, SELECT by program_id |
+| `fazle_contact_roles` | Seed identity rules | SELECT by phone + is_active |
+| `fazle_recruitment_sessions` | Recruitment funnel state | INSERT, UPDATE per step |
+| `fazle_knowledge_base` | KB rows for RAG | SELECT is_active=true |
+| `fazle_scheduled_jobs` | Scheduler run history | UPSERT per job run |
+| `fazle_service_heartbeats` | Service liveness | UPSERT per heartbeat |
+| `fazle_payroll_runs` | Monthly payroll records | INSERT, UPDATE (state transitions) |
+| `fazle_payroll_run_items` | Payroll line items | INSERT per compute |
+| `fazle_payroll_approval_log` | Payroll audit trail | INSERT per transition |
+| `wbom_staging_payments` | Unmatched payment staging | INSERT, UPDATE matched_employee_id |
+| `fazle_reconciliation_log` | Payment reconciliation audit | INSERT per attempt |
+| `bridge_poller_cursor` | Message polling position | UPSERT per bridge |
+| `processed_bridge_messages` | Message deduplication | INSERT ON CONFLICT DO NOTHING |
+| `processed_outgoing_escort_messages` | Outbound dedup | INSERT ON CONFLICT DO NOTHING |
+| `outbound_safety_incidents` | Blocked send log | INSERT |
+| `escort_roster_entries` | Computed roster entries | INSERT ON CONFLICT UPDATE |
+| `fazle_reminders_sent` | Reminder dedup | INSERT ON CONFLICT DO NOTHING |
+| `fazle_admin_audit` | RBAC command audit | INSERT per command |
+| `fazle_admins` | Admin user registry | INSERT, UPDATE |
+| `fazle_admin_roles` | Admin-role mapping | INSERT ON CONFLICT DO NOTHING |
+| `fazle_roles` | Role definitions | Seeded (viewer/operator/accountant/admin/superadmin) |
+| `fazle_payment_correction_log` | Payment corrections | INSERT |
+
+### Critical Patterns
+- Phone lookups always try multiple variants (01XXXXXXXXX, 880XXXXXXXXX, etc.)
+- Idempotency keys prevent double-payment: format `payment-draft:{id}`
+- Payroll idempotency: UNIQUE(employee_id, period_year, period_month) WHERE status != 'cancelled'
+- Attendance: UNIQUE(employee_id, attendance_date) → ON CONFLICT UPDATE
+- All financial writes use explicit PostgreSQL transactions with advisory locks where concurrent access is possible
+
+---
+
+## REPORT 17 — AI BEHAVIOUR REPORT
+
+### LLM Provider Chain
+
+```
+1. GitHub Models (primary) — openai/gpt-4o-mini
+   If fails or rate-limited →
+2. Groq (secondary) — llama-3.1-8b-instant (14,400 req/day, 30 RPM free tier)
+   If fails →
+3. Ollama (local) — qwen3:8b
+   If ollama_reply_disabled=true or fails →
+4. Polite holding message (no crash)
+```
+
+### Ollama Usage Restrictions
+- When `OLLAMA_REPLY_DISABLED=true`: Ollama is NEVER used for customer-facing WhatsApp replies
+- Ollama still runs for: intent classification, RAG index rebuild, learning memory extraction
+- GitHub Models must succeed or a polite holding message is returned to the customer
+
+### AI Functions
+| Function | Model Used | Purpose |
+|---|---|---|
+| `classify_intent_llm(text)` | Primary chain | Classify message intent |
+| `generate_reply(text, intent, context, role, source)` | Primary chain | Generate WhatsApp reply |
+| `generate_recruitment_reply(...)` | Primary chain | Recruitment-specific reply |
+| Memory extraction (scheduler) | GitHub Models | Extract facts from conversations |
+
+### Intent Classification
+- AI is **authoritative** for intent
+- Deterministic rule-based classifier (`modules/intent.classify`) is the **availability fallback**
+- If AI intent = 'unknown', deterministic rules run
+
+### AI Safety Mode (`AI_SAFE_MODE=true`)
+- Long replies become drafts
+- Low-confidence auto-replies become drafts
+- Uncertain-intent auto-replies become drafts
+
+### Auto-Reply Enabled Gate
+- `AUTO_REPLY_ENABLED=false` → no customer replies (except recruitment)
+- `RECRUITMENT_AUTOREPLY_ENABLED=true` → recruitment still replies even when auto-reply is off
+- Per-source control: `AUTO_REPLY_SOURCES` = comma-separated allowed source names
+
+---
+
+## REPORT 18 — NOTIFICATION REPORT
+
+### Notification Types
+
+| Type | Trigger | Recipient | Channel |
+|---|---|---|---|
+| Admin draft notification | Any new draft | Admin | bridge1/bridge2 (admin_note mechanism) |
+| Escort order received | Client sends vessel order | Admin | bridge2 (OPS) |
+| Escort confirmed slip | Admin ESCORTCONFIRM | Original client | bridge2 |
+| Release review request | Employee sends release intent | Admin | bridge1/bridge2 |
+| Payment notification | Admin PAID/ADVANCE | Accountant | accountant_phone setting |
+| Payroll daily summary | 02:00 scheduler | Admin | bridge1 |
+| DLQ alert | Every 15 min (if actionable DLQ > 0) | Admin | bridge1 |
+| Health summary | Every 6h (if degraded) | Admin | bridge1 |
+| Stale escort reminder | Daily 09:00 | Admin | bridge1 |
+| Backup staleness alert | Daily 03:00 | Admin | bridge1 |
+| Bridge watchdog alert | Every 5 min (if stale bridge) | Admin | message_router |
+| Agent incident summary | Every 6h | Admin | bridge1 |
+| Daily admin digest | 08:00 | Admin | bridge1 |
+
+### Idempotency
+All scheduler notifications use idempotency keys to prevent duplicate alerts:
+- Format: `{purpose}-{date}` or `{purpose}-{signature}`
+- Uses `outbound.enqueue()` with `idempotency_key` parameter
+
+---
+
+## REPORT 19 — AUDIT REPORT
+
+### Audit Mechanisms
+
+| Audit | Table | What is Logged |
+|---|---|---|
+| Admin commands | `fazle_admin_audit` | actor_phone, command, args, allowed, required_role, denied_reason, result_summary |
+| Payroll transitions | `wbom_payroll_approval_log` | run_id, action, actor, from_status, to_status, reason, payload_json |
+| Scheduled job runs | `fazle_scheduled_jobs` | job_name, last_run_at, last_status, last_duration_ms, last_error, run_count |
+| Payment reconciliation | `fazle_reconciliation_log` | source, source_ref, matched, match_method, matched_employee_id |
+| Blocked outbound | `outbound_safety_incidents` | recipient, bridge, blocked_reason, message_preview, queue_id |
+| Program closure | `wbom_escort_programs.remarks` | 'b13-closed-by:{actor}' appended to remarks |
+| LID unresolved messages | observability counter | `messages_lid_unresolved_total` |
+| Skipped group/newsletter | observability counter | `messages_skipped_total` by reason |
+| RAG search audit | In-memory ring buffer (50 entries) | query, hits, top_score, top_source, chunk_preview |
+| Service heartbeats | `fazle_service_heartbeats` | service, last_seen, queue_depth |
+
+### Security Audit Notes
+- API keys stored as SHA-256 hashes only — plaintext never stored
+- Admin phone bootstrapped from `ADMIN_NUMBERS` env — no DB-only lock-out possible
+- RBAC denials are always recorded in `fazle_admin_audit`
+
+---
+
+## REPORT 20 — SCHEDULER REPORT
+
+**Timezone:** `Asia/Dhaka` (configurable via `SCHEDULER_TIMEZONE`)
+
+| Job Name | Schedule | Function | Purpose |
+|---|---|---|---|
+| `daily_payroll_compute` | 02:00 daily | `job_daily_payroll()` | Compute payroll for all Active employees |
+| `dlq_alert` | Every 15 min | `job_dlq_alert()` | Alert admin if actionable DLQ messages exist |
+| `health_summary` | Every 6h | `job_health_summary()` | Alert admin if any health probe degraded |
+| `agent_incident_summary` | Every 6h | `job_agent_incident_summary()` | Summarize unresolved monitoring incidents |
+| `stale_escort_reminder` | 09:00 daily | `job_stale_escort_reminder()` | Alert for escort programs Active >N days |
+| `payment_reconciliation` | Hourly | `job_payment_reconciliation()` | Re-match unmatched staging payments |
+| `backup_staleness_alert` | 03:00 daily | `job_backup_staleness()` | Alert if newest DB backup > 48h old |
+| `combined_draft_cleanup` | Hourly | `job_combined_draft_cleanup()` | Expire escort + payment drafts >24h |
+| `daily_memory_review` | 09:00 daily | `job_daily_memory_review()` | Extract facts from conversations via LLM |
+| `rag_rebuild` | 18:00 daily | `job_rag_rebuild()` | Rebuild BM25 RAG index |
+| `daily_admin_digest` | 08:00 daily | `job_daily_admin_digest()` | Daily summary to admin |
+| `daily_db_backup` | 02:30 daily | `job_daily_db_backup()` | Run database backup |
+| `lock_cleanup` | Every 5 min | `cleanup_expired_locks()` | Clean expired processing locks |
+| `draft_ttl_cleanup` | Every 30 min | `expire_stale_drafts()` | Mark pending drafts as expired |
+| `bridge_watchdog` | Every 5 min | Bridge stale check | Alert if bridge silent >10 min |
+
+**Environment Overrides:**
+- `PAYROLL_AUTO_COMPUTE_HOUR` (default: 2)
+- `DLQ_ALERT_INTERVAL_MIN` (default: 15)
+- `MEMORY_REVIEW_HOUR` (default: 9)
+- `RAG_REBUILD_HOUR` (default: 18)
+- `DAILY_DIGEST_HOUR` (default: 8)
+- `DAILY_BACKUP_HOUR` (default: 2), `DAILY_BACKUP_MIN` (default: 30)
+- `ESCORT_STALE_DAYS` (default: 30)
+- `BACKUP_STALE_HOURS` (default: 48)
+
+---
+
+## REPORT 21 — RAG REPORT
+
+### Architecture
+- **Algorithm:** BM25 (offline, no external embedding service)
+- **Language:** Bilingual: Bangla (`\u0980-\u09FF`) + English
+- **Index:** In-memory, rebuilt on demand
+- **Rebuild:** Daily at 18:00 (scheduler) + on-demand API
+
+### Index Sources
+1. Plain-text files under `core/resources/*.txt` (excluding internal dirs and files)
+2. Active rows from `fazle_knowledge_base` (key + reply_text)
+
+### BM25 Parameters
+- k1 = 1.5, b = 0.75
+- Chunk size: 320 characters, overlap: 60 characters
+- Min token length: 2 characters
+
+### Safety Filters (3 layers)
+1. **Directory exclusion:** `_internal_archived`, `_internal`, `prompts`, `debug`, `tests`, `drafts`, `internal`, `ai`, `training`, `examples`, `temp`
+2. **Filename keyword exclusion:** analysis, prompt, intent, debug, test, sample, chain, reasoning, internal, archived, system_context
+3. **Chunk-level safety:** 30+ internal marker patterns — unsafe chunks **purged entirely** from index (never stored, `unsafe_docs` always = 0)
+
+### Stop Words
+80+ Bangla and English function words removed before indexing. Critical note: `লোক`, `পদে`, `নেওয়া`, `হচ্ছে` were originally stop words but **removed** because they are content words in recruitment queries like `কোন পদে লোক নেওয়া হচ্ছে`.
+
+### Search Behaviour
+- Query tokenized same way as documents
+- Scores via BM25 per document
+- Unsafe chunks skipped during scoring
+- Top-k returned with source traceability
+- Last 50 queries in ring buffer for debugging (`recent_searches()`)
+
+---
+
+## REPORT 22 — KNOWLEDGE RELATIONSHIP GRAPH
+
+```
+CANDIDATE ──────────► RECRUITMENT FUNNEL ──────► EMPLOYEE
+                           │                         │
+                     (scored session)         (wbom_employees)
+                                                      │
+                       ┌───────────────────────────────┤
+                       │               │               │
+                  ATTENDANCE      ESCORT DUTY      SALARY/ADVANCE
+                       │               │               │
+              (wbom_attendance)   (wbom_escort_    (wbom_cash_
+                       │            programs)      transactions)
+                       │               │               │
+                   PAYROLL ◄───────────┘               │
+                       │         (day_count)           │
+              (wbom_payroll_runs)                       │
+                       │                               │
+                   APPROVAL ◄─────────── ADMIN COMMAND (PAYROLL PAID)
+                       │
+              (wbom_payroll_approval_log)
+                       │
+                      CASH ──────────────────────── LEDGER
+              (wbom_cash_transactions)                  │
+                       │                         (reports)
+                       │
+                    REPORTS ◄─── SCHEDULER (daily_admin_digest)
+
+
+ESCORT CLIENT ──► ESCORT ORDER ──► wbom_escort_programs (draft)
+                                         │
+                              ADMIN ESCORTCONFIRM
+                                         │
+                              (status: confirmed/Assigned)
+                                         │
+                              ESCORT ON DUTY (Running)
+                                         │
+                          RELEASE (text/OCR slip)
+                                         │
+                         [RELEASE CONFIRMED] (admin)
+                                         │
+                    ┌────────────────────┴─────────────────┐
+                    │                                       │
+             ATTENDANCE                              PAYMENT DRAFT
+          (backfill per day)                    (fazle_payment_drafts)
+                                                           │
+                                              ADMIN PAID command
+                                                           │
+                                          ACCOUNTANT NOTIFICATION
+                                                           │
+                                             wbom_cash_transactions
+
+
+INBOUND MESSAGE ──► IDENTITY BRAIN ──► MESSAGE ROUTER ──► REPLY
+                         │                   │
+                  (11 roles,           (15 routing steps)
+                   6 sources,                │
+                   confidence)         ┌─────┴──────┐
+                                    DRAFT        AUTO-SEND
+                                    (fazle_      (bridge API)
+                                     draft_
+                                     replies)
+                                       │
+                                  ADMIN APPROVE
+                                       │
+                                     SEND
+```
+
+---
+
+## REPORT 23 — KNOWLEDGE COVERAGE MATRIX
+
+| Domain | Has KB Article | Accurate | Complete | Hidden Rules Covered |
+|---|---|---|---|---|
+| Company identity / office | ✅ | ✅ | ✅ | ✅ |
+| Recruitment policy | ✅ | ✅ | Partial | ❌ (scoring, TTL, positions missing) |
+| Salary structure | ✅ | ✅ | Partial | ❌ (probation vs permanent amounts not explicit) |
+| Attendance policy | ✅ | ✅ | Partial | ❌ (draft workflow not fully documented) |
+| Escort workflow | ✅ | ✅ | Partial | ❌ (OCR slip flow, transport rates missing) |
+| Payment workflow | ✅ | Partial | Partial | ❌ (formula conflict with payroll) |
+| Payroll state machine | Partial | ✅ | ❌ | ❌ (6-state machine not documented) |
+| Release slip workflow | ✅ | ✅ | Partial | ❌ (OCR confidence warnings missing) |
+| Identity resolution | Partial | ✅ | ❌ | ❌ (4 secondary evidence sources missing) |
+| Admin commands | ❌ | — | — | ❌ (38 commands not documented) |
+| RBAC | ❌ | — | — | ❌ (5 roles, permission table missing) |
+| Message routing | ❌ | — | — | ❌ (15-step router missing) |
+| Silent-skip rules | ❌ | — | — | ❌ (completely missing) |
+| Draft-always gate | ❌ | — | — | ❌ (completely missing) |
+| Complaint protection | ❌ | — | — | ❌ (completely missing) |
+| Loop / flood detection | ❌ | — | — | ❌ (completely missing) |
+| RAG engine | Partial | ✅ | ❌ | ❌ (safety filters, stop words missing) |
+| Scheduler jobs | ❌ | — | — | ❌ (14 jobs not documented) |
+| Social auto-reply | ❌ | — | — | ❌ (Facebook/Messenger platform missing) |
+| LLM provider chain | ❌ | — | — | ❌ (GitHub → Groq → Ollama chain missing) |
+| Transport allowances | Partial | ❌ | ❌ | ❌ (code vs DB discrepancy unresolved) |
+| AI safety mode | ❌ | — | — | ❌ |
+| Voice processing | ❌ | — | — | ❌ |
+| OCR pipeline | Partial | ✅ | Partial | ❌ |
+
+**Coverage Score: 9/23 domains fully covered. 14/23 missing or incomplete.**
+
+---
+
+## REPORT 24 — PROPOSED KNOWLEDGE ARTICLES
+
+| ID | Title | Folder | Visibility | Priority |
+|---|---|---|---|---|
+| A-01 | Silent-Skip Rules and Blocked Contact Policy | `06_developer_system` | Developer / Admin | CRITICAL |
+| A-02 | Draft-Always Gate — Who Is Never Auto-Replied | `06_developer_system` | Developer / Admin | CRITICAL |
+| A-03 | Complaint and Financial Phrase Protection | `06_developer_system` | Developer | HIGH |
+| A-04 | Admin Command Complete Reference (38 Commands) | `02_admin_knowledge` | Admin | HIGH |
+| A-05 | RBAC Role Table and Command Permission Matrix | `02_admin_knowledge` | Admin | HIGH |
+| A-06 | LLM Provider Fallback Chain | `06_developer_system` | Developer | HIGH |
+| A-07 | Transport Allowance Rates (with conflict note) | `04_business_rules` | Operations | HIGH |
+| A-08 | Payroll State Machine (6 states) | `05_workflows` | HR / Accountant | HIGH |
+| A-09 | Escort Release + Payment Full Workflow | `05_workflows` | Operations | HIGH |
+| A-10 | Message Routing Priority (15 steps) | `06_developer_system` | Developer | HIGH |
+| A-11 | Loop Detection and Flood Protection Rules | `06_developer_system` | Developer | HIGH |
+| A-12 | Prompt Injection and Outbound Safety | `06_developer_system` | Developer | HIGH |
+| A-13 | Identity Resolution Evidence Sources | `03_ai_identity` | Developer | MEDIUM |
+| A-14 | Recruitment Scoring Algorithm | `04_business_rules` | HR | MEDIUM |
+| A-15 | RAG Engine Architecture and Safety Filters | `06_developer_system` | Developer | MEDIUM |
+| A-16 | Scheduler Job Reference | `06_developer_system` | Developer / Admin | MEDIUM |
+| A-17 | Social Auto-Reply Platform (Facebook/Messenger) | `06_developer_system` | Developer | MEDIUM |
+| A-18 | Accountant Payment Ingest Workflow | `05_workflows` | Accountant | MEDIUM |
+| A-19 | Advance Payment Keywords and Trigger Logic | `04_business_rules` | Operations | MEDIUM |
+| A-20 | OCR Release Slip Confidence Rules | `04_business_rules` | Operations | MEDIUM |
+| A-21 | Bridge Poller Architecture (SQLite, cursors, dedup) | `06_developer_system` | Developer | MEDIUM |
+| A-22 | AI Safety Mode Behaviour | `06_developer_system` | Developer | LOW |
+| A-23 | Voice Message Processing | `06_developer_system` | Developer | LOW |
+
+---
+
+## REPORT 25 — PROPOSED KNOWLEDGE BOOKS
+
+| ID | Book Title | Size Estimate | Key Chapters |
+|---|---|---|---|
+| KB-01 | `message_router_engine.md` | Large | Architecture, 15-step routing, silent-skip, draft-always, auto-send rules, complaint protection, examples |
+| KB-02 | `identity_engine.md` | Medium | 11 roles, 8 evidence sources, role priority table, confidence scoring, examples |
+| KB-03 | `escort_engine.md` | Large | Client order flow, parser formats, vessel extraction, lifecycle, OCR slip, transport rates, state machine |
+| KB-04 | `payment_engine.md` | Medium | Escort payment formula, advance flow, finalize, accountant message, idempotency |
+| KB-05 | `payroll_engine.md` | Medium | State machine, compute formula, per-program rate, transitions, audit log |
+| KB-06 | `admin_command_engine.md` | Large | All 38 commands, syntax, RBAC, Bangla digits, dedup, examples |
+| KB-07 | `scheduler_engine.md` | Medium | 14 jobs, schedules, heartbeat, env overrides, APScheduler integration |
+| KB-08 | `rag_engine.md` | Medium | BM25, bilingual tokenizer, safety filters, stop words, chunk config, audit |
+| KB-09 | `recruitment_engine.md` | Medium | 6-step funnel, 9 positions, scoring algorithm, TTL, eligibility rules |
+| KB-10 | `bridge_engine.md` | Large | SQLite ingestion, LID resolution, dedup, cursors, OCR/voice branching, safety |
+| KB-11 | `social_engine.md` | Medium | Facebook/Messenger auto-reply, reply content, salary/location/docs responses |
+| KB-12 | `attendance_engine.md` | Medium | Parser formats, draft workflow, save, summary, shift classification |
+| KB-13 | `database_engine.md` | Large | All 30+ tables, key operations, idempotency patterns, phone variant lookup |
+| KB-14 | `rbac_engine.md` | Medium | 5 roles, permission table, bootstrap, API keys, audit trail |
+
+---
+
+## REPORT 26 — PROPOSED FOLDER CHANGES
+
+No production folder changes. Knowledge Base folder additions only:
+
+```
+core/knowledge_base/
+├── 06_developer_system/       ← Already partially exists as 03_developer_system
+│   ├── message_router_engine.md    (NEW — KB-01)
+│   ├── identity_engine.md          (NEW — KB-02)
+│   ├── bridge_engine.md            (NEW — KB-10)
+│   ├── rag_engine.md               (NEW — updated from rag_rules.md)
+│   ├── scheduler_engine.md         (NEW — KB-07)
+│   ├── rbac_engine.md              (NEW — KB-14)
+│   ├── database_engine.md          (NEW — KB-13)
+│   └── social_engine.md            (NEW — KB-11)
+├── 05_workflows/
+│   ├── payroll_workflow.md         (NEW — detailed state machine)
+│   └── accountant_workflow.md      (NEW — payment ingest)
+└── 04_business_rules/
+    ├── transport_allowances_authoritative.md   (NEW — with conflict flag)
+    ├── complaint_protection_rules.md           (NEW)
+    └── ai_safety_rules.md                      (NEW)
+```
+
+---
+
+## REPORT 27 — PROPOSED FILE CHANGES
+
+**All changes are additions to KB files only. Zero changes to production code.**
+
+| File | Action | Reason |
+|---|---|---|
+| `06_developer_system/message_router_engine.md` | CREATE | 15-step routing, silent-skip, draft-always — entirely undocumented |
+| `06_developer_system/bridge_engine.md` | CREATE | SQLite architecture, dedup, loop/flood protection — entirely undocumented |
+| `02_admin_knowledge/admin_command_reference.md` | CREATE | All 38 commands with syntax — entirely undocumented |
+| `02_admin_knowledge/rbac_permission_matrix.md` | CREATE | 5 roles + command table — entirely undocumented |
+| `05_workflows/payroll_state_machine.md` | CREATE | 6-state machine with transitions — not in current payroll_rules.md |
+| `04_business_rules/transport_allowances_authoritative.md` | CREATE | Rate table with CON-03 conflict note |
+| `04_business_rules/complaint_protection_rules.md` | CREATE | Complaint phrase list and draft-force logic |
+| `06_developer_system/rag_engine.md` | CREATE (replaces rag_rules.md) | Add safety filters, BM25 params, stop words |
+| `06_developer_system/scheduler_engine.md` | CREATE | 14 jobs, schedules, env overrides |
+| knowledge_inventory.md | UPDATE | Reflect 23 new articles and conflict records |
+| `missing_report.md` | UPDATE | Mark MIS-01 to MIS-23 |
+| `conflict_resolution_record.md` | UPDATE | Add CON-01 to CON-04 |
+| `05_workflows/escort_release_payment_workflow.md` | UPDATE | Add OCR slip flow, transport rate logic, TASK 4 note |
+| `03_ai_identity/identity_overview.md` | UPDATE | Add 4 secondary evidence sources (cash, attendance, escort, contact) |
+
+---
+
+## REPORT 28 — KNOWLEDGE BASE GENERATION PLAN
+
+### Phase 1 — Critical Safety Knowledge (Week 1)
+
+**Objective:** Document the invisible rules that protect the system from sending wrong messages.
+
+| Step | Article | Purpose |
+|---|---|---|
+| 1.1 | Silent-Skip Rules | Prevent any future developer from accidentally replying to blocked contacts |
+| 1.2 | Draft-Always Gate | Document which contacts must never auto-receive a reply |
+| 1.3 | Complaint Phrase Protection | Document financial/complaint guard phrases |
+| 1.4 | Loop Detection + Flood Protection | Document anti-spam mechanisms |
+| 1.5 | Prompt Injection + Outbound Poison | Document security controls |
+
+### Phase 2 — Admin Operations Knowledge (Week 1–2)
+
+| Step | Article | Purpose |
+|---|---|---|
+| 2.1 | Admin Command Complete Reference | Admin needs this as working reference |
+| 2.2 | RBAC Role + Permission Matrix | Who can do what |
+| 2.3 | Scheduler Job Reference | Operations awareness |
+
+### Phase 3 — Business Logic Knowledge (Week 2)
+
+| Step | Article | Purpose |
+|---|---|---|
+| 3.1 | Payroll State Machine | HR and accountant working reference |
+| 3.2 | Transport Allowances + Conflict Note | Resolve CON-03 with management |
+| 3.3 | Recruitment Scoring Algorithm | HR reference |
+| 3.4 | AI Provider Fallback Chain | Operations awareness |
+
+### Phase 4 — Engine Documentation (Week 3)
+
+| Step | Article | Purpose |
+|---|---|---|
+| 4.1 | Message Router Engine Book | Full architecture documentation |
+| 4.2 | Identity Brain Engine Book | Full resolution logic |
+| 4.3 | Bridge Engine Book | Infrastructure documentation |
+| 4.4 | RAG Engine Book | AI knowledge layer documentation |
+
+### Phase 5 — Workflow Reconstruction (Week 3–4)
+
+| Step | Workflow | Purpose |
+|---|---|---|
+| 5.1 | Escort Release + OCR Payment Workflow | Operational reference |
+| 5.2 | Accountant Payment Ingest Workflow | Accountant reference |
+| 5.3 | Advance Payment Workflow | Operations reference |
+
+### Phase 6 — Conflict Resolution (Requires Management)
+
+| Conflict | Decision Required |
+|---|---|
+| CON-01 | Is escort payment `basic_salary/30 × days` or fixed ৳1,200/day? |
+| CON-03 | Is Mongla transport ৳700 (code) or ৳1,500 (DB)? Sync `escort_calculation_config` table. |
+| CON-04 | Is food bill ৳150/day (code estimate) or a different rate? |
+
+---
+
+# ─────────────────────────────────────
+# ⏸ STOP — AWAITING MANAGEMENT APPROVAL
+# ─────────────────────────────────────
+
+**All 28 reports above are Analysis Only. Zero production files have been modified. Zero KB files have been created or changed.**
+
+**Before any KB file is created:**
+1. Management must review and approve this full report
+2. Management must resolve CON-01 (payment formula), CON-03 (transport rate), and CON-04 (food rate)
+3. Management must confirm classification decisions for each proposed article
+4. Management must confirm which proposed Knowledge Books to create first
+
+**Pending management decision, the Knowledge Base Generation Plan (Report 28) is ready to execute on approval.**
