@@ -140,6 +140,10 @@ Condition E: Management explicitly authorizes the specific file
 | ID | Change | File | Date |
 |---|---|---|---|
 | PAY-03-FIX | Mongla transport rate ৳700 → ৳800 | `modules/escort_lifecycle/__init__.py:387` | 2026-06-23 |
+| CR-07 | Age range in fallback "১৮–৪৫" → "১৮–৫৫" (BR-25) | `modules/knowledge_base/__init__.py:66` | 2026-06-23 |
+| CR-08 | Escort salary upper "৳১৮,০০০" → "৳১৭,০০০" | `modules/knowledge_base/__init__.py:101` | 2026-06-23 |
+| CR-09 | Survey Scout salary upper "৳১৮,০০০" → "৳১৭,০০০" | `modules/knowledge_base/__init__.py:28` | 2026-06-23 |
+| SAL-POL | Salary policy KB article created | `knowledge_base/04_business_rules/salary_policy.md` | 2026-06-23 |
 
 ### Phase 6 — Remaining Refactoring Candidates
 
@@ -148,11 +152,11 @@ Each must be **re-verified at execution time** before requesting management auth
 | Candidate | Potential Mismatch | Re-verify Command | Risk Level |
 |---|---|---|---|
 | `identity_brain` | KB Step 10 = DB lookup first; production may run keyword check first in some conditions | `grep -n "_CANDIDATE_KEYWORDS\|step.*10" modules/identity_brain/__init__.py` | MEDIUM |
-| `knowledge_base` module | Hardcoded fallback templates (৳3,500 joining fee, ৳600 form fee etc.) may diverge from KB v2 authoritative values | `grep -n "FALLBACK\|3500\|৳" modules/knowledge_base/__init__.py` | HIGH — financial figures |
-| `payroll_logic` | Core computation formula undocumented — if wrong vs KB v2 formula, refactor needed | `cat modules/payroll_logic/__init__.py` | HIGH — financial |
+| `knowledge_base` module | ~~Fallback templates~~ | ~~RESOLVED~~ — CR-07/CR-08/CR-09 fixed (age 45→55, salary upper bounds ৳18k→৳17k). Commit `e11fbd7` | ✅ DONE |
+| `payroll_logic` | ~~Computation formula~~ | ~~NOT A FORMULA MODULE~~ — it is a data-query/display module. No fix needed. | ✅ CLOSED |
 | `recruitment_flow` | Dual recruitment path (funnel + LLM FAQ) — verify current code matches KB description | `grep -n "recruitment_ai\|recruitment_flow" modules/message_router/__init__.py` | LOW |
 | `wbom_payroll_runs` DDL | DDL in KB sourced from `tests/conftest.py` — production migration may differ | `find db/migrations/ -name "*payroll*"` | MEDIUM |
-| `INTENT_HINTS` count | MEP noted count may be 11 not 12 — KB has 12 | `python3 -c "from shared.reply_policy import INTENT_HINTS; print(len(INTENT_HINTS))"` | LOW |
+| `INTENT_HINTS` count | ~~May be 11 not 12~~ | ~~RESOLVED~~ — system_prompt.md already had correct count of 11 with note. MEP was wrong. | ✅ CLOSED |
 
 ### Phase 6 — Blocked Items (Need Management Decision First)
 
@@ -629,7 +633,7 @@ Production changes only in Phases 3 and 6, each requiring file-level authorizati
 | **PHASE 3** — Visibility Engine | ✅ COMPLETE | 2026-06-23 | `359812c` | rag/search() role param + 2 call sites |
 | **PHASE 4** — Coverage 90%+ | ✅ COMPLETE | 2026-06-23 | `7940415`–`a1da765` | 18 articles; weighted 67%; P0+P1 100% pass |
 | **PHASE 5** — Freeze v2 | ✅ COMPLETE | 2026-06-23 | `3ef2c11` | PKCA/PKMA/PKVC v2 pass; KB v2 CERTIFIED |
-| **PHASE 6** — Refactoring | 🔄 IN PROGRESS | Started 2026-06-23 | `0a3039e` | PAY-03 fix done; 6 candidates remain |
+| **PHASE 6** — Refactoring | 🔄 IN PROGRESS | Started 2026-06-23 | `0a3039e`, `e11fbd7` | PAY-03 + CR-07/08/09 done; salary_policy.md created; 4 candidates remain |
 
 ---
 
