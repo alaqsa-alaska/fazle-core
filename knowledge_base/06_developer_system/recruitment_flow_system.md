@@ -185,6 +185,41 @@ Stored in `fazle_recruitment_sessions.score_bucket`.
 
 ---
 
+## `wbom_candidates` — Permanent Candidate Record (U-01, verified 2026-06-23)
+
+**Source:** Verified via `\d wbom_candidates` on production DB.
+**Relationship to `fazle_recruitment_sessions`:** `fazle_recruitment_sessions` is the **temporary** intake session (expires after SESSION_TTL=24h). `wbom_candidates` is the **permanent** candidate record created when a session completes scoring. FK: `fazle_recruitment_sessions.candidate_id → wbom_candidates.candidate_id ON DELETE SET NULL`.
+
+| Column | Type | Nullable | Default | Notes |
+|---|---|---|---|---|
+| `candidate_id` | BIGSERIAL | NOT NULL | auto | PK |
+| `phone` | VARCHAR(20) | NOT NULL | — | UNIQUE — one permanent record per phone |
+| `full_name` | VARCHAR(100) | — | NULL | From intake `name` step |
+| `age` | INTEGER | — | NULL | Validated 18–55 (BR-25) |
+| `area` | VARCHAR(100) | — | NULL | From intake `area` step |
+| `job_preference` | VARCHAR(50) | — | NULL | Normalised to `VALID_POSITIONS` |
+| `experience_years` | INTEGER | — | NULL | From intake `experience` step |
+| `available_join_date` | DATE | — | NULL | Set downstream (not in intake funnel) |
+| `funnel_stage` | VARCHAR(30) | NOT NULL | `'new'` | CHECK: new / collecting / scored / assigned / contacted / interviewed / hired / rejected / dropped |
+| `collection_step` | VARCHAR(30) | — | `'name'` | Current or last completed step |
+| `score` | INTEGER | NOT NULL | 0 | 0–100 CHECK (from `_compute_score()`) |
+| `score_bucket` | VARCHAR(10) | NOT NULL | `'cold'` | CHECK: hot / warm / cold |
+| `assigned_recruiter` | VARCHAR(80) | — | NULL | Admin who owns follow-up |
+| `assigned_at` | TIMESTAMPTZ | — | NULL | When recruiter assigned |
+| `last_contact_at` | TIMESTAMPTZ | — | NULL | Updated on each contact |
+| `next_follow_up_at` | TIMESTAMPTZ | — | NULL | Indexed for scheduler follow-up sweep |
+| `source` | VARCHAR(30) | — | `'whatsapp'` | Channel where candidate first appeared |
+| `source_message` | TEXT | — | NULL | Original trigger message |
+| `notes` | TEXT | — | NULL | Admin notes |
+| `created_at` | TIMESTAMPTZ | NOT NULL | NOW() | Immutable |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | NOW() | Updated on each stage change |
+
+**Indexes:** UNIQUE on `phone`; btree on `score_bucket`, `next_follow_up_at` (partial WHERE NOT NULL), `funnel_stage`, `assigned_recruiter`.
+
+**Referenced by:** `fazle_recruitment_sessions` (FK, SET NULL on delete), `wbom_candidate_conversations` (FK, CASCADE), `wbom_recruitment_reminders` (FK, CASCADE).
+
+---
+
 ## Key Functions
 
 ### `intake_message(phone, text, source) → dict`
