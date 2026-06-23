@@ -528,9 +528,152 @@ The SOCIAL domain is entirely separate from MESSAGING domain (WhatsApp). They sh
 
 ---
 
+## Wave-4 — Risk Flagger Exact Specification (W4-AUTH)
+
+**Source:** `modules/social_auto_reply/risk_flagger.py` (read 2026-06-23)
+
+### Exact Frozensets
+
+```python
+RISKY_INTENTS = {
+    "accountant", "transaction", "employee_id", "reports_issue",
+    "escort_order", "escort_client", "roster_issue", "internal_operations",
+    "complaint", "payment_issue", "legal_issue", "scam_allegation",
+    "abuse", "negative_comment", "media_only", "unclear",
+}  # 16 members
+
+SAFE_AUTO_SEND_INTENTS = {
+    "greeting", "interested", "job_details", "salary", "salary_objection",
+    "location", "age_issue", "documents", "fees", "applicant_info_complete",
+    "training", "join_process", "recruitment_follow_up", "career_growth",
+    "accommodation",
+}  # 15 members
+
+ESCALATION_INTENTS = {
+    "employee_salary_complaint",
+    "legal_issue",
+    "payment_issue",
+}  # 3 members
+
+RECRUITING_INTENTS = SAFE_AUTO_SEND_INTENTS  # alias — same set
+```
+
+### `risk_reason()` — Full Logic
+
+```python
+def risk_reason(classification, *, media_flag=False, text="") -> str | None:
+    if media_flag and not (text or "").strip():
+        return "media_only"          # media with no text → risky
+    if classification.intent in RISKY_INTENTS:
+        return classification.intent # named risky intent
+    return None                      # safe
+```
+
+**Key detail:** `media_flag=True` with no text body is independently risky, regardless of intent classification. This catches images/videos sent without caption.
+
+### `can_auto_send()` — Full Logic
+
+```python
+def can_auto_send(classification, *, platform, text="") -> bool:
+    if risk_reason(classification, text=text):
+        return False
+    if platform in {"messenger", "meta_whatsapp", "facebook_comment"}:
+        return classification.intent in SAFE_AUTO_SEND_INTENTS
+    return False
+```
+
+**Platform restriction:** Only the three listed platforms return True. Any other platform (including WhatsApp bridge1/bridge2) → `False`. The condition `platform not in set → return False` is the second gate.
+
+### `is_escalation_intent()` — Full Logic
+
+```python
+def is_escalation_intent(intent: str) -> bool:
+    return intent in ESCALATION_INTENTS
+```
+
+Called by the planner worker to route escalated items to `social_flagged_items` with severity `'escalation'` and emit a WARNING log.
+
+---
+
+## Wave-4 — State Tracker Details (W4-AUTH)
+
+**Source:** `modules/social_auto_reply/state_tracker.py` (read 2026-06-23)
+
+### Kill Switch
+
+```python
+def daemon_enabled() -> bool:
+    return os.getenv("SOCIAL_AUTO_REPLY_ENABLED", "false").lower() in {"1", "true", "yes"}
+```
+
+Default: **disabled** (`false`). Must be explicitly set to enable the social daemon. `is_paused()` also returns `True` (paused) when `daemon_enabled()` is False.
+
+### Pause Mechanism
+
+Pause state is stored in `social_backlog_state` via UPSERT on `state_key='daemon_paused'`:
+
+```json
+{"paused": true/false, "reason": "manual"}
+```
+
+`is_paused()` reads this row. If no row exists → not paused. The UPSERT pattern means only one row per `state_key` ever exists (ON CONFLICT DO UPDATE).
+
+### Status Function Output Fields
+
+`status()` returns a dict with these fields — used by admin `/api/social/status` endpoint:
+
+| Field | Source |
+|---|---|
+| `enabled` | `daemon_enabled()` |
+| `paused` | `is_paused()` |
+| `pending` | `COUNT(*) FROM social_reply_queue WHERE status='pending'` |
+| `failed` | `COUNT(*) FROM social_reply_queue WHERE status='failed'` |
+| `flagged_open` | `COUNT(*) FROM social_flagged_items WHERE status='open'` |
+| `sent_24h` | `COUNT(*) FROM social_sent_log WHERE sent_at >= NOW() - INTERVAL '24 hours'` |
+| `rate_limit` | Full row from `social_rate_limit_state WHERE channel='global'` |
+
+### Tables Referenced by state_tracker
+
+| Table | Purpose |
+|---|---|
+| `social_backlog_state` | Daemon pause state (state_key='daemon_paused') |
+| `social_reply_queue` | Outbound reply queue (pending/failed counts) |
+| `social_flagged_items` | Open items needing admin action |
+| `social_sent_log` | 24h send count |
+| `social_rate_limit_state` | Per-channel rate limit state |
+
+---
+
+## Wave-4 — Payment Complaint Path (W4-AUTH)
+
+**Source:** `modules/social_auto_reply/payment_issue_handler.py` (read 2026-06-23)
+
+The payment complaint path has exactly **two replies** (initial → escalation):
+
+### Path 1 — Initial Reply (`initial_payment_reply()`)
+
+Returns `reply_rules.PAYMENT_INFO_REQUEST_REPLY` — asks the sender to provide:
+- Employee name
+- Payment amount  
+- Transaction date
+- Contact number
+
+This is a data-collection step before escalation.
+
+### Path 2 — Escalation Reply (`escalation_reply()`)
+
+Returns `reply_rules.PAYMENT_ESCALATION_REPLY` — informs the sender that the matter is being reported to the office and will be investigated.
+
+The planner worker routes `payment_issue` intent to `social_flagged_items` (severity=`'escalation'`) in parallel with queuing the initial_payment_reply for sending. Admin must resolve the flagged item.
+
+**Note:** `payment_issue` is in both `RISKY_INTENTS` AND `ESCALATION_INTENTS`. Its presence in `RISKY_INTENTS` means `can_auto_send()` returns False; despite this, `initial_payment_reply()` is still queued — the "safe for this specific intent" override is handled by the planner (the planner is aware that payment_issue gets a structured initial reply even though it can't be auto-sent without admin review in the general case).
+
+---
+
 ## Revision History
 
 | Date | Change | Author |
 |---|---|---|
 | 2026-06-22 | Wave-2A: Initial documentation created from production file read | KSP Wave-2A |
 | 2026-06-22 | Wave-2B: Added Visibility Matrix, management sensitivity warning, resolved heartbeat table conflict (C-06), entity ownership notes | KSP Wave-2B |
+| 2026-06-23 | Wave-4 (W4-AUTH): Added exact RISKY_INTENTS/SAFE_AUTO_SEND_INTENTS/ESCALATION_INTENTS frozensets, risk_reason() media_flag logic, can_auto_send() full logic, state_tracker kill switch + pause mechanism, payment complaint two-path detail | W4-AUTH |
