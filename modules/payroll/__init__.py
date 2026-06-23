@@ -23,7 +23,7 @@ import asyncpg
 log = logging.getLogger("fazle.payroll")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DEFAULT_PER_PROGRAM_RATE = 800.0  # ৳/day for escort duty
+DEFAULT_PER_PROGRAM_RATE = 400.0  # ৳/day for escort duty (PAY-01: 12,000 ÷ 30)
 ALLOWED_TRANSITIONS = {
     "draft":     {"reviewed", "cancelled"},
     "reviewed":  {"approved", "draft", "cancelled"},

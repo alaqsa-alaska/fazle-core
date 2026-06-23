@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from app.database import execute
@@ -14,6 +15,27 @@ from .conversation_history import recent_thread_history, thread_state
 from .payment_issue_handler import initial_payment_reply
 from .reply_generator import generate_comment_reply, generate_reply
 from .risk_flagger import risk_reason
+
+_BANGLA_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+
+def _extract_age(text: str) -> int | None:
+    """Extract a numeric age from text. Returns None if no clear age found."""
+    normalized = unicodedata.normalize("NFC", text)
+    for pattern in (
+        r"(?:বয়স|age)[:\s]*([0-9০-৯]+)",
+        r"\b([0-9০-৯]{2})\s*(?:বছর|years?|yr)\b",
+        r"\b([6-9][0-9])\b",
+    ):
+        m = re.search(pattern, normalized, re.IGNORECASE)
+        if m:
+            try:
+                age = int(m.group(1).translate(_BANGLA_DIGITS))
+                if 10 <= age <= 80:
+                    return age
+            except ValueError:
+                pass
+    return None
 
 
 @dataclass(frozen=True)
@@ -146,7 +168,13 @@ def _combined_rule_reply(platform: str, text: str, intents: list[str], history: 
     if "fees" in intents and "fees" not in already:
         parts.append(rules.FEES_REPLY)
     if "age_issue" in intents and "age_issue" not in already:
-        parts.append(rules.AGE_ISSUE_REPLY)
+        extracted_age = _extract_age(text)
+        if extracted_age is not None and (
+            extracted_age < rules.MIN_AGE or extracted_age > rules.MAX_AGE
+        ):
+            parts.append(rules.AGE_OUT_OF_RANGE_REPLY)
+        else:
+            parts.append(rules.AGE_ISSUE_REPLY)
     if "training" in intents or "experience" in intents:
         parts.append("অভিজ্ঞতা না থাকলেও সমস্যা নেই। কাজের নিয়ম, দায়িত্ব ও নিরাপত্তা বিষয়ে প্রয়োজন অনুযায়ী ট্রেনিং/গাইডলাইন দেওয়া হয়, তাই মনোযোগ দিয়ে শিখলে কাজ বুঝে নেওয়া সম্ভব।")
     if "recruitment_follow_up" in intents and "recruitment_follow_up" not in already:
