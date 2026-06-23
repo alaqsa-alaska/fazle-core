@@ -67,6 +67,7 @@ These decisions resolved contested table domain assignments. They are permanent.
 | GOV-03 | Production Freeze remains in effect. No production changes without explicit management authorization | 2026-06-22 |
 | GOV-04 | KB-First Reading Policy: every implementation task begins by reading KB, not production code | 2026-06-22 |
 | GOV-05 | Session 2 (Knowledge-Driven Application Development) is the active development phase | 2026-06-22 |
+| GOV-06 | Knowledge Base v2.0 is MANAGEMENT CERTIFIED (PKCA v2: 67% weighted / P0+P1 100% pass; PKMA v2: 4.88/5.0; PKVC v2: 0 conflicts) | 2026-06-23 |
 
 ---
 
@@ -138,6 +139,18 @@ These are not decisions — they are unresolved schema questions that require a 
 
 ---
 
+## Phase 5 Completion + KB v2 Certification (Session 7 — 2026-06-23)
+
+**Authorization type:** Mixed — KB certification (read-only record) + one production code change (GOV-03) + one new KB article
+
+| ID | Authorization | Scope | Date |
+|---|---|---|---|
+| KB-V2-CERT | KB v2.0 certified (GOV-06) | Read-only governance record. PKCA v2: 67% weighted overall, all P0+P1 modules ≥70%. PKMA v2: 4.88/5.0. PKVC v2: 0 real conflicts. | 2026-06-23 |
+| PAY-03-FIX | `modules/escort_lifecycle/__init__.py` | Production code fix: separate Mongla from Faridpur in `_TRANSPORT_RATES`; set Mongla = ৳800 (from ৳700) to match PAY-03 management decision. Faridpur remains at ৳700. | 2026-06-23 |
+| OUTBOUND-DOC | `knowledge_base/06_developer_system/outbound_delivery.md` | New KB article for `modules/outbound`. P0 module was at 30% coverage; this article brings it to full coverage. | 2026-06-23 |
+
+---
+
 ## Change Log
 
 | Date | Change | Authorized By |
@@ -151,3 +164,5 @@ These are not decisions — they are unresolved schema questions that require a 
 | 2026-06-23 | Phase 3 COMPLETE — role-aware RAG search() wired; 3 files changed; commit 359812c | Management |
 | 2026-06-23 | Wave-4 Phase 4 KB Coverage 90%+ authorized (W4-AUTH); KB-only — NO production code changes | Management |
 | 2026-06-23 | Wave-4 COMPLETE — Group A (13 articles: P2-B/C/D/E/F/G/H/I/J/K + bridge_poller/ocr/contact_sync/admin_ops), Group B (payroll_module new, fpe_overview/recruitment_flow_system DDL updates), Group C (admin_commands_detail new), Group D (social_auto_reply exact specs); commits 0947ee7→f419135 | W4-AUTH |
+| 2026-06-23 | Phase 5 COMPLETE — PKCA/PKMA/PKVC v2 audit reports written; commit 3ef2c11 | W4-AUTH |
+| 2026-06-23 | KB v2.0 CERTIFIED (GOV-06); PAY-03 production fix (Mongla ৳700→৳800); outbound_delivery.md created | Management |
