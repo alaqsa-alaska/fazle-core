@@ -151,6 +151,65 @@ These are not decisions — they are unresolved schema questions that require a 
 
 ---
 
+## Session 8 — Fallback Fixes + Salary Policy (2026-06-23)
+
+**Authorization type:** Production code changes (3 conflict resolutions) + new KB article + DORMANT module analysis
+
+### Conflict Resolutions (Session 8)
+
+| ID | Conflict | Decision | Implementation | Date |
+|---|---|---|---|---|
+| CR-07 | CONFLICT-7: Age range in `knowledge_base` fallback said "১৮–৪৫" — violates BR-25 (18–55) | **Fix fallback to ১৮–৫৫** (BR-25 was set in Session 4 but fallback was never updated) | Code: `modules/knowledge_base/__init__.py` line 66 | 2026-06-23 |
+| CR-08 | CONFLICT-8: Escort post-training salary in fallback said "৳১২,০০০–১৮,০০০" — management policy is ৳১২,০০০–৳১৭,০০০ | **Fix upper bound to ৳১৭,০০০** | Code: `modules/knowledge_base/__init__.py` line 101 | 2026-06-23 |
+| CR-09 | CONFLICT-9: Survey Scout job description in fallback said "বেতন: ১০,০০০–১৮,০০০" — upper bound exceeds management policy | **Fix upper bound to ৳১৭,০০০** | Code: `modules/knowledge_base/__init__.py` line 28 | 2026-06-23 |
+
+### Session 8 Authorizations
+
+| ID | Authorization | Scope | Date |
+|---|---|---|---|
+| SAL-POL | Salary policy management-approved and documented | KB: `04_business_rules/salary_policy.md` created. Groups: (1) Probation/Training ৳১০,০০০–১৫,০০০; (2) Operational/Escort ৳১২,০০০–১৭,০০০; (3) Permanent ৳১৭,০০০–৳২৪,৭০০ | 2026-06-23 |
+| DOM-ANALYZE | DORMANT module activation analysis authorized | Read-only analysis. Show activation impact before any code change. `payment_correction` and `conversation_layer` analyzed — see DORMANT Module Status section below | 2026-06-23 |
+
+---
+
+## DORMANT Module Status (Analyzed 2026-06-23)
+
+### payment_correction (`modules/payment_correction/__init__.py`)
+
+**Status:** Fully implemented, zero external callers (audited 2026-06-02)
+**Functions:** `reverse_payment()`, `adjust_payment()`, `list_corrections()`
+**DB tables required:** `fazle_payment_drafts` ✅, `wbom_cash_transactions` ✅, `fazle_payment_correction_log` ✅ (migration `008_payment_correction.sql`)
+
+**To activate — changes required:**
+1. `modules/admin_commands/__init__.py`: Wire `REVERSE <draft_id> <reason>` → `payment_correction.reverse_payment()`
+2. `modules/admin_commands/__init__.py`: Wire `ADJUST <draft_id> <new_amount> <method> [reason]` → `payment_correction.adjust_payment()`
+3. Add `REVERSE` and `ADJUST` to `COMMAND_ROLE` dict with required role (recommended: `superadmin` for REVERSE, `admin` for ADJUST)
+4. KB: Create `06_developer_system/payment_correction.md` documenting both commands
+5. Test: Write unit tests for `reverse_payment()` edge cases (already reversed, non-approved status)
+
+**Risk:** LOW — immutable ledger approach (writes counter-transactions, never deletes). Reversals are audited in `fazle_payment_correction_log`. Rollback: remove commands from `admin_commands` — no data damage.
+
+**Management decision needed:** YES — authorize the two specific admin command wiring files before activation.
+
+---
+
+### conversation_layer (`modules/conversation_layer/__init__.py`)
+
+**Status:** Shadow-only / read-only. "Intentionally not imported by the live message router."
+**Functions:** `generate_recruitment_reply_shadow()`, `simulate_current_core_reply()`
+**Purpose:** A/B testing framework — compares richer recruitment replies against current deterministic behavior. Never sends messages to users.
+
+**To activate — changes required:**
+1. `modules/message_router/__init__.py`: Import and call `generate_recruitment_reply_shadow()` alongside real reply generation (shadow mode — log only, do not send)
+2. OR: Replace one recruitment reply path with `generate_recruitment_reply_shadow()` output (full activation — sends to users)
+3. Read `modules/conversation_layer/recruitment.py` completely before deciding activation mode
+
+**Risk:** MEDIUM (full activation) / LOW (shadow mode only). Shadow mode is safe — never reaches users. Full activation changes recruitment reply quality and format.
+
+**Management decision needed:** YES — choose activation mode (shadow logging vs full replace) before any code change.
+
+---
+
 ## Change Log
 
 | Date | Change | Authorized By |
@@ -166,3 +225,4 @@ These are not decisions — they are unresolved schema questions that require a 
 | 2026-06-23 | Wave-4 COMPLETE — Group A (13 articles: P2-B/C/D/E/F/G/H/I/J/K + bridge_poller/ocr/contact_sync/admin_ops), Group B (payroll_module new, fpe_overview/recruitment_flow_system DDL updates), Group C (admin_commands_detail new), Group D (social_auto_reply exact specs); commits 0947ee7→f419135 | W4-AUTH |
 | 2026-06-23 | Phase 5 COMPLETE — PKCA/PKMA/PKVC v2 audit reports written; commit 3ef2c11 | W4-AUTH |
 | 2026-06-23 | KB v2.0 CERTIFIED (GOV-06); PAY-03 production fix (Mongla ৳700→৳800); outbound_delivery.md created | Management |
+| 2026-06-23 | CR-07/CR-08/CR-09: knowledge_base fallback fixed (age 45→55, escort upper ৳18k→৳17k, survey scout ৳18k→৳17k); salary_policy.md created; DORMANT module impact analyzed | Management |
