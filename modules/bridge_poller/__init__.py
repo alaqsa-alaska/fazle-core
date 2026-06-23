@@ -778,16 +778,54 @@ async def _poll_bridge(config: dict):
                                         "text": f"📋 Release Slip OCR (from {phone}):\n\n{draft_txt}",
                                         "bridge": "bridge2",
                                     })
+                                # Reply to escort: acknowledge receipt and ask for missing info
+                                conf = ocr_result.get("confidence_score", 100)
+                                missing = [f for f in ("employee_name", "vessel", "date", "location")
+                                           if not ocr_result.get(f)]
+                                if missing or conf < 60:
+                                    escort_reply = (
+                                        "✅ আপনার রিলিজ স্লিপ পাওয়া গেছে।"
+                                        + (f" কিছু তথ্য স্পষ্ট নয় ({', '.join(missing)})।" if missing else "")
+                                        + " অ্যাডমিন যাচাই করছেন — অনুগ্রহ করে আপনার নাম ও আইডি নম্বর পাঠান।"
+                                    )
+                                else:
+                                    escort_reply = "✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"
+                                text = escort_reply
+                                # Allow normal reply routing to send this back to escort
                             except Exception as _rs_err:
                                 log.error(f"[{bridge_name}] release slip handling error: {_rs_err}")
-                            continue  # Do not route normally
+                                continue
+                            # Fall through to normal routing to send escort_reply
 
-                        elif slip_type not in ("unknown", "duplicate"):
+                        elif slip_type == "unknown":
+                            # If sender has active escort program, flag to admin — may be unclear release slip
+                            try:
+                                from modules.escort_lifecycle import check_active_program_for_phone
+                                has_program = await check_active_program_for_phone(phone)
+                                if has_program:
+                                    await _notify_admin_bridge({
+                                        "admin_phone": _settings.admin_bridge2_number,
+                                        "text": (
+                                            f"⚠️ অস্পষ্ট ছবি (OCR ব্যর্থ) from {phone}\n"
+                                            "এই নম্বরে সক্রিয় এস্কর্ট প্রোগ্রাম আছে — রিলিজ স্লিপ হতে পারে।\n"
+                                            "ম্যানুয়ালি যাচাই করুন অথবা এস্কর্টকে স্পষ্ট ছবি পাঠাতে বলুন।"
+                                        ),
+                                        "bridge": "bridge2",
+                                    })
+                                    text = "ছবিটি স্পষ্ট নয়। অনুগ্রহ করে ভালো আলোতে আবার ছবি তুলে পাঠান।"
+                                    # Fall through to reply to escort
+                                else:
+                                    continue  # Unknown image, no active program — skip
+                            except Exception:
+                                continue
+
+                        elif slip_type == "duplicate":
+                            continue  # duplicate — skip routing
+
+                        else:
                             # escort_slip or payment_slip — use OCR text as message text
                             text = ocr_result.get("raw_text") or f"[image: {slip_type}]"
                             _extracted_text = ocr_result.get("raw_text") or ""
-                        else:
-                            continue  # Unknown or duplicate — skip routing
                     finally:
                         await _mark_processed(msg_id, bridge_name, phone)
                         log.info("[IMG_MARK_PROCESSED_FINAL] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
