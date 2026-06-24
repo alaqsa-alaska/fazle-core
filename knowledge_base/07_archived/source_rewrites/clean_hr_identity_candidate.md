@@ -1,4 +1,12 @@
-﻿# Clean Rewrite: HR Identity Brain And Candidate
+---
+title: Clean Rewrite: HR Identity Brain And Candidate
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
+# Clean Rewrite: HR Identity Brain And Candidate
 
 This source is normalized into:
 - 01_employee_knowledge/recruitment_policy.md

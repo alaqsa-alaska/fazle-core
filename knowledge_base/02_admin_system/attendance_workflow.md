@@ -1,4 +1,12 @@
-﻿# Attendance Workflow
+---
+title: Attendance Workflow
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Attendance Workflow
 
 ## Purpose
 Define the admin-only workflow for security guard and escort attendance handling.

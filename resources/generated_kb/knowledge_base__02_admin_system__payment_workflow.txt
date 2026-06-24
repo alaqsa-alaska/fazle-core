@@ -1,0 +1,57 @@
+Source: knowledge_base/02_admin_system/payment_workflow.md
+SHA256: 040dd6f4c0c2ea411919ff537a9fd7375718b57f23f146c4173390de1e6efdbf
+Version: 040dd6f4c0c2
+
+# Payment Workflow
+
+## Purpose
+Define admin-only payment verification, approval, accountant handoff, and ledger update rules.
+
+## Scope
+Level 2 admin system knowledge. Visible to Admin, Accountant, HR, Operation Officer, and Management only.
+
+## Definitions
+- Payment Draft: structured payment message containing employee identity, payment number, method, and amount.
+- Accountant Handoff: admin manually sends payment message to accountant WhatsApp, or system sends it to accountant after explicit admin approval.
+- Payment Complete State: payment is considered complete when the admin's payment message reaches the accountant WhatsApp number.
+
+## Workflow
+1. Employee or escort requests money, salary, food advance, conveyance, or final payment.
+2. Identity is verified using registered number, duty context, duty selfie, duty slip, or release slip as needed.
+3. Payment method and number are confirmed every time.
+4. Payment draft is prepared for admin review.
+5. Admin handles payment message.
+6. Preferred current operation: admin manually sends all payment messages to accountant WhatsApp.
+7. High-level future option: admin sends approval message to system, and system sends the message to accountant.
+8. When admin's payment message reaches accountant WhatsApp, payment is considered complete.
+9. Ledger/database update happens immediately after accountant handoff completion.
+
+## Business Rules
+- No automatic payment is allowed without admin handling.
+- Admin manual message to accountant is the current source-of-truth payment completion trigger.
+- If a future system-mediated approval flow is used, accountant handoff remains the completion trigger.
+- Payment message may include multiple transactions in one message.
+- Employee mobile banking number can serve as ID when no separate ID is present.
+- Confirm bKash/Nagad number every time, even if the employee used it before.
+- Duplicate payments must be checked before ledger update.
+
+## Payment Message Examples
+- ID: 01859213411 Md. Musa 01712006898(B) 300/-
+- ID: 01983978654 Ayon 01983978654(N) 200/-
+- Liakot 01870827528(N) 200/-
+- ID: Runo 01773558211(N) 400/-
+- ID: 01339620136 Mosain Mea 01819295455(N) 800/- (conv.)
+
+## Exceptions
+Unknown or alternate employee numbers must be verified before payment draft or approval.
+
+## AI Notes
+Do not tell employees that accountant WhatsApp handoff updates ledger/database. Employee-facing answer should only say the request is under company review or payment will be processed according to company policy.
+
+## Cross References
+- payroll_rules.md
+- release_slip_workflow.md
+- admin_business_rules.md
+
+## Revision History
+- 2026-06-19: Created using management decision that accountant WhatsApp receipt is the payment-complete and ledger-update trigger.

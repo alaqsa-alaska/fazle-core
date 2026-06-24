@@ -146,6 +146,14 @@ async def lifespan(app: FastAPI):
     await start_pollers()
     outbound_queue.start_background_worker()
     fazle_scheduler.start_scheduler()
+    # Ollama daemon client — persistent keep-alive client + async model warmup.
+    try:
+        from app import ollama_daemon
+        await ollama_daemon.start()
+        asyncio.create_task(ollama_daemon.warm_model())
+        log.info("[ollama_daemon] started and warmup scheduled")
+    except Exception as e:
+        log.warning(f"[ollama_daemon] startup failed (non-fatal): {e}")
     # Batch 21 — build RAG index in background (non-fatal)
     try:
         from modules import rag
@@ -269,6 +277,11 @@ async def lifespan(app: FastAPI):
         await stop_social_auto_reply()
     except Exception as e:
         log.warning(f"[social] shutdown error: {e}")
+    try:
+        from app import ollama_daemon
+        await ollama_daemon.stop()
+    except Exception as e:
+        log.warning(f"[ollama_daemon] shutdown error: {e}")
     await close_db()
     log.info("Fazle Core stopped")
 

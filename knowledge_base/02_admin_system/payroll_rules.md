@@ -1,4 +1,12 @@
-﻿# Payroll Rules
+---
+title: Payroll Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Payroll Rules
 
 ## Purpose
 Define admin-only payroll rules connecting attendance, leave, late arrival, advance, bonus, transport, and final salary calculation.

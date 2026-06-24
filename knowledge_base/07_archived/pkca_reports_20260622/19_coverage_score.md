@@ -1,3 +1,11 @@
+---
+title: PKCA Report 19: Coverage Score
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKCA Report 19: Coverage Score
 
 **Date:** 2026-06-22

@@ -1,4 +1,12 @@
-﻿# Workflow Engine
+---
+title: Workflow Engine
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Workflow Engine
 
 ## Purpose
 Define internal event triggers, maintenance rules, and workflow dependencies for Fazle AI operations.

@@ -1,0 +1,856 @@
+Source: knowledge_base/00_governance/module_alignment_report.md
+SHA256: d0260950e362bf19f31bb738db37a37a9b922bb8402e26eaf9e160ba6ef07e70
+Version: d0260950e362
+
+# Module Alignment Report — Phase 4 Step 5
+**Program:** Organizational Brain Validation
+**Date:** 2026-06-22
+**Mode:** READ-ONLY AUDIT — No production code changed
+**Scope:** All production modules vs certified Knowledge Base v1.0
+**Baseline:** PKCA 2026-06-22 (14% overall), Brain Readiness 62%
+
+---
+
+## Audit Method
+
+For each module:
+1. Read production source code (docstrings, business logic, constants, hidden rules)
+2. Read corresponding KB articles
+3. Score coverage 0–100%
+4. Identify gaps across 6 dimensions
+
+Coverage % = (knowledge actually documented in KB) / (total knowledge that should be documented)
+
+---
+
+## Module 1 — message_router
+
+**File:** `modules/message_router/__init__.py` (581 lines)
+**KB Articles:** `06_developer_system/automation_pipeline.md`, `06_developer_system/workflow_engine.md`
+**Coverage: 20%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | 15-step routing priority not documented step-by-step; _SILENT_SKIP_NAME_TOKENS (11 tokens) partially in KB but not as a list; _SAFE_AUTOSEND_INTENTS (8 intents) not listed in KB; DRAFT_ALWAYS_ROLES not documented |
+| Undocumented Workflow | Step 11 (advance request catch-all for non-handled roles) not in KB; Step 12 (office_location fast path — KB-only, skips LLM) not in KB; Step 14 (reviewed_reply_memory lookup order) not in KB |
+| Hidden Rules | `REPLY_COOLDOWN = 60s` not documented; `_ESCORT_ROLES = frozenset` (4 roles) not documented; recruitment blocked for operational roles (intent=recruitment + non-candidate role → silent return) not documented |
+| Visibility Risk | DRAFT_ALWAYS_PHONES list (14 phone numbers) in env — must never appear in KB or AI replies |
+| Conflict Risk | None detected |
+| KB Article Mapping | Partial: `automation_pipeline.md` (LLM chain documented), `workflow_engine.md` (state machine concept only) |
+
+**Priority gaps:** office_location fast path (KB→reply, no LLM), complaint → draft (not documented), operational role recruitment block.
+
+---
+
+## Module 2 — identity_brain
+
+**File:** `modules/identity_brain/__init__.py` (393 lines)
+**KB Articles:** `06_developer_system/identity_brain.md`, `03_ai_identity/identity_overview.md`, `03_ai_identity/permission_matrix.md`
+**Coverage: 65%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `_CANDIDATE_KEYWORDS` list (10 terms) not in KB; `_ESCORT_CONTENT_RE` pattern not documented; confidence score mapping not documented; `_ROLE_PRIORITY` numeric weights not in KB |
+| Undocumented Workflow | text_hint step (Step 10 in production is actually candidate keyword detection — how it works not documented) |
+| Hidden Rules | Escort content regex triggers `client_escort_buyer` even for unregistered senders if message contains vessel keywords — not documented as a rule |
+| Visibility Risk | Low — identity resolution is internal |
+| Conflict Risk | KB says Step 10 is `candidate` from `fazle_recruitment_sessions`. Production code also detects candidate by keyword before DB lookup. Sequence and override logic is unclear in KB |
+| KB Article Mapping | `identity_brain.md` covers 11-step algorithm (well documented); phone variant lookup documented |
+
+**Priority gaps:** text_hint keyword detection criteria, confidence score threshold rules.
+
+---
+
+## Module 3 — recruitment_ai
+
+**File:** `modules/recruitment_ai/__init__.py` (253 lines, Phase 4 updated)
+**KB Articles:** `04_business_rules/recruitment_business_rules.md`, `05_workflows/recruitment_workflow.md`, `01_employee_knowledge/recruitment_policy.md`
+**Coverage: 40%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `_FEE_PHRASES` detection list (14 phrases) not in KB; `_QUESTION_HINTS` list not in KB; `_deterministic_fact_reply()` fast-path (address/contact/age bypass LLM) not documented; Section-scoring BM25 in `build_recruitment_source_context()` not documented |
+| Undocumented Workflow | **Phase 4 Step 2 gap:** `_safe_rag_chunks()` call and RAG enrichment of kb_context NOT in any KB article; source tracing via `rag_sources=` log NOT documented |
+| Hidden Rules | Static file source: `resources/ops/recruitment_source_of_truth.txt` — existence and authority not in KB; top-4 section selection by score+title overlap not documented; `[:4500]` context truncation limit not documented |
+| Visibility Risk | Medium — enforce_recruitment_reply_policy() guards against hallucinated numbers; but source_context now includes RAG chunks whose number space is larger → guard may pass more numbers than before |
+| Conflict Risk | KB `recruitment_workflow.md` describes a 6-step funnel starting from session creation. production code in `recruitment_ai` bypasses session flow entirely — it generates direct LLM reply. Two parallel systems (session funnel in `recruitment_flow` vs direct reply in `recruitment_ai`) are not clearly differentiated in KB |
+| KB Article Mapping | `recruitment_policy.md` (positions, eligibility), `recruitment_business_rules.md` (fee rules, age policy) |
+
+**Priority gaps:** RAG enrichment integration (Phase 4 Step 2), two-system ambiguity (session funnel vs direct AI reply).
+
+---
+
+## Module 4 — rag (Hybrid RAG)
+
+**File:** `modules/rag/__init__.py` (1045 lines)
+**KB Articles:** `06_developer_system/rag_strategy.md`, `06_developer_system/hybrid_search.md`
+**Coverage: 25%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | **ENTIRE HYBRID RAG SUBSYSTEM undocumented:** Qdrant Docker server (172.20.0.2:6333); MiniLM model (paraphrase-multilingual-MiniLM-L12-v2, 384 dims, 117.7M params); LRU embedding cache (max 2000, SHA1 key); 27 seed queries; dedicated encoding executor (1 thread); RRF fusion algorithm (score = 1/(60+rank) + 1/(60+rank)); HYBRID_SEARCH_ENABLED flag; server→embedded fallback mode |
+| Undocumented Workflow | `_vector_search()` → cache hit / miss → Qdrant search → payload filter → return; `_hybrid_search()` → BM25 + vector → RRF fusion; `build_index()` → encoder warm-up → Qdrant rebuild → seed cache; fallback degradation path (vector fails → BM25 only) |
+| Hidden Rules | `safe_for_customer=True` filter applied twice (vector AND BM25 paths) — not in KB; 18 unsafe chunks purged on build (documented in code comment) — criteria not in KB; `_RECENT_SEARCHES` ring buffer (deque, 200 items) for incident debugging — not in KB |
+| Visibility Risk | **HIGH:** KB article `rag_strategy.md` says "BM25 keyword search with a Unicode-aware tokenizer" as if hybrid mode doesn't exist. Any training from KB only will produce a system unaware that Qdrant is live in production |
+| Conflict Risk | **CRITICAL:** `hybrid_search.md` documents a 5-signal ranking (role match > keyword > semantic > recency > workflow state). Production uses pure RRF (BM25 rank + vector rank fusion). These are fundamentally different algorithms. KB documentation conflicts with production behavior |
+| KB Article Mapping | `rag_strategy.md` covers BM25 params (Wave-2B enriched); `hybrid_search.md` is 17 lines and describes wrong algorithm |
+
+**Priority gaps:** Hybrid RAG architecture, RRF algorithm, Qdrant integration, LRU cache, seed queries — NONE documented. Highest-priority gap in entire KB.
+
+---
+
+## Module 5 — attendance
+
+**Files:** `modules/attendance/__init__.py`, `modules/attendance_parser/__init__.py`
+**KB Articles:** `04_business_rules/attendance_business_rules.md`, `05_workflows/attendance_workflow.md`, `02_admin_system/attendance_workflow.md`
+**Coverage: 50%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `_PRESENT_KEYWORDS` (12 terms) not in KB; `_ABSENT_KEYWORDS` (8 terms) not in KB; location extraction regex not documented; supervisor attendance (separate path from regular employee attendance) not clearly distinguished in KB |
+| Undocumented Workflow | Supervisor attendance `parse_attendance()` → `create_attendance_draft()` → admin approval path; admin `ATTENDANCE SAVE <id> <location>` command flow not in KB |
+| Hidden Rules | Attendance message detection is keyword-based substring match — not documented; draft requires admin approval before `wbom_attendance` is written — documented in code but not in KB workflow |
+| Visibility Risk | Low |
+| Conflict Risk | KB says "Unauthorized absence may cause up to 2 days deduction per 1 absent day." Production attendance module captures attendance but does NOT compute deductions — that is payroll. KB may be conflating attendance recording with payroll impact |
+| KB Article Mapping | `attendance_business_rules.md` (rules well documented), `attendance_workflow.md` (flow documented) |
+
+**Priority gaps:** Detection keyword lists, supervisor vs employee attendance path distinction.
+
+---
+
+## Module 6 — escort
+
+**Files:** `modules/escort/__init__.py`, `modules/escort_roster/`, `modules/escort_lifecycle/__init__.py`
+**KB Articles:** `04_business_rules/escort_business_rules.md`, `05_workflows/escort_workflow.md`, `05_workflows/release_slip_workflow.md`
+**Coverage: 40%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Exact regex for MV/lighter/master detection in `_looks_like_escort_order()` not documented; `remarks` JSON structure (8 fields: sender_phone, source_bridge, escort_name, escort_mobile, capacity, importer, cargo_type) not documented; completed draft detection pattern not documented |
+| Undocumented Workflow | 2-step escort flow (client → admin draft → admin completes → client confirmation) is documented at high level but completed-draft detection trigger is not; status transition (draft → confirmed) not documented in KB |
+| Hidden Rules | `_ESCORT_ROLES = frozenset` (escort_client, client_escort_buyer, vip_client, repeat_client) — role set not listed in KB; release intent detection (`is_release_intent()`) not documented; release confirmation requires exact text `[RELEASE CONFIRMED]` — not documented |
+| Visibility Risk | **HIGH:** Transport rate table (Dhaka ৳600, Faridpur ৳700, etc.) is in KB but framed as a business rule. If AI exposes this to candidates, it sets incorrect expectations (transport is paid to Master/Sukani, not escort) |
+| Conflict Risk | KB `escort_business_rules.md` says "Escort duty day is 24 hours, day plus night." `wbom_escort_programs` has a `shift` field. Whether a partial shift constitutes a full duty day is not documented |
+| KB Article Mapping | `escort_business_rules.md` (financial rules good), `escort_workflow.md` (flow moderate), transport table documented |
+
+**Priority gaps:** Completed-draft detection, [RELEASE CONFIRMED] exact-text rule, remarks JSON structure.
+
+---
+
+## Module 7 — payment_workflow
+
+**Files:** `modules/payment_workflow/__init__.py`, `modules/payment/__init__.py`, `modules/payment_ingest/__init__.py`
+**KB Articles:** `05_workflows/payment_workflow.md`, `04_business_rules/payment_business_rules.md`
+**Coverage: 35%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `DEFAULT_DAILY_RATE = 1200` (৳1200/day for escort duty) — authoritative rate not in KB; payment ingest SMS parser patterns not documented; bKash/Nagad/cash categorization logic not documented |
+| Undocumented Workflow | Employee advance eligibility check (what conditions must be met) not documented; payment verification state machine (requested → verified → approved → paid) not in KB |
+| Hidden Rules | `is_admin_cash_shorthand()` function exists in payment_ingest — cash shorthand format not documented; `looks_like_payment_sms()` — SMS patterns it matches not documented |
+| Visibility Risk | **HIGH:** DEFAULT_DAILY_RATE=1200 is a financial constant. If AI states it without authorization, employees can dispute calculations. This figure must be management-approved before KB inclusion |
+| Conflict Risk | `payment_business_rules.md` documents advance rules but doesn't specify maximum advance amount or cooldown period. Production code likely has these constraints but they're not verified |
+| KB Article Mapping | `payment_workflow.md` (flow moderate), `payment_business_rules.md` (rules partial) |
+
+**Priority gaps:** DEFAULT_DAILY_RATE authorization, advance eligibility criteria, SMS parser pattern documentation.
+
+---
+
+## Module 8 — bridge_poller
+
+**File:** `modules/bridge_poller/__init__.py` (1000+ lines)
+**KB Articles:** `06_developer_system/automation_pipeline.md` (partial)
+**Coverage: 20%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Adaptive poll interval (1–30s with 1.5× backoff) not documented; LID→phone resolution (WA LID mapping) not documented; `REPLY_COOLDOWN = 60s` per-sender cooldown not documented; `processed_bridge_messages` dedup table logic not documented |
+| Undocumented Workflow | Full ingest pipeline (SQLite poll → LID resolve → dedup → router → draft → quality gate → send → checkpoint) not in KB; fresh-start behavior (begins from NOW, ignores historical) not documented |
+| Hidden Rules | DM-always-persisted rule (v1.0.2 ingest policy) partially in code comment; Group/newsletter/status@broadcast skipped at SQL level — not in KB; LID-unresolved DMs saved as `phone='unresolved:<lid>'` not documented; complaint-phrase guard in bridge_poller (specific phrases → draft regardless of intent) not documented |
+| Visibility Risk | Low |
+| Conflict Risk | None detected |
+| KB Article Mapping | `automation_pipeline.md` mentions polling model conceptually; DM-always rule from code comment |
+
+**Priority gaps:** Ingest policy v1.0.2 full text, REPLY_COOLDOWN, LID resolution, complaint-phrase guard.
+
+---
+
+## Module 9 — scheduler
+
+**File:** `modules/scheduler/__init__.py`
+**KB Articles:** `06_developer_system/automation_pipeline.md` (jobs listed)
+**Coverage: 30%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Exact cron schedules not in KB: daily_payroll_compute (02:00), dlq_alert (every 15min), health_summary (every 6h), stale_escort_reminder (09:00), payment_reconciliation (hourly), backup_staleness_alert (03:00), daily_memory_review (09:00), rag_rebuild (18:00) |
+| Undocumented Workflow | Job failure behavior (retry / alert / skip) not documented; `SCHEDULE STATUS` command output format not documented; `RUN JOB <name>` manual trigger list not documented |
+| Hidden Rules | `fazle_scheduled_jobs` table records every run — existence not in KB; SCHEDULER_ENABLED=true kill-switch not documented; timezone override (SCHEDULER_TIMEZONE=Asia/Dhaka) not documented |
+| Visibility Risk | Low |
+| Conflict Risk | `automation_pipeline.md` says "Maintenance: Expire old pending drafts after 48 hours" but `.env` has `DRAFT_TTL_HOURS=24`. **CONFLICT: 48h (KB) vs 24h (production).** |
+| KB Article Mapping | `automation_pipeline.md` lists 8 jobs by name without schedules |
+
+**Priority gaps:** CONFLICT resolution (24h vs 48h TTL), exact schedules for all 8 jobs.
+
+---
+
+## Module 10 — social_auto_reply
+
+**Files:** `modules/social_auto_reply/` (20 files)
+**KB Articles:** `06_developer_system/social_auto_reply_system.md`
+**Coverage: 40%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Escalation thresholds in `risk_flagger.py` not documented; rate limiter parameters not documented; `state_tracker.py` state machine transitions not documented; salary/fee figures in `reply_rules.py` flagged as management-unapproved in KB |
+| Undocumented Workflow | Comment → escalation path not documented; payment complaint → payment_issue_handler flow not documented; backlog_processor retry behavior not documented |
+| Hidden Rules | Age issue: social auto-reply uses no fixed age range (diverges from BR-25 18–55 management decision) — documented as a warning in KB but no resolution plan |
+| Visibility Risk | **CRITICAL:** `reply_rules.py` WELCOME_REPLY discloses "বেতন: ১০,০০০/- থেকে ১৮,০০০/- টাকা" to Facebook contacts. KB explicitly flags these figures as management-unapproved for AI use. Gap: figures are live in production but not authorized for KB-grounded AI responses |
+| Conflict Risk | **ACTIVE CONFLICT:** Social auto-reply age handling (no fixed range) conflicts with BR-25 management decision (18–55). Same company, same position, different rule in different channels |
+| KB Article Mapping | `social_auto_reply_system.md` covers system overview and visibility rules |
+
+**Priority gaps:** Age conflict resolution (BR-25 vs social auto-reply), salary figure management approval.
+
+---
+
+## Module 11 — fazle_payroll_engine (FPE)
+
+**Files:** `modules/fazle_payroll_engine/` (20 files)
+**KB Articles:** `06_developer_system/fpe_overview.md`
+**Coverage: 35%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `fpe_employee_ledger` schema not documented; normalization rules (payment deduplication, amount matching thresholds) not documented; `fpe_unmatched_messages` review queue behavior not documented; `ai_enhance_parse()` (Ollama-based parse recovery at confidence < 0.7) not documented |
+| Undocumented Workflow | Reconcile flow (accounting_worker creates transaction, checks duplicates, updates ledger) not fully in KB; reversal process (`REVERSAL` command) not documented; historical_sync_worker backfill completion criteria not documented |
+| Hidden Rules | `FPE_CASH_AUTHORIZED_PHONES` — only these phones can issue Cash commands; `FPE_INCOME_AUTHORIZED_PHONES` — only these can issue Income commands; silence of unauthorized senders (no error reply) not documented |
+| Visibility Risk | **CRITICAL:** FPE processes real financial transactions (bKash, Nagad, cash). None of this may be exposed to candidates or employees. Rule is in KB but the engine processes sensitive data the LLM must never access |
+| Conflict Risk | None detected |
+| KB Article Mapping | `fpe_overview.md` (Wave-2A/B, 483 lines) — well documented at architecture level |
+
+**Priority gaps:** Normalization rules, ledger schema, ai_enhance_parse(), authorized phone behavior.
+
+---
+
+## Module 12 — admin_commands
+
+**Files:** `modules/admin_commands/` (7 files), `modules/rbac/__init__.py`
+**KB Articles:** `06_developer_system/role_permissions.md`, `02_admin_knowledge/admin_operations_overview.md`
+**Coverage: 50%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | NL query router (`nl_router.py`) categories not in KB; date parser (`date_parser.py`) supported formats not in KB; `nl_advance_record.py` query patterns not documented; `nl_employee_stats.py` stat query formats not documented |
+| Undocumented Workflow | NL query processing pipeline (text → nl_router → specialized handler → formatted reply) not in KB; `process_nl_admin_query()` fallback behavior not documented |
+| Hidden Rules | `is_admin_command()` prefix detection logic (how commands are identified) not documented; NL query triggers ("show last 10 chats of...") not in KB; Bangle number conversion for APPROVE (e.g., "APPROVE ১৬৫") not in KB |
+| Visibility Risk | Low |
+| Conflict Risk | None detected |
+| KB Article Mapping | `role_permissions.md` (37 commands + RBAC fully documented), `admin_operations_overview.md` |
+
+**Priority gaps:** NL query categories, date parser formats, Bangla numeral command support.
+
+---
+
+## Module 13 — draft_quality
+
+**File:** `modules/draft_quality/__init__.py` (99 lines)
+**KB Articles:** None
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | 4 quality criteria (empty, llm_fallback, bad_pattern, too_long) entirely absent from KB; exact LLM fallback strings not in KB; BAD_PATTERNS list (file://, /home/azim, Traceback, ```, <|, /scripts/, /venv/) not in KB; MAX_DRAFT_LEN=4000 not in KB |
+| Undocumented Workflow | Draft creation → quality check → `status='rejected_quality'` vs `status='pending'` state transition not documented anywhere |
+| Hidden Rules | `DRAFT_QUALITY_GATE=false` kill-switch exists — not in KB; numbered-list replies `[1]...` explicitly allowed (not flagged as bad) — intentional design not documented |
+| Visibility Risk | Low (internal gate) |
+| Conflict Risk | None detected |
+| KB Article Mapping | None — zero documentation |
+
+**Priority gaps:** Article creation required. This gate affects all AI-generated content in production.
+
+---
+
+## Module 14 — shared/reply_policy (Prompt Builder)
+
+**File:** `shared/reply_policy.py` (Phase 4 Step 3 updated)
+**KB Articles:** `06_developer_system/system_prompt.md` (13 lines)
+**Coverage: 10%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | **Phase 4 Step 3 gap:** 6-section structured format (Role → Business Rules → Workflow → Knowledge → Conversation → Question) NOT documented; `POLICY_VERSION = "structured_v2"` not in KB; `ROLE_PROMPTS` dict (7 roles, Bengali text) not in KB; `INTENT_HINTS` dict (12 intents, action instructions) not in KB; `clean_general_reply()` function not in KB |
+| Undocumented Workflow | How prompt is assembled for each path (recruitment vs general) not documented; when Conversation section is included/excluded not documented; 1500-char history truncation not documented |
+| Hidden Rules | Bengali section headers (ভূমিকা, ব্যবসায়িক নিয়ম, etc.) are structural prompts — not in KB; `source` parameter never changes prompt content (logged only) — important behavior not documented |
+| Visibility Risk | Low (internal prompt) |
+| Conflict Risk | `system_prompt.md` says "No emoji" and "Formal Bangla." Phase 4 Step 3 prompt builder says the same but in structured sections. No functional conflict but KB description is far too brief to be useful |
+| KB Article Mapping | `system_prompt.md` (13 lines — insufficient) |
+
+**Priority gaps:** 6-section format documentation, POLICY_VERSION, ROLE_PROMPTS, INTENT_HINTS. Entire Phase 4 Step 3 implementation is undocumented.
+
+---
+
+## Module 15 — intent
+
+**File:** `modules/intent/__init__.py` (171 lines)
+**KB Articles:** `03_developer_system/parser_logic.md` (partial)
+**Coverage: 20%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Full INTENT_KEYWORDS dict (13 categories, 100+ terms) not in KB; rapidfuzz fuzzy matching threshold not documented; `office_location` intent (separate from recruitment) not documented; `advance_request` intent detection not documented |
+| Undocumented Workflow | Rule-first → AI fallback order for intent classification documented in `automation_pipeline.md` but keyword-first step not detailed |
+| Hidden Rules | Fuzzy matching via rapidfuzz allows typo-tolerance in Bengali — not documented; score threshold for fuzzy match not in KB |
+| Visibility Risk | Low |
+| Conflict Risk | None detected |
+| KB Article Mapping | `conversation_parser.md` mentions intent classification at high level |
+
+---
+
+## Module 16 — knowledge_base (KB module)
+
+**File:** `modules/knowledge_base/__init__.py`
+**KB Articles:** `06_developer_system/rag_strategy.md` (data sources section)
+**Coverage: 30%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `_FALLBACK` list (10 hardcoded template entries: job details, office address, fee info, etc.) not documented; `get_recruitment_reply()` vs `get_reply()` function distinction not documented; hardcoded salary/fee amounts in fallback templates may differ from management-approved KB values |
+| Undocumented Workflow | Priority: DB first → hardcoded fallback second — documented in `rag_strategy.md` but fallback content not audited |
+| Hidden Rules | Fallback template contains "জয়েনিং ফি ৳৩,৫০০ — ঘুষ বা জামানত নয়। ৬ মাস পর ফেরত" — this exact amount appears hardcoded. If management changes the fee policy, this template must be updated separately from KB. Undocumented coupling |
+| Visibility Risk | **MEDIUM:** Hardcoded fallback templates contain specific financial figures (joining fee ৳3,500, form fee ৳330, salary ranges). These are exposed to all candidates. Not management-approved as KB values |
+| Conflict Risk | Hardcoded template salary "১০,০০০–১৮,০০০ টাকা" (survey scout) matches social_auto_reply but may diverge over time if one is updated and not the other |
+| KB Article Mapping | `rag_strategy.md` (data sources section) |
+
+**Priority gaps:** Hardcoded template audit and management approval, coupling risk documentation.
+
+---
+
+## Module 17 — reviewed_reply_memory
+
+**File:** `modules/reviewed_reply_memory/__init__.py`
+**KB Articles:** `06_developer_system/automation_pipeline.md` (brief mention)
+**Coverage: 5%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Match scope criteria (phone → intent → role hierarchy) not documented; similarity/exact match algorithm not documented; REVIEWED_REPLY_MEMORY_ENABLED kill-switch not documented; TTL/expiration of reviewed replies not documented |
+| Undocumented Workflow | Admin edits draft → reviewed reply saved → future similar messages get same reply — flow not documented |
+| Hidden Rules | Lookup happens AFTER KB and BEFORE LLM (step 14 in router) — ordering not documented |
+| Visibility Risk | Low |
+| Conflict Risk | None detected |
+| KB Article Mapping | Brief mention in automation_pipeline.md |
+
+---
+
+## Summary Table
+
+| Module | Coverage | Priority | Highest Risk |
+|---|---|---|---|
+| message_router | 20% | P1 | Office fast path, complaint draft, 60s cooldown |
+| identity_brain | 65% | P3 | Minor — text_hint criteria |
+| recruitment_ai | 40% | P1 | Phase 4 Step 2 RAG integration undocumented |
+| rag (Hybrid) | 25% | **P0** | Entire hybrid subsystem undocumented; KB conflicts with production |
+| attendance | 50% | P3 | Detection keywords, supervisor path |
+| escort | 40% | P2 | [RELEASE CONFIRMED] exact rule, transport exposure |
+| payment_workflow | 35% | P2 | DEFAULT_DAILY_RATE authorization |
+| bridge_poller | 20% | P2 | REPLY_COOLDOWN, complaint-phrase guard |
+| scheduler | 30% | P2 | CONFLICT: 24h vs 48h draft TTL |
+| social_auto_reply | 40% | P1 | Age conflict BR-25, salary figure authorization |
+| fazle_payroll_engine | 35% | P2 | ai_enhance_parse, authorized phones |
+| admin_commands | 50% | P3 | NL query categories |
+| draft_quality | 0% | P1 | Zero documentation — affects all AI output |
+| reply_policy (Phase 4) | 10% | P1 | Entire structured prompt format undocumented |
+| intent | 20% | P3 | Keyword lists, fuzzy threshold |
+| knowledge_base module | 30% | P2 | Hardcoded template audit |
+| reviewed_reply_memory | 5% | P3 | Match scope algorithm |
+
+**Weighted overall coverage (post-Phase-4):** ~32% (up from 14% baseline after Wave-2 articles)
+
+---
+
+## Supplemental Modules — Phase 4 Step 5 Extension (2026-06-23)
+
+The original report covered 17 modules. A further audit on 2026-06-23 identified 35 additional production modules not yet assessed. The following entries complete the required coverage of ALL production modules.
+
+---
+
+## Module 18 — escort_roster
+
+**Files:** `modules/escort_roster/` (3111 lines: `__init__.py`, `db.py`, `calculations.py`, `extractor.py`, `history_sync.py`, `routes.py`)
+**KB Articles:** `05_workflows/escort_workflow.md` (partial), `04_business_rules/escort_business_rules.md` (partial)
+**Coverage: 15%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Pay calculation logic (`calculate_pay()`, `parse_date_shift()`) — neither documented; conveyance rate table (`_get_conveyance_for_destination()`) — rates per destination not in KB; `_get_shift_rate()` — how daily shift rates are retrieved from DB not documented; roster entry lifecycle (sync → recalculate → audit log) not documented |
+| Undocumented Workflow | `sync_program_to_roster(program_id)` — upsert from wbom_escort_programs into escort_roster_entries; `recalculate_entry()` — recomputes shifts and pay; draft entry cleanup pipeline (3 jobs: `cleanup_draft_entries`, `expire_stale_drafts`, `cleanup_junk_drafts`); history sync not documented |
+| Hidden Rules | `expire_stale_drafts(hours=48)` — hardcoded 48h TTL for roster drafts (conflicts with DRAFT_TTL_HOURS=24 in scheduler); remarks TEXT column is fault-tolerant: may contain clean JSON, corrupted JSON, or plain text — all parsing is fault-tolerant; roster audit log (`escort_roster_audit_logs`) exists but not in KB |
+| Visibility Risk | MEDIUM — conveyance rates per destination (Dhaka, Faridpur, etc.) are in DB. If AI reads roster API output, it may disclose exact conveyance rates intended for internal calculation only |
+| Conflict Risk | **CONFLICT-4 (new):** `expire_stale_drafts(hours=48)` hardcoded in escort_roster vs `DRAFT_TTL_HOURS=24` in production `.env` scheduler. Two TTL values are in live use simultaneously for different draft types. See CONFLICT-1 in gap report for related issue |
+| KB Article Mapping | `escort_workflow.md` (flow high-level); `escort_business_rules.md` (rates partial) |
+
+**Priority gaps:** Pay calculation formula, conveyance rate table, roster draft lifecycle, TTL conflict.
+
+---
+
+## Module 19 — recruitment_flow
+
+**Files:** `modules/recruitment_flow/__init__.py` (365 lines)
+**KB Articles:** `05_workflows/recruitment_workflow.md`
+**Coverage: 30%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `INTAKE_KEYWORDS` (set of 28 Bengali/English trigger words including "cv", "joining") not in KB; `VALID_POSITIONS` dict (9 numeric + 9 keyword mappings to canonical job titles) not in KB; `COLLECTION_STEPS` 6-step sequence (name → age → area → job_preference → experience → phone_confirm) not fully documented; `_compute_score()` scoring algorithm (how candidate quality is rated) not documented; `SESSION_TTL = timedelta(hours=24)` documented as a system constant but not in KB |
+| Undocumented Workflow | Step-by-step question flow (STEP_QUESTIONS dict per step) not in KB; `intake_message()` — how session is created/advanced/completed not documented; `recruitment_eligibility()` check logic not documented; operational role block (OPERATIONAL_ROLES + OPERATIONAL_INTENTS) — these roles/intents are excluded from recruitment_flow but this exclusion is not in KB |
+| Hidden Rules | Phone confirmation step collects an alternate phone — this is the last step of the 6-step funnel but is not documented in KB workflow; `_parse_age()` / `_parse_job_preference()` / `_parse_experience()` — parsing rules for freeform inputs not documented |
+| Visibility Risk | LOW — recruitment_flow questions are template-driven, not LLM-generated |
+| Conflict Risk | **ACTIVE (existing CONFLICT):** `recruitment_workflow.md` in KB describes a funnel starting from session creation. `modules/recruitment_ai/__init__.py` generates direct LLM replies bypassing this funnel entirely. Two parallel systems serve recruitment on the same WhatsApp number. KB does NOT clearly distinguish when each path is activated. The KB implies funnel is the only path |
+| KB Article Mapping | `recruitment_workflow.md` (6-step funnel mentioned at high level, without step content) |
+
+**Priority gaps:** INTAKE_KEYWORDS list, VALID_POSITIONS dict, step questions, two-path ambiguity documentation.
+
+---
+
+## Module 20 — drafts (Draft Management API)
+
+**Files:** `modules/drafts/` (`__init__.py`, `routes.py`)
+**KB Articles:** None dedicated. `automation_pipeline.md` mentions drafts conceptually.
+**Coverage: 5%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Draft lifecycle states not documented beyond "pending" → "approved/rejected"; `block_number` functionality (approve a draft AND block auto-reply for that number) not documented; draft statistics endpoint output format not documented; admin API authentication (X-Internal-Key header) not documented for this module |
+| Undocumented Workflow | `approve_draft()` → enqueue for sending via outbound module — bypasses AUTO_REPLY_ENABLED check; `edit_draft()` → updates draft body; `reject_draft()` → marks rejected; `block_number()` → approve + block; these 4 admin actions are critical but undocumented |
+| Hidden Rules | Approve action bypasses AUTO_REPLY_ENABLED — admin approval ALWAYS sends regardless of system-wide auto-reply toggle; this override is not documented anywhere |
+| Visibility Risk | LOW (internal admin API) |
+| Conflict Risk | None detected |
+| KB Article Mapping | None |
+
+**Priority gaps:** Draft lifecycle full state machine, approve-bypasses-AUTO_REPLY_ENABLED rule, admin API endpoint list.
+
+---
+
+## Module 21 — wa_chat_frontend (Admin UI)
+
+**Files:** `modules/wa_chat_frontend/__init__.py` (820 lines)
+**KB Articles:** None
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | All 28 API endpoints undocumented (contacts, messages, drafts, groups, settings, SSE stream); group broadcast feature not documented; per-number auto-reply block via `/block` endpoint not in KB; settings persistence (role-based auto-reply toggles stored to DB) not documented |
+| Undocumented Workflow | SSE real-time stream (`/api/wa/stream`) — event types (new messages + new drafts) not documented; contact book sync trigger flow not documented; cursor-paginated conversation history not documented |
+| Hidden Rules | Admin UI uses cursor pagination (not offset) for messages; group broadcast sends to each member individually (not a WA group send); contact deletion deletes from `wbom_contacts` only (does not delete WA contact) |
+| Visibility Risk | MEDIUM — admin UI exposes conversation history, draft content, and auto-reply settings. Unauthorized access to this UI would expose all processed WhatsApp content |
+| Conflict Risk | None detected |
+| KB Article Mapping | None |
+
+**Priority gaps:** New KB article needed: `06_developer_system/admin_ui.md`. 0% coverage is a compliance risk.
+
+---
+
+## Module 22 — admin_transactions (FPE Financial CRUD)
+
+**Files:** `modules/admin_transactions/__init__.py` (550 lines)
+**KB Articles:** `06_developer_system/fpe_overview.md` (architecture only)
+**Coverage: 10%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Smart employee matching (4-rule algorithm: A=exact employee_id_phone, B=payout_phone, C=fuzzy name confidence>0.95, D=auto-create) not in KB; soft-delete rule (NEVER hard-delete financial history; deleted_at/deleted_by columns) not documented; ledger adjustment on amount/period change not documented |
+| Undocumented Workflow | `resolve_or_create_employee()` — the 4-rule matching algorithm is a critical production behavior; editing a transaction amount triggers ledger recalculation; deletion is always soft (deleted_at timestamp) |
+| Hidden Rules | `X-Internal-Key` header required for all mutations; `employee_id_phone` is immutable (identity anchor — cannot be changed after creation); amount changes trigger automatic ledger adjustment |
+| Visibility Risk | **CRITICAL** — financial transaction endpoints. X-Internal-Key protects them, but the key management policy is not documented in KB |
+| Conflict Risk | None detected |
+| KB Article Mapping | `fpe_overview.md` covers architecture; CRUD rules are absent |
+
+**Priority gaps:** Smart employee matching algorithm, soft-delete policy, X-Internal-Key lifecycle.
+
+---
+
+## Module 23 — admin_employees (Employee CRUD)
+
+**Files:** `modules/admin_employees/__init__.py` (390 lines)
+**KB Articles:** `02_admin_knowledge/admin_operations_overview.md` (partial)
+**Coverage: 15%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `EmployeeCreate` model fields (13 fields: employee_name, employee_mobile, designation, joining_date, bkash_number, nagad_number, basic_salary, nid_number, emergency_contact, address, bank_account) not in KB; after INSERT, auto-seeds FPE via `match_or_create_employee` (non-fatal) — not documented; deactivation propagates to `fpe_employees` — not documented |
+| Undocumented Workflow | CRUD flow (create → FPE seed → return); deactivate flow (status='Inactive' → propagate to FPE); reactivation flow; employee search by name/phone |
+| Hidden Rules | `employee_mobile` is immutable after creation (identity anchor); deactivation is soft (status='Inactive', not deletion); FPE seed on employee creation fails silently (non-fatal) |
+| Visibility Risk | LOW (internal admin) |
+| Conflict Risk | None detected |
+| KB Article Mapping | `admin_operations_overview.md` mentions employee management at high level |
+
+**Priority gaps:** EmployeeCreate field list, mobile immutability rule, FPE auto-seed behavior.
+
+---
+
+## Module 24 — reports (Admin Reports Engine)
+
+**Files:** `modules/reports/__init__.py` (460 lines)
+**KB Articles:** None
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | All 6 report builders undocumented: `_b_daily_summary`, `_b_monthly_payroll`, `_b_escort_utilization`, `_b_payment_reconciliation`, `_b_cash_position`, `job_daily_admin_digest`; cache TTL (DEFAULT_TTL_SEC=600, 10 minutes) not documented; audit log (every run recorded) not documented |
+| Undocumented Workflow | `run_report(name, args)` dispatch flow — admins can request by name via WhatsApp `REPORT DAILY` etc.; cache-then-generate flow; `render_text()` and `render_csv()` outputs not documented |
+| Hidden Rules | Reports are cached — stale data up to 10 minutes old may be returned; `cleanup_cache()` exists to invalidate; `job_daily_admin_digest()` is a scheduled job at 09:00 that auto-generates and sends a digest to admin |
+| Visibility Risk | MEDIUM — payroll and payment reports contain financial totals. Access is via admin WhatsApp commands (RBAC-controlled), but report format and available fields are not documented |
+| Conflict Risk | None detected |
+| KB Article Mapping | None |
+
+**Priority gaps:** Report list documentation, cache TTL, daily digest schedule.
+
+---
+
+## Module 25 — outbound (Persistent Send Queue)
+
+**Files:** `modules/outbound/__init__.py` (255 lines)
+**KB Articles:** `06_developer_system/automation_pipeline.md` (brief mention)
+**Coverage: 10%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `OUTBOUND_ENABLED` kill-switch not documented; exponential backoff parameters (2^attempts seconds, capped at MAX_BACKOFF_S) not documented; DLQ (dead letter queue) threshold and alerting not documented; circuit breaker integration not documented (opening sends one-per-minute admin alert) |
+| Undocumented Workflow | `enqueue()` → idempotency_key dedup → `sweep_once()` → send via bridge → retry with backoff → DLQ at max_attempts; `start_background_worker()` lifespan task flow not documented |
+| Hidden Rules | `idempotency_key` prevents duplicate enqueue of same message; circuit breaker triggers admin alert on outage — this alert destination (ADMIN_NUMBERS[0]) is not documented |
+| Visibility Risk | LOW (internal) |
+| Conflict Risk | None detected |
+| KB Article Mapping | `automation_pipeline.md` briefly mentions outbound queue; no detail |
+
+**Priority gaps:** OUTBOUND_ENABLED kill-switch, backoff parameters, DLQ behavior.
+
+---
+
+## Module 26 — employee_verification (Payment Verification Funnel)
+
+**Files:** `modules/employee_verification/__init__.py` (385 lines)
+**KB Articles:** `05_workflows/payment_workflow.md` (partial)
+**Coverage: 15%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | 5-step verification funnel (request → selfie → duty/release slip → payment method → draft creation) not fully documented; release slip fast-path (skip selfie if image already sent) not documented; identity mismatch handling (sender phone not in wbom_employees but matches master_mobile in wbom_escort_programs) not documented |
+| Undocumented Workflow | Full advance request flow (5 steps); release slip flow (conditional 4-step); identity mismatch branch |
+| Hidden Rules | Sessions stored in `fazle_draft_replies` table (same table as drafts, reusing intent='verification'); identity mismatch sends a specific message asking employee to use registered number — this message content not in KB |
+| Visibility Risk | LOW (employee-facing, no sensitive data disclosed except the identity mismatch message) |
+| Conflict Risk | None detected |
+| KB Article Mapping | `payment_workflow.md` covers payment flow at high level; verification funnel not mentioned |
+
+**Priority gaps:** 5-step verification sequence, release slip fast-path, `fazle_draft_replies` dual use.
+
+---
+
+## Module 27 — contact_sync (Multi-Source Contact Merger)
+
+**Files:** `modules/contact_sync/__init__.py` (356 lines)
+**KB Articles:** None
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | 3-source merge strategy (bridge1 SQLite, bridge2 SQLite, Meta webhook) not documented; display_name priority rule (full_name > push_name > saved_name) not documented; incremental sync window (last 10 minutes) not documented; LID JID handling (LID @lid entries are skipped) not documented |
+| Undocumented Workflow | Startup full sync → incremental poll sync → on-demand `sync_all_contacts()` — 3 sync modes not documented; ON CONFLICT DO UPDATE merge resolution not documented |
+| Hidden Rules | Non-BD numbers are skipped at normalization time; LID JIDs (@lid) are silently skipped; name merge rule: update only if newer name is longer/more complete |
+| Visibility Risk | LOW |
+| Conflict Risk | None detected |
+| KB Article Mapping | None |
+
+**Priority gaps:** 3-source merge, display_name priority, LID handling.
+
+---
+
+## Module 28 — ocr_processor
+
+**Files:** `modules/ocr_processor/__init__.py` (556 lines)
+**KB Articles:** `06_developer_system/ocr_engine.md`
+**Coverage: 35%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Confidence threshold for OCR acceptance not documented; image preprocessing steps (resize, grayscale, denoise) not documented; fallback behavior when OCR confidence is low not documented; specific document types recognized (release slip, bank statement, bkash screenshot) not documented |
+| Undocumented Workflow | How OCR output is routed to escort_slip_extractor vs employee_verification vs payment_ingest not documented |
+| Hidden Rules | OCR runs only when `OLLAMA_ENABLED=true` or a dedicated OCR backend is configured; blind fallback message sent if OCR fails (content not documented) |
+| Visibility Risk | LOW |
+| Conflict Risk | None detected |
+| KB Article Mapping | `ocr_engine.md` covers purpose and design |
+
+**Priority gaps:** Confidence threshold, document type list, OCR routing decision.
+
+---
+
+## Module 29 — rbac (Role-Based Access Control)
+
+**Files:** `modules/rbac/__init__.py` (341 lines)
+**KB Articles:** `06_developer_system/role_permissions.md`
+**Coverage: 60%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `COMMAND_ROLE` table (30+ entries, role level per command) is partially in KB but not as a machine-readable list; API key storage format (SHA-256 hash of raw key) not documented; `fazle_admin_audit` table (every command attempt recorded) not documented |
+| Undocumented Workflow | Auto-bootstrap of ADMIN_NUMBERS as superadmin on first sight — not documented; API key rotation flow not documented |
+| Hidden Rules | DEFAULT_REQUIRED_ROLE="admin" for unknown commands (secure by default); phones in ADMIN_NUMBERS env var are auto-upgraded to superadmin on first command — this bootstrap cannot be removed by a lower-privilege admin |
+| Visibility Risk | LOW (internal security) |
+| Conflict Risk | None detected |
+| KB Article Mapping | `role_permissions.md` (37 commands + RBAC well documented) |
+
+**Priority gaps:** API key hash format, `fazle_admin_audit` table, superadmin bootstrap behavior.
+
+---
+
+## Module 30 — phone_normalizer
+
+**Files:** `modules/phone_normalizer/__init__.py` (109 lines), `shared/phone.py` (109 lines)
+**KB Articles:** `core/PHONE_NORMALIZER_CONVENTION.md` (root-level, not inside KB)
+**Coverage: 45%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Canonical format (8801XXXXXXXXX, 13-digit) documented in CONVENTION file but NOT inside the KB — only accessible to developers who know to look in `/core/`, not in the AI-readable `knowledge_base/` directory |
+| Undocumented Workflow | How non-BD numbers are handled (return None) not in KB; how LID JIDs are handled not in KB |
+| Hidden Rules | VALID_OPERATORS set (11, 12, 13, 14, 15, 16, 17, 18, 19) — numbers with other prefixes return None; hyphenated numbers (01812-345678) are accepted; `+880` prefix is accepted; `00880` prefix not accepted |
+| Visibility Risk | LOW |
+| Conflict Risk | None — but the PHONE_NORMALIZER_CONVENTION.md in `/core/` root is outside the KB directory and will not be picked up by RAG |
+| KB Article Mapping | `core/PHONE_NORMALIZER_CONVENTION.md` (outside KB directory) |
+
+**Priority gaps:** Move or copy phone normalization convention into `06_developer_system/phone_normalizer.md`.
+
+---
+
+## Module 31 — reply_templates
+
+**Files:** `modules/reply_templates/__init__.py` (185 lines)
+**KB Articles:** None
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Template categories not documented; rotation algorithm (per-sender counter, modulo count) not documented; frustrated-mode templates not documented; emergency ack template not documented |
+| Undocumented Workflow | `get_template(intent, sender, frustrated=False)` call flow not documented |
+| Hidden Rules | Rotation counter is in-process (resets on restart) — consecutive messages get different templates, but a server restart resets the rotation; no template is shown to the same sender twice consecutively in the same process lifetime |
+| Visibility Risk | LOW |
+| Conflict Risk | None detected |
+| KB Article Mapping | None |
+
+**Priority gaps:** Template catalogue, rotation behavior, `frustrated` mode.
+
+---
+
+## Module 32 — payroll (Monthly Payroll Runs)
+
+**Files:** `modules/payroll/__init__.py` (338 lines)
+**KB Articles:** `06_developer_system/fpe_overview.md` (mentions FPE, does not cover payroll module)
+**Coverage: 5%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | `DEFAULT_PER_PROGRAM_RATE = ৳800/day` — escort program pay rate — NOT in any KB article; 5-state machine (draft → reviewed → approved → locked → paid, + cancelled) not documented; `ALLOWED_TRANSITIONS` dict (which states can move to which) not documented; `wbom_payroll_runs`, `wbom_payroll_approval_log` tables not documented |
+| Undocumented Workflow | `compute_run()` — aggregates Batch 12/13 outputs for a specific employee+period; `compute_all_for_period()` — batch for all employees; `submit_run` / `approve_run` / `lock_run` / `mark_paid` — 4-step approval chain not documented; cancellation from any non-paid state not documented |
+| Hidden Rules | `compute_run()` is idempotent (UNIQUE(employee_id, period_year, period_month) WHERE status<>'cancelled'); all transitions log to `wbom_payroll_approval_log` for audit; a run can only transition to `paid` from `locked` state |
+| Visibility Risk | **CRITICAL** — `DEFAULT_PER_PROGRAM_RATE = 800.0` is a live financial constant. **CONFLICT-5 (new):** `payment_workflow.DEFAULT_DAILY_RATE = 1200` is a different rate constant. Two active escort duty rate values exist in different modules. Employees may receive different payment amounts depending on which code path is triggered |
+| Conflict Risk | **CONFLICT-5 (new):** `payroll.DEFAULT_PER_PROGRAM_RATE = 800.0` vs `payment_workflow.DEFAULT_DAILY_RATE = 1200.0` — two different escort duty rates are hardcoded in different modules. See organizational_brain_gap_report.md for full analysis |
+| KB Article Mapping | `fpe_overview.md` (FPE architecture, does not cover this module) |
+
+**Priority gaps:** CRITICAL — rate conflict (800 vs 1200), 5-state payroll machine documentation, management approval needed.
+
+---
+
+## Module 33 — payroll_logic (Payroll Computation Engine)
+
+**Files:** `modules/payroll_logic/__init__.py` (200 lines)
+**KB Articles:** None (used by `payroll` module)
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Computation rules (how monthly pay is broken down) not documented; deduction calculation formula not documented; advance deduction handling not documented |
+| Undocumented Workflow | Used by `payroll.compute_run()` — internal business logic layer |
+| Hidden Rules | Likely contains the formula used to calculate escort monthly pay; formula not in KB |
+| Visibility Risk | MEDIUM — if formula is wrong, all payroll calculations are wrong |
+| Conflict Risk | Possibly related to CONFLICT-5 (rate constants) |
+| KB Article Mapping | None |
+
+---
+
+## Module 34 — payment_correction (DORMANT)
+
+**Files:** `modules/payment_correction/__init__.py` (291 lines)
+**KB Articles:** None
+**Coverage: N/A (DORMANT)**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Module is DORMANT: 0 external callers as of 2026-06-02 (confirmed by code comment). `reverse_payment`, `adjust_payment`, `list_corrections` are implemented but never called |
+| Undocumented Workflow | Not applicable — module is not in any live code path |
+| Hidden Rules | Module MUST NOT be deleted without explicit owner confirmation (per code comment) |
+| Visibility Risk | LOW (not in live paths) |
+| Conflict Risk | None (dormant) |
+| KB Article Mapping | None needed until module is activated |
+
+**Note:** When activated, REVERSE/ADJUST admin commands must be wired in `admin_commands`. At that point a KB article will be required.
+
+---
+
+## Module 35 — shared/queue_arbiter (Queue Lease Arbitration)
+
+**Files:** `shared/queue_arbiter.py` (814 lines)
+**KB Articles:** None
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Lease system (PG advisory lock + INSERT ON CONFLICT DO NOTHING) not documented; `LEASE_TTL_S = 120s` not documented; exponential backoff for re-queued messages (2^(attempts-1) seconds, capped at 3600s) not documented; dead-letter after MAX_ATTEMPTS not documented; in-memory metrics (processing_latency_ms, retries, lease_conflicts) not documented |
+| Undocumented Workflow | Acquire lease → process → release/complete/fail; recovery sweep (every 60s, reclaims expired leases from crashed workers); event emission on all state transitions |
+| Hidden Rules | Completed (message_id, intent) pairs can NEVER be re-leased; deduplication count tracked in metrics; multiple app instances (fazle-core, payroll-engine, escort-roster) all share the same queue — this multi-instance architecture is not in KB |
+| Visibility Risk | LOW |
+| Conflict Risk | None detected |
+| KB Article Mapping | None |
+
+**Priority gaps:** Lease system documentation, multi-instance architecture, backoff parameters.
+
+---
+
+## Module 36 — shared/bridge_orchestrator (Multi-Bridge Failover)
+
+**Files:** `shared/bridge_orchestrator.py` (645 lines)
+**KB Articles:** `06_developer_system/automation_pipeline.md` (brief mention of bridge1/bridge2)
+**Coverage: 10%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | Bridge authority hierarchy (bridge2 = OPS/admin = highest authority; bridge2 fails → bridge1) not documented; cross-bridge SHA-256 dedup not documented; `HISTORICAL_CUTOFF_S` guard (messages older than cutoff never generate drafts) not documented; outage buffer + replay (per-bridge send queue with exponential backoff, drained on reconnect) not documented; RTT sampling (latency metrics per bridge) not documented |
+| Undocumented Workflow | Failover sequence: bridge2 health check → if unhealthy → route via bridge1 → alert admin; reconnect + drain queued messages |
+| Hidden Rules | Admin bridge: `bridge2` sends to `8801880446111@s.whatsapp.net` (admin self-number) — this phone number appears in code but not in KB; source prioritization: bridge2 commands always take precedence over bridge1 commands when both receive the same message |
+| Visibility Risk | **HIGH** — admin phone number `8801880446111` is hardcoded in bridge_orchestrator. If this appears in any KB article or LLM context, it may be disclosed to external contacts |
+| Conflict Risk | None detected |
+| KB Article Mapping | `automation_pipeline.md` mentions bridge1/bridge2 conceptually |
+
+**Priority gaps:** Bridge authority hierarchy, admin phone number protection policy, HISTORICAL_CUTOFF_S.
+
+---
+
+## Module 37 — shared/self_heal (Self-Healing Runtime)
+
+**Files:** `shared/self_heal.py` (524 lines)
+**KB Articles:** None
+**Coverage: 0%**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | 6 monitored conditions (queue_stall, stale_locks, ws_failure, bridge_outage, dead_worker, retry_storm, stale_heartbeats) not documented; 6 recovery actions not documented; system pressure score (0.0–1.0, weighted sum of signals) not documented; `is_throttled()` behavior (non-critical modules check this before heavy processing) not documented |
+| Undocumented Workflow | Automatic recovery sequence: detect condition → execute recovery action → log → wait; throttle mode behavior not documented |
+| Hidden Rules | Recovery actions fail silently (logged but don't raise to caller); pressure score above threshold triggers throttle — non-critical modules are asked to skip work when system is under pressure |
+| Visibility Risk | LOW |
+| Conflict Risk | None detected |
+| KB Article Mapping | None |
+
+**Priority gaps:** 6 monitored conditions, pressure score thresholds, throttle behavior.
+
+---
+
+## Module 38 — conversation_layer (SHADOW MODULE — Not in Live Router)
+
+**Files:** `modules/conversation_layer/` (501 lines)
+**KB Articles:** None
+**Coverage: N/A (Shadow module)**
+
+| Dimension | Finding |
+|---|---|
+| Missing Knowledge | N/A — this module is explicitly NOT imported by the live message_router (per docstring) |
+| Undocumented Workflow | Provides `generate_recruitment_reply_shadow()` and `simulate_current_core_reply()` for comparison testing only |
+| Hidden Rules | Shadow-only: never invoked in production; exists for A/B comparison purposes |
+| Visibility Risk | LOW (not in live path) |
+| Conflict Risk | None |
+| KB Article Mapping | None needed |
+
+---
+
+## Modules 39–52 — Utility/Thin Modules (Grouped)
+
+The following modules have minimal business logic, no KB articles, and low operational risk. They are catalogued here for completeness:
+
+| Module | Lines | Purpose | Coverage | Priority |
+|---|---|---|---|---|
+| `accountant_summary` | <100 | Formatted accountant-role summary output | 0% | P3 |
+| `admin_employees` (sub-handlers) | — | Part of Module 23 above | — | — |
+| `backup` | 288 | Database backup jobs; backup staleness alerts | 0% | P3 |
+| `contact_roles` | 173 | Contact→role mapping lookups | 0% | P3 |
+| `escort_slip_extractor` | 947 | Parses release slips from OCR output | 0% | P2 |
+| `image_hash` | <100 | SHA-256 image dedup (prevent duplicate image processing) | 0% | P3 |
+| `kb_upload` | 400 | Admin API to upload/update KB articles from WhatsApp | 0% | P2 |
+| `media_normalization` | <100 | Normalizes media references for storage | 0% | P3 |
+| `memory_extractor` | <100 | Extracts structured facts from conversation for reviewed_reply_memory | 0% | P3 |
+| `message_archive` | <100 | Archives processed messages to cold storage | 0% | P3 |
+| `number_identity` | <100 | Maps phone numbers to identity context | 0% | P3 |
+| `observability` | <100 | Prometheus/metrics emission | 0% | P3 |
+| `role_classifier` | <100 | Maps role strings to canonical role names | 0% | P3 |
+| `user_role` | 247 | User-facing role assignment from WhatsApp (self-registration) | 0% | P2 |
+| `voice_processor` | <100 | Voice note transcription pipeline | 0% | P3 |
+| `shared/consistency.py` | 212 | Cross-module consistency checks | 0% | P3 |
+| `shared/events.py` | 243 | Event bus (emit/subscribe patterns) | 0% | P3 |
+| `shared/frontend_sync.py` | 508 | SSE sync for admin frontend | 0% | P2 |
+| `shared/identity_map.py` | 364 | Maps phone ↔ role ↔ identity | 0% | P2 |
+| `shared/locks.py` | 279 | DB-backed distributed locks | 0% | P3 |
+| `shared/realtime.py` | 188 | WebSocket/SSE broadcast layer | 0% | P3 |
+| `shared/runtime_gateway.py` | 614 | Central runtime config and feature flags | 0% | P1 |
+| `shared/write_router.py` | 301 | DB write routing (primary vs replica) | 0% | P3 |
+
+**Note on `shared/runtime_gateway.py` (614 lines, P1):** This is a central feature-flag and runtime configuration module. If it contains ENABLED/DISABLED flags for production features (like HYBRID_SEARCH_ENABLED, DRAFT_QUALITY_GATE, AUTO_REPLY_ENABLED), these flags must be documented as kill-switches in the KB. A dedicated audit pass is recommended.
+
+---
+
+## Updated Summary Table (All 52+ Modules)
+
+| Module | Coverage | Priority | Highest Risk |
+|---|---|---|---|
+| message_router | 20% | P1 | Office fast path, complaint draft, 60s cooldown |
+| identity_brain | 65% | P3 | Minor — text_hint criteria |
+| recruitment_ai | 40% | P1 | Phase 4 Step 2 RAG integration undocumented |
+| rag (Hybrid) | 25% | **P0** | Entire hybrid subsystem undocumented; KB conflicts with production |
+| attendance | 50% | P3 | Detection keywords, supervisor path |
+| escort | 40% | P2 | [RELEASE CONFIRMED] exact rule, transport exposure |
+| payment_workflow | 35% | P2 | DEFAULT_DAILY_RATE authorization |
+| bridge_poller | 20% | P2 | REPLY_COOLDOWN, complaint-phrase guard |
+| scheduler | 30% | P2 | CONFLICT: 24h vs 48h draft TTL |
+| social_auto_reply | 40% | P1 | Age conflict BR-25, salary figure authorization |
+| fazle_payroll_engine | 35% | P2 | ai_enhance_parse, authorized phones |
+| admin_commands | 50% | P3 | NL query categories |
+| draft_quality | 0% | P1 | Zero documentation — affects all AI output |
+| reply_policy (Phase 4) | 10% | P1 | Entire structured prompt format undocumented |
+| intent | 20% | P3 | Keyword lists, fuzzy threshold |
+| knowledge_base module | 30% | P2 | Hardcoded template audit |
+| reviewed_reply_memory | 5% | P3 | Match scope algorithm |
+| **escort_roster** | **15%** | **P1** | **Pay calc, conveyance table, TTL CONFLICT-4** |
+| **recruitment_flow** | **30%** | **P1** | **Two-system ambiguity, INTAKE_KEYWORDS, VALID_POSITIONS** |
+| **drafts** | **5%** | **P2** | **Approve bypasses AUTO_REPLY_ENABLED** |
+| **wa_chat_frontend** | **0%** | **P2** | **28 undocumented endpoints, SSE stream** |
+| **admin_transactions** | **10%** | **P1** | **Smart employee matching 4-rule algorithm, X-Internal-Key** |
+| **admin_employees** | **15%** | **P2** | **Mobile immutability, FPE auto-seed** |
+| **reports** | **0%** | **P2** | **Daily digest scheduled job, 10-min cache** |
+| **outbound** | **10%** | **P2** | **Kill-switch, DLQ, backoff** |
+| **employee_verification** | **15%** | **P2** | **5-step funnel, dual use of fazle_draft_replies** |
+| **contact_sync** | **0%** | **P2** | **3-source merge, LID handling** |
+| **ocr_processor** | **35%** | **P2** | **Confidence threshold, routing decision** |
+| **rbac** | **60%** | **P3** | **API key SHA-256, audit log** |
+| **phone_normalizer** | **45%** | **P2** | **Convention file outside KB directory** |
+| **reply_templates** | **0%** | **P3** | **Template catalogue missing** |
+| **payroll** | **5%** | **P0** | **CONFLICT-5: 800 vs 1200 escort rate — financial critical** |
+| **payroll_logic** | **0%** | **P1** | **Core computation formula undocumented** |
+| **payment_correction** | **N/A** | N/A | DORMANT — no coverage needed until activated |
+| **shared/queue_arbiter** | **0%** | **P1** | **Multi-instance architecture, lease system** |
+| **shared/bridge_orchestrator** | **10%** | **P1** | **Admin phone hardcoded, bridge authority hierarchy** |
+| **shared/self_heal** | **0%** | **P2** | **6 conditions, pressure score, throttle** |
+| **shared/runtime_gateway** | **0%** | **P1** | **Feature flags, kill-switches** |
+| conversation_layer | N/A | N/A | SHADOW — not in live router |
+| Utility modules (14) | 0% | P3 | Low risk, low priority |
+
+**Revised total module count: 52 production modules + 8 significant shared modules**
+**Weighted overall coverage (revised, post-Phase-4 extension): ~22%** (lower than original ~32% because large uncovered modules are now included in the denominator)
+
+---
+
+*Module Alignment Report | Phase 4 Step 5 (Extended 2026-06-23) | READ-ONLY*

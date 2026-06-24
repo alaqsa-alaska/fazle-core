@@ -1,4 +1,12 @@
-﻿# Clean Rewrite: Fazle System AI Automation And Operations
+---
+title: Clean Rewrite: Fazle System AI Automation And Operations
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
+# Clean Rewrite: Fazle System AI Automation And Operations
 
 This source is normalized into:
 - 03_ai_identity/identity_overview.md

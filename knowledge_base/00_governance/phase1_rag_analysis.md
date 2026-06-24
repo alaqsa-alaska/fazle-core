@@ -1,3 +1,11 @@
+---
+title: PHASE 1 — Hybrid RAG Integration Analysis
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # PHASE 1 — Hybrid RAG Integration Analysis
 **Version:** 1.0.0
 **Date:** 2026-06-22
@@ -28,7 +36,7 @@ search(q, k=5, min_score=0.0) / answer(q, k=3, min_score=1.0)
         ↓
 Context injected into LLM System Prompt
         ↓
-LLM Reply Chain (GitHub → Groq → Ollama → holding msg)
+LLM Reply Chain (Ollama → Groq → GitHub → holding msg)
         ↓
 Draft Quality Gate
         ↓

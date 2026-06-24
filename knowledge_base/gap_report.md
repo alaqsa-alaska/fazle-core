@@ -1,3 +1,11 @@
+---
+title: Knowledge Base Gap Report
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Knowledge Base Gap Report
 **Date:** 2026-06-19
 **Scope:** Compare production code (`/home/azim/core/`) against knowledge_base new role-centric structure

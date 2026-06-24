@@ -1,0 +1,35 @@
+Source: knowledge_base/missing_report.md
+SHA256: 809dabba7d93d24c5135f65ce91e3d7f733e6defe558d30e5fe1443a7d673bc6
+Version: 809dabba7d93
+
+# Missing Report
+
+## Missing Identity Rules
+Resolved by adding `03_ai_identity` with role files and permission matrix.
+
+## Missing Permission Rules
+Resolved by adding `03_ai_identity/permission_matrix.md` and `06_developer_system/role_permissions.md`.
+
+## Missing Conversation Memory
+Partially resolved by `06_developer_system/conversation_parser.md`. Backend must still implement storage schema, retention, and privacy policy.
+
+## Missing Role Priority
+Resolved by `03_ai_identity/identity_overview.md` and `06_developer_system/identity_brain.md`.
+
+## Missing Visibility Matrix
+Resolved by `03_ai_identity/permission_matrix.md` and `06_developer_system/visibility_rules.md`.
+
+## Missing AI Disclosure Rules
+Resolved by `03_ai_identity/response_rules.md` and `06_developer_system/security_rules.md`.
+
+## Missing Escalation Policy
+Partially resolved: unclear/sensitive/emergency cases route admin/manual review. Needs final SLA table for each role and issue type.
+
+## Missing Frontend Requirements
+Partially resolved: role CRUD, audit, and backend sync rules added. Full UI screen-by-screen spec still needed before frontend build.
+
+## Missing Database Schema
+Not fully specified. Added entity and mutation rules, but exact schema, constraints, indexes, migrations, and APIs must be designed before implementation.
+
+## Missing Test Plan
+Not present in source. Recommended future files: workflow_test_plan.md, identity_test_cases.md, payment_reconciliation_tests.md.

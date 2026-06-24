@@ -1,4 +1,12 @@
-﻿# VIP Identity
+---
+title: VIP Identity
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# VIP Identity
 
 ## Purpose
 Identify VIP clients and ensure careful manual or high-quality client-safe replies.

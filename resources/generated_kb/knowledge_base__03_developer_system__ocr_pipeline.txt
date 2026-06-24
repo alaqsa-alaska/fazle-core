@@ -1,0 +1,54 @@
+Source: knowledge_base/03_developer_system/ocr_pipeline.md
+SHA256: 0d14c4e5db13e63b5a51edb2724cf69a2d860e4a088b7165eb4c79d6f4f8b731
+Version: 0d14c4e5db13
+
+# OCR Pipeline
+
+## Purpose
+Define internal OCR and media interpretation rules for release slips, duty slips, and verification images.
+
+## Scope
+Level 3 developer/system knowledge. Never expose OCR mechanics to employees or candidates.
+
+## Supported Use Cases
+- Release slip image reading.
+- Duty slip image reading.
+- Duty selfie verification support.
+- Payment or attendance evidence review.
+
+## Release Slip Validation Targets
+When reading release slip images, verify whether these elements appear:
+- supervisor or ghat in-charge signature;
+- release date;
+- release time;
+- vessel/duty context if visible;
+- employee/escort identity if visible.
+
+## Duty Slip Validation Targets
+When reading duty slip images, verify whether these elements appear:
+- duty start date;
+- vessel name;
+- master's mobile number;
+- escort identity if present;
+- assignment context.
+
+## Workflow
+1. Store received media.
+2. Extract text from image/document when possible.
+3. Parse required fields.
+4. Flag missing or unclear data.
+5. Route to admin/manual review when confidence is low.
+6. Pass validated extraction to attendance, release slip, or payment workflow.
+
+## Business Rules
+- OCR result alone should not bypass admin/manual verification for payment-risk workflows.
+- Unclear images should trigger request for a clearer photo or manual review.
+- Do not expose OCR rules or confidence to users.
+
+## Cross References
+- ../02_admin_system/release_slip_workflow.md
+- ../02_admin_system/payment_workflow.md
+- security_rules.md
+
+## Revision History
+- 2026-06-19: Created from OCR and slip verification rules.

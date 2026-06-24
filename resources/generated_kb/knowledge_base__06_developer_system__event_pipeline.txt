@@ -1,0 +1,14 @@
+Source: knowledge_base/06_developer_system/event_pipeline.md
+SHA256: f54977aa4dbb5b2eda3f70e8b6705c627e9eb09e47b7ed8b6247b7d72f6c8f6b
+Version: f54977aa4dbb
+
+# Event Pipeline
+
+## Purpose
+Define internal event flow across message, identity, draft, approval, payment, attendance, and payroll systems.
+
+## Events
+message.received, media.extracted, identity.resolved, draft.created, admin.reviewed, attendance.approved, escort.confirmed, release.received, payment.handed_to_accountant, ledger.updated, payroll.synced.
+
+## Rules
+Events must be idempotent, auditable, and duplicate-safe.

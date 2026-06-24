@@ -1,3 +1,11 @@
+---
+title: Workflow Engine — Message Router
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Workflow Engine — Message Router
 **KB Article ID:** DEV-06-WORKFLOW
 **Source:** `modules/message_router/__init__.py` (598 lines — read 2026-06-23)

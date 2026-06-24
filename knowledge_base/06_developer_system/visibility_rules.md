@@ -1,3 +1,11 @@
+---
+title: Visibility Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Visibility Rules
 **KB Article ID:** DEV-06-VISIBILITY
 **Sources:** `modules/rag/__init__.py` (1000+ lines), `knowledge_base/ai_access_matrix.md`, `knowledge_base/03_ai_identity/permission_matrix.md` — all read 2026-06-23

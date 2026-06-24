@@ -1,4 +1,12 @@
-﻿# Employee FAQ
+---
+title: Employee FAQ
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Employee FAQ
 
 ## Purpose
 Provide approved short answers for common employee questions.

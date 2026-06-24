@@ -28,14 +28,14 @@ class Settings(BaseSettings):
     github_token_3: str = ""
     github_model_name: str = "openai/gpt-4o-mini"
     github_model_endpoint: str = "https://models.github.ai/inference"
-    primary_ai_provider: str = "github_models"   # "github_models" | "ollama"
-    # When True, Ollama is NEVER used for customer-facing WhatsApp replies.
-    # GitHub Models must succeed or the system returns a polite holding message.
-    # Ollama still runs for intent classification, RAG, and learning memory.
+    primary_ai_provider: str = "ollama"   # compatibility setting; runtime order prefers Ollama
+    # When True, Ollama is skipped for customer-facing WhatsApp replies.
+    # Fallbacks then run Groq → GitHub Models → polite holding message.
+    # Ollama still runs for intent classification, RAG, and learning memory unless unavailable.
     ollama_reply_disabled: bool = False
 
-    # Groq secondary provider (free tier: 14,400 req/day, 30 RPM)
-    # Used as fallback between GitHub Models and Ollama/holding message.
+    # Groq fallback provider (free tier: 14,400 req/day, 30 RPM)
+    # Used after Ollama and before GitHub Models.
     # Get key at: https://console.groq.com/keys
     groq_api_key: str = ""
     groq_model_name: str = "llama-3.1-8b-instant"

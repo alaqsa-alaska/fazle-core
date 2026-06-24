@@ -1,0 +1,198 @@
+Source: knowledge_base/06_developer_system/identity_integration.md
+SHA256: a29d33ebf15448b3a92ddd7ff60dacc05def1c4977a1eeac3f2ae15a9d8849cd
+Version: a29d33ebf154
+
+# Identity Integration Reference
+**KB Article ID:** DEV-06-IDENTITY-INTEGRATION
+**Sources:** `modules/identity_brain/__init__.py` (393 lines), `modules/message_router/__init__.py` (598 lines), `shared/reply_policy.py` (291 lines), `knowledge_base/ai_access_matrix.md` — all read 2026-06-23
+**Visibility:** Developer / Admin only — do NOT set `safe_for_customer=True`
+**Certified:** 2026-06-23 (Wave-3, W3P2-AUTH)
+
+---
+
+## Purpose
+
+This article is the single-page unified reference for how identity dimensions interact per sender type. It answers: given a sender's resolved role, what KB content can they access, what workflows can they enter, what prompt builder fires, and how is the reply delivered?
+
+**Why this exists:** Identity (who is this person?), visibility (what can they see?), workflows (what paths are open?), business rules (what policies apply?), and reply disposition (draft or auto-send?) are documented in five separate articles. In practice, these dimensions always activate together per sender type. This article documents their intersection.
+
+---
+
+## 6-Dimension Decision Table
+
+Each row is a sender type. Each column is one of the six identity dimensions.
+
+---
+
+### Dimension 1 — How the Role Is Identified
+
+| Sender Type | Primary Detection | Source Table / Mechanism | Confidence |
+|---|---|---|---|
+| **Admin** | `_check_admin_settings()` — phone in env admin list | `app.config.settings` (ADMIN_NUMBERS, bridge admin phones) | 100 (1.00) |
+| **Admin (alt)** | Seed rule with `role='admin'` in `fazle_contact_roles` | `_lookup_seed()` | from DB column |
+| **Employee** | Primary phone match in `wbom_employees` | `_lookup_employee()` | 88 (0.88) |
+| **Employee (secondary)** | Cash payment records → `wbom_cash_transactions` | `_lookup_cash_identity()` | 86 (0.86) |
+| **Employee (secondary)** | Attendance record → `wbom_attendance` | `_lookup_attendance_identity()` | 86 (0.86) |
+| **Employee (secondary)** | Escort duty → `wbom_escort_programs` (escort_mobile match) | `_lookup_escort_roster()` | 85 (0.85) |
+| **Supervisor** | Seed rule with `role='supervisor'` in `fazle_contact_roles` | `_lookup_seed()` | from DB column |
+| **Candidate** | `_CANDIDATE_KEYWORDS` in message text | `_is_candidate_text()` — only if no DB match | 50 (0.50) |
+| **repeat_client (escort unknown)** | Vessel/escort keywords in text from unregistered sender | `_ESCORT_CONTENT_RE` pattern match | 40 (0.40) |
+| **Unknown** | None of the above matched | `_unknown()` fallback | 0 (0.00) |
+
+Source: `modules/identity_brain/__init__.py` `detect_identity()` function.
+
+**Resolution order (highest priority first):** admin → seed rule → employee (primary, cash, attendance, escort) → contact DB → text-hint candidate → text-hint escort → unknown.
+
+---
+
+### Dimension 2 — KB Folders Accessible (Policy)
+
+From `knowledge_base/ai_access_matrix.md` and `06_developer_system/visibility_rules.md`.
+
+| KB Folder | Candidate | Employee | Supervisor | Accountant | Admin | Developer |
+|---|---|---|---|---|---|---|
+| `01_employee_knowledge/` | ✅ limited | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `02_admin_knowledge/` | ❌ | ❌ | ⚠️ limited | ✅ | ✅ | ✅ |
+| `02_admin_system/` | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `03_ai_identity/` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| `04_business_rules/` | ✅ safe rules only | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `05_workflows/` | ✅ recruitment only | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `06_developer_system/` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `07_archived/` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+**Current enforcement:** The RAG `search()` function has no role parameter — all callers get the same `safe_for_customer=True` content regardless of role. The matrix above is **policy intent** only. Full enforcement requires Phase 3 (Visibility Engine — production code change). See `visibility_rules.md` for the enforcement gap and Phase 3 design.
+
+---
+
+### Dimension 3 — Workflows Available
+
+| Sender Type | Workflows | Entry Point in Router |
+|---|---|---|
+| **Candidate / new_lead / unknown** | Recruitment funnel (6-step: name → age → area → position → eligibility check → office invite) | Step 7/8: `generate_recruitment_reply()` in `modules/recruitment_ai` |
+| **Employee** | Attendance reporting; advance verification (multi-step); slip submission; release request acknowledgement; salary query (payroll summary) | Step 10: employee sub-flow |
+| **Supervisor** | Attendance supervisor path (can mark others); otherwise employee workflows | Step 4 (attendance detection before intent classify) |
+| **Accountant** | Cash transaction summary; advance record query; payment SMS ingest; admin cash shorthand | Step 6: accountant sub-flow |
+| **Admin** | 37 commands (APPROVE/REJECT/PAID/ADVANCE/ESCORTCONFIRM/ESCORTOUT); NL queries; draft management; attendance summary | Step 3: admin sub-flow |
+| **Escort client roles** | Escort order intake (vessel name, date, headcount extraction → draft for admin review) | Step 2 / Step 9: `handle_escort_client_message()` |
+| **All (office location)** | Office address lookup — bypasses LLM; safe for ALL roles | Step 12: office fast path |
+
+Source: `modules/message_router/__init__.py` — 15-step routing chain. Full detail in `workflow_engine.md`.
+
+**Recruitment block:** If a resolved employee, supervisor, or accountant sends a message with `intent="recruitment"`, the router silently drops it at Step 5a. Operational identities cannot enter the recruitment funnel.
+
+---
+
+### Dimension 4 — Business Rules That Apply
+
+| Sender Type | Key Rules | Authority |
+|---|---|---|
+| **Candidate** | BR-25: age 18–55 required for active duty; eligibility check before funnel proceeds | management_decisions.md BR-25 |
+| **Candidate** | Joining fee / form fee amounts — require management approval before KB inclusion | management_decisions.md (pending) |
+| **Employee** | PAY-01: escort payment = ৳12,000 ÷ 30 × duty_days = ৳400/day | management_decisions.md PAY-01 |
+| **Employee** | PAY-03: Mongla conveyance = ৳800 per assignment | management_decisions.md PAY-03 |
+| **Employee** | Advance: verification required before any advance is recorded | workflow_engine.md Step 11 |
+| **Employee** | Complaint (salary/legal/payment): ALWAYS drafts — never auto-sends | workflow_engine.md Step 10 |
+| **Admin** | No age or salary gate — admin commands respond directly | Step 3 fallback |
+| **All** | `DRAFT_ALWAYS_ROLES`: accountant, client_escort_buyer, vip_client, repeat_client always get drafts | `.env` DRAFT_ALWAYS_ROLES |
+| **All** | `DRAFT_ALWAYS_PHONES`: 15 named individuals — values in `.env` only, never in KB | `.env` DRAFT_ALWAYS_PHONES |
+
+---
+
+### Dimension 5 — Prompt Builder Used
+
+| Sender Type | Prompt Builder | Called By |
+|---|---|---|
+| **Candidate** | `build_whatsapp_recruitment_policy(source, user_message, kb_context, history)` | `modules/recruitment_ai` |
+| **Employee, Supervisor, Vendor, Partner** | `build_whatsapp_reply_policy(source, user_message, role, intent, db_context, history)` | `modules/message_router` Step 15 |
+| **new_lead / unknown** | `build_whatsapp_reply_policy()` with `role="new_lead"` (default) | `modules/message_router` Step 15 |
+| **Admin** | No LLM prompt builder — `process_admin_command()` handles commands directly | `modules/message_router` Step 3 |
+| **Accountant** | No LLM via standard path — accountant sub-flow queries DB then constructs reply | Step 6 accountant flow |
+
+**Role-to-ROLE_PROMPTS mapping:** `build_whatsapp_reply_policy()` injects the `ROLE_PROMPTS[role]` Bengali tone instruction into Section 1 (ভূমিকা). Valid keys: `employee`, `client`, `new_lead`, `admin`, `vendor`, `partner`, `known_contact`. Roles not in the dict (e.g. `supervisor`, `repeat_client`) fall back to `ROLE_PROMPTS["new_lead"]`.
+
+Source: `shared/reply_policy.py`. Full section documentation in `system_prompt.md`.
+
+---
+
+### Dimension 6 — Reply Disposition
+
+| Sender Type | Intent/Condition | Disposition |
+|---|---|---|
+| **Candidate** | Recruitment reply | Auto-send (if `AUTO_REPLY_ENABLED=true`); draft if false |
+| **Employee** | Safe intent (`_SAFE_AUTOSEND_INTENTS`) + NOT in `DRAFT_ALWAYS_ROLES` | Auto-send |
+| **Employee** | Complaint intent (salary_complaint, legal_issue, payment_issue) | ALWAYS draft |
+| **Employee** | `advance_request` | Verification flow — no immediate reply |
+| **Admin** | Any command | Direct response (no draft) |
+| **Accountant** | Any message | Direct response (no LLM draft) |
+| **Roles in `DRAFT_ALWAYS_ROLES`** | Any intent | ALWAYS draft (exception: `office_location` bypasses — always auto-sends) |
+| **Numbers in `DRAFT_ALWAYS_PHONES`** | Any intent | ALWAYS draft |
+| **Escort client roles** | Escort order content | Draft (admin reviews vessel data before confirmation) |
+
+**`AUTO_REPLY_ENABLED=false` (current production state):** ALL replies regardless of role, intent, or disposition rules go to `fazle_draft_replies` for admin review. The rules above apply when `AUTO_REPLY_ENABLED=true`.
+
+**`AI_SAFE_MODE=true` (currently false):** Forces draft for any reply > 200 chars, identity_confidence < 50, or intent = unknown/unclear — regardless of role.
+
+---
+
+## Identity Dimension Interaction Diagram
+
+```
+Inbound message
+      │
+      ▼
+[identity_brain.detect_identity(phone, text)]
+      │
+      ├── role + confidence + source + priority
+      │
+      ▼
+[message_router.process_message()]
+      │
+      ├── DIMENSION 3: Workflow routing (15 steps)
+      │       └── Which step fires depends on role + intent
+      │
+      ├── DIMENSION 4: Business rules (applied per step)
+      │       └── complaint → draft | advance → verify | BR-25 → age gate
+      │
+      ├── DIMENSION 5: Prompt builder selection (Step 15 AI fallback only)
+      │       └── recruitment path → build_whatsapp_recruitment_policy()
+      │           general path → build_whatsapp_reply_policy(role=...)
+      │
+      └── DIMENSION 6: Reply disposition
+              └── draft / auto-send / command-response
+                    │
+                    ▼
+            DIMENSION 2: KB access (via RAG at Step 15)
+                    └── all callers get safe_for_customer=True chunks
+                        (role-aware filtering: Phase 3 — not yet live)
+```
+
+---
+
+## Current Enforcement Gaps
+
+| Gap | Impact | Resolution |
+|---|---|---|
+| RAG has no role parameter | Candidates can receive employee-level KB content if it passes `safe_for_customer` filter | Phase 3 Visibility Engine |
+| `supervisor` not in `ROLE_PROMPTS` | Supervisor defaults to `new_lead` tone in LLM prompt | Minor — tone difference only |
+| No `fazle_recruitment_sessions` lookup in identity_brain | Candidate identification relies on text keywords only; returning recruiters with no active session are not re-identified as candidates | Medium — session management in recruitment_flow handles it separately |
+| `AI_SAFE_MODE=false` | Low-confidence identities (≤ 50) are not forced to draft | Monitor — toggle if needed |
+
+---
+
+## Cross-References
+
+- `identity_brain.md` — Full resolution algorithm, `_CANDIDATE_KEYWORDS`, `_ROLE_PRIORITY`, confidence values
+- `visibility_rules.md` — 3-level visibility model, `safe_for_customer` enforcement, Phase 3 design
+- `workflow_engine.md` — Full 15-step routing table, all workflow entry points
+- `system_prompt.md` — `ROLE_PROMPTS` (7 roles), both prompt builders, section suppression rules
+- `runtime_gateway_flags.md` — `DRAFT_ALWAYS_ROLES`, `DRAFT_ALWAYS_PHONES`, `AUTO_REPLY_ENABLED`, `AI_SAFE_MODE`
+- `03_ai_identity/permission_matrix.md` — 37 admin commands + RBAC
+- `knowledge_base/ai_access_matrix.md` — 14-column role × knowledge-area matrix (root-level file)
+
+---
+
+## Visibility
+
+This article is **Developer/Admin only**. Do not set `safe_for_customer=True`.
+
+Reason: Contains identity resolution mechanism, confidence values, enforcement gaps, and routing behavior — all internal system logic that must not be visible to candidates, employees, or external contacts.

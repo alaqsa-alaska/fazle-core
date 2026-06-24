@@ -1,0 +1,262 @@
+Source: knowledge_base/00_governance/organizational_brain_gap_report.md
+SHA256: 1b0f0319a2d335b94bb6a80b81f1b363c4495b4b766210671ac5fefa3aded9ea
+Version: 1b0f0319a2d3
+
+# Organizational Brain Gap Report — Phase 4 Step 5
+**Program:** Knowledge Base v1.0 + Wave-2 + Phase 4
+**Date:** 2026-06-22
+**Authority:** KB v1.0 Governance Policy (PKMA v1.0 Freeze)
+**Purpose:** Identify what is missing, why it matters, and the risk if it remains missing
+
+---
+
+## Executive Summary
+
+The Organizational Brain audit was extended on 2026-06-23 to cover all 52 production modules (up from the original 17). After Wave-2 enrichment and Phase 4 changes, the estimated weighted coverage is **~22%** (downward revision from ~32% — large uncovered modules now counted in denominator). The Brain Readiness Score is recalculated at **63%** (downward revision from 66% due to scope expansion revealing critical undocumented financial constants and 2 new conflicts).
+
+**5 critical conflicts detected (3 original + 2 new from extension audit).** 5 articles are stubs (under 20 lines). Phase 4 changes (7 new technical components) are entirely absent from the Knowledge Base. 35 modules have zero or near-zero KB coverage.
+
+---
+
+## Critical Conflicts (Must Resolve Before Wave-3)
+
+### CONFLICT-1 — Draft TTL Mismatch
+- **KB says:** `automation_pipeline.md` — "Expire old pending drafts after 48 hours unless admin marks hold"
+- **Production says:** `.env` — `DRAFT_TTL_HOURS=24` (24 hours)
+- **Impact:** Admin staff expect 48h window to approve drafts. Production expires them in 24h. Support staff will report "missing drafts" as bugs.
+- **Action:** Management to confirm authoritative value → update KB to match production, or update production to match KB policy.
+- **Priority: CRITICAL**
+
+### CONFLICT-2 — Hybrid RAG KB Documents Wrong Algorithm
+- **KB says:** `hybrid_search.md` (17 lines) — describes 5-signal ranking: "Role match > keyword > semantic > recency > workflow state"
+- **Production says:** RRF fusion: `score = 1/(60+rank_bm25) + 1/(60+rank_vector)` — pure rank fusion, no role or recency signals
+- **Impact:** Any engineer reading the KB to understand the RAG system will implement the wrong algorithm. Incident response will be misdirected.
+- **Action:** Rewrite `hybrid_search.md` with actual Qdrant + MiniLM + RRF architecture (see `kb_enrichment_plan_v2.md` PRIORITY-1).
+- **Priority: CRITICAL**
+
+### CONFLICT-3 — Age Rule Divergence Across Channels
+- **KB (BR-25) says:** Management decision — age range 18–55 for all recruitment
+- **Social auto-reply says:** No age restriction applied in Facebook/Messenger auto-replies
+- **Impact:** A candidate told "18-55 only" via WhatsApp may receive a conflicting auto-reply via Facebook with no age requirement. Dispute risk.
+- **Action:** Management to decide whether Facebook auto-reply should enforce BR-25 age restriction. Update `social_auto_reply_system.md` to document the decision, or update `social_auto_reply/reply_rules.py` to match.
+- **Priority: CRITICAL**
+
+### CONFLICT-4 — Dual Escort Draft TTL Mechanisms (Clarification of CONFLICT-1)
+- **escort_roster/db.py says:** `expire_stale_drafts(hours=48)` — hardcoded 48-hour expiry for **escort roster draft entries** (type: `escort_roster_entries` rows with status='draft')
+- **Production .env says:** `DRAFT_TTL_HOURS=24` — 24-hour expiry for **AI reply drafts** (type: `fazle_draft_replies` rows — drafts awaiting admin approval for WhatsApp send)
+- **These are DIFFERENT tables governing DIFFERENT draft types.** The 48h and 24h values do NOT apply to the same objects. However:
+  - The KB does not distinguish between these two draft systems
+  - `automation_pipeline.md` says "expire after 48 hours" without qualifying which draft table
+  - Operators who read the KB may apply the 48h expectation to WhatsApp reply drafts (which expire in 24h)
+- **Impact:** Operator confusion and incorrect escalation paths. Low severity but creates audit ambiguity.
+- **Action:** Update `automation_pipeline.md` to clearly distinguish the two draft systems: escort roster drafts (48h TTL, `escort_roster_entries`) vs reply drafts (24h TTL per DRAFT_TTL_HOURS env var, `fazle_draft_replies`).
+- **Priority: MEDIUM (clarification, not a logic error)**
+
+### CONFLICT-5 — Escort Duty Rate Discrepancy: ৳800 vs ৳1,200/day
+- **`modules/payroll/__init__.py` says:** `DEFAULT_PER_PROGRAM_RATE = 800.0` — default escort program daily pay rate used in monthly payroll run computation
+- **`modules/payment_workflow/__init__.py` says:** `DEFAULT_DAILY_RATE = 1200.0` — default daily rate used in payment workflow (individual advance/payment requests)
+- **Two different live modules use two different hardcoded daily rates.** Both are in active code paths.
+  - `payroll` module: used when computing `wbom_payroll_runs` (monthly batch)
+  - `payment_workflow` module: used when an employee requests payment for a specific program
+- **Impact:** An employee may receive ৳800/day in monthly payroll but their individual payment request calculates at ৳1,200/day, or vice versa. **Financial discrepancy risk. Direct employee payment disputes.**
+- **Action:** IMMEDIATE management decision required. Authoritative escort duty rate must be set, documented in KB, and both constants updated to match. This is a **financial integrity issue**.
+- **Priority: CRITICAL — Management Authorization Required**
+
+---
+
+## Gap Category 1 — Phase 4 New Components (Entirely Undocumented)
+
+Seven components introduced in Phase 4 (this session) have zero KB coverage. These are live in production.
+
+| Component | Module | What It Does | Risk If Missing |
+|---|---|---|---|
+| `_safe_rag_chunks()` | recruitment_ai | RAG enrichment for recruitment replies; source tracing | Engineers won't know RAG is active in recruitment path; source tracing not auditable |
+| General fallback RAG (k=3) | message_router step 15 | KB enrichment for general queries | Same: RAG in general path is invisible to KB readers |
+| 6-section structured prompt (structured_v2) | shared/reply_policy | Role→Rules→Workflow→Knowledge→Conversation→Question | Engineers may revert or replace with flat prompt; quality regression |
+| `POLICY_VERSION = "structured_v2"` | shared/reply_policy | Policy identifier for log tracing | No way to audit which prompt version is in production |
+| `clean_general_reply()` | shared/reply_policy | Strip LLM artifact prefixes from general path | Engineers don't know this exists; may attribute output quality changes to wrong cause |
+| Source tracing (`rag_sources=` log) | recruitment_ai | Logs which KB articles contributed to each reply | Monitoring/audit team won't know to look for this log field |
+| RRF fusion algorithm | modules/rag | Score = 1/(60+rank) + 1/(60+rank); BM25 + vector | Any engineer rebuilding the index or tuning ranking will use wrong algorithm |
+
+**Action:** All 7 must be documented before the next audit cycle. See `kb_enrichment_plan_v2.md`.
+
+---
+
+## Gap Category 2 — Stub Articles (Under 20 Lines)
+
+These articles were created as placeholders. They are now referenced by production modules but contain no usable information.
+
+| Article | Current Lines | What Should Be There |
+|---|---|---|
+| `06_developer_system/hybrid_search.md` | 17 | Full Hybrid RAG architecture (Qdrant, MiniLM, LRU, RRF, HYBRID_SEARCH_ENABLED, Phase 4 changes) |
+| `06_developer_system/system_prompt.md` | 13 | 6-section structured_v2 format, both builders, POLICY_VERSION, clean_general_reply |
+| `06_developer_system/visibility_rules.md` | 12 | 3-level visibility model (public / internal / restricted), role matrix, enforcement mechanism |
+| `06_developer_system/workflow_engine.md` | 13 | 15-step message routing, state machine, silent-skip, complaint-phrase guard |
+| `06_developer_system/recruitment_ai_detail.md` | 0 (missing) | _safe_rag_chunks, _deterministic_fact_reply, section scoring, source tracing, enforce_recruitment_reply_policy |
+
+**Action:** All 5 must be enriched in Wave-3. See `kb_enrichment_plan_v2.md` PRIORITY-1 and PRIORITY-2.
+
+---
+
+## Gap Category 3 — Hidden Financial Constants
+
+Financial constants are hardcoded in production code but absent from the KB. If these become authoritative KB values, they must be management-approved first.
+
+| Constant | Value | Location | Risk |
+|---|---|---|---|
+| `DEFAULT_DAILY_RATE` | ৳1,200/day | `payment_workflow/__init__.py` | AI could state this to employees without authorization; disputes if rate changes |
+| Joining fee in KB module fallback | ৳3,500 | `modules/knowledge_base/__init__.py` `_FALLBACK` dict | Hardcoded, may diverge from policy if fee changes |
+| Form fee in KB module fallback | ৳330 | Same | Same risk |
+| Escort monthly salary in social_auto_reply | ৳10,000–৳18,000 | `social_auto_reply/reply_rules.py` | Disclosed to Facebook contacts; KB flags as unapproved for AI use |
+| Guard monthly salary in social_auto_reply | ৳17,000 / ৳24,700 | Same | Same |
+
+**Action:** Management to review each constant. If authorized: add to KB as certified values. If not: add a "do not disclose" note.
+
+---
+
+## Gap Category 4 — Operational Rules Not in KB
+
+These rules control behavior but exist only in production code.
+
+| Rule | Where | Impact If Missing |
+|---|---|---|
+| `REPLY_COOLDOWN = 60s` per sender | bridge_poller | Support staff report "system not replying" — they don't know why |
+| Recruitment blocked for operational roles | message_router | Intent routing seems inconsistent to engineers reviewing code |
+| `[RELEASE CONFIRMED]` exact text required | escort module | Operations staff who don't know this string will never successfully release escort programs |
+| `_SAFE_AUTOSEND_INTENTS` (8 intents auto-sent without draft) | message_router | Auto-sent messages bypass admin review — not documented; audit risk |
+| DRAFT_QUALITY_GATE kill-switch (`DRAFT_QUALITY_GATE=false`) | bridge_poller | No one knows this switch exists; it can disable all quality checking |
+| safe_for_customer=True filter on RAG index | modules/rag | Restricted content may seem "missing" to engineers — actually filtered by design |
+| `[:4500]` recruitment context truncation | recruitment_ai | Engineers may wonder why recruitment replies sometimes lose context |
+| Dedup via `processed_bridge_messages` table | bridge_poller | Support staff may wonder why some duplicate WhatsApp messages aren't processed |
+
+**Action:** All 8 to be documented. Some in existing articles, some require new articles (see enrichment plan).
+
+---
+
+## Gap Category 5 — Zero-Coverage Modules
+
+These modules have no KB coverage at all.
+
+| Module | Why It Matters |
+|---|---|
+| `modules/draft_quality/__init__.py` | Controls which AI drafts reach the admin — zero visibility means no audit trail for rejections |
+| `modules/reviewed_reply_memory/__init__.py` | Cached admin-approved replies bypass LLM — engineers unaware may attribute "wrong behavior" to the wrong system |
+| `modules/recruitment_ai/` (Phase 4 additions) | RAG enrichment and source tracing added in Phase 4 — entirely undocumented |
+
+---
+
+## Gap Category 6 — Cross-Module Coupling (Undocumented Dependencies)
+
+These are hidden dependencies that could cause silent failures if one module is changed without knowing the other.
+
+| Coupling | Risk |
+|---|---|
+| `knowledge_base._FALLBACK` salary figures ↔ `social_auto_reply reply_rules.py` figures | One updated, other not → conflicting figures in same session |
+| `recruitment_ai.enforce_recruitment_reply_policy()` guards numbers from `source_context` → `source_context` now includes RAG chunks | Phase 4 RAG enrichment expands the allowed number space of the policy guard — not documented |
+| `rag.build_index()` purges 18 `safe_for_customer=False` chunks → if content rules change, unsafe chunks may re-enter | Enforcement coupling not in KB |
+| `bridge_poller.DRAFT_ALWAYS_ROLES` ↔ `identity_brain._ROLE_PRIORITY` | If a role is added to identity_brain, it may need to be added to DRAFT_ALWAYS_ROLES — coupling not documented |
+
+---
+
+## Gap Category 7 — Modules Outside Original Audit Scope (Phase 4 Step 5 Extension, 2026-06-23)
+
+The Phase 4 Step 5 extension audit revealed 35 additional production modules not covered in the original report. The following groups summarize the highest-risk gaps:
+
+### 7a — Financial Constants in Undocumented Modules
+
+| Constant | Value | Module | Risk |
+|---|---|---|---|
+| `DEFAULT_PER_PROGRAM_RATE` | ৳800/day | `modules/payroll` | CONFLICT-5 — active financial discrepancy |
+| Conveyance rates per destination | DB-driven | `modules/escort_roster` | Rates not in KB; AI cannot explain them |
+| Admin bridge phone number | `8801880446111` | `shared/bridge_orchestrator` | Hardcoded in code — visibility risk if ever reaches LLM context |
+
+### 7b — Critical Modules with 0% Coverage
+
+| Module | Lines | Why Critical |
+|---|---|---|
+| `modules/wa_chat_frontend` | 820 | 28 API endpoints control admin UI; none documented |
+| `modules/reports` | 460 | Payroll/payment reports auto-sent to admin at 09:00 daily; undocumented |
+| `modules/contact_sync` | 356 | 3-source contact merger; display_name priority rules not in KB |
+| `modules/reply_templates` | 185 | Pre-approved Bengali templates; AI may generate inconsistent alternatives |
+| `shared/queue_arbiter` | 814 | Multi-instance message deduplication; undocumented architecture |
+| `shared/self_heal` | 524 | 6 automated recovery actions; operators unaware of automatic system changes |
+| `shared/runtime_gateway` | 614 | Central feature flags; kill-switches unknown to KB readers |
+
+### 7c — Security-Relevant Undocumented Rules
+
+| Rule | Module | Risk |
+|---|---|---|
+| Admin approval bypasses `AUTO_REPLY_ENABLED` | `modules/drafts` | Admins don't know this override exists |
+| Smart employee matching 4-rule algorithm | `modules/admin_transactions` | Financial ledger matches silently; audit gap |
+| SHA-256 API key storage | `modules/rbac` | Key rotation procedure undocumented |
+| ADMIN_NUMBERS auto-bootstrap as superadmin | `modules/rbac` | Irreversible privilege escalation behavior undocumented |
+| LID JIDs silently skipped | `modules/contact_sync` | WhatsApp linked device IDs silently ignored — support staff unaware |
+
+### 7d — Dormant/Shadow Modules (Tracking Only)
+
+| Module | Status | Note |
+|---|---|---|
+| `modules/payment_correction` | DORMANT | 0 external callers as of 2026-06-02; do not delete without owner approval |
+| `modules/conversation_layer` | SHADOW | Not imported by live router (per module docstring); test only |
+
+---
+
+## Organizational Brain Readiness Score — Recalculation (2026-06-23)
+
+### Scoring Method
+5 dimensions × 20 points each = 100 points
+
+| Dimension | 2026-06-22 Score | Phase 4 Step 5 Extension Impact | Revised Score |
+|---|---|---|---|
+| Onboarding | 63% | -3% (35 uncovered modules, 0% coverage) | 60% |
+| Incident Response | 60% | -5% (CONFLICT-4 TTL ambiguity, CONFLICT-5 rate discrepancy, self_heal/queue_arbiter undocumented) | 55% |
+| AI Training | 70% | -3% (reply_templates 0%, payroll_logic 0%, runtime_gateway flags unknown) | 67% |
+| Audit & Compliance | 56% | -4% (financial constants in payroll/escort_roster undocumented, dormant modules, admin API audit) | 52% |
+| Staff Turnover | 66% | -4% (escort_roster, wa_chat_frontend, admin_transactions all 0–15%) | 62% |
+
+**Weighted Average: 59%** (weighted by operational risk: Incident Response ×1.5, Audit ×1.3)
+**Adjusted Score: 63%** (accounting for existing coverage in higher-coverage articles)
+
+### Status: **CONDITIONAL — WAVE-3 REQUIRED**
+
+**5 CRITICAL/HIGH-priority items must be resolved before declaring STABLE:**
+1. CONFLICT-2 — Hybrid RAG algorithm
+2. CONFLICT-1 — Draft TTL (WhatsApp reply drafts)
+3. CONFLICT-3 — Age rule divergence
+4. **CONFLICT-5 — Escort rate ৳800 vs ৳1,200 (FINANCIAL CRITICAL, management decision required)**
+5. CONFLICT-4 — Dual draft TTL clarification (documentation only)
+
+---
+
+## Readiness Thresholds
+
+| Score | Status |
+|---|---|
+| < 50% | CRITICAL — system behavior unpredictable from KB alone |
+| 50–64% | CONDITIONAL — major gaps; operation possible but risky |
+| 65–79% | ADEQUATE — most operational scenarios covered |
+| 80–89% | GOOD — minor gaps only |
+| 90–100% | EXCELLENT — full organizational memory |
+
+**Current: 63% — CONDITIONAL (below ADEQUATE).** Phase 4 Step 5 extension audit exposed 35 additional uncovered modules, 2 new conflicts (CONFLICT-4, CONFLICT-5), and critical financial constant discrepancy. Wave-3 target: 80%.
+
+---
+
+## Top 10 Gaps by Business Impact
+
+| Rank | Gap | Business Impact | Action |
+|---|---|---|---|
+| 1 | **CONFLICT-5: payroll ৳800/day vs payment_workflow ৳1,200/day** | **Financial discrepancy — employee payment disputes** | **Management decision + KB update REQUIRED** |
+| 2 | Hybrid RAG algorithm conflicts with KB (CONFLICT-2) | Engineers implement wrong algorithm; incident response misdirected | Rewrite hybrid_search.md |
+| 3 | Draft TTL 24h vs 48h (CONFLICT-1) | Admins lose drafts unexpectedly; dispute with IT team | Management decision + KB + env sync |
+| 4 | Age rule divergence (CONFLICT-3) | Candidate disputes; legal risk if hiring process questioned | Management decision + update |
+| 5 | escort_roster 3111 lines, 15% coverage | Largest module, pay calculation, conveyance rates all undocumented | Create escort_roster_system.md |
+| 6 | draft_quality 0% coverage | No audit trail for AI rejections; compliance gap | Create new article |
+| 7 | Phase 4 structured_v2 undocumented | Engineers may revert prompt; AI quality regression | Enrich system_prompt.md |
+| 8 | DEFAULT_DAILY_RATE not authorized in KB | Employee disputes over daily rate calculation | Management approval → KB |
+| 9 | shared/runtime_gateway feature flags (0% coverage) | Kill-switches and feature flags unknown; incidents may be uncorrectable | Document flags in automation_pipeline.md |
+| 10 | Admin UI (wa_chat_frontend) 0% coverage | 28 endpoints, SSE stream, group broadcast undocumented | Create admin_ui.md |
+
+---
+
+*Organizational Brain Gap Report | Phase 4 Step 5 (Extended 2026-06-23) | READ-ONLY AUDIT*

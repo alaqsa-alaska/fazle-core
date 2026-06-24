@@ -1,3 +1,11 @@
+---
+title: PKVC Report — rag_strategy.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — rag_strategy.md
 **Article:** `06_developer_system/rag_strategy.md`
 **Wave:** Wave-2B (full replacement of 16-line stub)

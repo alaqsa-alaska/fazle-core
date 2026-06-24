@@ -1,4 +1,5 @@
 ---
+owner: Fazle Core Admin
 kb_id: DEV-AI-READONLY-ACCESS
 title: AI Read-Only Data Access Layer
 status: active

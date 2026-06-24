@@ -1,0 +1,133 @@
+Source: knowledge_base/06_developer_system/phone_normalizer.md
+SHA256: dd387ebe2280b33016d43719e2b9c998ce36b9e1ee0c6d5936dc145acd034f1e
+Version: dd387ebe2280
+
+# Phone Normalizer
+**KB Article ID:** DEV-06-PHONE-NORMALIZER
+**Source:** `modules/phone_normalizer/__init__.py` (55 lines — read 2026-06-23); `PHONE_NORMALIZER_CONVENTION.md` (43 lines — read 2026-06-23)
+**Visibility:** Developer
+**Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## Purpose
+
+Converts raw Bangladesh phone number strings from any common format into a single canonical form (`8801XXXXXXXXX`) used as the primary key for all messaging and identity lookups. Three different normalizers exist in the codebase — they must not be confused.
+
+---
+
+## Canonical Format
+
+```
+8801XXXXXXXXX  (13 digits, no symbols)
+```
+
+Examples:
+- `8801812345678` — Grameenphone subscriber
+- `8801958122322` — Al-Aqsa office number (canonical)
+
+All `wbom_*` storage tables must use this format. Deviations are schema violations.
+
+---
+
+## Constants
+
+```python
+BANGLADESH_COUNTRY_CODE = "880"
+
+VALID_OPERATORS = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}
+```
+
+**9 operator codes** (first 2 digits of local 10-digit format `1XXXXXXXXX`).
+
+---
+
+## `normalize_phone(raw) → Optional[str]`
+
+Strips all non-digit characters first, then accepts three input lengths:
+
+| Input Format | Example | Length (digits) |
+|---|---|---|
+| International with country code | `+8801812345678` → digits: `8801812345678` | 13 |
+| Local with leading zero | `01812345678` | 11 |
+| Local without leading zero | `1812345678` | 10 |
+
+**Operator validation:** Extracts 2-digit operator code (digits 3–4 of the 10-digit local number) and checks against `VALID_OPERATORS`. Returns `None` if not in set.
+
+**Returns `None` if:**
+- After stripping, length is not 10, 11, or 13
+- Operator code not in `VALID_OPERATORS`
+- Input is `None` or empty
+
+**Returns canonical 13-digit string** (`8801XXXXXXXXX`) on success.
+
+---
+
+## Display Format Variants
+
+| Function | Output Format | Example |
+|---|---|---|
+| `format_for_display(phone)` | `0XXXX-XXXXXX` | `01812-345678` |
+| `format_for_whatsapp(phone)` | `+8801XXXXXXXXX` | `+8801812345678` |
+
+Both functions accept canonical `8801XXXXXXXXX` input.
+
+---
+
+## Three Normalizers in This Codebase — Never Confuse Them
+
+| Module | Function | Output | Use Case |
+|---|---|---|---|
+| `modules.phone_normalizer` | `normalize_phone()` | `8801XXXXXXXXX` (13 digits) | **Default** — all WhatsApp routing, identity, session storage |
+| `modules.number_identity` | `normalize_phone()` | 3 variants (8801..., 01..., 1...) | DB lookup only — searches all 3 column forms simultaneously |
+| `fazle_payroll_engine.normalizer` | `normalize_bd_phone()` | `01XXXXXXXXX` (11 digits) | FPE payroll engine — internal FPE tables only |
+
+**Rule:** When in doubt, use `modules.phone_normalizer.normalize_phone()`.
+
+---
+
+## `number_identity` — 3-Variant Lookup
+
+`number_identity.normalize_phone(raw)` returns a list of 3 canonical variants for use in SQL `WHERE phone IN (...)` queries:
+
+1. `8801XXXXXXXXX` — international with country code
+2. `01XXXXXXXXX` — local with leading zero
+3. `1XXXXXXXXX` — local without leading zero
+
+This is specifically designed for DB queries where historical records may have been stored in any of the 3 formats.
+
+---
+
+## FPE Exception
+
+`fazle_payroll_engine.normalizer.normalize_bd_phone()` returns **11-digit** format (`01XXXXXXXXX`). This is intentional — FPE's internal tables use 11-digit format. Do not use this normalizer outside FPE.
+
+---
+
+## Storage Rule
+
+All `wbom_*` tables MUST store phones in **canonical `8801XXXXXXXXX` format**. Mixing formats within a single table creates duplicate identity records that break all lookup operations.
+
+---
+
+## WhatsApp JID Note
+
+WhatsApp business message JIDs arrive in `@s.whatsapp.net` or `@lid` format. `@lid` JIDs are not phone numbers and are not processed by this normalizer — they are handled separately by the bridge layer. Only `@s.whatsapp.net` JIDs produce extractable phone numbers.
+
+---
+
+## Related Functions
+
+| Function | Location | Notes |
+|---|---|---|
+| `phone_last10(phone)` | `modules.reviewed_reply_memory` | Extracts last 10 digits for `fazle_reviewed_replies` matching |
+| `format_for_display()` | `modules.phone_normalizer` | Human-readable display |
+| `format_for_whatsapp()` | `modules.phone_normalizer` | WhatsApp-compatible `+880...` format |
+
+---
+
+## Cross-References
+
+- `identity_brain.md` — phone used as primary sender key in all detection steps
+- `reviewed_reply_memory.md` — `last10_phone` field uses last 10 digits of canonical phone
+- `automation_pipeline.md` — canonical phones stored in all session tables

@@ -1,4 +1,5 @@
 ---
+owner: Fazle Core Admin
 kb_id: DEV-OLLAMA-MEMORY
 title: Ollama Memory Database
 status: active

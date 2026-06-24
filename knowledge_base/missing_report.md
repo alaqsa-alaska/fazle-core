@@ -1,4 +1,12 @@
-﻿# Missing Report
+---
+title: Missing Report
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Missing Report
 
 ## Missing Identity Rules
 Resolved by adding `03_ai_identity` with role files and permission matrix.

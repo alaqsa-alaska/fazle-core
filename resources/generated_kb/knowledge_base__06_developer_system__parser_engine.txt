@@ -1,0 +1,18 @@
+Source: knowledge_base/06_developer_system/parser_engine.md
+SHA256: a44ffdfda5102390076cd038ba50074f6d8662c2daacbbba3815589490fbf0ad
+Version: a44ffdfda510
+
+# Parser Engine
+
+## Purpose
+Parse structured and semi-structured operational messages.
+
+## Parsers
+- Escort order parser.
+- Payment message parser.
+- Attendance parser.
+- Candidate inquiry parser.
+- Admin fallback parser.
+
+## Rules
+Use deterministic extraction where possible. Use LLM only for ambiguity handling, not final approval.

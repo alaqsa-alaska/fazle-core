@@ -1,3 +1,11 @@
+---
+title: PKMA Report 07 — Quality Assessment
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA Report 07 — Quality Assessment
 
 **Program:** PKMA v1.0

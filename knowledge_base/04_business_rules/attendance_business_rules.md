@@ -1,4 +1,12 @@
-﻿# Attendance Business Rules
+---
+title: Attendance Business Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Attendance Business Rules
 
 ## Source Of Truth
 - Security guard: 12 hours equals one duty day.

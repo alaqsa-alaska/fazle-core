@@ -1,0 +1,291 @@
+Source: knowledge_base/06_developer_system/runtime_gateway_flags.md
+SHA256: a4ebf459ee2e9fed8cf0551f9b8b50782951c0c69f4a12f309072f329cf4f8d6
+Version: a4ebf459ee2e
+
+# Runtime Gateway & Feature Flags
+**KB Article ID:** DEV-06-GATEWAY-FLAGS
+**Sources:** `shared/runtime_gateway.py` (614 lines), `/home/azim/core/.env` — both read 2026-06-23
+**Visibility:** Developer / Admin only — do NOT set `safe_for_customer=True`
+**Certified:** 2026-06-23 (Wave-3, W3-AUTH)
+
+---
+
+## IMPORTANT — Correction to `kb_enrichment_plan_v2.md` P1-F
+
+`kb_enrichment_plan_v2.md` P1-F states: *"All feature flags in `shared/runtime_gateway.py`."*
+
+This is **incorrect.** `shared/runtime_gateway.py` is a **distributed node registry and heartbeat manager**, not a feature-flag registry. It manages `fazle_runtime_nodes` (DB table) and the heartbeat lifecycle of three registered app instances. It contains no feature flags.
+
+Feature flags live in **`.env`** (and are loaded into `app/config.py`). They are read by individual modules. This article documents both: (1) all production feature flags from `.env`, and (2) the `shared/runtime_gateway.py` node system.
+
+---
+
+## Section 1 — Kill-Switch Registry (`.env` Flags)
+
+Current production values are shown. These may differ in staging/test environments.
+
+---
+
+### Core AI Routing Flags
+
+| Flag | Current Value | Module That Reads It | Effect When Disabled |
+|---|---|---|---|
+| `AUTO_REPLY_ENABLED` | `false` | `modules/bridge_poller` | All AI replies go to `fazle_draft_replies` for admin review; nothing auto-sent to WhatsApp |
+| `HYBRID_SEARCH_ENABLED` | `true` | `modules/rag/__init__.py` | Falls back to BM25-only search; Qdrant not contacted; `_hybrid_search()` path skipped |
+| `DRAFT_QUALITY_GATE` | `true` | `modules/draft_quality` | Disables all 4 quality checks; all replies pass to queue without scoring |
+| `AI_SAFE_MODE` | `false` | `modules/bridge_poller` (line 1426) | When `true`: forces draft (no auto-send) for replies that are: >200 chars, identity confidence <50, or intent = "unknown"/"unclear" |
+| `DRAFT_CREATION_ENABLED` | `true` | Draft creation path | When `false`: disables all draft creation; replies are dropped rather than queued |
+| `REVIEWED_REPLY_MEMORY_ENABLED` | `true` | `modules/reviewed_reply_memory` | When `false`: `lookup_reviewed_reply()` returns `None` immediately; message_router step 14 is skipped |
+
+---
+
+### Recruitment Flags
+
+| Flag | Current Value | Module | Effect When Disabled |
+|---|---|---|---|
+| `RECRUITMENT_AUTOREPLY_ENABLED` | `true` | `app/main.py` line 9 | Disables candidate-intake bypass; recruitment auto-replies stop |
+
+---
+
+### Outbound & Queue Flags
+
+| Flag | Current Value | Module | Effect When Disabled |
+|---|---|---|---|
+| `OUTBOUND_ENABLED` | `true` | `modules/outbound` | Stops all outbound WhatsApp sends via outbound queue |
+| `USE_OUTBOUND_QUEUE` | `true` | Outbound path | When `false`: sends directly without queue (bypasses retry logic) |
+| `SCHEDULER_ENABLED` | `true` | `modules/scheduler` | Stops all scheduled jobs (15+ cron jobs) |
+| `INTERNAL_NOTIFICATIONS_ENABLED` | `true` | Internal notification system | Disables internal admin alerts |
+
+---
+
+### Agent / Proactive Outbound Flags
+
+| Flag | Current Value | Module | Effect When Disabled |
+|---|---|---|---|
+| `AGENT_ADMIN_FORWARD_ENABLED` | `false` | `app/main.py` line 1307 | Disables agent-to-admin message forwarding path |
+| `AGENT_PROACTIVE_OUTBOUND_ENABLED` | `false` | `app/main.py` line 1348 | Disables proactive AI-initiated outbound messages |
+
+---
+
+### LLM Provider Flags
+
+| Flag | Current Value | Module | Notes |
+|---|---|---|---|
+| `PRIMARY_AI_PROVIDER` | `github_models` | `app/llm.py` | Primary LLM selection: `github_models`, `groq`, `ollama` |
+| `OLLAMA_REPLY_DISABLED` | `false` | `app/llm.py` | When `true`: skips Ollama for reply generation; fallback becomes Groq → GitHub Models |
+| `GITHUB_MODEL_NAME` | `openai/gpt-4.1` | `app/llm.py` | Model identifier for GitHub Models API |
+| `GROQ_MODEL_NAME` | `llama-3.1-8b-instant` | `app/llm.py` | Model identifier for Groq API |
+| `OLLAMA_MODEL` | `qwen3:8b` | `app/llm.py` | Model name for Ollama local instance |
+
+---
+
+### Social Auto Reply Flags
+
+| Flag | Current Value | Module | Notes |
+|---|---|---|---|
+| `SOCIAL_AUTO_REPLY_SINGLE_ENGINE` | `false` | `modules/social_auto_reply` | When `false`: uses dual-engine mode (standard + intelligent generator). When `true`: single engine only |
+
+---
+
+### Draft Disposition Flags
+
+These flags determine which senders always receive drafts instead of auto-sends, regardless of intent:
+
+| Flag | Current Value | Effect |
+|---|---|---|
+| `DRAFT_ALWAYS_ROLES` | `accountant,client_escort_buyer,vip_client,repeat_client,...` (+ named contact roles) | Any sender whose resolved role is in this list always gets a draft — no auto-send |
+| `DRAFT_ALWAYS_PHONES` | *15 phone numbers — values NOT in KB (security)* | Named individuals always get drafts; list must not be exposed outside `.env` |
+| `DRAFT_ALWAYS_NAMES` | `"Jakir Master,Shohag Security"` | Senders whose display_name matches always get drafts |
+| `DRAFT_NAME_PREFIXES` | `client,escort,office` | Senders whose display_name starts with these prefixes always get drafts |
+
+---
+
+### Other Notable Flags
+
+| Flag | Current Value | Notes |
+|---|---|---|
+| `DRAFT_TTL_HOURS` | `24` | TTL for `fazle_draft_replies` entries (WhatsApp reply drafts); see CR-01 |
+| `OUTBOUND_SWEEP_INTERVAL_S` | `10` | How often the outbound worker sweeps the queue (seconds) |
+| `OUTBOUND_BRIDGE_TIMEOUT_S` | `10` | Timeout for outbound WhatsApp API calls |
+| `WEBHOOK_SIGNATURE_ENFORCEMENT` | `false` | When `true`: validates Meta webhook HMAC signature on every request |
+| `BRIDGE1_INGEST_ALL_DMS` | `true` | When `true`: bridge1 ingests all DMs regardless of contact list |
+
+---
+
+## Section 2 — Runtime Node System (`shared/runtime_gateway.py`)
+
+This module manages the **distributed node registry**. Three separate app processes register as nodes:
+- `fazle-core` — main WhatsApp bot and API
+- `payroll-engine` — payroll computation service
+- `escort-roster` — escort program sync service
+
+---
+
+### `RuntimeNode` Dataclass
+
+Source: `shared/runtime_gateway.py` lines 109–121
+
+```python
+@dataclass
+class RuntimeNode:
+    node_id:         str                 # "{app_name}-{hostname}-{pid}"
+    app_name:        str                 # "fazle-core" | "payroll-engine" | "escort-roster"
+    role:            str                 # "orchestrator" | "worker" | "standalone"
+    status:          str   = "online"    # "online" | "offline" | "degraded"
+    last_seen:       float = time.time() # Unix timestamp of last successful heartbeat
+    version:         str   = "unknown"   # App version string
+    active_requests: int   = 0           # In-flight requests at heartbeat time
+    queue_depth:     int   = 0           # Queue depth at heartbeat time
+    metadata:        dict  = {}          # Arbitrary JSON for diagnostics
+```
+
+**Node ID format:** `{app_name}-{hostname}-{pid}` (example: `fazle-core-vmi3117764-12345`)
+
+The PID component makes each node ID unique across restarts on the same host. A crashed-and-restarted process generates a new node_id.
+
+---
+
+### Heartbeat & Stale Detection
+
+| Parameter | Value | Effect |
+|---|---|---|
+| `HEARTBEAT_INTERVAL_S` | **30 seconds** | How often each node updates `fazle_runtime_nodes.last_seen` |
+| `STALE_THRESHOLD_S` | **90 seconds** | `last_seen > 90 s ago` → node is marked `offline` by stale sweep |
+| `_STALE_SWEEP_EVERY` | **3 cycles** | Stale sweep runs every 3 heartbeats = every 90 seconds |
+
+**Stale sweep is atomic:** Uses `UPDATE ... RETURNING` on `fazle_runtime_nodes` — no lost-update race between multiple nodes running the sweep concurrently.
+
+---
+
+### Reconnect Alerting
+
+`heartbeat_loop()` tracks consecutive failures. At **3 consecutive failures**, it emits a `RECONNECTING` event. On the next successful heartbeat, it emits `WS_RECOVERED`.
+
+---
+
+### What Happens When a Node Dies
+
+1. The dying node calls `stop_gateway()` in its lifespan teardown — marks itself `offline` immediately
+2. If the crash is unclean (no teardown): stale sweep detects `last_seen > 90 s` → marks offline
+3. `mark_stale_nodes()` also calls `_release_claimed_queue_items()` — releases any `fazle_message_queue` items with `processor_id = dead_node_id` back to `pending` status (attempts capped at 2 to avoid immediate dead-letter)
+
+---
+
+### Core Functions
+
+| Function | Purpose |
+|---|---|
+| `start_gateway(app_name, role, version, ...)` | Register node + start heartbeat task (call from app lifespan startup) |
+| `stop_gateway()` | Cancel heartbeat task + deregister node (call from app lifespan teardown) |
+| `register_node(app_name, role, version, ...)` | UPSERT into `fazle_runtime_nodes`; returns node_id |
+| `heartbeat(node_id, active_requests, queue_depth)` | Touch `last_seen`; returns True/False |
+| `deregister_node(node_id)` | Mark node `offline` (clean shutdown) |
+| `mark_stale_nodes(stale_after_seconds=90)` | Atomic stale sweep; releases queue items |
+| `get_active_nodes()` | Return all nodes with `age_s` field; used by `/api/runtime/nodes` |
+| `get_current_node_id()` | Return this process's node_id (None if start_gateway not called) |
+
+---
+
+### `fazle_runtime_nodes` Table
+
+Columns written by the gateway (from `register_node()` UPSERT at lines 190–208):
+
+| Column | Type | Source |
+|---|---|---|
+| `node_id` | text PK | `{app_name}-{hostname}-{pid}` |
+| `app_name` | text | Parameter to `start_gateway()` |
+| `role` | text | Parameter: orchestrator / worker / standalone |
+| `status` | text | online / offline / degraded |
+| `last_seen` | timestamptz | Updated on every heartbeat |
+| `registered_at` | timestamptz | Set on INSERT; not updated on UPSERT |
+| `version` | text | App version string |
+| `active_requests` | int | Snapshot at heartbeat time |
+| `queue_depth` | int | Snapshot at heartbeat time |
+| `metadata_json` | jsonb | Arbitrary diagnostic JSON |
+
+---
+
+### Runtime Event Bus
+
+`shared/runtime_gateway.py` re-exports `shared.events` as `shared_runtime_event_bus`. Events:
+
+| Event Constant | Trigger |
+|---|---|
+| `NODE_ONLINE` | `register_node()` success |
+| `NODE_OFFLINE` | `deregister_node()` (clean) or `mark_stale_nodes()` (stale) |
+| `QUEUE_PRESSURE` | `_release_claimed_queue_items()` releases > 0 items |
+| `STALE_FRONTEND` | (defined in shared.events; emitted by other callers) |
+| `LOCK_CONTENTION` | (defined in shared.events; emitted by other callers) |
+| `RECONNECTING` | 3 consecutive heartbeat failures |
+| `WS_RECOVERED` | Heartbeat success after failures |
+
+---
+
+## Section 3 — Safe Toggle Procedures
+
+### Flags Safe to Toggle Without Restart
+
+These flags are read on each message processing cycle:
+
+| Flag | Toggle Method | Notes |
+|---|---|---|
+| `AUTO_REPLY_ENABLED` | Edit `.env` → restart process (or use app config reload if implemented) | Most common toggle — switches between draft-only and live-send mode |
+| `AI_SAFE_MODE` | Edit `.env` → restart process | Use in degraded-trust situations |
+| `DRAFT_QUALITY_GATE` | Edit `.env` → restart process | Disable only for debugging |
+
+### Emergency Disable Sequence
+
+**Scenario: Auto-reply storm (bot sending wrong messages)**
+1. Set `AUTO_REPLY_ENABLED=false` in `.env`
+2. Restart `fazle-core`: `pm2 restart fazle-core` (or equivalent)
+3. All subsequent replies will queue to `fazle_draft_replies` instead of sending
+4. Inspect queue: `DRAFTS` WhatsApp admin command or `/api/drafts` endpoint
+5. After fixing root cause: set `AUTO_REPLY_ENABLED=true` → restart
+
+**Scenario: Outbound queue overflow / send failure**
+1. Set `OUTBOUND_ENABLED=false` → restart
+2. Queue accumulates in `fazle_message_queue` (no messages lost if queue persists)
+3. After fixing outbound service: set `OUTBOUND_ENABLED=true` → restart
+
+**Scenario: LLM provider down (Ollama / Groq / GitHub Models)**
+1. Set `PRIMARY_AI_PROVIDER=ollama` in `.env` → restart
+2. Ollama runs locally at `OLLAMA_URL` and is the primary provider
+3. If Ollama is degraded: fallback proceeds to Groq, then GitHub Models
+4. If Ollama must be bypassed for replies: set `OLLAMA_REPLY_DISABLED=true` → restart
+4. System falls back to KB-only replies (no LLM output)
+
+**Scenario: Hybrid RAG causing wrong results**
+1. Set `HYBRID_SEARCH_ENABLED=false` → restart
+2. RAG falls back to BM25-only mode
+3. Vector search (Qdrant) is bypassed; BM25 index still available
+
+---
+
+## Key Relationships
+
+```
+.env (all feature flags)
+  │
+  ├── AUTO_REPLY_ENABLED ──→ bridge_poller: skip outbound if false
+  ├── HYBRID_SEARCH_ENABLED ──→ modules/rag: use BM25 only if false
+  ├── DRAFT_QUALITY_GATE ──→ modules/draft_quality: bypass all checks if false
+  ├── OUTBOUND_ENABLED ──→ modules/outbound: drop sends if false
+  ├── SCHEDULER_ENABLED ──→ modules/scheduler: no jobs run if false
+  ├── REVIEWED_REPLY_MEMORY_ENABLED ──→ message_router step 14: skip lookup if false
+  ├── DRAFT_ALWAYS_PHONES / ROLES / NAMES / PREFIXES ──→ bridge_poller: force draft
+  └── AI_SAFE_MODE ──→ bridge_poller: force draft on long/low-conf/unclear replies
+
+shared/runtime_gateway.py
+  │
+  ├── fazle_runtime_nodes (DB table) ── node health registry
+  ├── fazle_message_queue (DB table) ── queue items released on node death
+  └── shared.events ── event bus for NODE_ONLINE/OFFLINE/QUEUE_PRESSURE
+```
+
+---
+
+## Visibility
+
+This article is **Developer/Admin only**. Do not set `safe_for_customer=True`.
+
+Reason: Contains internal system flags, kill-switch procedures, and distributed node architecture — none of which should be visible to candidates or external contacts. `DRAFT_ALWAYS_PHONES` values are intentionally omitted from this article.

@@ -1,3 +1,11 @@
+---
+title: Identity Integration Reference
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Identity Integration Reference
 **KB Article ID:** DEV-06-IDENTITY-INTEGRATION
 **Sources:** `modules/identity_brain/__init__.py` (393 lines), `modules/message_router/__init__.py` (598 lines), `shared/reply_policy.py` (291 lines), `knowledge_base/ai_access_matrix.md` — all read 2026-06-23

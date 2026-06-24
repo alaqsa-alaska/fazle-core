@@ -1,3 +1,11 @@
+---
+title: Organizational Brain Gap Report — Phase 4 Step 5
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Organizational Brain Gap Report — Phase 4 Step 5
 **Program:** Knowledge Base v1.0 + Wave-2 + Phase 4
 **Date:** 2026-06-22

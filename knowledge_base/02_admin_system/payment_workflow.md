@@ -1,4 +1,12 @@
-﻿# Payment Workflow
+---
+title: Payment Workflow
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Payment Workflow
 
 ## Purpose
 Define admin-only payment verification, approval, accountant handoff, and ledger update rules.

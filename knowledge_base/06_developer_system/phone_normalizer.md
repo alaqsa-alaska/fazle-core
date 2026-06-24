@@ -1,3 +1,11 @@
+---
+title: Phone Normalizer
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Phone Normalizer
 **KB Article ID:** DEV-06-PHONE-NORMALIZER
 **Source:** `modules/phone_normalizer/__init__.py` (55 lines — read 2026-06-23); `PHONE_NORMALIZER_CONVENTION.md` (43 lines — read 2026-06-23)

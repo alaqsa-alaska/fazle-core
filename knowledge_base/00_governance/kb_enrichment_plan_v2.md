@@ -1,3 +1,11 @@
+---
+title: KB Enrichment Plan v2
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # KB Enrichment Plan v2
 **Program:** Wave-3 Knowledge Base Enrichment
 **Date:** 2026-06-22

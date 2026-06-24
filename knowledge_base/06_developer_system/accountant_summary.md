@@ -1,3 +1,11 @@
+---
+title: Accountant Summary Detector
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Accountant Summary Detector
 
 **Source:** `modules/accountant_summary/__init__.py` (158 lines — read 2026-06-23)

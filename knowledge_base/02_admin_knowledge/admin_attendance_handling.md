@@ -1,4 +1,12 @@
-﻿# Admin Attendance Handling
+---
+title: Admin Attendance Handling
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Admin Attendance Handling
 
 ## Purpose
 Define admin handling for self-attendance, supervisor attendance, and escort attendance.

@@ -1,3 +1,11 @@
+---
+title: Intent Classifier
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Intent Classifier
 
 **Source:** `modules/intent/__init__.py` (172 lines — read 2026-06-23)

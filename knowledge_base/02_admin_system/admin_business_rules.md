@@ -1,4 +1,12 @@
-﻿# Admin Business Rules
+---
+title: Admin Business Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Admin Business Rules
 
 ## Purpose
 Define cross-cutting Level 2 rules for admin operations, approvals, routing, verification, and disclosure boundaries.

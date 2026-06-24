@@ -1,3 +1,11 @@
+---
+title: Automation Pipeline
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Automation Pipeline
 
 ## Purpose
@@ -27,15 +35,15 @@ Define safe automation boundaries and document the production AI, outbound, and 
 ## LLM Provider Chains
 
 ### Purpose
-The platform uses two independent LLM chains with different provider priority orders. The order difference is intentional: reply generation optimizes for quality (GitHub Models first), while intent classification optimizes for speed (Groq first).
+The platform uses one Ollama-first LLM chain. Local Ollama is preferred for runtime privacy, cost control, and Knowledge Base grounding. External providers are fallbacks only.
 
 ### Reply Generation Chain (Customer-Facing WhatsApp)
 
 | Priority | Provider | Model | Rate Limit | Fallback Trigger |
 |---|---|---|---|---|
-| 1 (Primary) | GitHub Models | openai/gpt-4.1 | Plan limit | Any error or rate limit |
-| 2 (Secondary) | Groq | llama-3.1-8b-instant | 14,400 req/day / 30 RPM | GitHub fails |
-| 3 (Tertiary) | Ollama (local) | qwen3:8b | None (local) | Groq fails or OLLAMA_REPLY_DISABLED=true |
+| 1 (Primary) | Ollama (local) | qwen3:8b | Local VPS capacity | Ollama fails or OLLAMA_REPLY_DISABLED=true for reply generation |
+| 2 (Fallback) | Groq | llama-3.1-8b-instant | 14,400 req/day / 30 RPM | Ollama fails/skipped |
+| 3 (Secondary fallback) | GitHub Models | openai/gpt-4.1 | Plan limit | Groq fails |
 | 4 (Final fallback) | Polite holding message | N/A | N/A | All providers fail |
 
 **Fallback holding message (exact text):**
@@ -45,7 +53,7 @@ The platform uses two independent LLM chains with different provider priority or
 
 **Business Rule:** When all LLM providers fail, the system always returns the polite holding message rather than sending no reply or raising an error to the user.
 
-**Exception:** When `OLLAMA_REPLY_DISABLED=true`, Ollama is skipped even if Groq fails. The polite holding message becomes the immediate fallback after Groq.
+**Exception:** When `OLLAMA_REPLY_DISABLED=true`, Ollama is skipped for reply generation. The fallback chain becomes Groq → GitHub Models → polite holding message.
 
 **Source Module:** `app/llm.py`
 **Source Function:** `generate_reply()`, `_FALLBACK_REPLY`
@@ -56,11 +64,11 @@ The platform uses two independent LLM chains with different provider priority or
 
 | Priority | Provider | Model | Fallback Trigger |
 |---|---|---|---|
-| 1 (Primary) | Groq | llama-3.1-8b-instant | Fails or returns 'unknown' |
-| 2 (Secondary) | GitHub Models | openai/gpt-4.1 | Groq fails |
-| 3 (Tertiary) | Ollama | qwen3:8b | GitHub fails |
+| 1 (Primary) | Ollama | qwen3:8b | Fails or returns 'unknown' |
+| 2 (Fallback) | Groq | llama-3.1-8b-instant | Ollama fails/unknown |
+| 3 (Secondary fallback) | GitHub Models | openai/gpt-4.1 | Groq fails/unknown |
 
-**Business Rule:** Intent classification uses Groq first (not GitHub first) because intent queries are smaller and Groq's speed advantage matters more at this stage.
+**Business Rule:** Intent classification uses Ollama first. Groq and GitHub Models are used only if local classification fails or returns `unknown`.
 
 **Source Module:** `app/llm.py`
 **PKCA Report:** 08_ai_behavior_coverage_report.md

@@ -1,0 +1,600 @@
+Source: knowledge_base/PKM_KE_KBG_Program_v2_Analysis_2026-06-21_DETAILED.md
+SHA256: 75051d460b9bb2ff0c0ab88204a0badcb0e9346c545166bb42e6d5a9f9ce36d5
+Version: 75051d460b9b
+
+# FAZLE AI PLATFORM
+# PRODUCTION KNOWLEDGE MINING -> KNOWLEDGE ENRICHMENT -> KNOWLEDGE BASE GENERATION PROGRAM
+
+Version: 2.0
+Status: ANALYSIS ONLY (DETAILED EDITION)
+Company: Al-Aqsa Security and Logistics Services Ltd.
+Date: 2026-06-21
+
+---
+
+## Program Mandate
+This document is the expanded management-facing second version of the PKM -> KE -> KBG analysis package.
+
+Mission:
+- Discover, extract, classify, normalize, enrich, preserve and document operational knowledge hidden in production behavior.
+- Transfer knowledge, not code.
+- Produce full reporting before any knowledge-base mutation.
+
+Safety lock for this phase:
+- No production code changes.
+- No API/route/runtime/service changes.
+- No database schema changes.
+- No deployment changes.
+
+---
+
+## REPORT 1 - EXECUTIVE SUMMARY
+
+### 1.1 System Characterization
+Fazle AI Platform is an identity-first operations intelligence stack that processes inbound messaging channels, performs role-aware routing, drives draft-first approvals, and orchestrates escort, attendance, payroll, payment, recruitment, and reporting workflows.
+
+### 1.2 Core Conclusion
+Production code currently contains non-trivial hidden business knowledge that is not fully represented in the current knowledge base. The knowledge base can only become the organizational brain after documenting hidden routing guards, parser logic, safety gates, state transitions, and decision thresholds.
+
+### 1.3 Critical Outcomes
+- Operational logic is highly deterministic and safety-gated.
+- Role-based branches contain silent constraints not yet documented.
+- Multiple hidden rules impact customer-facing behavior and risk posture.
+- A conflict track is required before policy-level publication.
+
+---
+
+## REPORT 2 - PRODUCTION KNOWLEDGE INVENTORY
+
+### 2.1 Primary Engines Mined
+- Unified Message Router
+- Identity Brain
+- Bridge SQLite Poller
+- Escort Order and Escort Lifecycle
+- Attendance and Attendance Parser
+- Payment Workflow
+- Payroll Engine
+- Recruitment Funnel
+- RBAC and Admin Governance
+- Scheduler and Automation Jobs
+- RAG Retrieval Engine
+- Social Auto-Reply Engine
+
+### 2.2 Operational Subsystems
+- WhatsApp bridge ingestion (dual bridge)
+- Media/OCR and voice processing
+- Draft and approval queues
+- Admin command execution and auditing
+- Reporting and daily digests
+
+### 2.3 Persistence and Integration Surfaces
+- PostgreSQL business tables
+- Redis cooldown and fallback support
+- SQLite bridge stores for inbound polling
+- LLM provider chain and fallback logic
+
+---
+
+## REPORT 3 - HIDDEN KNOWLEDGE INVENTORY
+
+### 3.1 High-Risk Hidden Rules
+- Silent-skip logic based on role/name/accountant phone match.
+- Draft-always routing for select roles and profile signatures.
+- Complaint phrase override forcing draft even when intent is otherwise safe.
+- Outbound poison-content blockers preventing internal-analysis leakage.
+
+### 3.2 Safety and Abuse Controls
+- Prompt-injection pattern detection.
+- Loop detection pause window.
+- Keyword flood suppression window.
+- Cooldown enforcement with Redis and in-memory fallback.
+
+### 3.3 Operational Defaults and Fallbacks
+- Office-location fast path bypassing AI fallback.
+- Recruitment exclusion for operational identities.
+- OCR draft-only handling for release slips pending admin confirmation.
+
+### 3.4 Knowledge Status
+These behaviors are partially or fully absent in existing KB narrative files and must be preserved in restricted visibility knowledge artifacts.
+
+---
+
+## REPORT 4 - KNOWLEDGE MINING REPORT
+
+### 4.1 Mining Method
+- Engine-first scan of high-volume modules.
+- Rule extraction from control flow, constants, regex patterns, and fallback chains.
+- Cross-check against current knowledge_base folder for coverage and contradictions.
+
+### 4.2 Knowledge Types Mined
+- Business rules
+- Decision trees
+- Workflow order and transitions
+- Identity and role signals
+- Parser and extraction rules
+- Validation and sanitization rules
+- Retry, fail-safe, and fallback behavior
+- Audit and observability traces
+
+### 4.3 Reliability of Findings
+Evidence source is production code behavior and inline operational comments, treated as authoritative for current runtime truth.
+
+---
+
+## REPORT 5 - KNOWLEDGE CLASSIFICATION REPORT
+
+### 5.1 Classification Model
+- Public
+- Employee Safe
+- Candidate Safe
+- Escort Safe
+- Supervisor
+- Operations
+- HR
+- Admin
+- Accountant
+- Management
+- Developer
+- Internal
+- System
+- Confidential
+- Archived
+
+### 5.2 Classification Rules
+- Parser internals: Developer/Internal or Confidential.
+- Command internals: Admin/Developer.
+- Security and anti-abuse rules: Confidential.
+- Database internals and schema behavior: Developer/Internal.
+- Public-facing policy text: Public/Employee Safe/Candidate Safe.
+
+### 5.3 Publication Guard
+No confidential internals may be exposed to public-facing knowledge channels.
+
+---
+
+## REPORT 6 - DUPLICATE REPORT
+
+### 6.1 Duplicate Themes
+- Office information appears across multiple response systems.
+- Escort keyword sets appear in more than one decision layer.
+- Overlapping attendance handlers and parsing paths.
+- Overlapping payment and payroll narrative assumptions.
+
+### 6.2 Duplicate Strategy
+- Preserve one authoritative article per policy domain.
+- Keep technical references in developer-only docs.
+- Retain traceability links to old/legacy files.
+
+---
+
+## REPORT 7 - CONFLICT REPORT
+
+### 7.1 Conflict Classes
+- Formula-level conflicts (payment/payroll assumptions).
+- Allowance table mismatches (transport/food estimates).
+- Draft estimate vs final approved amount semantics.
+
+### 7.2 Required Conflict Record Fields
+- Conflict ID
+- Production evidence
+- KB evidence
+- Risk level
+- Management decision
+- Recommendation
+- Follow-up owner
+
+### 7.3 Governance Requirement
+No silent overwrite. Every conflict must be decision-tracked and versioned.
+
+---
+
+## REPORT 8 - MISSING KNOWLEDGE REPORT
+
+### 8.1 Missing Critical Domains
+- Message routing priority with complete branch order.
+- Silent-skip and draft-always behavior catalog.
+- Anti-abuse safety gates (loop/flood/injection/outbound poison).
+- Command-to-role permission table and command grammar reference.
+- Scheduler operational job catalog and runbook.
+- RAG exclusion and safety pipeline details.
+
+### 8.2 Missing Internal Domains
+- Identity evidence source precedence details.
+- OCR release review constraints and warning logic.
+- Advanced fallback behavior and send suppression logic.
+
+---
+
+## REPORT 9 - WORKFLOW RECONSTRUCTION REPORT
+
+### 9.1 Inbound Message Lifecycle
+Actor: Contact or role holder
+Input: Inbound bridge or meta message
+Validation: dedup, cooldown, role detection, safety checks
+Decision: role route, intent route, workflow route
+Processing: draft or send
+Database: message logs, draft queues, role lookups
+Notification: admin/accountant as needed
+Audit: command and incident logs
+
+### 9.2 Escort Order Lifecycle
+Actor: Escort client / admin
+Flow: escort message parse -> draft creation -> admin completion/confirmation -> client delivery -> status updates
+
+### 9.3 Release Closure Lifecycle
+Actor: Employee/admin
+Flow: release intent or OCR -> admin confirmation -> program close -> attendance backfill -> payment draft generation
+
+### 9.4 Attendance Lifecycle
+Actor: Supervisor/employee/admin
+Flow: parse attendance -> create draft -> admin approve -> persist attendance
+
+### 9.5 Recruitment Lifecycle
+Actor: Candidate/unknown sender
+Flow: eligibility check -> session create -> stepwise collection -> scoring -> stage transition
+
+### 9.6 Admin Command Lifecycle
+Actor: Admin role holder
+Flow: parse -> dedup -> RBAC check -> execute -> audit
+
+---
+
+## REPORT 10 - STATE MACHINE REPORT
+
+### 10.1 Payroll State Machine
+- draft -> reviewed -> approved -> locked -> paid
+- cancellation permitted from non-paid states per transition rules
+
+### 10.2 Escort Program State Trajectory
+- draft -> confirmed/assigned/running -> completed
+- cancellation path where operationally applicable
+
+### 10.3 Draft Objects
+- pending -> approved/sent
+- pending -> rejected
+- pending -> expired
+
+### 10.4 Recruitment Session
+- new/collecting -> scored
+- stale collecting session -> expired
+
+### 10.5 Attendance Draft
+- pending -> approved -> persisted
+- pending -> rejected
+
+### 10.6 Admin User Status
+- active -> disabled
+
+---
+
+## REPORT 11 - PARSER REPORT
+
+### 11.1 Parser Families
+- Escort vessel/lighter extraction parser
+- Completed escort draft parser
+- Attendance free-form parser
+- Release confirmation field parser
+- Payment ingestion parser(s)
+- Intent fallback classifier
+
+### 11.2 Parser Documentation Requirements
+Each parser article must include:
+- Supported input patterns
+- Regex and token behavior notes
+- Ambiguity handling
+- Fallback strategy
+- Example accepted and rejected payloads
+
+---
+
+## REPORT 12 - VALIDATION REPORT
+
+### 12.1 Validation Classes
+- Age and identity constraints
+- Date and shift normalization checks
+- Monetary non-negative constraints
+- Release-date plausibility checks
+- Duty-day plausibility checks
+- OCR eligibility constraints
+
+### 12.2 Failure Handling
+Validation outcomes route to:
+- User correction prompts
+- Draft-only escalation
+- Safe no-send outcomes
+- Admin review pathways
+
+---
+
+## REPORT 13 - COMMAND REPORT
+
+### 13.1 Command Categories
+- Draft controls
+- Payment and advance controls
+- Escort controls
+- Payroll lifecycle controls
+- Scheduler and backup controls
+- Reporting controls
+- User/RBAC controls
+
+### 13.2 Command Governance
+Each command requires:
+- Explicit syntax
+- Required role
+- Side effects
+- Audit trace
+- Error path behavior
+
+### 13.3 Publication Note
+Public channels must never include full internal command internals.
+
+---
+
+## REPORT 14 - BUSINESS RULE REPORT
+
+### 14.1 Rule Domains
+- Role eligibility and exclusion logic
+- Draft-first enforcement for sensitive intents
+- Release confirmation authority
+- Financial settlement constraints
+- Recruitment progression requirements
+
+### 14.2 Rule Publication Requirement
+Business rules must be maintained in one authoritative place with visibility tiers and revision history.
+
+---
+
+## REPORT 15 - IDENTITY REPORT
+
+### 15.1 Identity Model Summary
+Identity is resolved using priority and source confidence across:
+- Settings/bootstrap admin data
+- Contact role seeds
+- Employee records
+- Attendance evidence
+- Payment/cash evidence
+- Escort roster evidence
+- Contact relationship evidence
+- Text hints
+
+### 15.2 Identity Publication Requirement
+Document:
+- Resolution order
+- Confidence model
+- Source precedence
+- Tie-break behavior
+- Security implications
+
+---
+
+## REPORT 16 - DATABASE BEHAVIOUR REPORT
+
+### 16.1 Database Behavior Themes
+- Message persistence as canonical operational history.
+- Draft queues as approval boundary.
+- Payment and payroll idempotency mechanisms.
+- Poller cursor persistence and dedup guards.
+- Audit logs and heartbeats for governance.
+
+### 16.2 Documentation Requirement
+Do not expose raw DB internals publicly. Publish internal database behavior map for ops/developer audiences only.
+
+---
+
+## REPORT 17 - AI BEHAVIOUR REPORT
+
+### 17.1 AI Usage Model
+- Intent classification with deterministic fallback.
+- Reply generation with provider chain and graceful degradation.
+- AI safety mode support for uncertain/unsafe response conditions.
+
+### 17.2 AI Governance Requirement
+Document provider fallback order and no-send behavior under failure or safety conditions.
+
+---
+
+## REPORT 18 - NOTIFICATION REPORT
+
+### 18.1 Notification Classes
+- Draft review notifications
+- Financial and accountant handoff notifications
+- Scheduler health/backup/DLQ notifications
+- Admin operational alerts
+
+### 18.2 Delivery and Dedup Notes
+Notification dedup and idempotency behavior must be documented to prevent alert storms and duplicate action risk.
+
+---
+
+## REPORT 19 - AUDIT REPORT
+
+### 19.1 Audit Sources
+- Command audit logs
+- Payroll transition logs
+- Reconciliation logs
+- Scheduler run logs
+- Outbound safety incidents
+- Service heartbeat records
+
+### 19.2 Audit Requirement
+Every sensitive action path must retain actor, timestamp, action, and result traceability.
+
+---
+
+## REPORT 20 - SCHEDULER REPORT
+
+### 20.1 Scheduler Scope
+- Payroll compute automation
+- DLQ and health alerts
+- Reconciliation and cleanup jobs
+- Memory review and RAG rebuild
+- Backup freshness and bridge watchdog checks
+
+### 20.2 Scheduler Documentation Requirement
+Each job must have:
+- Trigger cadence
+- Inputs/outputs
+- Side effects
+- Alert destinations
+- Failure mode and retry policy
+
+---
+
+## REPORT 21 - RAG REPORT
+
+### 21.1 RAG Architecture
+- Offline BM25 retrieval model
+- Bilingual tokenization and stop-word curation
+- Resource and KB indexing
+- Unsafe-content chunk purge policy
+
+### 21.2 RAG Safety Requirement
+Document source exclusions, unsafe-pattern filtering, and search trace auditing in developer/system restricted docs.
+
+---
+
+## REPORT 22 - KNOWLEDGE RELATIONSHIP GRAPH
+
+### 22.1 Process Relationship Chains
+- Attendance -> Payroll -> Cash -> Reports
+- Escort -> Roster -> Attendance -> Payment -> Payroll -> Reports
+- Candidate -> Recruitment -> Employee -> Attendance -> Payroll -> Exit
+
+### 22.2 Graph Deliverables
+- Process graph (workflow-centric)
+- Role graph (identity-centric)
+- Data-flow graph (persistence-centric)
+
+---
+
+## REPORT 23 - KNOWLEDGE COVERAGE MATRIX
+
+### 23.1 Coverage Evaluation
+Current KB has strong policy and workflow base, but under-covers hidden runtime safeguards and internal governance behavior.
+
+### 23.2 Coverage Status Labels
+- Documented and accurate
+- Documented but partial
+- Missing
+- Contradictory
+
+---
+
+## REPORT 24 - PROPOSED KNOWLEDGE ARTICLES
+
+### 24.1 Priority A (Immediate)
+- Router priority and suppression matrix
+- Draft policy and exception matrix
+- Admin command reference and RBAC map
+- Anti-abuse safeguards and outbound protections
+
+### 24.2 Priority B (Near-Term)
+- Scheduler operations runbook
+- Identity resolution decision table
+- RAG architecture and safety policy
+- OCR release handling policy
+
+### 24.3 Priority C (Follow-On)
+- Deep parser internals catalog
+- Database behavior compendium
+- AI fallback and degradation handbook
+
+---
+
+## REPORT 25 - PROPOSED KNOWLEDGE BOOKS
+
+Proposed large books:
+- attendance_engine.md
+- escort_engine.md
+- payroll_engine.md
+- payment_engine.md
+- identity_engine.md
+- message_router_engine.md
+- parser_engine.md
+- rag_engine.md
+- scheduler_engine.md
+- admin_command_engine.md
+- bridge_engine.md
+- database_engine.md
+- social_engine.md
+
+Each book should include:
+- Purpose
+- Architecture
+- Workflow
+- Decision trees
+- State machine
+- Error/recovery
+- Security visibility notes
+- Revision history
+
+---
+
+## REPORT 26 - PROPOSED FOLDER CHANGES
+
+Knowledge-only folder actions:
+- Expand internal/developer/system sections for engine-level runtime behavior.
+- Preserve role-centric public/admin segmentation.
+- Maintain archived traceability records.
+
+No production repository runtime folder changes are required for this phase.
+
+---
+
+## REPORT 27 - PROPOSED FILE CHANGES
+
+Planned KB-only outputs:
+- New missing articles for hidden runtime logic.
+- Expanded workflows and state-machine files.
+- Conflict records and management decision logs.
+- Updated inventory, duplicate, missing, and coverage reports.
+
+All changes remain documentation-only and non-invasive to production behavior.
+
+---
+
+## REPORT 28 - KNOWLEDGE BASE GENERATION PLAN
+
+### 28.1 Stage Plan
+1. Freeze baseline behavior references.
+2. Publish critical hidden-rule documents (safety/routing first).
+3. Publish command and governance docs.
+4. Publish workflow/state-machine books.
+5. Publish parser/validation and RAG internal docs.
+6. Resolve conflicts via management decisions.
+7. Certify coverage matrix and readiness.
+
+### 28.2 Exit Criteria
+- Every critical workflow reproducible from docs.
+- Every high-risk rule documented with correct visibility.
+- Conflicts explicitly resolved with decision trace.
+- No critical operational knowledge remains code-only.
+
+---
+
+## Consolidated Risk Register
+- R-01: Hidden safety rules not documented may cause accidental behavior drift.
+- R-02: Formula conflicts in payment/payroll knowledge can create policy mismatch.
+- R-03: Incomplete command/RBAC docs increase admin operational error risk.
+- R-04: Under-documented anti-abuse filters can increase leakage/spam risk.
+
+Mitigation:
+- Prioritize critical hidden-rule publication and conflict governance before broad KB expansion.
+
+---
+
+## Management Approval Gate
+STOP after analysis.
+
+Before any KB mutation:
+- Approve this detailed analysis package.
+- Approve conflict resolution protocol.
+- Approve visibility policy for sensitive internals.
+- Approve staged generation plan.
+
+Approval status: PENDING
+
+Sign-off:
+- Management Representative: __________________
+- Date: __________________
+- Decision Notes: __________________

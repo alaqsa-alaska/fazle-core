@@ -1,0 +1,206 @@
+Source: knowledge_base/02_admin_knowledge/admin_operations_overview.md
+SHA256: ad97e2f6ec207f0b7668e9e20bf705ee92308e7989716f4b12bcc88d9b176f0b
+Version: ad97e2f6ec20
+
+# Admin Operations Overview
+
+## Purpose
+Central admin-facing source of truth for operating the Fazle AI Platform without exposing internal logic to employees, candidates, or clients.
+
+## Scope
+Visible to Admin, HR, Operation Officer, Supervisor, Accountant, and Management.
+
+## Operating Model
+The system is role-routed, not domain-routed. Every incoming message must be resolved to a role or sub-role before the AI decides whether it can answer, draft, verify, escalate, or stay silent.
+
+## Admin Responsibilities
+- Review attendance drafts before attendance becomes final.
+- Review escort order drafts before client confirmation.
+- Handle payment messages and accountant handoff.
+- Resolve unclear identity and unknown-number cases.
+- Maintain employee, candidate, client, vendor, and role records.
+- Approve exceptions for joining fee, advance, payment, and duty cases.
+
+## Business Rules
+- Candidate FAQ can auto-send when intent is clear.
+- Sensitive/internal or unclear messages must route to admin/manual review.
+- Payment completion occurs when admin's payment message reaches accountant WhatsApp.
+- Ledger/database update follows accountant handoff.
+- Frontend edits to role, permission, employee, client, or workflow records must update the backend source records immediately.
+
+## Cross References
+- ../03_ai_identity/permission_matrix.md
+- ../04_business_rules/payment_business_rules.md
+- ../05_workflows/payment_workflow.md
+- ../06_developer_system/database_rules.md
+
+## Revision History
+- 2026-06-19: Created as role-centric admin source of truth.
+- 2026-06-22: Enriched with complete command reference, RBAC roles, and scheduler commands (Wave-1).
+
+---
+
+## Complete Admin Command Reference
+
+### Purpose
+All 37 WhatsApp admin commands, their syntax, required RBAC role, and action.
+
+**RBAC hierarchy:** `viewer < operator < accountant < admin < superadmin`
+
+**Global command features:**
+- Bangla digits accepted: `APPROVE ১৬৫` = `APPROVE 165`
+- Multi-ID APPROVE: `APPROVE 165 166 167` approves all three in one command
+- Command dedup: same command within 30 seconds from same sender is silently ignored
+- All commands logged to `fazle_admin_audit`
+
+---
+
+### Group 1: Draft Management
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| APPROVE | `APPROVE <id>` or `APPROVE <id> <id> ...` | operator | Load draft → send to recipient → mark sent |
+| REJECT | `REJECT <id>` | operator | Mark draft rejected |
+| EDIT | `EDIT <id> <new text>` | operator | Replace draft text |
+| STATUS | `STATUS` | viewer | Show pending draft count |
+| DRAFTS | `DRAFTS [page]` | viewer | List pending drafts paginated |
+
+---
+
+### Group 2: Payment Commands
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| PAID | `PAID <draft_id> <amount> bkash\|nagad\|cash [ref=X]` | accountant | Finalize payment → notify accountant |
+| ADVANCE | `ADVANCE <draft_id> <amount> bkash\|nagad\|cash [ref=X]` | accountant | Finalize advance → notify accountant |
+| REJECT | `REJECT <payment_draft_id>` | operator | Reject payment draft |
+
+---
+
+### Group 3: Escort Commands
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| ESCORTCONFIRM | `ESCORTCONFIRM <id>\|<name>\|<mobile>\|<date>\|<shift>` | operator | Assign escort to program |
+| ESCORTCANCEL | `ESCORTCANCEL <program_id> <reason>` | operator | Cancel escort program |
+| ESCORTLIST | `ESCORTLIST [status]` | viewer | List programs by status |
+| ESCORTDETAIL | `ESCORTDETAIL <id>` | viewer | Show program full detail |
+
+---
+
+### Group 4: Payroll Commands
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| PAYROLL COMPUTE | `PAYROLL COMPUTE <YYYY-MM> [employee_id]` | accountant | Compute payroll run |
+| PAYROLL SUBMIT | `PAYROLL SUBMIT <run_id>` | accountant | draft → reviewed |
+| PAYROLL APPROVE | `PAYROLL APPROVE <run_id>` | accountant | reviewed → approved |
+| PAYROLL LOCK | `PAYROLL LOCK <run_id>` | accountant | approved → locked |
+| PAYROLL PAID | `PAYROLL PAID <run_id> <amount> bkash\|nagad\|cash [ref=X]` | accountant | locked → paid |
+| PAYROLL CANCEL | `PAYROLL CANCEL <run_id> <reason>` | accountant | → cancelled |
+| PAYROLL LIST | `PAYROLL LIST <YYYY-MM> [status]` | viewer | List payroll runs for period |
+
+---
+
+### Group 5: Report Commands
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| REPORT DAILY | `REPORT DAILY` | viewer | Daily operations summary |
+| REPORT PAYROLL | `REPORT PAYROLL <YYYY-MM>` | viewer | Payroll report for month |
+| REPORT CASH | `REPORT CASH [days]` | viewer | Cash flow report |
+| REPORT RECON | `REPORT RECON [days]` | viewer | Payment reconciliation report |
+| REPORT ESCORT | `REPORT ESCORT <start> <end>` | viewer | Escort program report for date range |
+| REPORT LIST | `REPORT LIST` | viewer | List available report types |
+
+---
+
+### Group 6: Backup Commands
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| BACKUP STATUS | `BACKUP STATUS` | viewer | Show last backup age and status |
+| BACKUP NOW | `BACKUP NOW` | admin | Trigger immediate pg_dump backup |
+| BACKUP LIST | `BACKUP LIST [n]` | viewer | List recent n backups |
+
+---
+
+### Group 7: User / RBAC Commands
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| USER ADD | `USER ADD <phone> <name> [role]` | superadmin | Create admin user (default: viewer) |
+| USER ROLE | `USER ROLE <phone> <role>` | superadmin | Change admin user role |
+| USER REMOVE | `USER REMOVE <phone>` | superadmin | Disable admin user (soft-disable) |
+| USER LIST | `USER LIST` | viewer | List all active admins |
+| USER APIKEY | `USER APIKEY <phone>` | superadmin | Issue API key (SHA-256 stored) |
+
+---
+
+### Group 8: Scheduler Commands
+
+| Command | Syntax | Required Role | Action |
+|---|---|---|---|
+| SCHEDULE STATUS | `SCHEDULE STATUS` | viewer | Show all 15 scheduled job statuses |
+| RUN JOB | `RUN JOB <job_name>` | admin | Manually trigger a scheduled job immediately |
+
+**Source Module:** `modules/admin_commands`, `modules/rbac`, `modules/scheduler`
+**PKCA Report:** 12_command_coverage_report.md
+**Management Authority:** Production evidence; documented 2026-06-22
+
+---
+
+## Employee Management — API (Wave-4)
+
+**Source:** `modules/admin_employees/__init__.py`
+**Endpoint prefix:** `/api/admin/employees`
+**Auth:** `X-Internal-Key` header
+
+### `EmployeeCreate` — 11 User Fields + 3 Auto-Set
+
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `employee_name` | ✅ | — | Non-blank after strip |
+| `employee_mobile` | ✅ | — | **Immutable identity anchor** — normalized to FPE 11-digit on insert; uniqueness enforced (409 if duplicate) |
+| `designation` | | `"Staff"` | Cleaned, defaults to Staff if blank |
+| `joining_date` | | `null` | ISO date string `YYYY-MM-DD` |
+| `bkash_number` | | `null` | bKash payment number |
+| `nagad_number` | | `null` | Nagad payment number |
+| `basic_salary` | | `null` | Base monthly salary (float) |
+| `nid_number` | | `null` | National ID number |
+| `emergency_contact` | | `null` | Emergency contact phone |
+| `address` | | `null` | Home/work address |
+| `bank_account` | | `null` | Bank account number |
+| `status` | auto | `'Active'` | Auto-set on create |
+| `created_at` | auto | `NOW()` | Auto-set on create |
+| `updated_at` | auto | `NOW()` | Auto-set on create |
+
+### Critical Rules
+
+**Mobile immutability:** `employee_mobile` is the identity anchor and is **never editable after creation**. `EmployeeUpdate` does not include `employee_mobile`. Changing mobile requires creating a new employee record.
+
+**FPE auto-seed:** After every successful `POST /api/admin/employees`, `match_or_create_employee()` from `fazle_payroll_engine.employee` is called to pre-seed the FPE employee record. This call is **non-fatal** — FPE seed failure is logged but does not roll back the `wbom_employees` insert.
+
+**Soft deactivation:** Setting `status='Inactive'` via `PATCH /api/admin/employees/{id}` propagates to `fpe_employees` (by phone lookup). Physical deletion never occurs.
+
+**Duplicate guard:** If a record with the same `employee_mobile` already exists → HTTP 409 Conflict.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/admin/employees` | Create employee (11 user fields + FPE auto-seed) |
+| `GET` | `/api/admin/employees` | Paginated list with search |
+| `GET` | `/api/admin/employees/{id}` | Single employee detail |
+| `PATCH` | `/api/admin/employees/{id}` | Partial update (10 editable fields; mobile excluded) |
+| `DELETE` | `/api/admin/employees/{id}` | Soft-deactivate (status → Inactive; propagates to FPE) |
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-19 | Initial: role-centric admin source of truth | KSP |
+| 2026-06-22 | Wave-1: Complete command reference, RBAC roles, scheduler commands | KSP Wave-1 |
+| 2026-06-23 | Wave-4: Added Employee Management API section (13 fields, mobile immutability, FPE auto-seed, soft deactivation) | W4-AUTH |

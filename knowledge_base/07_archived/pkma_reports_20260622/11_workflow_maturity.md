@@ -1,3 +1,11 @@
+---
+title: PKMA Report 11 — Workflow Maturity
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA Report 11 — Workflow Maturity
 
 **Program:** PKMA v1.0

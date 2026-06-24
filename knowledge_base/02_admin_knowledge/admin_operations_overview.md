@@ -1,3 +1,11 @@
+---
+title: Admin Operations Overview
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Admin Operations Overview
 
 ## Purpose

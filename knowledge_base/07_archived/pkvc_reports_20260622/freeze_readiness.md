@@ -1,3 +1,11 @@
+---
+title: Knowledge Base v1.0 Freeze Readiness Report
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # Knowledge Base v1.0 Freeze Readiness Report
 **Date:** 2026-06-22
 **Program:** KSP Wave-2B — Final Governance Gate

@@ -1,4 +1,12 @@
-﻿# Candidate Identity
+---
+title: Candidate Identity
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Candidate Identity
 
 ## Purpose
 Identify job seekers and route them to recruitment-safe answers.

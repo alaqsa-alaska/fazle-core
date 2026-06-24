@@ -1,3 +1,11 @@
+---
+title: PKMA v3 — Production Knowledge Maturity Audit
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA v3 — Production Knowledge Maturity Audit
 **Program:** Production Knowledge Maturity Audit (PKMA)
 **Version:** v3 (Session 10 post-enrichment)

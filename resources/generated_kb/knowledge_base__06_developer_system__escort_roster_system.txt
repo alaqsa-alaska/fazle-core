@@ -1,0 +1,378 @@
+Source: knowledge_base/06_developer_system/escort_roster_system.md
+SHA256: af97dca31c69fadac76929769701f56d9293301a891aab7060dc9c2f3fac9ea4
+Version: af97dca31c69
+
+# Escort Roster System
+**KB Article ID:** DEV-06-ESCORT-ROSTER
+**Sources:** `modules/escort_roster/` — `__init__.py` (22), `calculations.py` (148), `db.py` (1054), `extractor.py` (417), `history_sync.py` (948), `routes.py` (522) — all read 2026-06-23
+**Visibility:** Developer / Admin only — do NOT set `safe_for_customer=True`
+**Certified:** 2026-06-23 (Wave-3, W3-AUTH)
+
+---
+
+## Overview
+
+The escort roster module maintains a real-time, calculated payroll mirror of escort program assignments. Every row in `wbom_escort_programs` (the operational parent) has a corresponding row in `escort_roster_entries` (the payroll child). The child row stores computed pay fields that the parent table does not.
+
+**Public API** (importable from `modules.escort_roster`):
+
+```python
+sync_program_to_roster(program_id)   # upsert one program → roster entry
+sync_all_programs()                  # bulk sync ALL programs (idempotent)
+recalculate_entry(program_id)        # recompute pay (calls sync_program_to_roster)
+get_roster_summary()                 # aggregate stats dict for dashboard
+router                               # FastAPI APIRouter (registered in app/main.py)
+```
+
+**No circular imports:** Other production modules must NOT import from `modules.escort_roster`. This constraint is noted in `__init__.py`.
+
+---
+
+## Two-Table Architecture
+
+| Table | Owner | Purpose |
+|---|---|---|
+| `wbom_escort_programs` | Escort operations | Source of truth: vessel names, dates, employee assignment, program status |
+| `escort_roster_entries` | Escort roster module | Mirror: computed pay columns (shifts, days, salary, conveyance, total) + payroll roster_status |
+
+The roster module is a computed projection — it never writes back to `wbom_escort_programs`.
+
+---
+
+## `sync_program_to_roster(program_id, actor="system")`
+
+Source: `modules/escort_roster/db.py` lines 86–244
+
+**Full upsert flow:**
+
+1. Fetch program row from `wbom_escort_programs` with a LEFT JOIN to `wbom_employees` for escort name
+2. Resolve start date: `start_date` column, fallback to `program_date` column
+3. Resolve start shift: `shift` column, default `"D"` (Day)
+4. Resolve end date: `end_date` column; end shift: `end_shift` column, default `"N"` (Night)
+5. Resolve escort name: `escort_name` column on program, fallback to `employee_name` from employees join
+6. If both `start_date` and `end_date` present: compute pay via `calculate_pay()` (see Pay Calculation below)
+7. If dates missing but `total_payment` present (legacy): use `total_payment` directly
+8. Map operational status to roster_status:
+
+| Program Status | Roster Status |
+|---|---|
+| `draft` | `draft` |
+| `assigned` | `active` |
+| `running` | `active` |
+| `completed` | `completed` |
+| `cancelled` | `cancelled` |
+| *(any other)* | `draft` |
+
+9. If roster entry exists: UPDATE with incremented `calc_version` and `last_synced_at = NOW()`
+10. If no roster entry: INSERT with `calc_version = 1`
+11. Audit log: action = `sync_insert` or `sync_update` → written to `escort_roster_audit_logs`
+12. Return the fresh roster row
+
+**Idempotency:** Safe to call repeatedly — existing rows are updated, not duplicated.
+
+---
+
+## Pay Calculation
+
+Source: `modules/escort_roster/calculations.py`
+
+### Shift Model
+
+- Each calendar day has exactly 2 shifts: **D (Day)** and **N (Night)**, in that order
+- Counting is **inclusive** on both ends: `(start_date, start_shift) → (end_date, end_shift)`
+- 1 shift = 0.5 day
+
+**Examples from code docstring:**
+
+| Start | End | Shifts | Days | Salary (at ৳200/shift) |
+|---|---|---|---|---|
+| 13.05.2026 D | 13.05.2026 D | 1 | 0.5 | ৳200 |
+| 13.05.2026 D | 13.05.2026 N | 2 | 1.0 | ৳400 |
+| 13.05.2026 D | 14.05.2026 N | 4 | 2.0 | ৳800 |
+| 13.05.2026 N | 18.05.2026 D | 10 | 5.0 | ৳2,000 |
+
+### `calculate_pay()` — Full Formula
+
+```python
+calculate_pay(start_date, start_shift, end_date, end_shift,
+              conveyance=Decimal("0"), shift_rate=Decimal("200")) -> dict
+```
+
+Returns:
+```python
+{
+    "total_shifts": int,
+    "total_days":   float,   # total_shifts × 0.5
+    "salary":       float,   # total_shifts × shift_rate
+    "conveyance":   float,   # per-destination from DB
+    "total":        float,   # salary + conveyance
+}
+```
+
+### Shift Rate (DB-Configurable)
+
+`_get_shift_rate()` reads `shift_rate` from `escort_calculation_config` (first row). Default if table empty: `Decimal("200")` (৳200/shift = ৳400/day).
+
+**Alignment with management decisions:**
+- PAY-01 formula: ৳12,000 ÷ 30 = ৳400/day = ৳200/shift × 2 shifts/day ✅ (identical result)
+- CR-05: confirmed ৳400/day authoritative rate ✅
+
+The shift model (৳200/shift) and the management PAY-01 formula (৳400/day) produce identical results. The DB-configurable shift rate must remain at ৳200 unless management explicitly changes PAY-01.
+
+---
+
+## Conveyance Resolution
+
+Source: `modules/escort_roster/db.py` lines 51–71
+
+`_get_conveyance_for_destination(destination)`:
+
+1. Exact match: `escort_calculation_config.destination_key = destination.lower()`
+2. Fuzzy fallback: `ILIKE '%' || destination_key || '%'` — longest match wins
+3. Default: `Decimal("0")` if no match found
+
+**Configuration table:** `escort_calculation_config`
+- Columns: `destination`, `destination_key`, `conveyance_amount`, `shift_rate`, `updated_by`, `updated_at`
+- Unique constraint on `destination_key` (lowercase)
+
+**Management-approved conveyance rates:**
+- Mongla: ৳800 per assignment (PAY-03, management_decisions.md)
+- Other destinations: values stored in DB; not KB-authoritative until management documents them individually
+
+---
+
+## `escort_roster_entries` — Column Reference
+
+Fields written by `sync_program_to_roster()`:
+
+| Column | Source | Notes |
+|---|---|---|
+| `program_id` | `wbom_escort_programs.program_id` | FK to parent |
+| `mother_vessel` | program | |
+| `lighter_vessel` | program | |
+| `master_mobile` | program | |
+| `escort_name` | program.escort_name OR employees.employee_name | |
+| `escort_mobile` | program | |
+| `destination` | program | Used for conveyance lookup |
+| `start_date` | program.start_date OR program.program_date | |
+| `start_shift` | program.shift, default `"D"` | |
+| `end_date` | program.end_date | |
+| `end_shift` | program.end_shift, default `"N"` | |
+| `total_shifts` | calculated | int |
+| `total_days` | calculated | float (total_shifts × 0.5) |
+| `salary` | calculated | float |
+| `conveyance` | from escort_calculation_config | float |
+| `total` | calculated | salary + conveyance |
+| `release_point` | program.release_point OR program.release_location | |
+| `roster_status` | mapped from program.status | draft / active / completed / cancelled |
+| `escort_employee_id` | program.escort_employee_id | |
+| `calc_version` | auto-incremented on each sync | int, starts at 1 |
+| `last_synced_at` | NOW() on every sync | |
+| `expires_at` | optional — for draft TTL override | If set, used in stale-draft check |
+
+---
+
+## Remarks Field — Fault-Tolerant JSON
+
+The `remarks` TEXT column on `wbom_escort_programs` may contain:
+- Clean JSON (normal case)
+- Corrupted JSON — text appended after the closing `}` (WhatsApp extraction artifacts)
+- Plain text (legacy entries)
+
+`_safe_json(text)` handles all three cases:
+1. Find the last `}` in the string
+2. Truncate at that position
+3. Attempt `json.loads()` on the truncated string
+4. On any exception: return `{}` (empty dict)
+
+This ensures roster processing never fails due to malformed remarks.
+
+---
+
+## Audit Logging
+
+Every sync, update, create, and cleanup operation writes a row to `escort_roster_audit_logs`.
+
+Table schema (from `log_audit()` in `db.py` lines 672–708):
+
+| Column | Type | Notes |
+|---|---|---|
+| `program_id` | int | References the affected program |
+| `action` | text | sync_insert, sync_update, edit, create, draft_cleanup, draft_expired, draft_reconciled, junk_draft_cleanup |
+| `old_data` | jsonb | State before change (null for inserts) |
+| `new_data` | jsonb | State after change (null for deletes) |
+| `performed_by` | text | Actor: "system", "scheduler", "api", "reconciler" |
+| `source` | text | "sync", "api", "cleanup", "reconciler", "scheduler" |
+
+`log_audit()` is fail-safe: any DB exception logs at WARNING level and does not propagate.
+
+---
+
+## Roster Entry Lifecycle
+
+```
+wbom_escort_programs.status
+    draft     →  escort_roster_entries.roster_status = "draft"
+    assigned  →  escort_roster_entries.roster_status = "active"
+    running   →  escort_roster_entries.roster_status = "active"
+    completed →  escort_roster_entries.roster_status = "completed"
+    cancelled →  escort_roster_entries.roster_status = "cancelled"
+```
+
+State transitions are driven by `sync_program_to_roster()` — it reads the current program status and overwrites the roster_status on every sync. The roster module does not manage its own state machine independently.
+
+---
+
+## Draft Cleanup Pipeline
+
+Five cleanup functions are defined in `modules/escort_roster/db.py`. They target different sets of draft rows:
+
+---
+
+### 1. `cleanup_draft_entries(actor="system")`
+
+Deletes **ALL** rows in `escort_roster_entries` where `roster_status = 'draft'`.
+
+No age filter — removes all drafts regardless of age. Logs each deletion to audit log before deletion. Returns `{"deleted": N}`.
+
+Called by: API endpoint `/roster/cleanup-drafts` (admin action, not scheduler).
+
+---
+
+### 2. `expire_stale_drafts(hours=48, actor="scheduler")`
+
+Deletes roster drafts that meet either condition:
+- `expires_at IS NOT NULL AND expires_at < NOW()`
+- `expires_at IS NULL AND created_at < NOW() - (hours || ' hours')::INTERVAL`
+
+**IMPORTANT — scheduler override:**
+The function default is `hours=48`. However, the **scheduler calls this with `hours=24`**:
+```python
+from modules.escort_roster.db import expire_stale_drafts
+escort_result = await expire_stale_drafts(hours=24, actor="scheduler")
+```
+Source: `modules/scheduler/__init__.py` line 356.
+
+**Actual production TTL for escort roster drafts = 24 hours** (scheduler), not 48 hours (function default).
+
+**Documentation note:** CR-04 stated escort roster draft TTL = 48h vs WhatsApp reply drafts = 24h. This was based on the function default. In practice, the scheduler uses 24h for both. This discrepancy is documented here for management review.
+
+---
+
+### 3. `cleanup_empty_drafts(min_age_hours=1, actor="scheduler")`
+
+Deletes programs from `wbom_escort_programs` that have ALL THREE fields empty:
+- `mother_vessel` IS NULL or blank
+- `lighter_vessel` IS NULL or blank
+- `escort_name` IS NULL or blank
+
+AND are at least `min_age_hours` old (`assignment_time < NOW() - 1 hour`).
+
+Also deletes the corresponding `escort_roster_entries` rows (FK-safe: roster deleted first).
+
+Purpose: removes junk rows from failed OCR or partial extraction jobs that captured no vessel data.
+
+---
+
+### 4. `cleanup_junk_drafts(actor="system")`
+
+Deletes programs where `lighter_vessel` matches known junk patterns (from partial or erroneous OCR output):
+- Starts with a numbered list prefix (e.g. `"15. "`)
+- Contains `"CAPACITY:"` substring
+- Contains `"PHONE:"` substring
+- Contains `"Contact number"` substring
+- Contains `"S/N:"` substring
+- Starts with `"SI. No"`
+- Starts with `"@BR-"` (bridge message IDs incorrectly parsed as vessel names)
+
+FK-safe: deletes `escort_roster_entries` rows first, then `wbom_escort_programs` rows. Logs each deletion to audit log.
+
+---
+
+### 5. `reconcile_drafts_for_confirmation(lighter_vessel, mother_vessel, actor="reconciler")`
+
+Called after a program is confirmed (status changes from draft to assigned/running). Removes orphaned draft rows that were superseded by the confirmed program.
+
+Matching uses fuzzy similarity (`SequenceMatcher`):
+- Lighter vessel similarity ≥ 0.75 (required)
+- Mother vessel similarity ≥ 0.60 (optional filter when both non-empty)
+
+FK-safe: deletes `escort_roster_entries` first, then `wbom_escort_programs` drafts only.
+
+---
+
+## Historical Sync Worker
+
+Source: `modules/escort_roster/history_sync.py`
+
+**Purpose:** Backfill — reconstruct historical escort duty records from WhatsApp conversation export files. Does not operate on live production data.
+
+**Flow:**
+1. Parse conversation export file (timestamp + direction + text per line)
+2. For each outbound admin message: extract escort order(s)
+3. Save to `escort_order_groups` (one per message) and `escort_order_lighters` (one per lighter assignment)
+4. Match each lighter to existing `wbom_escort_programs` rows using confidence scoring
+5. Upsert matched programs into `escort_roster_entries`
+
+**Matching confidence levels** (from `history_sync.py` docstring):
+
+| Confidence | Match Method |
+|---|---|
+| 1.00 | Exact `escort_mobile` match in `wbom_escort_programs` |
+| 0.95 | Exact `master_mobile` + lighter name fuzzy ≥ 0.80 |
+| 0.85 | Lighter vessel fuzzy ≥ 0.85 + date match |
+| 0.70 | Lighter vessel fuzzy ≥ 0.70 + mother vessel fuzzy ≥ 0.70 |
+| 0.50 | Escort name exact + date match |
+
+**Supported destination aliases** (from `DESTINATIONS` dict in history_sync.py):
+Narayanganj, Noapara, Nagarbari, Aricha, Bhairab, Ashuganj, Chandpur, Barishal, Mongla, Rupshi, Kachpur, Chittagong (and common abbreviations/spellings).
+
+---
+
+## Date/Shift Parsing
+
+Source: `modules/escort_roster/calculations.py` lines 117–148
+
+`parse_date_shift(text)` parses date + optional shift marker from free text.
+
+**Accepted input formats:**
+- `13.05.2026(D)` or `13.05.2026(N)` — date with explicit shift
+- `13.05.26(D)` — 2-digit year (adds 2000)
+- `13.05.2026` — date only (no shift; returns shift=None)
+- Separators: `.`, `-`, `/`
+
+**Returns:** `(date_obj, shift_char)` where `shift_char` is `"D"`, `"N"`, or `None`.
+
+**Invalid inputs:** Returns `(None, None)`.
+
+---
+
+## `update_roster_entry()` — Editable Fields
+
+When an entry is updated via API, only these fields may be changed:
+
+```
+notes, release_point, roster_status, conveyance, end_date, end_shift,
+start_date, start_shift, mother_vessel, lighter_vessel, master_mobile,
+escort_name, escort_mobile
+```
+
+If any of `start_date`, `start_shift`, `end_date`, `end_shift` is updated → pay is automatically recalculated from the new dates. Every edit is written to `escort_roster_audit_logs` with `action="edit"`.
+
+---
+
+## Related Scheduler Jobs
+
+| Job Name | Function Called | Frequency | Notes |
+|---|---|---|---|
+| `combined_draft_cleanup` | `expire_stale_drafts(hours=24)` | Hourly | Clears escort roster drafts older than 24h |
+| *(cleanup jobs)* | `cleanup_empty_drafts()` | (check scheduler for schedule) | Clears empty OCR artifacts |
+| *(cleanup jobs)* | `cleanup_junk_drafts()` | (check scheduler for schedule) | Clears malformed vessel-name drafts |
+
+---
+
+## Visibility
+
+This article is **Developer/Admin only**. Do not set `safe_for_customer=True`.
+
+Reason: Contains pay formulas, conveyance rate resolution logic, internal DB schema, and draft cleanup behavior — all financial calculation internals that must not be visible to candidates or external contacts.

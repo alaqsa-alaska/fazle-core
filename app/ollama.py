@@ -16,8 +16,8 @@ import asyncio
 import json
 import logging
 import time
-import httpx
 from app.config import get_settings
+from app import ollama_daemon
 from shared.reply_policy import (
     build_whatsapp_reply_policy,
     build_whatsapp_recruitment_policy,
@@ -76,30 +76,26 @@ async def classify_intent_llm(text: str) -> str:
     )
     async with _ollama_sem:
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                payload = {
-                    "model": settings.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 10, "num_ctx": 256},
+            payload = {
+                "model": settings.ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.1, "num_predict": 10, "num_ctx": 256},
+            }
+            if _is_qwen3(settings.ollama_model):
+                payload["think"] = False
+            r = await ollama_daemon.post_generate(payload, timeout=30.0)
+            if r.status_code == 200:
+                result = r.json().get("response", "").strip().lower().split()[0]
+                valid = {
+                    "recruitment", "salary_query", "payment_due", "escort_duty",
+                    "complaint", "client_order", "leave", "join", "attendance",
+                    "slip_submission", "voice_note", "greeting", "unknown",
                 }
-                if _is_qwen3(settings.ollama_model):
-                    payload["think"] = False
-                r = await client.post(
-                    f"{settings.ollama_url}/api/generate",
-                    json=payload,
-                )
-                if r.status_code == 200:
-                    result = r.json().get("response", "").strip().lower().split()[0]
-                    valid = {
-                        "recruitment", "salary_query", "payment_due", "escort_duty",
-                        "complaint", "client_order", "leave", "join", "attendance",
-                        "slip_submission", "voice_note", "greeting", "unknown",
-                    }
-                    return result if result in valid else "unknown"
-                else:
-                    log.warning("[ollama] classify_intent_llm non-200: status=%d body=%.100s",
-                                r.status_code, r.text)
+                return result if result in valid else "unknown"
+            else:
+                log.warning("[ollama] classify_intent_llm non-200: status=%d body=%.100s",
+                            r.status_code, r.text)
         except Exception as e:
             log.warning(f"Ollama classify error: {type(e).__name__}: {e}")
     return "unknown"
@@ -131,29 +127,25 @@ async def generate_reply(
     t0 = time.monotonic()
     async with _ollama_sem:
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                payload = {
-                    "model": settings.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.4, "num_predict": 50, "num_ctx": 512},
-                }
-                if _is_qwen3(settings.ollama_model):
-                    payload["think"] = False
-                r = await client.post(
-                    f"{settings.ollama_url}/api/generate",
-                    json=payload,
-                )
-                if r.status_code == 200:
-                    reply_text = r.json().get("response", "").strip()
-                    latency_ms = int((time.monotonic() - t0) * 1000)
-                    asyncio.create_task(_log_llm(
-                        "generate_reply", settings.ollama_model, prompt, reply_text, latency_ms,
-                    ))
-                    return reply_text
-                else:
-                    log.warning("[ollama] generate_reply non-200: status=%d body=%.100s",
-                                r.status_code, r.text)
+            payload = {
+                "model": settings.ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.4, "num_predict": 50, "num_ctx": 512},
+            }
+            if _is_qwen3(settings.ollama_model):
+                payload["think"] = False
+            r = await ollama_daemon.post_generate(payload, timeout=120.0)
+            if r.status_code == 200:
+                reply_text = r.json().get("response", "").strip()
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                asyncio.create_task(_log_llm(
+                    "generate_reply", settings.ollama_model, prompt, reply_text, latency_ms,
+                ))
+                return reply_text
+            else:
+                log.warning("[ollama] generate_reply non-200: status=%d body=%.100s",
+                            r.status_code, r.text)
         except Exception as e:
             log.error(f"Ollama generate error: {type(e).__name__}: {e}")
 
@@ -197,33 +189,29 @@ async def generate_recruitment_reply(
     t0 = time.monotonic()
     async with _ollama_sem:
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                payload = {
-                    "model": settings.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.2,
-                        "num_predict": 50,
-                        "num_ctx": 512,
-                        "repeat_penalty": 1.08,
-                    },
-                }
-                if _is_qwen3(settings.ollama_model):
-                    payload["think"] = False
-                r = await client.post(
-                    f"{settings.ollama_url}/api/generate",
-                    json=payload,
-                )
-                if r.status_code == 200:
-                    reply_text = r.json().get("response", "").strip()
-                    latency_ms = int((time.monotonic() - t0) * 1000)
-                    asyncio.create_task(_log_llm(
-                        "generate_recruitment_reply", settings.ollama_model, prompt, reply_text, latency_ms,
-                    ))
-                    return reply_text
-                log.warning("[ollama] generate_recruitment_reply non-200: status=%d body=%.100s",
-                            r.status_code, r.text)
+            payload = {
+                "model": settings.ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                    "num_predict": 50,
+                    "num_ctx": 512,
+                    "repeat_penalty": 1.08,
+                },
+            }
+            if _is_qwen3(settings.ollama_model):
+                payload["think"] = False
+            r = await ollama_daemon.post_generate(payload, timeout=120.0)
+            if r.status_code == 200:
+                reply_text = r.json().get("response", "").strip()
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                asyncio.create_task(_log_llm(
+                    "generate_recruitment_reply", settings.ollama_model, prompt, reply_text, latency_ms,
+                ))
+                return reply_text
+            log.warning("[ollama] generate_recruitment_reply non-200: status=%d body=%.100s",
+                        r.status_code, r.text)
         except Exception as e:
             log.error(f"Ollama recruitment generate error: {type(e).__name__}: {e}")
 
@@ -295,13 +283,12 @@ async def generate_rag_answer(
 
     async with _rag_sem:
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                r = await client.post(f"{settings.ollama_url}/api/generate", json=payload)
-                if r.status_code == 200:
-                    reply = r.json().get("response", "").strip()
-                    return reply if reply else None
-                log.warning("[ollama] generate_rag_answer non-200: status=%d body=%.100s",
-                            r.status_code, r.text)
+            r = await ollama_daemon.post_generate(payload, timeout=120.0)
+            if r.status_code == 200:
+                reply = r.json().get("response", "").strip()
+                return reply if reply else None
+            log.warning("[ollama] generate_rag_answer non-200: status=%d body=%.100s",
+                        r.status_code, r.text)
         except Exception as e:
             log.error("Ollama RAG answer error: %s: %s", type(e).__name__, e)
     return None
@@ -361,13 +348,12 @@ Admin-এর প্রশ্ন: {question[:400]}
 
     async with _rag_sem:
         try:
-            async with httpx.AsyncClient(timeout=180.0) as client:  # was 120s; 180s covers 100 tok at 0.8 tok/s
-                r = await client.post(f"{settings.ollama_url}/api/generate", json=payload)
-                if r.status_code == 200:
-                    reply = r.json().get("response", "").strip()
-                    return reply if reply else None
-                log.warning("[ollama] generate_chat_reply non-200: status=%d body=%.100s",
-                            r.status_code, r.text)
+            r = await ollama_daemon.post_generate(payload, timeout=180.0)
+            if r.status_code == 200:
+                reply = r.json().get("response", "").strip()
+                return reply if reply else None
+            log.warning("[ollama] generate_chat_reply non-200: status=%d body=%.100s",
+                        r.status_code, r.text)
         except Exception as e:
             log.error("Ollama chat reply error: %s: %s", type(e).__name__, e)
     return None
@@ -377,16 +363,16 @@ async def check_ollama_health() -> dict:
     """Check if Ollama is reachable and return available models."""
     settings = get_settings()
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{settings.ollama_url}/api/tags")
-            if r.status_code == 200:
-                models = [m["name"] for m in r.json().get("models", [])]
-                return {
-                    "status": "ok",
-                    "models": models,
-                    "active_model": settings.ollama_model,
-                    "queue_depth": _ollama_sem._value,
-                }
+        r = await ollama_daemon.get_tags(timeout=5.0)
+        if r.status_code == 200:
+            models = [m["name"] for m in r.json().get("models", [])]
+            return {
+                "status": "ok",
+                "models": models,
+                "active_model": settings.ollama_model,
+                "queue_depth": _ollama_sem._value,
+                "daemon": ollama_daemon.diagnostics(),
+            }
     except Exception as e:
         return {"status": "error", "error": str(e)}
     return {"status": "error"}

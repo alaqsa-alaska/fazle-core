@@ -1,3 +1,11 @@
+---
+title: Management Decisions and Directives Record (Approved)
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # Management Decisions and Directives Record (Approved)
 
 - Program: Fazle AI Platform PKVC

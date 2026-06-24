@@ -1,3 +1,11 @@
+---
+title: PKMA Report 10 — Business Rule Maturity
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA Report 10 — Business Rule Maturity
 
 **Program:** PKMA v1.0

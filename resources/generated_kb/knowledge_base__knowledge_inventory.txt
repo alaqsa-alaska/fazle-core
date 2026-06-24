@@ -1,0 +1,37 @@
+Source: knowledge_base/knowledge_inventory.md
+SHA256: cec5751bccfb41e7c6993b58825c55369d176c04864995868315c844a4790bef
+Version: cec5751bccfb
+
+# Knowledge Inventory
+
+## Summary
+- Total Policies: 12
+- Total SOP / Workflows: 8
+- Total AI Prompt/System Rule Files: 14
+- Total Business Rule Files: 8
+- Total Narrative Articles: 8
+- Total Structured Documents: 40+
+- Total Archived/Legacy Notes: 3
+- Total Deprecated: 0 hard-deleted; old structure retained for traceability
+- Total Candidate Articles: 2 direct, plus identity/rules/workflow support
+- Total Employee Articles: 8 direct
+- Total Admin Articles: 10+
+- Total Developer Articles: 14+
+
+## Source Files Used
+- ADMIN SYSTEM KNOWLEDGE (Restricted).txt
+- HR_ Identity brain & Candidate.txt
+- The Fazle System_ AI Automation and Operations Management.txt
+- Management conflict decisions from 2026-06-19
+
+## Current Architecture
+- 01_employee_knowledge
+- 02_admin_knowledge
+- 03_ai_identity
+- 04_business_rules
+- 05_workflows
+- 06_developer_system
+- 07_archived
+
+## Notes
+This inventory is designed for AI retrieval and operational system design, not only human documentation.

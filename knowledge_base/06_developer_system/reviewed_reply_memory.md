@@ -1,3 +1,11 @@
+---
+title: Reviewed Reply Memory
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Reviewed Reply Memory
 **KB Article ID:** DEV-06-REVIEWED-REPLY-MEMORY
 **Source:** `modules/reviewed_reply_memory/__init__.py` (365 lines — read 2026-06-23)

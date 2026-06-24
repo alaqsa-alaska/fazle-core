@@ -1,3 +1,11 @@
+---
+title: Runtime Gateway & Feature Flags
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Runtime Gateway & Feature Flags
 **KB Article ID:** DEV-06-GATEWAY-FLAGS
 **Sources:** `shared/runtime_gateway.py` (614 lines), `/home/azim/core/.env` — both read 2026-06-23
@@ -68,7 +76,7 @@ Current production values are shown. These may differ in staging/test environmen
 | Flag | Current Value | Module | Notes |
 |---|---|---|---|
 | `PRIMARY_AI_PROVIDER` | `github_models` | `app/llm.py` | Primary LLM selection: `github_models`, `groq`, `ollama` |
-| `OLLAMA_REPLY_DISABLED` | `false` | `app/llm.py` | When `true`: skips Ollama as LLM provider even when configured |
+| `OLLAMA_REPLY_DISABLED` | `false` | `app/llm.py` | When `true`: skips Ollama for reply generation; fallback becomes Groq → GitHub Models |
 | `GITHUB_MODEL_NAME` | `openai/gpt-4.1` | `app/llm.py` | Model identifier for GitHub Models API |
 | `GROQ_MODEL_NAME` | `llama-3.1-8b-instant` | `app/llm.py` | Model identifier for Groq API |
 | `OLLAMA_MODEL` | `qwen3:8b` | `app/llm.py` | Model name for Ollama local instance |
@@ -243,10 +251,11 @@ These flags are read on each message processing cycle:
 2. Queue accumulates in `fazle_message_queue` (no messages lost if queue persists)
 3. After fixing outbound service: set `OUTBOUND_ENABLED=true` → restart
 
-**Scenario: LLM provider down (GitHub Models / Groq)**
+**Scenario: LLM provider down (Ollama / Groq / GitHub Models)**
 1. Set `PRIMARY_AI_PROVIDER=ollama` in `.env` → restart
-2. Ollama fallback runs locally at `OLLAMA_URL`
-3. If Ollama also down: set `OLLAMA_REPLY_DISABLED=true` → restart
+2. Ollama runs locally at `OLLAMA_URL` and is the primary provider
+3. If Ollama is degraded: fallback proceeds to Groq, then GitHub Models
+4. If Ollama must be bypassed for replies: set `OLLAMA_REPLY_DISABLED=true` → restart
 4. System falls back to KB-only replies (no LLM output)
 
 **Scenario: Hybrid RAG causing wrong results**

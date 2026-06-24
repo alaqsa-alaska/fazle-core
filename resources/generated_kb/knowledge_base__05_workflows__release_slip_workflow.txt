@@ -1,0 +1,116 @@
+Source: knowledge_base/05_workflows/release_slip_workflow.md
+SHA256: 7c8b97d3c433a46820b249735e0fb713e2b0d9413dddf059e93a295df6a0d512
+Version: 7c8b97d3c433
+
+# Release Slip Workflow
+
+## Flow
+Escort Sends Slip -> Media Store -> OCR/Manual Read -> Date/Time/Signature Check -> Duty Days -> Food/Conveyance -> Advance Deduction -> Final Payment Draft.
+
+## Required Fields
+Release date, release time, supervisor or ghat signature, escort identity, duty context.
+
+## Manual Review
+Unreadable image, missing signature, missing date/time, mismatched escort identity.
+
+## Cross References
+- escort_workflow.md
+- ../06_developer_system/ocr_engine.md
+
+---
+
+## Release Confirmation Parser
+
+### Purpose
+When an admin sends a release confirmation message (containing `[RELEASE CONFIRMED]`), the parser extracts 6 structured fields to build the final payment draft.
+
+### Extracted Fields
+
+| Field | Parser Constant | Description |
+|---|---|---|
+| Release date | `_RC_DATE_RE` | Date escort was released |
+| Release shift | `_RC_SHIFT_RE` | D (Day) or N (Night) |
+| Release point/location | `_RC_POINT_RE` | Location where escort was released |
+| Duty days | `_RC_DAYS_RE` | Total days on duty |
+| Conveyance amount | `_RC_CONV_RE` | Transport cost (BDT) |
+| Food amount | `_RC_FOOD_RE` | Food cost (BDT) |
+
+**Business Rule:** All 6 fields must be present for the payment draft to be auto-generated. Missing fields trigger manual review.
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Function:** `parse_release_confirmation()`
+**PKCA Report:** 05_parser_coverage_report.md
+**Management Authority:** Production evidence; documented 2026-06-22
+
+---
+
+## Release Date Validation
+
+### Purpose
+Prevents incorrect dates from creating payment drafts with wrong duty day counts.
+
+### Validation Rules
+
+| Condition | Action |
+|---|---|
+| Release date is in the future | Rejected; returns validation error |
+| Release date is more than 1 year in the past | Rejected; treated as stale data |
+| Release date within valid range | Accepted; duty days calculated |
+
+**Business Rule:** Admin must correct the date before the payment draft can be generated.
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Function:** `_validate_release_date()`
+**PKCA Report:** 09_state_machine_coverage_report.md (HK-22)
+
+---
+
+## Duty Day Calculation
+
+### Formula
+```
+duty_days = (release_date - start_date).days + 1
+```
+
+**Food cost:** `duty_days × 150 BDT` (with time exceptions — see escort_business_rules.md)
+
+**Transport:** Based on `_TRANSPORT_RATES` table (see escort_business_rules.md)
+
+**Warning threshold:** If `duty_days > 90`, a SUSPICIOUS flag is added to the draft for admin attention.
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Function:** `_calc_duty_days()`, `build_release_draft()`
+**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-20, HK-23)
+
+---
+
+## OCR Slip Extraction
+
+### Purpose
+When an escort sends a physical release slip as an image (JPG/JPEG/PNG/WEBP), the OCR system attempts to extract structured data automatically.
+
+### Image Requirements (Production Enforced)
+- **Accepted formats:** JPG, JPEG, PNG, WEBP
+- **Size range:** 1 KB minimum, 8 MB maximum
+- **Out-of-range images:** Rejected with manual review prompt
+
+### Document Types Detected
+| Type | Characteristics |
+|---|---|
+| `printed_template_slip` | Contains 16+ template keywords (al-aqsa, escort slip, master mobile, etc.) |
+| `handwritten_blank_slip` | Contains Bangla/English field words without printed header |
+| `mixed_form` | Mix of printed and handwritten elements |
+| `unknown_document` | Cannot determine type; routes to manual review |
+
+### Required Fields (EscortSlipResult)
+For a slip to be accepted without manual review, these 6 fields must be extracted with sufficient confidence:
+- `mother_vessel`
+- `lighter_vessel`
+- `escort_name`
+- `escort_mobile`
+- `start_date`
+- `completion_date`
+
+**Source Module:** `modules/escort_slip_extractor`
+**Source Function:** `extract_slip()`, `detect_document_type()`
+**PKCA Report:** 05_parser_coverage_report.md

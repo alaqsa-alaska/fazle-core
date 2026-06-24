@@ -1,0 +1,665 @@
+Source: knowledge_base/00_governance/master_execution_plan_v2.md
+SHA256: 273e07d1c0400ed919960e8d1c7379718764ed915122b186d11fec9146a0c527
+Version: 273e07d1c040
+
+# Master Execution Plan v2 — Organizational Brain Validation & Alignment
+**Document ID:** MEP-v2
+**Created:** 2026-06-23
+**Last Updated:** 2026-06-23 (Session 7 rewrite — post-KB v2 Certification)
+**Authority:** Management — Al-Aqsa Security & Logistics Services Ltd.
+**Goal:** Knowledge Base → Organizational Brain → Production AI
+**Status:** KB v2 CERTIFIED — Phase 6 (Conditional Refactoring) is the active phase
+
+---
+
+## How to Use This Document
+
+This is the canonical execution roadmap for every future AI agent session. Before starting any work:
+
+1. Read this document completely
+2. Read `management_decisions.md` — confirm phase authorization exists
+3. Read `kb_enrichment_plan_v2.md` — task templates and detailed content specs
+4. Read `organizational_brain_gap_report.md` — gap categories and business impact scores
+5. Run the pre-conditions check in the target phase
+6. Only then begin execution
+
+**Cross-reference authority:** When this document conflicts with `kb_enrichment_plan_v2.md`, this document takes precedence for phase sequencing. `kb_enrichment_plan_v2.md` takes precedence for article content templates.
+
+---
+
+## Current State Baseline (Verified 2026-06-23 — Post-Session 7)
+
+All facts below verified by direct code and file reading.
+
+### Production Infrastructure
+
+| Component | Status | Evidence |
+|---|---|---|
+| Hybrid RAG | ✅ LIVE | `HYBRID_SEARCH_ENABLED=true` in `.env`; `_hybrid_search()` in `modules/rag/__init__.py`; RRF formula live |
+| RRF Fusion | ✅ CONFIRMED | `rrf_score = 1/(60 + rank_bm25) + 1/(60 + rank_vector)` — production formula |
+| Qdrant Vector DB | ✅ ACTIVE | Server mode at `172.20.0.2:6333`; collection `fazle_rag_chunks`; 251 indexed points |
+| MiniLM Encoder | ✅ ACTIVE | `paraphrase-multilingual-MiniLM-L12-v2`, 384 dims, LRU cache 2000 entries |
+| Prompt Builder | ✅ STRUCTURED | `POLICY_VERSION="structured_v2"`, 6-section format (`shared/reply_policy.py`) |
+| Auto Reply | ⚠️ DRAFT MODE | `AUTO_REPLY_ENABLED=false` — all AI replies go to admin queue before sending |
+| Draft Quality Gate | ✅ ACTIVE | `DRAFT_QUALITY_GATE=true`; 4 criteria |
+| Scheduler | ✅ ACTIVE | `SCHEDULER_ENABLED=true`; 15 jobs; `SCHEDULER_TIMEZONE=Asia/Dhaka` |
+| Outbound Queue | ✅ ACTIVE | `OUTBOUND_ENABLED=true`; default sweep interval 10s |
+| Role-Aware RAG | ✅ LIVE | Phase 3 complete; `search(q, k, min_score, role="candidate")` in `modules/rag/__init__.py` |
+| Transport Rates | ✅ FIXED | PAY-03: Mongla=৳800 (fixed 2026-06-23); Faridpur=৳700 remains |
+
+### Knowledge Base State
+
+| Metric | Value | Source |
+|---|---|---|
+| KB version | **v2.0 CERTIFIED** | `management_decisions.md` GOV-06 (2026-06-23) |
+| Weighted module coverage | **67%** (P0+P1 = 100% pass rate) | PKCA v2 report `07_archived/pkca_reports_20260623/` |
+| Maturity score | **4.88 / 5.0** across 18 Wave-4 articles | PKMA v2 report `07_archived/pkma_reports_20260623/` |
+| Active conflicts | **0** | PKVC v2 report: 0 real conflicts; PAY-03 gap now resolved in code |
+| Brain Readiness | **CONDITIONAL** (all P0+P1 pass) | PKCA v2: only P3 utilities below threshold |
+| Last commit | `0a3039e` | KB v2 certified + PAY-03 fix + outbound_delivery.md |
+
+### What Is Done — Full Chronological Record
+
+| Item | Session | Commit | Status |
+|---|---|---|---|
+| Hybrid RAG live (`HYBRID_SEARCH_ENABLED=true`) | Session 2 | — | ✅ |
+| Structured prompt builder `structured_v2` | Session 3 | — | ✅ |
+| Phase 4 production code (5 files) | Session 3 | `4c2b6f2` | ✅ |
+| Wave-2 KB enrichment (23 articles + 2 new) | Session 3 + 4 | `4c2b6f2` | ✅ |
+| Conflict resolutions CR-01–CR-06 | Session 4 | `4c2b6f2` | ✅ |
+| Phase 1 (Wave-3 P1 KB) — 5 articles, 1,492 lines | Session 5 | `43d8eec`–`81818ab` | ✅ |
+| Phase 2 (Identity Brain) — identity_brain + identity_integration | Session 6 | `510cd15` | ✅ |
+| Phase 3 (Visibility Engine) — role-aware RAG + 2 call sites | Session 6 | `359812c` | ✅ |
+| Wave-4 Group A — 13 articles (P2-B through P2-K + 3 new) | Session 7 | `7940415`–`8c92aa2` | ✅ |
+| Wave-4 Group B — payroll_module, fpe_overview, recruitment_flow DDL | Session 7 | `61f2ca3` | ✅ |
+| Wave-4 Group C — admin_commands_detail | Session 7 | `f419135` | ✅ |
+| Wave-4 Group D — social_auto_reply exact specs | Session 7 | `f419135` | ✅ |
+| Phase 5 — PKCA/PKMA/PKVC v2 audit reports | Session 7 | `3ef2c11` | ✅ |
+| **KB v2 CERTIFIED** (GOV-06) | Session 7 | `0a3039e` | ✅ |
+| PAY-03 production fix (Mongla ৳700 → ৳800) | Session 7 | `0a3039e` | ✅ |
+| outbound_delivery.md (P0 module brought to full coverage) | Session 7 | `0a3039e` | ✅ |
+
+---
+
+## Target State — Achieved vs Remaining
+
+```
+KB v2 Certified  ✅ ACHIEVED
+  ├── Coverage        67% weighted (P0 avg 75%, P1 avg 84%)  ← target was ≥90%*
+  ├── P0+P1 pass      100% (16/17 modules ≥70% — only outbound was below, now fixed)
+  ├── Maturity        4.88/5.0  ✅ (target ≥4.0)
+  ├── Conflicts       0  ✅
+  └── PKCA/PKMA/PKVC v2 all PASS  ✅
+
+*90% weighted target NOT met due to P3 utilities (0–10%).
+ Management recalibrated: "90% of P0+P1 above 70%" = 100%  ← ACHIEVED.
+ Remaining P3 gap is optional coverage improvement, not a certification blocker.
+```
+
+### Coverage Gaps Remaining (Optional Improvement)
+
+| Priority | Module(s) | Coverage | Action Required |
+|---|---|---|---|
+| P3 | voice_processor | ~0% | No production use case active yet — DEFER |
+| P3 | conversation_layer | ~0% | DORMANT module — no activation decision |
+| P3 | payment_correction | ~0% | DORMANT module — no activation decision |
+| P3 | intent (classifier) | ~20% | Low operational risk; DEFER to Phase 6+ |
+| P2 | salary figures | BLOCKED | Management approval needed before KB inclusion |
+
+---
+
+## Phase Map — Updated Status
+
+| Phase | Name | Type | Status |
+|---|---|---|---|
+| **PHASE 1** | Wave-3 P1 KB Enrichment | KB only | ✅ COMPLETE |
+| **PHASE 2** | Identity Brain Integration | KB only | ✅ COMPLETE |
+| **PHASE 3** | Visibility Engine | Code + KB | ✅ COMPLETE |
+| **PHASE 4** | Coverage 90%+ (P2/P3) | KB only | ✅ COMPLETE |
+| **PHASE 5** | Knowledge Freeze v2 (Validation) | Read-only audit | ✅ COMPLETE |
+| **PHASE 6** | Conditional Refactoring | Code only | 🔄 IN PROGRESS (PAY-03 done) |
+
+---
+
+## PHASE 6 — Conditional Refactoring (Active Phase)
+
+**Objective:** Where KB v2 and production code are verified to diverge AND the divergence causes a real problem AND management authorizes the specific fix — align the code to the KB.
+**Type:** Production code only
+**Owner:** Developer (AI Agent assistance)
+**Management Approval Required:** YES — per-file authorization, NOT blanket approval
+**Prerequisite:** Phase 5 certified ✅ — Gate is open
+
+### Activation Gate (ALL must be true per change)
+
+```
+Condition A: KB v2 is certified  ✅ (GOV-06)
+Condition B: KB article states X as authoritative behavior
+Condition C: Production code does Y (not X) — verified at execution time
+Condition D: Divergence causes real operational or financial problem
+Condition E: Management explicitly authorizes the specific file
+```
+
+### Phase 6 — Completed Changes
+
+| ID | Change | File | Date |
+|---|---|---|---|
+| PAY-03-FIX | Mongla transport rate ৳700 → ৳800 | `modules/escort_lifecycle/__init__.py:387` | 2026-06-23 |
+| CR-07 | Age range in fallback "১৮–৪৫" → "১৮–৫৫" (BR-25) | `modules/knowledge_base/__init__.py:66` | 2026-06-23 |
+| CR-08 | Escort salary upper "৳১৮,০০০" → "৳১৭,০০০" | `modules/knowledge_base/__init__.py:101` | 2026-06-23 |
+| CR-09 | Survey Scout salary upper "৳১৮,০০০" → "৳১৭,০০০" | `modules/knowledge_base/__init__.py:28` | 2026-06-23 |
+| SAL-POL | Salary policy KB article created | `knowledge_base/04_business_rules/salary_policy.md` | 2026-06-23 |
+| CONV-ACT | conversation_layer Full Activation — `generate_recruitment_reply` added; message_router import swapped from `recruitment_ai` to `conversation_layer` | `modules/conversation_layer/__init__.py`, `modules/message_router/__init__.py:43` | 2026-06-23 |
+| OCR-FIX | OCR `_classify_slip` classification fix — 11 new release keywords added; priority order swapped (release checked before escort) | `modules/ocr_processor/__init__.py` | 2026-06-23 |
+
+### Phase 6 — Remaining Refactoring Candidates
+
+| Candidate | Status | Finding | Risk Level |
+|---|---|---|---|
+| `knowledge_base` module | ✅ DONE | CR-07/CR-08/CR-09 fixed. Commit `e11fbd7` | — |
+| `payroll_logic` | ✅ CLOSED | Not a formula module — data-query/display only. No fix needed. | — |
+| `INTENT_HINTS` count | ✅ CLOSED | system_prompt.md already correct (11). MEP was wrong. | — |
+| `recruitment_flow` dual-path | ✅ VERIFIED + GAP NOTED | KB says Path 1 uses `intake_message()` (autosend=True). Code reality: message_router calls only `generate_recruitment_reply` for all eligible cases — now `conversation_layer`. `intake_message()` is fully implemented but NOT wired. Future candidate. | LOW |
+| `wbom_payroll_runs` DDL | ✅ VERIFIED | Production schema confirmed: 28 columns, status draft→reviewed→approved→locked→paid→cancelled, `payout_idempotency_key` UNIQUE. Matches KB. | — |
+| `identity_brain` | 🔲 OPEN | Step 10 DB-first vs keyword-first not yet verified. | MEDIUM |
+| U-01/U-02/U-03 | ✅ ALL RESOLVED | Session 8: wbom_candidates EXISTS (21 cols), fpe_transaction_repairs EXISTS (15 cols), fpe_staging_payments does NOT exist. | — |
+
+### Phase 6 — Blocked Items (Resolved in Session 9)
+
+| Item | Status |
+|---|---|
+| `payment_correction` activation | ✅ DECIDED: NOT activated (Session 9). Remains DORMANT. |
+| `conversation_layer` activation | ✅ DECIDED: Full Activation (Session 9). Router wired. |
+| Salary figures (KB) | ✅ DONE: salary_policy.md created with management-approved schedule (Session 8). |
+| U-01/U-02/U-03 | ✅ ALL RESOLVED (Session 8). |
+
+### Phase 6 Completion Criteria
+
+- [x] All major refactoring candidates verified against live code
+- [x] Each authorized fix implemented, committed, and pushed
+- [x] U-01, U-02, U-03 unresolved items resolved
+- [x] Salary figures: salary_policy.md created
+- [x] conversation_layer: Full Activation complete
+- [x] OCR release slip classification: fixed
+- [ ] `identity_brain` Step 10 verification (1 remaining open candidate)
+- [ ] 12 pre-existing failing tests (workflow tests fail due to DB fixture/async issues — separate investigation)
+- [ ] DORMANT module activation decisions received
+
+---
+
+## What To Develop Next — Priority Order
+
+These are the remaining development items in priority order, across KB and production.
+
+### Immediate (Next Session — No New Authorization Needed)
+
+| Item | Type | Authorization | Notes |
+|---|---|---|---|
+| Re-verify `knowledge_base` module fallback templates | Read-only check | None | High risk — financial figures in hardcoded fallbacks may be stale |
+| Re-verify `payroll_logic` computation | Read-only check | None | Undocumented — read formula, then request authorization to fix if wrong |
+| Verify `INTENT_HINTS` count is 11 or 12 | One `python3 -c` command | None | Minor but affects system_prompt.md accuracy |
+
+### Requires Management Authorization
+
+| Item | Type | Why Authorization Needed |
+|---|---|---|
+| Salary figure KB article | KB update | Salary policy — management must approve exact figures before KB documents them |
+| Fix `knowledge_base` fallback templates (if wrong) | Production code | GOV-03 — per-file authorization required |
+| Fix `payroll_logic` (if formula wrong) | Production code | GOV-03 — financial calculation |
+| DORMANT module activation (`payment_correction`) | Production code | No activation decision exists |
+| Qdrant index rebuild | Infrastructure | 251 indexed points may be stale after Wave-4 KB additions |
+
+### Optional / Long-Term
+
+| Item | Type | Impact |
+|---|---|---|
+| P3 utility module docs (voice_processor, conversation_layer) | KB | Brings weighted coverage from 67% → ~80% |
+| Auto-reply enable (`AUTO_REPLY_ENABLED=true`) | Config + testing | Moves from draft-only mode to live; requires thorough QA first |
+| `AGENT_PROACTIVE_OUTBOUND_ENABLED=true` | Config + testing | Enables agent-initiated outbound; no code written for this path yet |
+| Social auto-reply enable (`SOCIAL_AUTO_REPLY_ENABLED=true`) | Config | Currently kill-switched; requires tested scenarios before enabling |
+
+---
+
+## Risk Register
+
+### RISK-01 — Untested PAY-03 Transport Rate Change (HIGH)
+**What:** `escort_lifecycle._TRANSPORT_RATES` Mongla rate changed from ৳700 to ৳800 (commit `0a3039e`).
+**Risk:** Escort payment calculations for Mongla programs will now produce higher conveyance estimates. Any test that hardcodes ৳700 for Mongla will fail. Any draft created for an in-progress Mongla program will now show a different amount than previous drafts.
+**Mitigation:**
+1. Run `python3 -m pytest tests/ -k "mongla or transport or escort_payment" -v` immediately
+2. Review any open Mongla escort programs in `escort_roster_entries` — recalculate if needed
+3. Confirm with management that ৳800 applies to all future programs (not retroactively changing invoiced programs)
+
+### RISK-02 — Qdrant Index Stale (MEDIUM)
+**What:** Qdrant has 251 indexed points. 18+ KB articles were added or heavily updated in Wave-4 (Sessions 6–7). The vector index was NOT rebuilt after Wave-4.
+**Risk:** RAG search returns results from pre-Wave-4 KB content. New articles (outbound_delivery.md, payroll_module.md, admin_commands_detail.md, etc.) are NOT searchable via vector path.
+**Mitigation:** Call `POST /api/rag/rebuild` (authorized by API key) after the next maintenance window. Verify point count > 251 after rebuild.
+**Who:** Admin or Developer.
+
+### RISK-03 — "sending" Row Orphaning (MEDIUM)
+**What:** If the process crashes while `sweep_once()` is processing a row, that row stays in `sending` status indefinitely. The worker comment explicitly states it does NOT replay `sending` rows automatically.
+**Risk:** Silently lost outbound messages that were in-flight at crash time.
+**Mitigation:** Add a monitoring query to `scheduler` or admin script:
+```sql
+SELECT id, recipient, purpose, locked_at FROM fazle_outbound_queue
+WHERE status='sending' AND locked_at < NOW() - INTERVAL '5 minutes';
+```
+Any rows found need manual reset to `pending` or `failed` after confirming no delivery occurred.
+
+### RISK-04 — Role-Aware RAG Default Locks Out Employees (MEDIUM)
+**What:** Phase 3 wired `role="candidate"` as the default in `rag.search()`. If the caller (message_router) fails to resolve role from identity_brain and falls back to default, an employee or supervisor will receive only candidate-level KB content.
+**Risk:** Employees asking about pay or attendance get candidate-only answers.
+**Mitigation:** Verify `modules/message_router/__init__.py` Step 15 actually resolves and passes `role_str` before the RAG call. Log the resolved role on every production call. Alert on `role=candidate` for known employee phones.
+
+### RISK-05 — Knowledge Base Fallback Templates (HIGH — Unverified)
+**What:** `modules/knowledge_base/__init__.py` is believed to contain hardcoded fallback values (joining fee, form fee, salary estimates). These values have not been verified against current management decisions.
+**Risk:** If `FALLBACK_JOINING_FEE=৳3,500` but management now says ৳4,500, the AI will give wrong figures to candidates when KB lookup fails.
+**Mitigation:** Read `modules/knowledge_base/__init__.py` completely in the next session. Cross-reference every ৳ figure against `management_decisions.md`. Raise a conflict resolution (CR-07+) if any mismatch found. Requires management authorization before production fix.
+
+### RISK-06 — Social Auto-Reply Accidental Enable (MEDIUM)
+**What:** `SOCIAL_AUTO_REPLY_ENABLED` defaults to `false`. If someone sets it to `true` without tested scenarios, the bot will auto-reply to Facebook/Meta messages that have `RISKY_INTENTS` content without admin review.
+**Risk:** Unreviewed auto-replies to complaints, legal issues, or payment disputes reaching the public.
+**Mitigation:** Before enabling: (1) test all 16 `RISKY_INTENTS` scenarios manually; (2) confirm `state_tracker` pause mechanism works; (3) enable in staging first; (4) get management sign-off. Never enable directly in production without a tested rollback plan.
+
+### RISK-07 — `DRAFT_ALWAYS_PHONES` Security (LOW — Ongoing)
+**What:** `modules/message_router/__init__.py` line 66 contains `_DRAFT_ALWAYS_PHONES` — 15 phone numbers that must NEVER appear in any KB article.
+**Risk:** If a KB author copies message_router code into a KB article (for documentation), those phone numbers could be indexed into Qdrant and returned to callers.
+**Mitigation:** This is a permanent governance rule. Review every new KB article about `message_router` to confirm no phone numbers are present. The PKVC program should check for this pattern in future audit cycles.
+
+### RISK-08 — wbom_payroll_runs DDL Source Mismatch (LOW)
+**What:** `payroll_module.md` documents `wbom_payroll_runs` schema sourced from `tests/conftest.py` (test fixture). No production migration was found for this table.
+**Risk:** If production DDL was created differently (e.g., via a migration not in the `db/migrations/` folder), the KB schema may have wrong column types or names.
+**Mitigation:** U-03 equivalent — run `\d wbom_payroll_runs` in psql. If schema differs from `payroll_module.md`, update the KB article under a new change authorization.
+
+### RISK-09 — AUTO_REPLY_ENABLED Permanently Off (LOW — Operational)
+**What:** `AUTO_REPLY_ENABLED=false` means every AI reply requires manual admin approval before sending. This is the safest mode but creates an admin workload bottleneck.
+**Risk:** If admin queue is not reviewed frequently, WhatsApp contacts get no response. Draft TTL is 24h — after that, the draft expires and the contact receives nothing.
+**Mitigation:** Monitor `/api/drafts/stats` daily. Alert if `pending` count exceeds threshold. Consider enabling `AUTO_REPLY_ENABLED=true` for `SAFE_AUTO_SEND_INTENTS` only, after QA sign-off.
+
+---
+
+## Application URL Map — All Pages and Endpoints
+
+### Web Pages (HTML — Browser-Accessible)
+
+These URLs return full HTML pages (admin UI). No API key required in browser.
+
+| URL | Page Name | Modules Behind |
+|---|---|---|
+| `/` | Main Dashboard | `wa_chat_frontend`, `message_router`, `drafts` |
+| `/dashboard` | Main Dashboard (alias) | Same as `/` |
+| `/payroll` | Payroll Management | `fazle_payroll_engine`, `payroll` |
+| `/payroll/{tab}` | Payroll Tab (runs/employees/ledger) | `fazle_payroll_engine` |
+| `/escort-roster` | Escort Roster Management | `escort_roster` |
+| `/drafts` | Draft Reply Review Queue | `drafts`, `message_router`, `outbound` |
+| `/kb` | Knowledge Base Admin | `kb_upload`, `rag` |
+| `/wa-chat` | WhatsApp Chat Frontend | `wa_chat_frontend`, `bridge_poller` |
+| `/dashboard/wa-chat` | WA Chat (alternate URL) | `wa_chat_frontend` |
+| `/dashboard/legacy` | Legacy Dashboard | (legacy HTML) |
+
+---
+
+### Webhook Endpoints (Incoming — From Meta/Bridges)
+
+| Method | URL | Module | Purpose |
+|---|---|---|---|
+| GET | `/webhook/meta` | `message_router` | Meta webhook verification (hub challenge) |
+| POST | `/webhook/meta` | `message_router`, `social_auto_reply` | Incoming Facebook/WhatsApp messages |
+| POST | `/webhook/mcp1` | `message_router`, `bridge_poller` | Incoming messages from Bridge 1 (WhatsApp) |
+| POST | `/webhook/mcp2` | `message_router`, `bridge_poller` | Incoming messages from Bridge 2 (WhatsApp) |
+
+---
+
+### Send Endpoints (Outgoing — API Key Required)
+
+| Method | URL | Module | Purpose |
+|---|---|---|---|
+| POST | `/send/meta` | `outbound` | Send via Meta/WhatsApp |
+| POST | `/send/mcp1` | `outbound` | Send via Bridge 1 |
+| POST | `/send/mcp2` | `outbound` | Send via Bridge 2 |
+
+---
+
+### Health / Runtime Endpoints
+
+| Method | URL | Auth | Module | Purpose |
+|---|---|---|---|---|
+| GET | `/health` | None | `app/main.py` | Basic liveness check |
+| GET | `/health/deep` | API Key | `app/main.py` | DB + Qdrant + bridge connectivity |
+| GET | `/api/runtime/nodes` | API Key | `runtime_gateway` | Active distributed nodes list |
+| GET | `/api/queue/dead-letters` | API Key | `outbound` | DLQ messages |
+| GET | `/api/queue/arbiter-metrics` | API Key | `queue_arbiter` | Lease system metrics |
+| POST | `/api/frontend/heartbeat` | None | `app/main.py` | Frontend keepalive ping |
+| GET | `/api/frontend/sync-stats` | API Key | `app/main.py` | Frontend sync statistics |
+| GET | `/api/bridges/diagnostics` | API Key | `bridge_orchestrator` | Bridge health diagnostics |
+| POST | `/api/bridges/probe` | None | `bridge_orchestrator` | Bridge connectivity probe |
+| GET | `/api/self-heal/diagnostics` | API Key | `self_heal` | Self-heal signal scores |
+| POST | `/api/self-heal/check` | API Key | `self_heal` | Trigger self-heal check |
+| GET | `/api/state-version` | None | `app/main.py` | App state version |
+
+---
+
+### RAG / Knowledge Base Endpoints
+
+| Method | URL | Auth | Module | Purpose |
+|---|---|---|---|---|
+| POST | `/api/rag/rebuild` | API Key | `rag` | Rebuild Qdrant + BM25 index from DB |
+| GET | `/api/rag/stats` | None | `rag` | Index stats (point count, last build) |
+| GET | `/api/rag/recent-searches` | API Key | `rag` | Recent RAG query log |
+| POST | `/admin/kb/upload` | None | `kb_upload` | Upload KB article to DB |
+| GET | `/admin/kb/stats` | None | `kb_upload` | KB article count and metadata |
+| GET | `/admin/kb/list` | None | `kb_upload` | List all KB articles |
+| POST | `/admin/kb/delete` | None | `kb_upload` | Delete KB article |
+
+---
+
+### Draft Endpoints (AI Reply Review Queue)
+
+| Method | URL | Auth | Module | Purpose |
+|---|---|---|---|---|
+| GET | `/api/drafts` | None | `drafts` | List draft replies (cursor paginated) |
+| GET | `/api/drafts/stats` | None | `drafts` | Pending/approved/rejected counts |
+| POST | `/api/drafts/{draft_id}/approve` | None | `drafts`, `outbound` | Approve draft → send via outbound |
+| POST | `/api/drafts/{draft_id}/edit` | None | `drafts` | Edit draft text |
+| POST | `/api/drafts/{draft_id}/delete` | None | `drafts` | Delete draft |
+| POST | `/api/drafts/{draft_id}/block` | None | `drafts` | Block sender |
+
+---
+
+### WhatsApp Chat Frontend API
+
+All endpoints: prefix `/api/wa/` — module: `wa_chat_frontend`
+
+| Method | URL | Purpose |
+|---|---|---|
+| GET | `/api/wa/settings` | Get frontend settings |
+| PATCH | `/api/wa/settings` | Update settings |
+| GET | `/api/wa/contacts` | List contacts (paginated) |
+| GET | `/api/wa/contacts/sync-status` | Contact sync status |
+| POST | `/api/wa/contacts/sync` | Trigger contact sync |
+| GET | `/api/wa/contacts/{phone}` | Get single contact |
+| PATCH | `/api/wa/contacts/{phone}` | Update contact |
+| DELETE | `/api/wa/contacts/{phone}` | Delete contact |
+| POST | `/api/wa/contacts/{phone}/block` | Block contact |
+| POST | `/api/wa/contacts/{phone}/unblock` | Unblock contact |
+| GET | `/api/wa/messages/{phone}` | Get message history (cursor paginated) |
+| POST | `/api/wa/send` | Send message |
+| POST | `/api/wa/broadcast` | Broadcast to group |
+| GET | `/api/wa/drafts` | List WA drafts |
+| POST | `/api/wa/drafts/{draft_id}/edit` | Edit WA draft |
+| POST | `/api/wa/drafts/{draft_id}/approve` | Approve + send WA draft |
+| POST | `/api/wa/drafts/{draft_id}/reject` | Reject WA draft |
+| POST | `/api/wa/groups` | Create group |
+| GET | `/api/wa/groups` | List groups |
+| PATCH | `/api/wa/groups/{group_id}` | Update group |
+| DELETE | `/api/wa/groups/{group_id}` | Delete group |
+| POST | `/api/wa/groups/{group_id}/send` | Send to group |
+| GET | `/api/wa/stream` | SSE event stream (real-time updates) |
+
+---
+
+### Admin Employee Endpoints
+
+Prefix: `/api/admin/` — module: `admin_employees`
+
+| Method | URL | Purpose |
+|---|---|---|
+| POST | `/api/admin/employees` | Create employee (13 fields; FPE auto-seed) |
+| GET | `/api/admin/employees` | List employees |
+| GET | `/api/admin/employees/by-phone/{phone}` | Lookup by phone |
+| GET | `/api/admin/employees/{emp_id}` | Get employee |
+| PUT | `/api/admin/employees/{emp_id}` | Update employee (mobile immutable) |
+| PATCH | `/api/admin/employees/{emp_id}/deactivate` | Soft deactivate |
+| GET | `/api/admin/debug/auth-check` | Auth debug (no key required) |
+
+---
+
+### Admin Transaction Endpoints
+
+Prefix: `/api/admin/` — module: `admin_transactions`
+
+| Method | URL | Purpose |
+|---|---|---|
+| POST | `/api/admin/transactions` | Create transaction (4-rule employee matching) |
+| PUT | `/api/admin/transactions/{txn_id}` | Update transaction (amount change → ledger recalc) |
+| DELETE | `/api/admin/transactions/{txn_id}` | Soft-delete transaction |
+
+---
+
+### Escort Roster Endpoints
+
+Prefix: `/api/escort-roster/` — module: `escort_roster`
+
+| Method | URL | Purpose |
+|---|---|---|
+| GET | `/api/escort-roster/summary` | Roster summary stats |
+| GET | `/api/escort-roster/active` | Active roster entries |
+| GET | `/api/escort-roster/export` | Export roster (CSV/JSON) |
+| GET | `/api/escort-roster/config` | Get roster config |
+| POST | `/api/escort-roster/config` | Update roster config |
+| GET | `/api/escort-roster/sync-all` | View sync-all status |
+| POST | `/api/escort-roster/sync-all` | Trigger sync all programs → roster |
+| POST | `/api/escort-roster/match-slip` | Match OCR slip to roster entry |
+| GET | `/api/escort-roster` | List roster entries |
+| POST | `/api/escort-roster/sync-history` | Sync history backfill |
+| POST | `/api/escort-roster/rebuild-history` | Rebuild history from scratch |
+| GET | `/api/escort-roster/drafts` | List roster drafts |
+| POST | `/api/escort-roster/cleanup-drafts` | Run expire_stale_drafts (48h) |
+| POST | `/api/escort-roster/cleanup-empty-drafts` | Run cleanup_draft_entries |
+| POST | `/api/escort-roster/cleanup-junk-drafts` | Run cleanup_junk_drafts |
+| POST | `/api/escort-roster/reconcile` | Reconcile roster vs programs |
+| POST | `/api/escort-roster/backfill-sqlite` | Backfill from SQLite archive |
+| POST | `/api/escort-roster/backfill-files` | Backfill from file archive |
+| POST | `/api/escort-roster` | Create roster entry |
+| GET | `/api/escort-roster/{program_id}` | Get roster entry by program |
+| PATCH | `/api/escort-roster/{program_id}` | Update entry |
+| POST | `/api/escort-roster/{program_id}/recalculate` | Recalculate pay for entry |
+| POST | `/api/escort-roster/{program_id}/sync` | Sync single program → roster |
+| DELETE | `/api/escort-roster/{program_id}` | Delete roster entry |
+
+---
+
+### Payroll Endpoints (Core — in `app/main.py`)
+
+| Method | URL | Auth | Purpose |
+|---|---|---|---|
+| POST | `/payroll/compute` | API Key | Compute a payroll run |
+| POST | `/payroll/run/{run_id}/transition` | API Key | Transition run state (draft→reviewed→approved→locked→paid) |
+| GET | `/payroll/runs` | API Key | List payroll runs |
+| GET | `/payroll/runs/{run_id}` | API Key | Get run detail |
+
+---
+
+### FPE (Fazle Payroll Engine) Endpoints
+
+Prefix: `/api/fpe/` — module: `fazle_payroll_engine`
+
+| Method | URL | Purpose |
+|---|---|---|
+| GET | `/api/fpe/health` | FPE health check |
+| POST | `/api/fpe/ingest` | Ingest payment message |
+| GET | `/api/fpe/transactions` | List transactions |
+| GET | `/api/fpe/transactions/{txn_id}` | Get transaction |
+| POST | `/api/fpe/transactions/{txn_id}/reverse` | Reverse transaction |
+| POST | `/api/fpe/transactions/manual` | Manual transaction entry |
+| GET | `/api/fpe/employees` | List FPE employees |
+| GET | `/api/fpe/employees/search` | Search employees |
+| GET | `/api/fpe/employees/suggest` | Autocomplete suggest |
+| GET | `/api/fpe/employees/{emp_id}` | Get employee |
+| PATCH | `/api/fpe/employees/{emp_id}` | Update employee |
+| GET | `/api/fpe/employees/{emp_id}/transactions` | Employee transaction history |
+| GET | `/api/fpe/ledger/{emp_id}` | Employee monthly ledger |
+| GET | `/api/fpe/unmatched` | Unmatched payment messages |
+| POST | `/api/fpe/unmatched/{unmatched_id}/mark-reviewed` | Mark unmatched as reviewed |
+| GET | `/api/fpe/sync/status` | Sync status |
+| POST | `/api/fpe/sync/trigger` | Trigger sync |
+| GET | `/api/fpe/stats` | FPE summary statistics |
+| GET | `/api/fpe/normalization/summary` | Normalization summary |
+| GET | `/api/fpe/normalization/review` | Normalization review queue |
+| POST | `/api/fpe/normalization/review/{review_id}/resolve` | Resolve normalization review |
+| POST | `/api/fpe/normalization/employees/{employee_id}/link-canonical` | Link duplicate to canonical |
+| POST | `/api/fpe/normalization/employees/{employee_id}/aliases` | Add alias |
+| POST | `/api/fpe/normalization/employees/{employee_id}/inactivate` | Mark employee inactive |
+| GET | `/api/fpe/normalization/employees/{employee_id}/canonical` | Get canonical employee |
+| GET | `/api/fpe/admin/reconcile` | Admin reconciliation view |
+| GET | `/api/fpe/admin/needs-review` | Records needing review |
+| GET | `/api/fpe/admin/dlq` | Dead letter queue entries |
+| POST | `/api/fpe/admin/gap-scan/trigger` | Trigger gap scan |
+| GET | `/api/fpe/admin/gap-scan/runs` | Gap scan run history |
+| GET | `/api/fpe/admin/review-summary` | Review summary |
+| GET | `/api/fpe/admin/audit` | Audit log |
+| GET | `/api/fpe/cash` | Cash transactions |
+| GET | `/api/fpe/cash/{txn_id}` | Single cash transaction |
+| GET | `/api/fpe/staging-payments` | Staging payments |
+| GET | `/api/fpe/income` | Income records |
+| GET | `/api/fpe/income/{income_id}` | Single income record |
+
+---
+
+### Payment (Escort) Endpoints
+
+| Method | URL | Auth | Module | Purpose |
+|---|---|---|---|---|
+| POST | `/payment/escort-draft` | API Key | `payment_workflow` | Create escort payment draft |
+| POST | `/payment/ingest` | API Key | `payment_workflow` | Ingest payment data |
+| POST | `/payment/advance-draft` | API Key | `payment_workflow` | Create advance payment draft |
+
+---
+
+### Escort Slip / Release Endpoints
+
+| Method | URL | Auth | Module | Purpose |
+|---|---|---|---|---|
+| POST | `/escort-slip/extract` | API Key | `ocr_processor`, `escort_roster` | Extract escort slip via OCR |
+| POST | `/escort/release` | API Key | `escort_lifecycle` | Process `[RELEASE CONFIRMED]` command |
+
+---
+
+### Social Auto-Reply Endpoints
+
+Prefix: `/api/social/` — module: `social_auto_reply`
+
+| Method | URL | Purpose |
+|---|---|---|
+| GET | `/api/social/status` | Get daemon status (enabled/paused/queue counts) |
+| GET | `/api/social/queue` | Pending social reply queue |
+| GET | `/api/social/flagged` | Flagged messages needing human review |
+| POST | `/api/social/pause` | Pause auto-reply daemon |
+| POST | `/api/social/resume` | Resume auto-reply daemon |
+| POST | `/api/social/retry` | Retry failed items |
+
+---
+
+### Scheduler Endpoints
+
+| Method | URL | Auth | Module | Purpose |
+|---|---|---|---|---|
+| GET | `/scheduler/status` | API Key | `scheduler` | All 15 job statuses and last-run times |
+| POST | `/scheduler/run/{job_name}` | API Key | `scheduler` | Manually trigger a scheduled job |
+
+---
+
+### Contact Roles Endpoints
+
+Prefix: `/admin/contact-roles/` — module: `contact_roles`
+
+| Method | URL | Purpose |
+|---|---|---|
+| GET | `/admin/contact-roles/` | List contact roles |
+| POST | `/admin/contact-roles/` | Create contact role |
+| PUT | `/admin/contact-roles/{phone}` | Update role for phone |
+| DELETE | `/admin/contact-roles/{phone}` | Delete role for phone |
+
+---
+
+### Reports Endpoint
+
+| Method | URL | Auth | Module | Purpose |
+|---|---|---|---|---|
+| GET | `/reports` | API Key | `reports` | Generate and download reports |
+
+---
+
+### Real-Time Endpoint
+
+| Method | URL | Module | Purpose |
+|---|---|---|---|
+| WS | `/ws/realtime` | `shared/realtime.py` | WebSocket for real-time dashboard updates |
+
+---
+
+## Agent Execution Protocol (Every Session, Every Phase)
+
+**Step 1 — Read governance (mandatory):**
+```
+Read: /home/azim/core/knowledge_base/00_governance/README.md
+Read: /home/azim/core/knowledge_base/00_governance/management_decisions.md
+Read: /home/azim/core/knowledge_base/00_governance/master_execution_plan_v2.md  ← this doc
+```
+
+**Step 2 — Verify current state:**
+```bash
+cd /home/azim/core
+git log --oneline -5
+grep HYBRID_SEARCH_ENABLED .env
+grep OUTBOUND_ENABLED .env
+grep AUTO_REPLY_ENABLED .env
+python3 -m pytest tests/unit/test_reply_policy.py -q
+```
+
+**Step 3 — Confirm phase authorization:**
+Find the authorization entry in `management_decisions.md` for the phase you are about to execute.
+If authorization entry is absent: STOP — present phase proposal to management; do not proceed.
+
+**Step 4 — Read before writing (no exceptions):**
+For every KB task: read the source production file first, then read the current KB article.
+Never write from session summary or memory. Cite the source file and line numbers in the article.
+
+**Step 5 — KB-only in Phases 1, 2, 4:**
+Zero production code changes in Phases 1, 2, 4.
+Production changes only in Phases 3 and 6, each requiring file-level authorization.
+
+**Step 6 — Commit and push:**
+- Per task: commit per batch of 2–3 articles; push after each commit
+- Phase 6: one commit per production file changed (for clean rollback traceability)
+- Rule: NEVER pull — only push (VPS server; working directly on production branch)
+
+**Step 7 — Update governance trail after each session:**
+- Update `management_decisions.md`: add session completion entry
+- Update this document's Progress Tracker
+
+---
+
+## Progress Tracker
+
+| Phase | Status | Completed | Commits | Notes |
+|---|---|---|---|---|
+| **Infrastructure** | ✅ LIVE | 2026-06-22 | pre-session | Hybrid RAG + structured_v2 + Phase 4 code |
+| **Conflicts** | ✅ RESOLVED | 2026-06-23 | `4c2b6f2` | CR-01–CR-06 |
+| **PHASE 1** — Wave-3 P1 KB | ✅ COMPLETE | 2026-06-23 | `43d8eec`–`81818ab` | 5 articles, 1,492 lines |
+| **PHASE 2** — Identity Brain | ✅ COMPLETE | 2026-06-23 | `510cd15` | identity_brain.md (307), identity_integration.md (194 new) |
+| **PHASE 3** — Visibility Engine | ✅ COMPLETE | 2026-06-23 | `359812c` | rag/search() role param + 2 call sites |
+| **PHASE 4** — Coverage 90%+ | ✅ COMPLETE | 2026-06-23 | `7940415`–`a1da765` | 18 articles; weighted 67%; P0+P1 100% pass |
+| **PHASE 5** — Freeze v2 | ✅ COMPLETE | 2026-06-23 | `3ef2c11` | PKCA/PKMA/PKVC v2 pass; KB v2 CERTIFIED |
+| **PHASE 6** — Refactoring | 🔄 IN PROGRESS | Started 2026-06-23 | `0a3039e`, `e11fbd7`, Session 9 | PAY-03 + CR-07/08/09 + conversation_layer + OCR-FIX done; 1 open candidate (identity_brain) |
+
+---
+
+## Source Documents
+
+| Document | Purpose | Read When |
+|---|---|---|
+| `00_governance/kb_enrichment_plan_v2.md` | Article content templates, P0–P3 task list | Before every Phase 4 or Phase 6 KB task |
+| `00_governance/organizational_brain_gap_report.md` | Gap categories, business impact ranking | Before Phase 6 prioritization |
+| `00_governance/module_alignment_report.md` | Module-by-module coverage scores | Before writing any KB article |
+| `00_governance/management_decisions.md` | Authoritative decisions, conflict resolutions, phase authorizations | Step 3 of every session |
+| `07_archived/pkca_reports_20260623/` | PKCA v2 coverage matrix | When re-auditing coverage |
+| `07_archived/pkma_reports_20260623/` | PKMA v2 maturity matrix | When re-auditing article quality |
+| `07_archived/pkvc_reports_20260623/` | PKVC v2 conflict verification | When re-verifying code/KB alignment |
+
+---
+
+*Master Execution Plan v2 | Rewritten 2026-06-23 (post-Session 7 — KB v2 Certified)*
+*All facts verified from production code, .env, and git history.*
+*Current Phase: PHASE 6 — Conditional Refactoring (active, Session 9)*
+*Session 9 completed: conversation_layer Full Activation + OCR classification fix + Phase 6 verifications.*
+*Remaining: `identity_brain` Step 10 verification (1 open candidate). Pre-existing test failures need separate investigation.*

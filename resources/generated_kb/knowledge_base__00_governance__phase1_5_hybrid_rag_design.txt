@@ -1,0 +1,735 @@
+Source: knowledge_base/00_governance/phase1_5_hybrid_rag_design.md
+SHA256: 4f027d074f9fb41151a55fdae0afba035984273d8acd903fcc74448456708f2f
+Version: 4f027d074f9f
+
+# PHASE 1.5 — Hybrid RAG Architecture Design Package
+**Version:** 1.0.0
+**Date:** 2026-06-22
+**Phase:** Master Execution Plan — PHASE 1.5
+**Status:** DESIGN COMPLETE — AWAITING MANAGEMENT APPROVAL
+**Author:** Lead Software Architect (Session 2)
+**Scope:** Documentation and design only. No production code changes.
+
+---
+
+## Table of Contents
+
+1. [Context and Constraints](#1-context-and-constraints)
+2. [Current BM25 Flow](#2-current-bm25-flow)
+3. [Future Hybrid RAG Flow](#3-future-hybrid-rag-flow)
+4. [Embedding Model Evaluation](#4-embedding-model-evaluation)
+5. [Qdrant Schema](#5-qdrant-schema)
+6. [Payload Structure](#6-payload-structure)
+7. [Fusion Algorithm](#7-fusion-algorithm)
+8. [Ranking Strategy](#8-ranking-strategy)
+9. [Incremental Synchronization](#9-incremental-synchronization)
+10. [Index Rebuild Strategy](#10-index-rebuild-strategy)
+11. [Performance Estimation](#11-performance-estimation)
+12. [Migration Strategy](#12-migration-strategy)
+13. [Rollback Strategy](#13-rollback-strategy)
+14. [Risk Assessment](#14-risk-assessment)
+15. [Implementation Roadmap](#15-implementation-roadmap)
+16. [Management Decision Required](#16-management-decision-required)
+
+---
+
+## 1. Context and Constraints
+
+### Platform Facts (verified)
+
+| Fact | Value |
+|---|---|
+| VPS RAM | 24 GB total / ~15 GB available |
+| Current corpus size | 456 KB (resources directory) |
+| Text files indexed | 20 .txt files (approx 300–400 chunks after exclusion) |
+| DB KB rows | `fazle_knowledge_base` WHERE `is_active=true` (count not verified; estimated <100 rows) |
+| Current BM25 index | In-process, in-memory, rebuilt in <1 second |
+| Current dependencies | fastapi, uvicorn, asyncpg, httpx, rapidfuzz, PyMuPDF, python-docx |
+| No existing | Qdrant, sentence-transformers, torch, numpy, faiss |
+| Language corpus | Bilingual: Bangla + English |
+| Deployment model | VPS, offline-first — no external network calls during query |
+
+### Design Constraints (from KB governance)
+
+- Must remain offline-first — no embedding API calls during query
+- Must not break existing BM25 behavior
+- Must preserve all 32 chunk-level safety filters
+- Must preserve all file-level exclusion rules
+- Rollback must be possible without code deletion or database migration
+- Must not increase query latency beyond an acceptable threshold (target: <100ms end-to-end)
+- Production freeze in effect — no changes until explicit management approval per task
+
+---
+
+## 2. Current BM25 Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  SOURCES                                                        │
+│  resources/*.txt (after exclusion)  +  fazle_knowledge_base DB │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  CHUNK  (320 chars / 60 overlap)                                │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  SAFETY FILTER  (32 _CHUNK_UNSAFE_PATTERNS → purge)            │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  TOKENIZE  [A-Za-z0-9ঀ-৿]+ → filter stop words                │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  BM25 IN-MEMORY INDEX  (k1=1.5, b=0.75)                        │
+│  _IDX.docs / _IDX.df / _IDX.avgdl                              │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │  Query time
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  QUERY TOKENIZE  (same tokenizer)                               │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  BM25 SCORE  → top-k results (min_score=1.0 for answer())      │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  answer() → {answer text, citations}  or  None                 │
+└─────────────────┬───────────────────────────────────────────────┘
+                  │
+                  ▼
+            LLM Prompt Context
+```
+
+**Weakness of current BM25 flow:**
+A query using different vocabulary than the document will score zero even if semantically equivalent. Example: query "salary timing" may not match a document that only says "বেতন প্রদানের সময়" (Bangla equivalent). BM25 is term-overlap only — no semantic bridging across languages or synonyms.
+
+---
+
+## 3. Future Hybrid RAG Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  SOURCES (same as current)                                      │
+│  resources/*.txt + fazle_knowledge_base DB                     │
+└──────────┬──────────────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  CHUNK + SAFETY FILTER (unchanged — same 32-pattern filter)    │
+└──────────┬──────────────────────────────────────────────────────┘
+           │
+     ┌─────┴──────────────────────────┐
+     │                                │
+     ▼                                ▼
+┌──────────────────┐        ┌──────────────────────────────────┐
+│  BM25 TOKENIZE   │        │  EMBEDDING MODEL                 │
+│  + INDEX BUILD   │        │  encode(chunk) → 384-dim vector  │
+└────────┬─────────┘        └─────────────────┬────────────────┘
+         │                                     │
+         │                                     ▼
+         │                  ┌──────────────────────────────────┐
+         │                  │  QDRANT LOCAL (file-based)       │
+         │                  │  Collection: fazle_rag_chunks     │
+         │                  │  Cosine distance, 384 dims        │
+         │                  └─────────────────┬────────────────┘
+         │                                     │
+         │               Query time            │
+         │                                     │
+         ▼                                     ▼
+┌──────────────────┐        ┌──────────────────────────────────┐
+│  BM25 SEARCH     │        │  QDRANT VECTOR SEARCH            │
+│  top-k=10        │        │  top-k=10, cosine similarity      │
+└────────┬─────────┘        └─────────────────┬────────────────┘
+         │                                     │
+         └──────────────┬──────────────────────┘
+                        │
+                        ▼
+         ┌──────────────────────────────────┐
+         │  RRF FUSION                      │
+         │  score = 1/(60+bm25_rank)        │
+         │        + 1/(60+vector_rank)      │
+         └──────────────┬───────────────────┘
+                        │
+                        ▼
+         ┌──────────────────────────────────┐
+         │  RANKING SIGNALS                 │
+         │  1. RRF base score               │
+         │  2. Source freshness boost       │
+         │  3. Workflow state bonus         │
+         └──────────────┬───────────────────┘
+                        │
+                        ▼
+         ┌──────────────────────────────────┐
+         │  answer() → {answer, citations}  │
+         │  or None (below threshold)       │
+         └──────────────┬───────────────────┘
+                        │
+                        ▼
+                  LLM Prompt Context
+```
+
+**Improvement over current:**
+- Cross-lingual retrieval: "salary timing" now matches "বেতন প্রদানের সময়" via vector similarity
+- Synonym matching: "pay" matches "wage", "salary", "compensation" via semantic space
+- Graceful fallback: if vector search fails → BM25 result used alone
+- All safety filters unchanged
+
+---
+
+## 4. Embedding Model Evaluation
+
+### Evaluation Criteria
+
+| Criterion | Weight | Reason |
+|---|---|---|
+| Bangla language support | Critical | Core use case — bilingual platform |
+| Offline capability | Critical | VPS offline-first constraint |
+| Model size (RAM/disk) | High | VPS deployment |
+| Inference speed (CPU) | High | No GPU on VPS |
+| Vector dimensions | Medium | Affects Qdrant storage and search speed |
+| License | Medium | Production deployment |
+
+### Candidate Models
+
+| Model | Size | Dims | Bangla Support | Framework | CPU Speed | Notes |
+|---|---|---|---|---|---|---|
+| `paraphrase-multilingual-MiniLM-L12-v2` | 118 MB | 384 | Good (50+ langs, incl. Bangla) | sentence-transformers (PyTorch) | ~10ms/chunk | **Recommended** — best balance |
+| `paraphrase-multilingual-mpnet-base-v2` | 420 MB | 768 | Excellent | sentence-transformers (PyTorch) | ~30ms/chunk | Better quality, but 3.5× larger |
+| `LaBSE` | 471 MB | 768 | Excellent (109 langs) | sentence-transformers (PyTorch) | ~35ms/chunk | Best Bangla; too large for this corpus size benefit |
+| `multilingual-e5-small` | 118 MB | 384 | Good | FastEmbed (ONNX) | ~5ms/chunk | No PyTorch needed; ONNX runtime only |
+| `multilingual-e5-base` | 278 MB | 768 | Good | FastEmbed (ONNX) | ~15ms/chunk | No PyTorch; better quality than small |
+
+### Recommendation: Option A (Primary) — `paraphrase-multilingual-MiniLM-L12-v2`
+
+**Rationale:**
+- 118 MB model — loads into RAM once, stays resident (~120 MB overhead)
+- 384-dimensional vectors — compact Qdrant storage (300 chunks × 384 × 4 bytes = ~460 KB)
+- CPU inference ~10ms per chunk; full rebuild of 300 chunks = ~3–5 seconds (acceptable for daily rebuild)
+- Query embedding ~10ms — well within <100ms target
+- Proven Bangla support: trained on mined parallel data across 50+ languages including Bengali
+- MIT license — production safe
+- Widely used: >10M monthly downloads
+
+**Alternative: Option B — `multilingual-e5-small` via FastEmbed (ONNX)**
+- Same size (118 MB) but uses ONNX runtime instead of PyTorch
+- Avoids adding PyTorch (~200 MB additional RAM) as a dependency
+- FastEmbed integrates directly with `qdrant-client[fastembed]`
+- Slightly faster inference via ONNX
+- Tradeoff: less Bangla-specific validation data published compared to MiniLM
+
+### New Dependencies Required
+
+**Option A:**
+```
+sentence-transformers>=2.7.0   # pulls torch, transformers, numpy
+qdrant-client>=1.9.0
+```
+Approximate additional disk: ~700 MB (torch + sentence-transformers + model)
+Approximate additional RAM at runtime: ~300–400 MB
+
+**Option B (lighter):**
+```
+qdrant-client[fastembed]>=1.9.0   # includes fastembed + ONNX runtime
+```
+Approximate additional disk: ~400 MB (ONNX runtime + model)
+Approximate additional RAM at runtime: ~200–250 MB
+
+**Management Decision Required:** Which option to proceed with.
+
+---
+
+## 5. Qdrant Schema
+
+### Collection Design
+
+```
+Collection name:  fazle_rag_chunks
+Vector size:      384  (MiniLM-L12-v2 or multilingual-e5-small)
+Distance metric:  Cosine
+Storage mode:     Local file-based  →  QdrantClient(path="./store/qdrant")
+```
+
+### Collection Configuration
+
+```python
+from qdrant_client.models import VectorParams, Distance
+
+vectors_config = VectorParams(
+    size=384,
+    distance=Distance.COSINE,
+    on_disk=False,          # Keep in RAM (corpus is tiny — <1 MB of vectors)
+)
+```
+
+### Index Configuration
+
+For a corpus of 300–500 vectors, **no HNSW tuning is needed** — flat exhaustive search is faster at this scale. Qdrant automatically selects the optimal internal strategy.
+
+```python
+# No custom HNSW params needed for <1000 vectors
+# Qdrant uses flat index below threshold automatically
+```
+
+### Persistence Path
+
+```
+/home/azim/core/store/qdrant/
+```
+
+This directory already exists in the project store pattern. The Qdrant client will manage subdirectory structure internally.
+
+---
+
+## 6. Payload Structure
+
+Every vector point stored in Qdrant carries this payload. The payload mirrors the `_IDX.docs` dict in the current BM25 index to ensure consistency between the two indexes.
+
+```python
+{
+    "source":             "file:office_info.txt",     # same as _IDX.docs["source"]
+    "title":              "office_info",               # same as _IDX.docs["title"]
+    "chunk_idx":          3,                           # position within source
+    "text":               "...",                       # the actual chunk text
+    "safe_for_customer":  True,                        # always True (unsafe chunks never stored)
+    "source_kind":        "file",                      # "file" | "kb"
+    "indexed_at":         1750000000.0,                # unix timestamp of index build
+}
+```
+
+**Point ID strategy:** Deterministic UUID generated from `source + str(chunk_idx)`:
+```python
+import uuid
+point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source_id}:{chunk_idx}"))
+```
+This allows upsert semantics — re-indexing a chunk replaces the existing point (same UUID = same chunk).
+
+---
+
+## 7. Fusion Algorithm
+
+### Algorithm: Reciprocal Rank Fusion (RRF)
+
+RRF is chosen because:
+1. **No tuning required** — a single constant `k=60` is universally stable
+2. **Scale-invariant** — BM25 scores and cosine similarities are on different scales; RRF uses only rank order
+3. **Graceful degradation** — if a document appears in only one result set, it still gets partial credit
+4. **Proven** — used by Elasticsearch, Qdrant, and production hybrid search systems
+
+### Formula
+
+```
+RRF_score(document d) = 1 / (k + bm25_rank(d)) + 1 / (k + vector_rank(d))
+```
+
+Where:
+- `k = 60` (standard constant; prevents rank-1 documents from dominating)
+- `bm25_rank(d)` = 1-based rank of document `d` in BM25 results (missing = `max_k + 1`)
+- `vector_rank(d)` = 1-based rank of document `d` in vector results (missing = `max_k + 1`)
+
+### Example
+
+```
+BM25 results (k=10):      Vector results (k=10):
+  rank 1: chunk_A            rank 1: chunk_B
+  rank 2: chunk_B            rank 2: chunk_A
+  rank 3: chunk_C            rank 3: chunk_D
+  ...                        rank 4: chunk_C
+                             ...
+
+RRF_score(chunk_A) = 1/(60+1) + 1/(60+2) = 0.01639 + 0.01613 = 0.03252
+RRF_score(chunk_B) = 1/(60+2) + 1/(60+1) = 0.01613 + 0.01639 = 0.03252   ← tie (both in both)
+RRF_score(chunk_D) = 1/(60+11) + 1/(60+3) = 0.01408 + 0.01587 = 0.02995  ← only in vector
+RRF_score(chunk_C) = 1/(60+3) + 1/(60+4) = 0.01587 + 0.01563 = 0.03149
+```
+
+Documents appearing in both result sets consistently score higher than documents only in one.
+
+### Fallback Behavior
+
+```python
+def rrf_merge(bm25_results, vector_results, k=60, max_candidates=10):
+    """
+    Merge two ranked result lists using RRF.
+    Both lists are list[dict] with 'source' + 'chunk_idx' as identity key.
+    Returns merged list sorted by RRF score descending.
+    """
+    scores = {}
+
+    # BM25 contributions
+    for rank, doc in enumerate(bm25_results, start=1):
+        key = (doc["source"], doc["chunk_idx"])
+        scores.setdefault(key, {"doc": doc, "rrf": 0.0})
+        scores[key]["rrf"] += 1.0 / (k + rank)
+
+    # Vector contributions
+    for rank, doc in enumerate(vector_results, start=1):
+        key = (doc["source"], doc["chunk_idx"])
+        scores.setdefault(key, {"doc": doc, "rrf": 0.0})
+        scores[key]["rrf"] += 1.0 / (k + rank)
+
+    merged = sorted(scores.values(), key=lambda x: x["rrf"], reverse=True)
+    return [entry["doc"] | {"rrf_score": round(entry["rrf"], 6)} for entry in merged[:max_candidates]]
+```
+
+**Edge case — vector search unavailable:**
+If Qdrant is unavailable (startup failure, corrupted store, dependency missing):
+→ `vector_results = []`
+→ RRF degrades to pure BM25 ranking
+→ Behavior is identical to current production
+→ No error surfaced to caller
+
+---
+
+## 8. Ranking Strategy
+
+### Signal Priority
+
+After RRF fusion, apply two optional re-ranking signals:
+
+```
+Final Score = RRF_score × source_freshness_multiplier + workflow_state_bonus
+```
+
+| Signal | Type | Value | Purpose |
+|---|---|---|---|
+| RRF base score | Primary | 0.0 – 0.033+ | Core fusion score from BM25 + vector |
+| Source freshness | Multiplier | KB row: ×1.1, file: ×1.0 | Prefer admin-curated KB rows when scores are close |
+| Workflow state bonus | Additive | +0.002 if chunk contains workflow state keywords | Boost contextually relevant chunks for known workflow states |
+
+### Visibility Filter (Hard Filter — Not a Ranking Signal)
+
+**This is a hard exclusion, not a score penalty.** Applied BEFORE ranking.
+
+All chunks in the index are already `safe_for_customer=True` (enforced by the 32-pattern filter at build time). The visibility filter is an additional runtime guard:
+
+```python
+# If caller provides role context:
+#   - If role < ADMIN: exclude chunks whose source is in DEVELOPER_ONLY_SOURCES
+#   - DEVELOPER_ONLY_SOURCES = {"file:system_context.txt"}  ← already excluded by _EXCLUDED_NAME_KEYWORDS
+# Currently: all indexed chunks are already safe for customer
+# This layer is a defense-in-depth guard for future corpus additions
+```
+
+**Current state:** This filter is a no-op because `system_context.txt` is already excluded at file-level by the `system_context` keyword in `_EXCLUDED_NAME_KEYWORDS`. It is designed here for when the corpus expands.
+
+### Minimum Score Threshold
+
+After re-ranking, apply the existing `min_score` threshold:
+- `answer()` uses `min_score=1.0` (BM25 scale for current system)
+- For hybrid: threshold is applied to **RRF score**, which is on a different scale (~0.033 maximum for perfect agreement)
+- **Proposed hybrid threshold:** `min_rrf_score=0.015` (equivalent to a document appearing at rank ≤5 in at least one index)
+- This threshold is configurable via env: `RAG_MIN_RRF_SCORE=0.015`
+
+---
+
+## 9. Incremental Synchronization
+
+### Assessment
+
+For the current corpus (456 KB, ~300–400 chunks), a **full rebuild on schedule** is simpler and safer than incremental sync:
+
+| Approach | Pros | Cons | Verdict |
+|---|---|---|---|
+| Full rebuild (daily at 18:00) | Simple, no delta state, guarantees consistency | ~5–10s rebuild time (vs <1s today) | **Recommended** |
+| Incremental file-change detection | Faster individual updates | File mtime tracking complexity, potential drift between BM25 and Qdrant indexes | Not needed at this scale |
+| Event-driven sync (DB trigger) | Real-time | Requires DB hooks, more complexity | Premature for this scale |
+
+### Full Rebuild Design
+
+The existing `rag_rebuild` scheduler job at 18:00 will be extended to:
+1. Drop and recreate Qdrant collection (guarantees clean state)
+2. Re-embed all chunks in parallel batches
+3. Upsert all vectors to Qdrant
+4. Rebuild BM25 index (unchanged)
+5. Release rebuild lock
+
+**Parallelism:** The embedding model runs CPU-bound work. Use `asyncio.get_event_loop().run_in_executor(None, ...)` to run encoding in the thread pool without blocking the asyncio event loop.
+
+### On-Startup Rebuild
+
+`ensure_index()` will check BOTH indexes:
+```python
+async def ensure_index():
+    bm25_missing = _IDX.built_at is None
+    qdrant_missing = not await _qdrant_collection_exists()
+    if bm25_missing or qdrant_missing:
+        await build_index()  # builds both
+```
+
+---
+
+## 10. Index Rebuild Strategy
+
+### Rebuild Lock
+
+The existing `_IDX.lock` (asyncio.Lock) covers BM25 rebuild. The Qdrant rebuild will run under the same lock — both indexes are always rebuilt together, never in an inconsistent split state.
+
+```python
+async def build_index():
+    async with _IDX.lock:
+        # Phase A: BM25 (existing logic unchanged)
+        _IDX.reset()
+        ... existing BM25 build code ...
+
+        # Phase B: Qdrant (new)
+        if HYBRID_SEARCH_ENABLED:
+            await _build_qdrant_index(safe_chunks)  # same chunks, already filtered
+```
+
+### Rebuild Sequence Detail
+
+```
+1. Acquire _IDX.lock  (prevents concurrent search during rebuild)
+2. _IDX.reset()       (wipe BM25 in-memory state)
+3. Load all sources   (files + DB rows)
+4. Chunk + safety filter  (produce safe_chunks list)
+5. Build BM25 index   (existing: tokenize, compute df, avgdl)
+6. IF HYBRID_SEARCH_ENABLED:
+   a. Drop Qdrant collection fazle_rag_chunks (if exists)
+   b. Create fresh collection (384 dims, cosine)
+   c. Batch encode safe_chunks via embedding model (batch_size=32)
+   d. Upsert all points to Qdrant (batch upsert)
+7. Set _IDX.built_at = time.time()
+8. Release lock
+9. Log: index built — docs=N bm25_vocab=V qdrant_points=N rebuild_ms=T
+```
+
+### Rebuild Time Estimate
+
+| Step | Estimated Time |
+|---|---|
+| BM25 build (current) | <1 second |
+| Qdrant collection drop+create | <10ms |
+| Encode 400 chunks @ 10ms/chunk | ~4 seconds |
+| Batch upsert 400 vectors | ~100ms |
+| **Total hybrid rebuild** | **~5–6 seconds** |
+
+This is acceptable for a daily rebuild at 18:00. The rebuild lock prevents search during this window (~5 seconds vs <1 second current).
+
+**Mitigation:** During rebuild, `ensure_index()` will find `_IDX.built_at is not None` (set from previous build) so existing searches can use the old BM25 index. Only the lock window itself blocks concurrent searches.
+
+---
+
+## 11. Performance Estimation
+
+### Query Path Timing
+
+| Step | Estimated Time | Notes |
+|---|---|---|
+| BM25 tokenize query | <0.1ms | In-process, already proven |
+| BM25 search (k=10) | <1ms | 400 documents in-memory |
+| Embed query text | ~10ms | CPU inference, single forward pass |
+| Qdrant vector search (k=10) | <5ms | 400 vectors, cosine, in-memory collection |
+| RRF fusion (k=20 candidates) | <0.1ms | Pure Python dict operations |
+| **Total hybrid search** | **~15–20ms** | Well within 100ms target |
+
+### Memory Footprint (at runtime)
+
+| Component | RAM |
+|---|---|
+| BM25 in-memory index (current) | ~2–5 MB |
+| Embedding model (MiniLM-L12-v2) | ~120 MB |
+| Qdrant in-process client | ~10 MB |
+| Qdrant vector store (400 vectors × 384 dims × 4 bytes) | ~0.6 MB |
+| **Total addition to current** | **~130–135 MB** |
+
+Current available RAM: ~15 GB. Addition of ~130 MB is negligible (< 1%).
+
+### Disk Footprint
+
+| Component | Disk |
+|---|---|
+| MiniLM-L12-v2 model (downloaded once to `~/.cache/`) | ~118 MB |
+| Qdrant store at `store/qdrant/` | <5 MB |
+| **Total new disk usage** | **~125 MB** |
+
+---
+
+## 12. Migration Strategy
+
+### Principle: Additive Only — Never Replace
+
+The hybrid implementation is a **strict superset** of the current system:
+- All current code paths preserved
+- All safety filters preserved and enforced on BOTH indexes
+- BM25 index unchanged
+- New vector index added alongside
+
+### Phase Sequence
+
+```
+STEP 0 — Pre-migration (before any code change):
+  Add HYBRID_SEARCH_ENABLED=false to .env
+  Verify all tests pass (no behavioral change)
+
+STEP 1 — Dependency addition:
+  Add qdrant-client and sentence-transformers to requirements.txt
+  Install on VPS
+  Verify service starts (no behavioral change — HYBRID=false)
+
+STEP 2 — Build path addition (flag=false):
+  Add Qdrant build logic inside "if HYBRID_SEARCH_ENABLED" block
+  Add embedding model loader (lazy, load on first build)
+  Service still behaves as current (flag=false, vector code never runs)
+  Verify: logs show no Qdrant activity
+
+STEP 3 — Query path addition (flag=false):
+  Add hybrid search() and answer() code paths
+  Add rrf_merge() utility
+  Service still behaves as current (flag=false)
+  Verify: search() returns same results as current
+
+STEP 4 — Test with flag=true in NON-PRODUCTION:
+  Set HYBRID_SEARCH_ENABLED=true locally
+  Trigger manual rebuild: await rebuild_index()
+  Run test queries in Bangla and English
+  Verify: hybrid results include semantically relevant chunks
+  Verify: all 32 unsafe patterns still blocked
+  Verify: rebuild completes in <10s
+  Verify: query latency <100ms
+
+STEP 5 — Management review of STEP 4 results:
+  STOP — present test results to Management
+  Await approval before VPS deployment
+
+STEP 6 — VPS deployment with flag=false:
+  Deploy new code; HYBRID_SEARCH_ENABLED=false
+  Verify VPS starts cleanly; behavior unchanged
+
+STEP 7 — Enable on VPS with flag=true (Management authorization required):
+  Set HYBRID_SEARCH_ENABLED=true in VPS .env
+  Service restarts; build_index() runs at startup
+  Monitor logs for: index built, qdrant points, rebuild_ms
+  Monitor query latency in logs
+```
+
+---
+
+## 13. Rollback Strategy
+
+### Rollback Trigger Conditions
+
+| Condition | Rollback Action |
+|---|---|
+| Qdrant build fails on startup | Already handled: vector path skipped, BM25 serves requests |
+| Query latency >100ms | Set `HYBRID_SEARCH_ENABLED=false` in .env, restart |
+| Incorrect results observed | Set `HYBRID_SEARCH_ENABLED=false` in .env, restart |
+| Memory pressure | Set `HYBRID_SEARCH_ENABLED=false` in .env, restart |
+| Embedding model load fails | Already handled: `HYBRID_SEARCH_ENABLED=false` in fallback |
+
+### Rollback Procedure
+
+```
+1. SSH to VPS
+2. Edit /home/azim/core/.env:
+   HYBRID_SEARCH_ENABLED=false
+3. systemctl restart fazle-core
+4. Verify logs: "hybrid=false — BM25 only mode"
+5. Verify search behavior returns to current (BM25-only)
+```
+
+**Rollback time: < 2 minutes**
+**Code deletion required: NONE**
+**Database change required: NONE**
+**The Qdrant store directory can be left in place or deleted safely — it is rebuilt from scratch every time `build_index()` runs with `HYBRID_SEARCH_ENABLED=true`.**
+
+---
+
+## 14. Risk Assessment
+
+### Risk Matrix
+
+| ID | Risk | Probability | Impact | Mitigation |
+|---|---|---|---|---|
+| R-01 | Qdrant build fails at startup (corrupt store, permission issue) | Low | Low | Auto-fallback to BM25; logged as WARNING; service continues |
+| R-02 | Embedding model download fails (network, disk space) | Low | Medium | Model cached at `~/.cache/huggingface/` — manual download possible; deployment docs cover offline setup |
+| R-03 | Query latency exceeds 100ms | Low | Medium | CPU inference ~10ms measured; 24GB VPS has headroom; flag=false instant rollback |
+| R-04 | Semantic false positives (irrelevant chunks injected into LLM context) | Medium | Medium | min_rrf_score threshold filters weak matches; Draft Quality Gate remains as final guard |
+| R-05 | RRF degrades BM25 precision for exact-match queries | Low | Low | Exact-match chunks still score highest in both indexes; RRF preserves their top rank |
+| R-06 | Memory pressure from embedding model (~130MB addition) | Very Low | Low | 15GB available; 130MB addition is <1% of available RAM |
+| R-07 | Rebuild window increases 5× (1s → 6s) | Medium | Low | Rebuild runs at 18:00 daily; brief lock window acceptable; no query failures during rebuild (old index served) |
+| R-08 | PyTorch/sentence-transformers version conflict with existing deps | Low | Medium | No current deps touch torch; isolated dependency tree; test in venv first |
+| R-09 | Cross-lingual hallucination (vector matches unrelated Bangla text) | Low | Medium | min_rrf_score threshold; Draft Quality Gate post-LLM; only affects context, not raw output |
+| R-10 | Unsafe chunk leaks through vector index | Very Low | High | Same 32-pattern filter applied to both BM25 and Qdrant at build time; vector index only stores `safe_for_customer=True` chunks |
+
+### Overall Risk: LOW
+
+The additive architecture and `HYBRID_SEARCH_ENABLED` flag eliminate deployment risk. The biggest ongoing risk (R-04, semantic false positives) is mitigated by threshold tuning and the existing Draft Quality Gate.
+
+---
+
+## 15. Implementation Roadmap
+
+Each task is designed to be:
+- Small (1–6 hours)
+- Independently reviewable
+- Safe (no production breakage if it fails)
+- Independently deployable (flag=false protects against partial deployment)
+
+| Task ID | Task | Effort | Depends On | Files Affected | Risk |
+|---|---|---|---|---|---|
+| **T-01** | Add `HYBRID_SEARCH_ENABLED` env var + guard scaffold | 1h | Management approval | `modules/rag/__init__.py`, `.env.example` | None — flag=false, no behavior change |
+| **T-02** | Add `qdrant-client` and `sentence-transformers` to requirements.txt | 30m | T-01 | `requirements.txt` | None — not loaded until flag=true |
+| **T-03** | Implement embedding model loader (lazy, thread-safe singleton) | 2h | T-02 | `modules/rag/__init__.py` (new: `_get_encoder()`) | None — only called when flag=true |
+| **T-04** | Implement `_build_qdrant_index(safe_chunks)` — collection drop/create/upsert | 3h | T-03 | `modules/rag/__init__.py` (new: Qdrant build path) | None — only called when flag=true |
+| **T-05** | Extend `build_index()` and `rebuild_index()` to call `_build_qdrant_index()` when flag=true | 2h | T-04 | `modules/rag/__init__.py` | None — guard: `if HYBRID_SEARCH_ENABLED` |
+| **T-06** | Implement `rrf_merge(bm25_results, vector_results)` utility | 2h | T-05 | `modules/rag/__init__.py` (new function) | None — not called from search() yet |
+| **T-07** | Implement `_vector_search(q, k)` using Qdrant | 2h | T-06 | `modules/rag/__init__.py` (new function) | None — not called from search() yet |
+| **T-08** | Extend `search()` to call `_vector_search()` + `rrf_merge()` when flag=true | 2h | T-07 | `modules/rag/__init__.py` — `search()` function | Low — guarded by flag |
+| **T-09** | Update `answer()` to use RRF min_score threshold when flag=true | 1h | T-08 | `modules/rag/__init__.py` — `answer()` function | Low — guarded by flag |
+| **T-10** | Update `stats()` to include Qdrant stats (point count, collection status) when flag=true | 1h | T-09 | `modules/rag/__init__.py` — `stats()` function | None — additive only |
+| **T-11** | Update `rag_strategy.md` in KB to document hybrid architecture | 1h | T-10 | `knowledge_base/06_developer_system/rag_strategy.md` | None — documentation only |
+| **T-12** | Local integration test: flag=true rebuild + search + verify safety filters | 4h | T-11 | Test scripts (not production) | None — test environment only |
+| **T-13** | VPS deployment with flag=false (code present, disabled) | 1h | T-12 + Management approval | VPS deployment only | None |
+| **T-14** | Enable flag=true on VPS + monitor | 2h | T-13 + Management approval per-step | VPS .env only | Low — rollback in <2 min |
+
+**Total estimated effort:** ~27 hours of focused implementation
+**Total new production files changed:** 2 (`modules/rag/__init__.py`, `requirements.txt`)
+**Total new production files created:** 0
+**Approval gates:** T-01 (start), T-12 (review test results), T-14 (enable in production)
+
+---
+
+## 16. Management Decision Required
+
+**This design package is complete. No production code has been changed.**
+
+The following decisions are required before any implementation begins:
+
+### Decision 1 — Approve or reject this design
+
+Options:
+- A) **APPROVE** — proceed to Task T-01
+- B) **APPROVE WITH MODIFICATIONS** — specify required changes; architect revises design
+- C) **REJECT** — design is set aside; PHASE 2 (Identity Brain) begins instead
+
+### Decision 2 — Embedding model selection (if design approved)
+
+Options:
+- A) **Option A: `paraphrase-multilingual-MiniLM-L12-v2`** (sentence-transformers, PyTorch) — Recommended
+- B) **Option B: `multilingual-e5-small`** (FastEmbed, ONNX, lighter dependency) — Alternative
+- C) **Defer to architect** — architect selects based on VPS test results
+
+### Decision 3 — Approval gate granularity (if design approved)
+
+Options:
+- A) **Per-task approval** — management approves each task before it begins
+- B) **Per-milestone approval** — approve T-01 to T-07 as a unit (build), then T-08 to T-11 (query), then T-12+ (test/deploy)
+- C) **Single approval** — approve all tasks T-01 to T-13; T-14 (enabling on VPS) requires separate authorization
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-22 | PHASE 1.5 design package created — complete architecture, 14 sections, 14-task roadmap | Session 2 Architect |

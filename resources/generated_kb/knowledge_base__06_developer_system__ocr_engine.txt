@@ -1,0 +1,243 @@
+Source: knowledge_base/06_developer_system/ocr_engine.md
+SHA256: 9e1c715102cf35d6c10b4faaf476fb78c27704fd3c456737df21f4f616f7e7c8
+Version: 9e1c715102cf
+
+# OCR Engine — Fazle AI Platform
+
+**Article Type:** Developer System Reference
+**Visibility:** Developer / Admin
+**Source Module:** `modules/ocr_processor/__init__.py`
+**Production Status:** ACTIVE — called on every image/document received via WhatsApp
+**Wave:** Wave-2B | 2026-06-22
+**Traceability:** PKMA Report 18 (DEV-09 — enriched from Level 1 partial)
+**Management Decision:** OCR is strategic — must cover escort release slip (current) and future candidate CV extraction (approved scope extension)
+
+---
+
+## Visibility and AI Exposure Rules
+
+**Visibility:** Developer (pipeline internals), Admin (slip types and field extraction behavior)
+**AI Exposure:** OCR confidence scores, prompt internals, classification keywords, field extraction logic, and the OCR API endpoint must NEVER be exposed to candidates or employees. Safe acknowledgement replies (in Bangla) may be auto-sent — these are the only OCR output visible to the public.
+
+---
+
+## Purpose
+
+The OCR Engine processes two categories of inbound media:
+
+1. **Escort slip images** (primary operational use) — duty slips, release slips, payment slips received from escorts or clients via WhatsApp
+2. **Candidate documents** (strategic future scope) — CV, NID, certificates, chairman certificates, handwritten applications
+
+Both pipelines call the `media_processor` service (port 8090) for raw text extraction, then perform in-process classification, field extraction, confidence scoring, and Bangla reply generation.
+
+---
+
+## Pipeline Overview
+
+### Image Pipeline (`process_image`)
+
+```
+Inbound image
+      ↓
+check_and_register() — SHA-256 hash dedup
+      ↓ (duplicate) → return duplicate notice
+      ↓ (new)
+_call_ocr(media_processor_url, file_path) → raw_text
+      ↓
+_clean_ocr_text(raw_text) → clean_text
+      ↓
+_classify_slip(clean_text) → slip_type
+      ↓
+_extract_fields(clean_text, slip_type) → fields dict
+      ↓
+_compute_confidence(clean_text, fields) → confidence 0–100
+      ↓
+_build_reply(slip_type, fields, confidence) → Bangla reply
+      ↓
+OcrResult TypedDict returned
+```
+
+### Document Pipeline (`process_document`)
+
+```
+Inbound PDF/document
+      ↓
+_call_extract(media_processor_url, file_path) → extracted_text
+      ↓
+_classify_candidate_doc(extracted_text, filename) → doc_type
+      ↓
+_build_doc_acknowledgement(doc_type, filename) → Bangla acknowledgement
+      ↓
+DocResult TypedDict returned (auto_send_safe: always True for recognized doc types)
+```
+
+---
+
+## OcrResult TypedDict — All 14 Fields
+
+**Source:** `class OcrResult(TypedDict)` in `modules/ocr_processor/__init__.py`
+
+| Field | Type | Description |
+|---|---|---|
+| `raw_text` | str | Full unprocessed text from OCR service |
+| `slip_type` | str | escort_slip \| release_slip \| payment_slip \| duplicate \| unknown |
+| `is_duplicate` | bool | True if SHA-256 hash matches a previously processed image |
+| `duplicate_of` | Optional[int] | `message_id` of the original message if duplicate |
+| `confidence_score` | int | 0–100 quality estimate of the OCR extraction |
+| `employee_name` | Optional[str] | Extracted escort/employee name |
+| `employee_id` | Optional[str] | Extracted employee ID number if present |
+| `date` | Optional[str] | Extracted date from slip |
+| `vessel` | Optional[str] | Vessel name (mother vessel or lighter vessel) |
+| `location` | Optional[str] | Extracted location / destination |
+| `amount` | Optional[str] | Extracted amount (for payment slips) |
+| `client` | Optional[str] | Client name if present |
+| `reference_no` | Optional[str] | Reference or slip number |
+| `reply` | str | Auto-generated Bangla reply for this slip type |
+
+---
+
+## DocResult TypedDict — All 6 Fields
+
+**Source:** `class DocResult(TypedDict)` in `modules/ocr_processor/__init__.py`
+
+| Field | Type | Description |
+|---|---|---|
+| `extracted_text` | str | Full extracted text from PDF/document |
+| `doc_type` | str | cv \| nid \| certificate \| chairman_cert \| handwritten \| passport_photo \| passport \| unknown |
+| `filename` | str | Original filename (used in reply context) |
+| `confidence_score` | int | Rough word-count-based quality score (0–100) |
+| `reply` | str | Bangla acknowledgement reply (auto-send safe) |
+| `auto_send_safe` | bool | True for all recognized doc types; False for unknown |
+
+---
+
+## Slip Type Classification
+
+**Source Function:** `_classify_slip(text)`
+**Algorithm:** Keyword scoring — score each of 3 slip types; type with highest score wins
+
+| Slip Type | Classification Keywords |
+|---|---|
+| `escort_slip` | escort, এস্কর্ট, vessel, ভেসেল, mother vessel, lighter, assignment, নিয়োগ, duty slip, ডিউটি স্লিপ, escort slip |
+| `release_slip` | release, রিলিজ, completion, সমাপ্ত, discharge, cleared |
+| `payment_slip` | payment, পেমেন্ট, salary, বেতন, advance, অ্যাডভান্স, paid, পরিশোধ, bkash, বিকাশ, nagad, নগদ, amount, টাকা |
+
+If all scores = 0 → `unknown`. Highest-scoring type wins. Ties: escort > release > payment.
+
+---
+
+## Document Type Classification
+
+**Source Function:** `_classify_candidate_doc(text, filename)` — Strategic scope (future candidate CV processing)
+**Algorithm:** Keyword scoring across 7 document types
+
+| Document Type | Key Classification Keywords |
+|---|---|
+| `cv` | curriculum vitae, resume, cv, work experience, education, skills, জীবন বৃত্তান্ত, শিক্ষাগত, কর্ম অভিজ্ঞতা |
+| `nid` | national id, nid, national identity, voter id, জাতীয় পরিচয়, ভোটার আইডি, election commission |
+| `certificate` | certificate, সনদ, সার্টিফিকেট, ssc, hsc, board, gpa, মাধ্যমিক, উচ্চমাধ্যমিক |
+| `chairman_cert` | chairman, চেয়ারম্যান, ward, union, পরিষদ, নাগরিকত্ব, citizenship, character certificate |
+| `handwritten` | আবেদন, application, বরাবর, মহোদয়, বিনীত নিবেদন, নিবেদক, জনাব, dear sir |
+| `passport_photo` | photo, ফটো, passport size, ছবি |
+| `passport` | passport, পাসপোর্ট, republic of bangladesh, travel document |
+
+**auto_send_safe = True** for all recognized types (cv, nid, certificate, chairman_cert, handwritten, passport_photo, passport). `unknown` → `auto_send_safe = False`.
+
+---
+
+## Confidence Scoring — Actual Algorithm (Wave-4)
+
+**Source Function:** `_compute_confidence(text, fields)` in `modules/ocr_processor/__init__.py`
+**Range:** 0–100 (heuristic, not ML-based). Clamped: `min(100, max(0, score))`.
+
+**Scoring components (summed):**
+
+| Component | Condition | Points |
+|---|---|---|
+| Text volume | ≥ 20 words | +30 |
+| Text volume | ≥ 10 words (< 20) | +20 |
+| Text volume | ≥ 5 words (< 10) | +10 |
+| Text volume | < 5 words (and text ≥ 20 chars) | +0 |
+| Minimum floor | text < 20 chars | returns 10 immediately |
+| Field extraction | `(extracted_fields / total_fields) × 40` | 0–40 |
+| Valid date | `fields["date"]` passes `_is_garbage_date()` check | +10 |
+| Garbage date | `fields["date"]` fails `_is_garbage_date()` check | -20 |
+| Clean text | `alpha_chars / total_chars ≥ 0.3` | +20 |
+| Noise penalty | `alpha_chars / total_chars < 0.3` (heavy noise) | -20 |
+
+**Low confidence threshold:** `< 40` → reply suffix appended: `" [⚠️ কম নির্ভরযোগ্য — যাচাই করুন]"`
+
+**Escort lifecycle check:** `escort_lifecycle` also reads `confidence_score` and appends `"⚠️ LOW OCR CONFIDENCE: {conf}/100 — verify all fields"` warning when `conf < 40`.
+
+**Document confidence (different formula):** `min(100, max(10, len(extracted_text.split()) * 2))` — word-count proxy only.
+
+**Confidence is NEVER exposed raw to customers** — only the warning suffix appears when low.
+
+---
+
+## Duplicate Detection
+
+**Module:** `modules/image_hash/`
+**Algorithm:** SHA-256 hash of raw image bytes
+**Storage:** `check_and_register(file_path, message_id)` — registers hash in production table on first occurrence
+**Behavior:** If duplicate detected → returns early with Bangla notice: `"এই স্লিপটি পূর্বে জমা হয়েছে। যাচাই চলছে।"`
+**No double-processing:** The full OCR pipeline is bypassed for duplicates.
+
+---
+
+## Image Requirements
+
+| Parameter | Constraint |
+|---|---|
+| File size | 1 KB minimum; 8 MB maximum |
+| Formats | JPG, JPEG, PNG, WEBP |
+| OCR endpoint | `POST {media_processor_url}/ocr` with `{"file_path": path}` |
+| Document extract endpoint | `POST {media_processor_url}/extract` with `{"file_path": path}` |
+| Timeout | 30 seconds per HTTP call |
+
+---
+
+## Context-Based Pre-Filter
+
+**Source Function:** `classify_from_context(context_text)` (Phase 22 addition)
+**Purpose:** Lightweight pre-filter using surrounding chat messages to determine if incoming image is likely an escort slip before calling OCR
+
+**Returns True (likely escort slip) if context contains:**
+- Release keywords: release, রিলিজ, completion, সমাপ্ত, slip, স্লিপ, done, finished
+- Escort keywords: escort, এস্কর্ট, vessel, lighter, assignment, duty, ডিউটি
+
+This pre-filter saves OCR API calls for clearly non-slip images.
+
+---
+
+## Future Scope — Candidate CV Processing (Management Decision)
+
+**Management Decision 2026-06-22:** OCR is strategic. Current scope covers escort slips. Future scope explicitly includes candidate CV extraction.
+
+The `DocResult` TypedDict and `_classify_candidate_doc()` classifier are already production-ready for CV processing. The `auto_send_safe` flag and 7 document type acknowledgements in `_DOC_ACK` are implemented but may not yet be triggered in the main recruitment flow.
+
+**Gap:** The recruitment flow module (`modules/recruitment_flow/`) does not currently call `process_document()` for incoming candidate documents. This is a known Wave-3 integration gap.
+
+---
+
+## API Integration
+
+The OCR engine is called by `app/main.py` when an inbound WhatsApp message contains an image or document attachment. It is not exposed as a standalone API endpoint — it is an internal processing module.
+
+**Media processor service:** Port 8090 (see `developer_notes.md` bridge configuration)
+
+---
+
+## Related Articles
+
+- `05_workflows/release_slip_workflow.md` — Business workflow for release slip processing
+- `06_developer_system/database_rules.md` — `escort_slip_extractions` (ESCORT domain, table 7)
+- `06_developer_system/fpe_overview.md` — FPE payment_slip OCR integration
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-22 | Wave-2B: Full enrichment. Previous stub (18 lines) replaced. Both TypedDicts (OcrResult 14 fields, DocResult 6 fields), document type classification, confidence scoring, duplicate detection, future CV scope documented. | KSP Wave-2B |

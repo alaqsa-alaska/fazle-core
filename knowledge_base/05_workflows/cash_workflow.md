@@ -1,4 +1,12 @@
-﻿# Cash Workflow
+---
+title: Cash Workflow
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Cash Workflow
 
 ## Flow
 Admin Payment Message -> Accountant Receipt -> Transaction Parse -> Duplicate Check -> Cash Ledger Entry -> Employee Balance Update -> Payroll/Advance Sync.

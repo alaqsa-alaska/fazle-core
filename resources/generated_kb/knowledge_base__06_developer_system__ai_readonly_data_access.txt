@@ -1,0 +1,111 @@
+Source: knowledge_base/06_developer_system/ai_readonly_data_access.md
+SHA256: 3826efc019227b41a76a4da512e3e3695f5cf59424ccbabdb237f24b731fb1db
+Version: 3826efc01922
+
+# AI Read-Only Data Access Layer
+
+## Purpose
+
+Allows Ollama/Chat Lab AI to answer operational questions using live production
+data — without ever writing to, altering, or dropping production tables.
+
+## Architecture
+
+```
+Admin question
+     ↓
+detect_tools_needed(question)  ← keyword-based router
+     ↓
+run_tool(tool_name, question)
+     ↓
+fazle_ai_reader role (SELECT only)
+     ↓
+ai_read_* view (approved, column-filtered)
+     ↓
+Formatted rows → context block → Ollama prompt
+```
+
+## DB Role
+
+| Role | DB | Permissions |
+|---|---|---|
+| `fazle_ai_reader` | `postgres` (production) | SELECT on `ai_read_*` views only |
+| `ollama_memory_owner` | `fazle_ollama_memory` | Full DDL/DML on memory DB |
+
+## Approved Views (9 views)
+
+| View | Source Tables | What AI sees |
+|---|---|---|
+| `ai_read_employees` | `wbom_employees` | name, mobile, designation, status, salary |
+| `ai_read_contacts` | `wbom_contacts` | name, number, relation, company |
+| `ai_read_recent_messages` | `wbom_whatsapp_messages` | last 7 days, 300 char body |
+| `ai_read_escort_programs` | `wbom_escort_programs` | vessel, employee, status, last 30 days |
+| `ai_read_attendance_summary` | `wbom_attendance` | current + last month |
+| `ai_read_payroll_runs` | `wbom_payroll_runs` | salary summaries, last year |
+| `ai_read_recruitment_leads` | `fazle_recruitment_sessions` | last 30 days, no NID |
+| `ai_read_module_bridge_status` | `fazle_service_heartbeats` | service health |
+| `ai_read_kb_articles` | `fazle_knowledge_base` | active KB content |
+
+## Python Tool Functions
+
+```python
+# modules/ai_readonly_tools/__init__.py
+await get_employee_list(status="active")
+await get_contact_summary(phone)
+await get_contacts_list(limit=30)
+await get_recent_messages(phone=None, limit=10)
+await get_payment_summary(employee_name, month, year)
+await get_escort_program_status(vessel, date_str, status)
+await get_attendance_summary(employee_name, month)
+await get_payroll_run_status(month, year)
+await get_recruitment_leads(limit=20)
+await get_module_bridge_status()
+await get_kb_articles(category, search, limit)
+await fetch_web_page(url)         # internet read-only GET
+detect_tools_needed(question)     # auto-detect needed tools
+await run_tool(tool_name, question)  # execute with param extraction
+```
+
+## Internet Access (fetch_web_page)
+
+- Read-only HTTP GET only (no POST/PUT/DELETE to external)
+- Private/internal IPs blocked (localhost, 172.x, 192.168.x, 10.x)
+- Max 3000 chars returned per fetch
+- AI may read external info to answer admin questions
+- AI may never publish internal data to external URLs
+
+## Security Rules (Hard Constraints)
+
+1. AI never receives production DB write credentials
+2. AI never executes arbitrary SQL — only named tool functions
+3. All tool functions use only `ai_read_*` views
+4. Row limits enforced: max 100 rows per query
+5. Sensitive fields excluded at view level (NID, bank account, API tokens)
+6. Internet fetch blocked for internal network addresses
+7. Production DB schema cannot be changed by AI
+
+## Auto-Detection Keywords
+
+The `detect_tools_needed(question)` function routes questions by keyword:
+
+| Tool | Trigger keywords |
+|---|---|
+| `get_employee_list` | employee, staff, কর্মচারী, guard, গার্ড |
+| `get_escort_program_status` | vessel, escort, ভেসেল, lighter, duty, shift |
+| `get_attendance_summary` | attendance, উপস্থিতি, present, check in |
+| `get_payroll_run_status` | payroll, salary, বেতন, payment summary |
+| `get_recruitment_leads` | recruit, candidate, নিয়োগ |
+| `get_module_bridge_status` | bridge, service status, health, module |
+| `fetch_web_page` | internet, web search, URL, ইন্টারনেট |
+
+## Chat Lab Integration
+
+Chat Lab (`/chat-lab`) calls this module automatically per question. The context
+pipeline order is:
+
+1. Ollama memory (past Q&A relevant facts)
+2. RAG (knowledge_base KB articles)
+3. Read-only DB tools (auto-detected)
+4. Internet fetch (if URL in question)
+
+Combined context → Ollama generation → answer saved to memory DB.

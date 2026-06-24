@@ -1,3 +1,11 @@
+---
+title: Salary Policy — Al-Aqsa Security & Logistics Services Ltd.
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Salary Policy — Al-Aqsa Security & Logistics Services Ltd.
 **Authority:** Management-approved (2026-06-23)
 **Visibility:** safe_for_customer=True — candidates may receive salary information

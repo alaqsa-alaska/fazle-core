@@ -1,3 +1,11 @@
+---
+title: PKVC Report 02: Knowledge Coverage Report
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report 02: Knowledge Coverage Report
 
 - Date: 2026-06-21

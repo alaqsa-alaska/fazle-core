@@ -1,3 +1,11 @@
+---
+title: PKVC Report — developer_notes.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — developer_notes.md
 **Article:** `06_developer_system/developer_notes.md`
 **Wave:** Wave-1 (configuration flags, bridge config, backup) + Wave-2B (REST API, SSE, observability)

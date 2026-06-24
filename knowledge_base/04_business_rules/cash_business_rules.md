@@ -1,4 +1,12 @@
-﻿# Cash Business Rules
+---
+title: Cash Business Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Cash Business Rules
 
 ## Purpose
 Define cash ledger behavior and accountant handoff rules.

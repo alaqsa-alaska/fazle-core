@@ -1,3 +1,11 @@
+---
+title: PKVC Report — database_rules.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — database_rules.md
 **Article:** `06_developer_system/database_rules.md`
 **Wave:** Wave-2B (full creation; replaced 23-line stub)

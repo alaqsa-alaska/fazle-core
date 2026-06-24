@@ -1,0 +1,277 @@
+Source: knowledge_base/06_developer_system/developer_notes.md
+SHA256: d991151605081f1376490560781298b83d18371d431c47eed113676b99236ef3
+Version: d99115160508
+
+# Developer Notes
+
+## Application Reliability Notes
+- Backend is source of truth; frontend must not maintain unsynced role state.
+- All writes require validation and audit log.
+- Identity cache must refresh after role edits.
+- Payment completion trigger is accountant handoff from admin message.
+- Candidate auto-reply must be disabled for sensitive/internal or unclear messages.
+- Business-rule files should be used by decision engine before workflow execution.
+
+## Missing Data Handling
+When a required field is missing, ask the user for that field if safe; otherwise create admin draft/manual review.
+
+---
+
+## AI Runtime Configuration Flags
+
+### Purpose
+These environment flags control the AI subsystem's runtime behavior. They allow operational adjustments without code changes.
+
+### Critical AI Flags
+
+| Flag | Default | Effect When Set |
+|---|---|---|
+| `OLLAMA_REPLY_DISABLED` | false | `true` → Ollama is skipped for customer-facing WhatsApp replies. Fallback becomes Groq → GitHub Models → polite holding message. Ollama is still used for intent classification and RAG rebuild when available. |
+| `AI_SAFE_MODE` | false | `true` → Long replies, low-confidence replies, and uncertain-intent replies become drafts instead of auto-sends. |
+| `AUTO_REPLY_ENABLED` | true | `false` → No customer auto-replies are sent. Only recruitment still replies (controlled by `RECRUITMENT_AUTOREPLY_ENABLED`). |
+| `RECRUITMENT_AUTOREPLY_ENABLED` | true | `false` → Recruitment auto-replies also disabled (requires `AUTO_REPLY_ENABLED=false` first). |
+| `AUTO_REPLY_SOURCES` | all | Comma-separated list of source names that may auto-reply (e.g. `bridge1,bridge2`). |
+| `DRAFT_QUALITY_GATE` | true | `false` → Disables the draft quality gate (not recommended in production). |
+| `REVIEWED_REPLY_MEMORY_ENABLED` | false | `true` → Enables admin-approved reply learning system. |
+| `SCHEDULER_ENABLED` | true | `false` → All 15 scheduled jobs disabled. |
+| `OUTBOUND_ENABLED` | true | `false` → No messages sent via outbound queue (dry-run mode). |
+
+**Business Rule:** In production, Ollama is the primary runtime AI provider. `OLLAMA_REPLY_DISABLED=true` is an emergency bypass for customer-facing reply generation only.
+
+**Source Module:** `app/config.py`
+**PKCA Report:** 08_ai_behavior_coverage_report.md, 07_scheduler_coverage_report.md
+**Management Authority:** Production evidence; documented 2026-06-22
+
+---
+
+## Bridge Configuration
+
+| Setting | Value | Purpose |
+|---|---|---|
+| `bridge1_url` | Port 8082 | HR channel (employee, recruitment, attendance) |
+| `bridge2_url` | Port 8081 | OPS channel (escort clients, operations) |
+| `media_processor_url` | Port 8090 | OCR and media processing endpoint |
+| `app_port` | Port 8200 | Main Fazle Core API |
+
+**Source Module:** `app/config.py`
+**PKCA Report:** 02_module_coverage_report.md
+
+---
+
+## Backup System
+
+**Business Rule:** Database backups run via `pg_dump` through Docker exec at 02:30 daily.
+
+| Parameter | Value | Env Override |
+|---|---|---|
+| Daily backups retained | 14 | Hardcoded |
+| Weekly backups retained | 8 | Hardcoded |
+| Verification | SHA-256 hash of each backup file | — |
+| Audit table | `fazle_db_backups` | — |
+| Stale alert threshold | 48 hours | `BACKUP_STALE_HOURS` |
+
+**Exception:** If backup directory does not exist, the `backup_staleness_alert` job returns a skipped status rather than alerting.
+
+**Source Module:** `modules/backup`
+**Source Function:** `job_daily_db_backup()`
+**PKCA Report:** 07_scheduler_coverage_report.md
+
+---
+
+## wa_chat_frontend REST API
+
+**Visibility:** Developer / Admin
+**Source Module:** `modules/wa_chat_frontend/__init__.py`
+**Production Status:** ACTIVE — mounted at Fazle Core (port 8200) under `/api/wa/`
+**Authentication:** All endpoints require API key (`X-Api-Key` header or `?api_key=` query param) via `_require_api_key` dependency
+
+### Endpoint Inventory (23 REST + 1 SSE)
+
+#### Settings (2 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/settings` | Read all runtime settings from `fazle_runtime_settings` table |
+| `PATCH` | `/api/wa/settings` | Update one or more runtime settings (key-value patch) |
+
+#### Contacts (8 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/contacts` | List all contacts with message count, last message, and role |
+| `GET` | `/api/wa/contacts/sync-status` | Get current contact sync status (last_sync_at, total count) |
+| `POST` | `/api/wa/contacts/sync` | Trigger manual contact sync from WhatsApp bridges |
+| `GET` | `/api/wa/contacts/{phone}` | Full contact detail: profile, roles, last 10 messages |
+| `PATCH` | `/api/wa/contacts/{phone}` | Edit contact display_name, notes, or assigned role |
+| `DELETE` | `/api/wa/contacts/{phone}` | Soft-delete contact record |
+| `POST` | `/api/wa/contacts/{phone}/block` | Block a contact (sets is_blocked=true, suppresses replies) |
+| `POST` | `/api/wa/contacts/{phone}/unblock` | Unblock a previously blocked contact |
+
+#### Messages (1 endpoint)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/messages/{phone}` | Paginated message history for a phone number (default last 50) |
+
+#### Send (3 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/wa/send` | Send a single message to one phone via specified bridge |
+| `POST` | `/api/wa/broadcast` | Send same message to multiple phone numbers (list) |
+| `POST` | `/api/wa/groups/{group_id}/send` | Send message to all members of a named contact group |
+
+#### Drafts (4 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/drafts` | List all pending drafts (status not in rejected/sent/approved) |
+| `POST` | `/api/wa/drafts/{draft_id}/edit` | Replace draft reply_text before approval |
+| `POST` | `/api/wa/drafts/{draft_id}/approve` | Approve and enqueue draft for sending; sets status=approved |
+| `POST` | `/api/wa/drafts/{draft_id}/reject` | Reject draft with optional reason; sets status=rejected |
+
+#### Groups (4 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/wa/groups` | Create a named contact group for broadcast targeting |
+| `GET` | `/api/wa/groups` | List all contact groups with member count |
+| `PATCH` | `/api/wa/groups/{group_id}` | Edit group name or membership |
+| `DELETE` | `/api/wa/groups/{group_id}` | Delete a contact group (does not delete contacts) |
+
+#### Real-Time Stream (SSE)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/stream` | Server-Sent Events stream — real-time new messages and new drafts |
+
+**SSE Stream Detail:**
+
+```
+GET /api/wa/stream?last_id=0&last_draft_id=0
+→ Content-Type: text/event-stream
+→ Headers: Cache-Control: no-cache, X-Accel-Buffering: no, Connection: keep-alive
+```
+
+**Poll interval:** 3 seconds (asyncio.sleep(3)); keepalive emitted every cycle as `: keepalive\n\n`
+
+**new_message event payload:**
+```json
+{
+  "type": "new_message",
+  "payload": {
+    "id": 12345,
+    "phone": "8801XXXXXXXXX",
+    "body": "...",
+    "direction": "inbound",
+    "platform": "bridge1",
+    "received_at": "2026-06-22T10:00:00",
+    "identity_role": "employee",
+    "intent_detected": "attendance_query"
+  }
+}
+```
+
+**new_draft event payload:**
+```json
+{
+  "type": "new_draft",
+  "payload": {
+    "id": 456,
+    "phone": "8801XXXXXXXXX",
+    "contact_name": "Karim (bridge1)",
+    "draft_body": "...",
+    "intent": "salary_query",
+    "original_message": "...",
+    "created_at": "2026-06-22T10:00:05"
+  }
+}
+```
+
+**Source Function:** `sse_stream()` at line 720 of `modules/wa_chat_frontend/__init__.py`
+**DB Tables Read:** `wbom_whatsapp_messages` (messages), `fazle_draft_replies` (drafts), `wbom_contacts` (contact names)
+**Business Rule:** Draft events are only emitted for drafts with status NOT IN (`rejected`, `sent`, `approved`). The client tracks `last_id` and `last_draft_id` to resume without replay on reconnect.
+
+---
+
+## Observability and Prometheus Metrics
+
+**Visibility:** Developer
+**Source Module:** `modules/observability/__init__.py`
+**Endpoints:**
+- `GET /metrics` — Prometheus text format (no auth required)
+- `GET /metrics/json` — JSON snapshot (API key required)
+
+The observability module is in-process with zero external dependencies. It tracks counters, gauges, and histograms using thread-safe storage (`threading.Lock`).
+
+### HTTP Metrics (Auto-collected by FastAPI middleware)
+
+| Metric Name | Type | Labels | Description |
+|---|---|---|---|
+| `http_requests_total` | Counter | method, path, status | Every request, including health checks |
+| `http_request_duration_ms` | Histogram | path | Latency in ms; buckets: 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 |
+
+### Draft Quality Metrics
+
+| Metric Name | Type | Labels | Description |
+|---|---|---|---|
+| `drafts_rejected_total` | Counter | reason, source | Rejected drafts by reason code (empty, llm_fallback, bad_pattern, too_long) |
+| `kb_hits_total` | Counter | source | Knowledge base hits by source (db, file) |
+
+### FPE Observability Gauges (`bridge_health_loop`)
+
+`bridge_health_loop` runs every **5 minutes** as a background asyncio task inside FPE. It publishes current system health to the following gauges:
+
+| Gauge Name | Labels | Alert Threshold | Description |
+|---|---|---|---|
+| `fpe_bridge_gap_minutes` | source (bridge1/bridge2/meta) | > 30 min → ALERT | Minutes since last message seen per bridge |
+| `fpe_bridge_last_hour_count` | source | — | Message count ingested in last 1 hour per bridge |
+| `fpe_skip_ratio_1h` | — | > 20% → WARN | Fraction of messages skipped vs total in last 1h |
+| `fpe_processed_1h` | — | — | Total messages processed in last 1h |
+| `fpe_retry_storm_count` | — | > 10 → WARN | Messages with attempts > 2 (retry storm signal) |
+| `fpe_dlq_backlog` | — | > 20 → WARN | Current DLQ depth (unrecoverable messages) |
+| `phase12_event_emitted` | — | — | Phase 12 WebSocket events emitted in last cycle |
+| `phase12_event_failed` | — | — | Phase 12 WebSocket events failed in last cycle |
+| `phase12_ws_clients` | — | — | Currently connected WebSocket clients |
+| `phase12_wr_lock_count` | — | — | Active write-lock count in state version system |
+| `phase12_state_version` | — | — | Current value of `fazle_state_version` |
+
+**Source Function:** `bridge_health_loop()` in `modules/fazle_payroll_engine/diagnostics.py`
+**Source Constants:** `_HEALTH_POLL_SECS = 300`, `_GAP_ALERT_MINS = 30`, `_SKIP_RATIO_WARN = 0.20`, `_RETRY_STORM_THRESH = 10`, `_DLQ_WARN_THRESH = 20`
+
+### Observability API
+
+| Function | Purpose |
+|---|---|
+| `obs.inc(name, value, labels)` | Increment a counter |
+| `obs.gauge(name, value, labels)` | Set a gauge value |
+| `obs.observe(name, value_ms, labels)` | Record histogram observation in ms |
+| `obs.render_prometheus()` | Render all metrics as Prometheus text format |
+| `obs.snapshot()` | Return all metrics as JSON-serializable dict |
+
+**Source Module:** `modules/observability/__init__.py`
+**PKMA Reference:** PKMA Report 18, DEV-02 (observability not previously documented)
+
+---
+
+## Visibility Rules for This Article
+
+**Visibility:** Developer / Admin (all sections)
+**AI Exposure:** REST endpoint details, SSE stream format, Prometheus metric names, bridge health thresholds, and runtime flags must NEVER be exposed to candidates or employees. Admin may be shown high-level system health summary only.
+
+---
+
+## Related Articles
+
+- `06_developer_system/automation_pipeline.md` — scheduler jobs (15 jobs), draft quality gate
+- `06_developer_system/fpe_overview.md` — FPE bridge_health_loop detailed context
+- `06_developer_system/rag_strategy.md` — RAG rebuild scheduler job
+- `06_developer_system/database_rules.md` — Domain 10 (SYSTEM): `fazle_scheduled_jobs`, `fazle_runtime_settings`, `wa_chat_groups`
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-22 | Wave-2B: Added wa_chat_frontend complete REST endpoint inventory (23 endpoints + SSE stream), SSE event payloads, observability module documentation, FPE bridge_health_loop Prometheus gauges and alert thresholds. Previous article was 74 lines (configuration flags + bridge config + backup). | KSP Wave-2B |

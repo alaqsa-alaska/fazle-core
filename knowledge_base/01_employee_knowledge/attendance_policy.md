@@ -1,4 +1,12 @@
-﻿# Attendance Policy
+---
+title: Attendance Policy
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Attendance Policy
 
 ## Purpose
 Explain attendance rules for security guards, escorts, and field employees in employee-safe language.

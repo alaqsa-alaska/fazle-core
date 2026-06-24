@@ -1,0 +1,181 @@
+Source: knowledge_base/06_developer_system/admin_ui.md
+SHA256: d1618908ddfb53f90c9faaa53c0e9dbe9ceb14277c19c65d82210b6dded67407
+Version: d1618908ddfb
+
+# Admin UI — wa_chat_frontend
+**KB Article ID:** DEV-06-ADMIN-UI
+**Source:** `modules/wa_chat_frontend/__init__.py` (821 lines — read 2026-06-23)
+**Visibility:** Developer / Admin only
+**Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## Purpose
+
+WhatsApp Web-style 3-panel admin UI at `/wa-chat`. Provides REST endpoints for:
+- Viewing contact list with unread message counts
+- Reading/sending WhatsApp messages
+- Managing pending AI reply drafts (approve, edit, reject)
+- Contact book management and sync
+- Broadcast messaging and groups
+- Auto-reply toggle settings per role
+- SSE real-time stream for new messages and drafts
+
+All endpoints require `X-Internal-Key` header (or `?key=` query param for SSE).
+
+---
+
+## Authentication
+
+Accepts `X-Internal-Key` via header (all endpoints) or `?key=` query parameter (SSE endpoint only).
+
+Valid tokens:
+1. System API key (`settings.internal_api_key`)
+2. Active admin key from `rbac.get_admin_by_api_key()`
+
+HTTP 403 on invalid/missing key.
+
+---
+
+## Endpoint Reference (23 endpoints)
+
+### Settings
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/settings` | Get all auto-reply toggles + labels |
+| `PATCH` | `/api/wa/settings` | Update one or more auto-reply toggles |
+
+**Settings keys:** `auto_reply.all`, `auto_reply.family`, `auto_reply.admin_group`, `auto_reply.employee`, `auto_reply.escort_client`, `auto_reply.client`, `auto_reply.recruitment`
+
+**Master toggle:** `auto_reply.all` must be `true` for any role-specific toggle to fire.
+
+### Contacts (8 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/contacts` | Paginated contact list with unread counts; seeds SSE cursor |
+| `GET` | `/api/wa/contacts/sync-status` | Contact sync health: total, with_display_name, last_sync |
+| `POST` | `/api/wa/contacts/sync` | Trigger full contact sync from all bridge SQLite DBs |
+| `GET` | `/api/wa/contacts/{phone}` | Single contact detail + auto_reply_blocked status |
+| `PATCH` | `/api/wa/contacts/{phone}` | Edit `display_name` |
+| `DELETE` | `/api/wa/contacts/{phone}` | Delete contact from `wbom_contacts` |
+| `POST` | `/api/wa/contacts/{phone}/block` | Persist per-phone auto-reply block |
+| `POST` | `/api/wa/contacts/{phone}/unblock` | Remove per-phone auto-reply block |
+
+**Contact list response includes:**
+- `contacts[]`: phone, display_name, last_message, last_message_at, direction, identity_role, unread_count
+- `max_message_id` and `max_draft_id` — for SSE cursor initialization
+- `total`, `limit`, `offset`
+
+**Unread count logic:** messages received from sender AFTER the last outbound message sent to that sender.
+
+**Block mechanism:** `phone_block.{phone}` key in `fazle_runtime_settings` — treated same as DRAFT_ALWAYS.
+
+### Messages (3 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/messages/{phone}` | Cursor-paginated conversation history (newest first) |
+| `POST` | `/api/wa/send` | Send a message to a single recipient via bridge |
+| `POST` | `/api/wa/broadcast` | Send one message to multiple phones (max 500) |
+
+**Message history:** Returns up to 200 rows per page. Accepts `before_id` cursor (exclusive). Normalizes phone and searches both canonical and raw variants.
+
+**Send behavior:** Uses `outbound.enqueue()` with `purpose="wa_chat_ui_send"`. Platform auto-detected from last known message if not specified.
+
+**Broadcast:** Max 500 phones per call. Returns per-phone result array.
+
+### Drafts (4 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/drafts` | Pending drafts enriched with contact name + original message |
+| `POST` | `/api/wa/drafts/{draft_id}/edit` | Edit draft body (sets status=`edited`) |
+| `POST` | `/api/wa/drafts/{draft_id}/approve` | Approve draft → enqueue via outbound → set status=`sent` |
+| `POST` | `/api/wa/drafts/{draft_id}/reject` | Reject draft (sets status=`rejected`) |
+
+**Draft list filter:** `status NOT IN ('rejected', 'sent', 'approved')` AND `reviewed=false`.
+
+**Approve flow:** `approved_at` set → `outbound.enqueue()` called → status set to `sent`. Source bridge selection: `bridge1` if source is `bridge1` or `meta`; `bridge2` otherwise.
+
+**Cannot re-approve:** HTTP 400 if draft is already `sent` or `approved`.
+
+### Groups (5 endpoints)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/wa/groups` | Create a broadcast group (stored in `wa_chat_groups`) |
+| `GET` | `/api/wa/groups` | List all groups |
+| `PATCH` | `/api/wa/groups/{group_id}` | Edit group name, admin, add/remove members |
+| `DELETE` | `/api/wa/groups/{group_id}` | Delete group |
+| `POST` | `/api/wa/groups/{group_id}/send` | Broadcast to all group members |
+
+**Group storage:** `wa_chat_groups` table — `id`, `name`, `admin_phone`, `members TEXT[]`, `created_at`.
+
+**Group send:** Calls `outbound.enqueue()` per member. Returns per-member success/failure array.
+
+### SSE Stream (1 endpoint)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/wa/stream` | Server-Sent Events — real-time new messages + new drafts |
+
+**Query params:** `last_id` (last known message_id), `last_draft_id` (last known draft id)
+
+**Auth:** Accepts `?key=` query param in addition to header (browsers cannot set custom headers for SSE).
+
+**Event types:**
+- `new_message` — payload: id, phone, body, direction, platform, received_at, identity_role, intent_detected
+- `new_draft` — payload: id, phone, contact_name, draft_body, intent, created_at, original_message
+
+**Poll interval:** 3 seconds. Keepalive comment sent after each poll cycle to prevent connection timeout.
+
+---
+
+## Auto-Reply Settings — `fazle_runtime_settings` Table
+
+| Setting Key | Default (from env) | Description |
+|---|---|---|
+| `auto_reply.all` | `AUTO_REPLY_ENABLED` value | Master toggle — must be true for any role toggle to fire |
+| `auto_reply.family` | `false` | Family members get manual drafts |
+| `auto_reply.admin_group` | `false` | Admin group messages get manual drafts |
+| `auto_reply.employee` | `false` | Employee messages get manual drafts |
+| `auto_reply.escort_client` | `false` | Escort client messages get manual drafts |
+| `auto_reply.client` | `false` | Client messages get manual drafts |
+| `auto_reply.recruitment` | `RECRUITMENT_AUTOREPLY_ENABLED` value | Recruitment auto-reply |
+
+**Per-phone block:** `phone_block.{canonical_phone}` = `"true"` → treated like DRAFT_ALWAYS; blocks auto-reply regardless of role toggle.
+
+---
+
+## Runtime Tables Created by This Module
+
+On startup (`ensure_wa_chat_tables()`):
+
+| Table | Purpose |
+|---|---|
+| `fazle_runtime_settings` | Key-value store for auto-reply toggles and per-phone blocks |
+| `wa_chat_groups` | Broadcast contact groups (id, name, admin_phone, members TEXT[]) |
+
+---
+
+## Related Modules and Tables
+
+| Component | Notes |
+|---|---|
+| `modules/admin_transactions` | `/api/admin/transactions` (create/edit/soft-delete FPE cash transactions) |
+| `modules/escort_roster/routes` | `/api/escort-roster/` (12 endpoints — separate router) |
+| `wbom_whatsapp_messages` | Source for contact list and message history |
+| `wbom_contacts` | Display name lookup; updated via contact sync |
+| `fazle_draft_replies` | Pending draft source for `/api/wa/drafts` |
+| `modules/outbound` | All message sends pass through `outbound.enqueue()` |
+
+---
+
+## Cross-References
+
+- `contact_sync.md` — `POST /api/wa/contacts/sync` triggers `sync_all_contacts()`
+- `reviewed_reply_memory.md` — draft approval triggers `create_or_update_from_edit()` downstream
+- `runtime_gateway_flags.md` — `AUTO_REPLY_ENABLED`, `RECRUITMENT_AUTOREPLY_ENABLED` env vars
+- `automation_pipeline.md` — draft TTL cleanup and outbound queue

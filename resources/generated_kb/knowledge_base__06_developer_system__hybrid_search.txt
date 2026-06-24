@@ -1,0 +1,126 @@
+Source: knowledge_base/06_developer_system/hybrid_search.md
+SHA256: b8534a3556a690aac7d77d924369aa74dc51301875d9da1522055430f0504d28
+Version: b8534a3556a6
+
+# Hybrid Search System
+
+**Article Type:** Developer System Reference
+**Visibility:** Developer / Admin (Internal)
+**Source Module:** `modules/rag/__init__.py`
+**Production Status:** ACTIVE — enabled via HYBRID_SEARCH_ENABLED=true in .env
+**Certified:** 2026-06-23 (CONFLICT-2 resolution — previous 5-signal ranking description was a design draft, never implemented)
+
+---
+
+## Overview
+
+Fazle uses Hybrid RAG: BM25 keyword search combined with Qdrant vector search, fused via Reciprocal Rank Fusion (RRF). This replaced the single BM25 mode when Hybrid RAG was deployed in Session 2.
+
+---
+
+## Environment Control
+
+```
+HYBRID_SEARCH_ENABLED=true   # activates hybrid mode (BM25 + Qdrant)
+HYBRID_SEARCH_ENABLED=false  # falls back to BM25-only (in-process, no Qdrant dependency)
+```
+
+When `HYBRID_SEARCH_ENABLED=false` or Qdrant is unreachable, the system falls back to BM25-only. No error is raised to callers; the degradation is logged at WARNING level.
+
+---
+
+## Components
+
+### BM25 Index (In-Process)
+
+| Parameter | Value | Source |
+|---|---|---|
+| Tokenizer regex | `[A-Za-z0-9ঀ-৿]+` | Unicode-aware; covers Bangla + Latin |
+| Chunk size | 320 characters | `RAG_CHUNK_SIZE` env override |
+| Chunk overlap | 60 characters | `RAG_CHUNK_OVERLAP` env override |
+| BM25 k1 | 1.5 | Hardcoded |
+| BM25 b | 0.75 | Hardcoded |
+| Index corpus | 251 documents (87 file + 164 KB rows) | As of Wave-2 |
+| Safety filter | `safe_for_customer=True` required on all indexed chunks | Applied at build time |
+
+### Vector Search — Qdrant
+
+| Property | Value |
+|---|---|
+| Server | Docker `qdrant/qdrant:v1.17.0` at internal host `172.20.0.2:6333` (Internal only) |
+| Collection | `fazle_rag_chunks` |
+| Points | 251 (same corpus as BM25 index) |
+| Payload filter | `safe_for_customer=True` applied at query time (second safety layer) |
+| Fallback | If Qdrant is unreachable → BM25-only mode |
+
+### MiniLM Encoder
+
+| Property | Value |
+|---|---|
+| Model | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` |
+| Dimensions | 384 |
+| Languages | Bangla, English, Banglish (multilingual) |
+| Embedding cache | LRU, max 2000 entries, SHA1 key, thread-safe |
+| Encoding executor | 1 dedicated thread (isolates CPU-bound work from async event loop) |
+| Warm-up | 27 seed queries encoded on first index build |
+
+---
+
+## RRF Fusion Algorithm
+
+Scores from BM25 and vector search are combined using **Reciprocal Rank Fusion (RRF)**:
+
+```
+rrf_score = (1 / (60 + rank_bm25)) + (1 / (60 + rank_vector))
+```
+
+Where:
+- `rank_bm25` = 1-indexed position in the BM25 result list (1 = best BM25 match)
+- `rank_vector` = 1-indexed position in the Qdrant vector result list
+- Constant 60 is the standard RRF smoothing constant
+- A document appearing in only one list gets a score contribution from that list only
+
+Final results are sorted descending by `rrf_score`. Higher score = more relevant.
+
+**What RRF does NOT use:** role, recency, workflow state, or any other signals. The ranking is purely positional fusion of BM25 and semantic similarity ranks.
+
+---
+
+## Fallback Degradation Path
+
+```
+HYBRID_SEARCH_ENABLED=true AND Qdrant reachable  → Full hybrid (BM25 + vector + RRF)
+HYBRID_SEARCH_ENABLED=true AND Qdrant unreachable → BM25-only (logged at WARNING)
+HYBRID_SEARCH_ENABLED=false                       → BM25-only (by configuration)
+```
+
+---
+
+## Phase 4 Integration (2026-06-22)
+
+Two call sites were added in Phase 4 (Session 3):
+
+| Call Site | Function | k | Purpose |
+|---|---|---|---|
+| `modules/recruitment_ai/__init__.py` | `_safe_rag_chunks(text, k=5)` | 5 | Enriches `kb_context` before LLM in recruitment path |
+| `modules/message_router/__init__.py` (Step 15) | `rag.search(text, k=3)` | 3 | Enriches `db_ctx` for general AI fallback queries |
+
+Source tracing: `rag_sources=` field logged per recruitment reply to track which KB articles contributed.
+
+---
+
+## Safety Rules
+
+- `safe_for_customer=True` filter is enforced at both build time (BM25 index) and query time (Qdrant payload filter). Restricted content cannot reach LLM context via RAG.
+- 18 unsafe chunks were purged from the index at the last build (as of Wave-2).
+- `_RECENT_SEARCHES` ring buffer (deque, 200 items) is maintained in-process for incident debugging.
+
+---
+
+## What Was NOT Implemented
+
+The article that previously existed here described a "5-signal ranking" (role match → keyword → semantic → recency → workflow state). **This was a design draft and was never implemented.** The production system uses RRF only. This article supersedes the previous description.
+
+---
+
+*Source: `modules/rag/__init__.py` | Certified 2026-06-23 | CONFLICT-2 resolution*

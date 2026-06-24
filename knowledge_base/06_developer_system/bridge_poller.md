@@ -1,3 +1,11 @@
+---
+title: Bridge Poller
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Bridge Poller
 **KB Article ID:** DEV-06-BRIDGE-POLLER
 **Source:** `modules/bridge_poller/__init__.py` (read 2026-06-23; ESX-WIRE update 2026-06-23 Session 10; routing update 2026-06-23 Session 11)

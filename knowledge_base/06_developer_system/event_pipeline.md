@@ -1,4 +1,12 @@
-﻿# Event Pipeline
+---
+title: Event Pipeline
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Event Pipeline
 
 ## Purpose
 Define internal event flow across message, identity, draft, approval, payment, attendance, and payroll systems.

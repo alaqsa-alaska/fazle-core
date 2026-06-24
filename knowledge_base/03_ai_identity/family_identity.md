@@ -1,4 +1,12 @@
-﻿# Family Identity
+---
+title: Family Identity
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Family Identity
 
 ## Purpose
 Identify family contacts and route them according to limited personal access rules.

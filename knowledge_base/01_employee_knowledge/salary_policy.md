@@ -1,4 +1,12 @@
-﻿# Salary Policy
+---
+title: Salary Policy
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Salary Policy
 
 ## Purpose
 Provide employee-safe salary, bonus, advance, payment, and deduction rules.

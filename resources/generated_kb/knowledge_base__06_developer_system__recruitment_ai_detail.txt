@@ -1,0 +1,223 @@
+Source: knowledge_base/06_developer_system/recruitment_ai_detail.md
+SHA256: 04356f4427fedea2bcd4aac7f6c2899a7fdff78f12ea53e3b737b4d3f0b27c02
+Version: 04356f4427fe
+
+# Recruitment AI — Detailed Developer Reference
+**KB Article ID:** DEV-06-RECRUITMENT-AI-DETAIL
+**Source:** `modules/recruitment_ai/__init__.py` (258 lines — read 2026-06-23)
+**Visibility:** Developer
+**Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## Purpose
+
+`recruitment_ai` generates LLM-based replies for job-seeker messages that are NOT handled by the 6-step intake funnel. This is the "LLM chat" path — handling free-text recruitment questions, follow-up queries, and clarification requests.
+
+**Triggers:** `recruitment_eligibility()` returns `eligible=True, autosend=False, reason="session_followup_draft"`.
+
+---
+
+## Architecture
+
+```
+recruitment_ai.generate_recruitment_reply()
+    │
+    ├── _deterministic_fact_reply()   ← check first; returns hardcoded reply if matched
+    │       └── hit → return immediately (no LLM call)
+    │
+    ├── build_recruitment_source_context()  ← load approved source file + score sections
+    │       └── empty → return _SAFE_FALLBACK (no LLM call)
+    │
+    ├── _safe_rag_chunks()   ← Phase 4 RAG enrichment (role="candidate")
+    │       └── appends related KB content to source_context if found
+    │
+    ├── ai.generate_recruitment_reply()  ← LLM call (GitHub gpt-4.1)
+    │
+    └── enforce_recruitment_reply_policy()  ← post-generation safety gate
+            └── fail closed → _SAFE_FALLBACK on numeric or location hallucination
+```
+
+---
+
+## Constants
+
+### `_SAFE_FALLBACK`
+
+```
+"এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+```
+
+Returned whenever the module cannot produce a safe verified reply. Fail-closed design — no guessing.
+
+### `_OFFICE_REPLY`
+
+Hardcoded office location answer:
+> "অফিস ঠিকানা: আগ্রপাড়া, Victoria Gate #1, Khokoner Building, AK Khan Mor, Chittagong। অফিস সময় সকাল ১০টা থেকে বিকাল ৫টা। আসার আগে 01958-122322 নম্বরে যোগাযোগ করুন।"
+
+### `_CONTACT_REPLY`
+
+Hardcoded contact number answer:
+> "সর্বশেষ recruitment WhatsApp/যোগাযোগ নম্বর: 01958-122322।"
+
+### `_AGE_REPLY`
+
+```
+"সাধারণ বয়সসীমা ১৮–৫৫ বছর।"
+```
+
+### `_RECRUITMENT_SOURCE`
+
+```python
+Path(__file__).resolve().parents[2] / "resources" / "ops" / "recruitment_source_of_truth.txt"
+```
+
+Single approved recruitment source file. All LLM context comes from this file + the RAG index. The LLM never uses world knowledge — only what is in this file.
+
+---
+
+## Deterministic Fast-Path — `_deterministic_fact_reply(text)`
+
+Before any LLM call, checks 3 common factual patterns and returns hardcoded answers:
+
+| Pattern | Function | Returns |
+|---|---|---|
+| Office location / address | `_looks_like_office_location()` | `_OFFICE_REPLY` |
+| Contact / WhatsApp number | `_looks_like_contact_question()` | `_CONTACT_REPLY` |
+| Age limit | "বয়সসীমা" or "age limit" substring | `_AGE_REPLY` |
+
+Contact patterns: `"যোগাযোগ নম্বর"`, `"কন্টাক্ট নম্বর"`, `"contact number"`, `"whatsapp number"`, `"ফোন নম্বর"`, `"office number"`, `"অফিস নম্বর"`.
+
+Location patterns: `"office location"`, `"office address"`, `"অফিস কোথায়"`, `"অফিসের ঠিকানা"`.
+
+---
+
+## `_FEE_PHRASES` — Fee Question Detection
+
+```python
+_FEE_PHRASES = (
+    "ভর্তি ফি", "জয়েনিং ফি", "ট্রেনিং ফি", "প্রসেসিং ফি",
+    "আবেদন ফি", "ফর্ম ফি", "joining fee", "training fee",
+    "processing fee", "application fee", "form fee",
+    "ডিপোজিট", "deposit", "টাকা লাগবে", "টাকা লাগে",
+)
+```
+
+15 phrases (including bilingual variants). If a message matches any of these, the "ভর্তি ফি / ডিপোজিট" section from the source file is **included** in the LLM context (it is stripped by default to avoid confusing the model when irrelevant).
+
+Policy: Al-Aqsa does NOT charge joining fees. This section of the source file provides the policy statement the LLM uses to answer fee questions.
+
+---
+
+## `_QUESTION_HINTS` — Session Followup Detection
+
+```python
+_QUESTION_HINTS = (
+    "who are you", "who r u", "আপনি কে", "তুমি কে",
+    "কেন", "why", "am i asked for job", "asked for job",
+    "lok lagbe", "লোক লাগবে", "কাজ আছে", "job ache",
+)
+```
+
+12 phrases. `looks_like_recruitment_followup(text)` matches these and is used in `recruitment_eligibility()` to identify path 2 (LLM chat) vs not-eligible.
+
+---
+
+## `build_recruitment_source_context(message)` — Source File Loader
+
+Loads `recruitment_source_of_truth.txt` and selects the 4 most relevant sections.
+
+**Section scoring algorithm:**
+1. Tokenize the message into word tokens (≥ 2 chars, split on punctuation)
+2. For each `## Section` in the file, compute: `overlap + (title_overlap × 4)`
+3. Bonus: `+100` if section title is `"উত্তর দেওয়ার সীমা"` (always include reply limits)
+4. Bonus: `+100` if fee message + section contains `"ফি"`
+5. Bonus: `+100` if contact message + section title is `"অফিস তথ্য"`
+6. Select top 4 sections by score
+7. Truncate to 4500 characters total
+
+**Fee section stripping:** If the message is NOT a fee question, the "ভর্তি ফি / ডিপোজিট" section is stripped via regex before scoring.
+
+**If empty message:** Returns 4 default sections: `উত্তর দেওয়ার সীমা`, `বর্তমানে নিয়োগ চলমান পদ`, `সাধারণ যোগ্যতা ও সুবিধা`, `আবেদন ও যোগদান`.
+
+**On OSError (file missing):** Returns `""` → triggers `_SAFE_FALLBACK` in the caller.
+
+---
+
+## `_safe_rag_chunks(text, k=5)` — RAG Enrichment (Phase 4)
+
+Augments source context with related KB chunks from the Qdrant + BM25 index.
+
+- Calls `modules.rag.search(text, k=5, role="candidate")` — role-filtered (Phase 3)
+- Appends up to 400 chars per chunk as `[N] title: body`
+- Returns `(formatted_string, source_list)` — never raises (all exceptions swallowed)
+- If no chunks: returns `("", [])`
+
+Appended to source context as `## Related Knowledge Base\n{chunks}` before LLM call.
+
+---
+
+## `enforce_recruitment_reply_policy(message, reply, source_context)` — Post-Generation Safety Gate
+
+**Fails closed** (returns `_SAFE_FALLBACK`) if:
+
+1. Reply is empty after `clean_recruitment_reply()`.
+2. Reply contains **numeric facts not present in source context** — extracts all digit sequences from both reply and source; if `reply_numbers ⊄ source_numbers`, logs and returns fallback.
+3. Reply contains **unsupported location claims** — scans reply for tokens ending in `পাড়া`, `ঘাট`, `এলাকা`, `জেলা`, `বন্দর`; strips Bengali inflection suffixes; if location stem not in source context, logs and returns fallback.
+
+Inflection suffixes stripped: `"য়ে"`, `"য়"`, `"তে"`, `"র"`, `"ে"`, `"এ"`.
+
+This prevents the model from inventing hiring locations (e.g., "আগ্রপাড়ায়" must match "আগ্রপাড়া" in source).
+
+---
+
+## `clean_recruitment_reply(reply)` — LLM Artifact Stripper
+
+Applied inside `enforce_recruitment_reply_policy()` before checks:
+
+1. Strip LLM prefixes: `"Reply only the WhatsApp message text:"`, `"WhatsApp message:"`, `"উত্তর:"`, `"Reply:"`
+2. Remove triple-backtick blocks
+3. Strip whitespace from all lines
+4. Limit to 5 lines maximum (WhatsApp brevity)
+5. Truncate to 360 characters (with `...` if cut)
+
+---
+
+## `generate_recruitment_reply()` — Main Entry Point
+
+```python
+async def generate_recruitment_reply(
+    *, phone, text, source,
+    contact_context="", history=""
+) -> Optional[str]
+```
+
+**Note:** `contact_context` is explicitly unused (`del contact_context`) — contact data is not provided to the recruitment LLM.
+
+**Execution sequence:**
+1. `_deterministic_fact_reply(text)` → return if hit
+2. `build_recruitment_source_context(text)` → return `_SAFE_FALLBACK` if empty
+3. `_safe_rag_chunks(text, k=5)` → append if non-empty
+4. `ai.generate_recruitment_reply(user_message, kb_context, history, source=source)` → LLM call
+5. `enforce_recruitment_reply_policy(text, reply, kb_context)` → safety gate
+6. Log: `phone`, `source`, `chars`, `rag_sources count`
+7. Return cleaned, policy-enforced reply
+
+---
+
+## Reply Length Limits
+
+| Constraint | Value |
+|---|---|
+| Max WhatsApp lines | 5 lines |
+| Max characters | 360 chars (truncated with `...`) |
+| Source context max | 4500 chars |
+
+---
+
+## Cross-References
+
+- `recruitment_flow_system.md` — two-path routing; this module handles path 2 (LLM chat)
+- `system_prompt.md` — `ai.generate_recruitment_reply()` uses recruitment-specific system prompt
+- `hybrid_search.md` — `_safe_rag_chunks()` calls `rag.search()` with `role="candidate"`
+- `visibility_rules.md` — candidate role KB access matrix

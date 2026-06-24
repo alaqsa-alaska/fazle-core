@@ -1,3 +1,11 @@
+---
+title: PKCA Report 17: New Article Justification
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKCA Report 17: New Article Justification
 
 **Date:** 2026-06-22

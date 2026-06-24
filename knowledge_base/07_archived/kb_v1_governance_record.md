@@ -1,3 +1,11 @@
+---
+title: Knowledge Base v1.0 — Governance Record
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # Knowledge Base v1.0 — Governance Record
 **Version:** v1.0.0
 **Status:** MANAGEMENT APPROVED — CONTROLLED FREEZE

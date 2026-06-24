@@ -1,0 +1,112 @@
+Source: knowledge_base/02_admin_knowledge/admin_role_management.md
+SHA256: 635dbbf518cba56293ade0a2d3e8448e1459c06a0cf9d9cde2a282ae1ab1a774
+Version: 635dbbf518cb
+
+# Admin Role Management
+
+## Purpose
+Define how roles can be viewed, verified, added, edited, deleted, and synchronized between frontend and backend.
+
+## Scope
+Level 2 admin knowledge with Level 3 implementation references.
+
+## Role Records
+The admin panel must support role management for Candidate, Employee, Escort, Security Guard, Operation Officer, Female Operation Officer, Supervisor, Accountant, Admin, Escort Client, Vendor, Family, VIP, and Unknown.
+
+## Required Frontend Functions
+- View role list and role priority.
+- Search by name, phone, role, sub-role, source, and status.
+- Verify identity match.
+- Add new role record.
+- Edit role, phone, name, permission, status, and notes.
+- Delete or deactivate role record with audit log.
+- Merge duplicate contacts.
+- Promote Unknown to a confirmed role.
+
+## Backend Sync Rules
+- Every frontend create/edit/delete must write to the backend source table/service immediately.
+- Every role mutation must create an audit record: actor, timestamp, old value, new value, reason.
+- Backend must reject frontend role changes that violate permission rules.
+- AI must reload role mapping after successful role update.
+
+## Cross References
+- ../03_ai_identity/permission_matrix.md
+- ../06_developer_system/database_rules.md
+- ../06_developer_system/role_permissions.md
+
+## Revision History
+- 2026-06-19: Created from role CRUD and frontend/backend sync requirement.
+- 2026-06-22: Enriched with WhatsApp USER commands and bootstrap creation (Wave-1).
+
+---
+
+## WhatsApp Admin User Management Commands
+
+### Purpose
+Admin users (those who can send WhatsApp commands to the system) are managed via WhatsApp commands from a superadmin account. All USER commands require `superadmin` role.
+
+### USER Commands
+
+| Command | Syntax | Action |
+|---|---|---|
+| USER ADD | `USER ADD <phone> <name> [role]` | Create a new admin user. Default role: `viewer` if not specified. |
+| USER ROLE | `USER ROLE <phone> <role>` | Change an existing admin user's role. Valid roles: viewer, operator, accountant, admin, superadmin. |
+| USER REMOVE | `USER REMOVE <phone>` | Soft-disable an admin user. The record is preserved for audit; the user loses access. |
+| USER LIST | `USER LIST` | List all active admin users and their roles. Requires `viewer` role (any admin can run this). |
+| USER APIKEY | `USER APIKEY <phone>` | Issue an API key for a user. Key is stored as SHA-256 hash; plaintext shown once in reply. |
+
+**Examples:**
+```
+USER ADD 01711234567 রফিকুল ইসলাম operator
+USER ROLE 01711234567 admin
+USER REMOVE 01799999999
+USER APIKEY 01711234567
+```
+
+**Source Module:** `modules/admin_commands`, `modules/rbac`
+**PKCA Report:** 12_command_coverage_report.md
+**Management Authority:** Production evidence; documented 2026-06-22
+
+---
+
+## Bootstrap Admin Creation
+
+### Purpose
+The first admin user(s) are created automatically when the system first sees a message from a number listed in `ADMIN_NUMBERS`.
+
+### How Bootstrap Works
+
+1. The `ADMIN_NUMBERS` environment variable contains one or more phone numbers (comma-separated).
+2. When any of these phone numbers sends a WhatsApp message to the system for the first time, the system automatically creates them as `superadmin` in `fazle_admins`.
+3. This bootstrapping happens in `ensure_bootstrap_admins()` and is a one-time operation per number.
+4. If the number already exists in `fazle_admins`, the bootstrap is skipped (no-op).
+
+**Business Rule:** Bootstrap admins are the only way to add the first superadmin without an existing admin. After bootstrap, all further user management goes through USER commands.
+
+**Example:**
+```
+ADMIN_NUMBERS=01711234567,01799999999
+```
+Both numbers will be auto-created as superadmin on their first message.
+
+**Source Module:** `modules/rbac`
+**Source Function:** `ensure_bootstrap_admins()`
+**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-41)
+
+---
+
+## RBAC Role Levels (Summary for Role Management)
+
+| Level | Role Name | Who Can Assign | Typical Responsibilities |
+|---|---|---|---|
+| 1 | viewer | superadmin | Read-only access; reports, status checks |
+| 2 | operator | superadmin | Approve/reject drafts; escort confirmation |
+| 3 | accountant | superadmin | Payment finalization; payroll management |
+| 4 | admin | superadmin | Manual job triggers; all operator + accountant |
+| 5 | superadmin | superadmin only | User management; API keys; all permissions |
+
+**Business Rule:** Only a superadmin can add, change, or remove admin roles. A user cannot elevate their own role.
+
+**Source Module:** `modules/rbac`
+**Source Function:** `COMMAND_ROLE`
+**PKCA Report:** 12_command_coverage_report.md

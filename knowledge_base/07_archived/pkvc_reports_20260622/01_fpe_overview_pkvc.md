@@ -1,3 +1,11 @@
+---
+title: PKVC Report — fpe_overview.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — fpe_overview.md
 **Article:** `06_developer_system/fpe_overview.md`
 **Wave:** Wave-2A (initial) + Wave-2B (enriched)

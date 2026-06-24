@@ -1,0 +1,98 @@
+Source: knowledge_base/05_workflows/recruitment_workflow.md
+SHA256: 1118bfcb7f3d5239930e55bd9e9b65934f679780a42dda72f228e16f9f81fcaf
+Version: 1118bfcb7f3d
+
+# Recruitment Workflow
+
+## Trigger
+Candidate asks about job, salary, joining, training, duty, office, documents, age, education, or application.
+
+## Flow
+Message -> Identity Check -> Candidate Classification -> Load Recruitment Knowledge -> Safe Auto Reply or Admin Review -> Candidate Data Collection -> Office Visit Guidance -> Candidate Record Update.
+
+## Required Data
+Name, age, education, current address, desired role, phone number, source channel.
+
+## Auto Reply Allowed
+Yes, if intent is clear and non-sensitive.
+
+## Manual Review
+Fee dispute, abusive comment, unclear identity, sensitive/internal question, or fraud risk.
+
+## Cross References
+- ../04_business_rules/recruitment_business_rules.md
+- ../03_ai_identity/candidate_identity.md
+
+---
+
+## Recruitment Session State Machine
+
+### Purpose
+When a candidate engages in active data collection, the system creates a session that tracks progress through a 7-step funnel.
+
+### Session States
+
+```
+new → step:name → step:age → step:area → step:position → step:experience → step:phone → scored
+                                                                                       ↓
+                                                                                   expired (24h TTL)
+```
+
+| State | Prompt Sent To Candidate | Expected Input |
+|---|---|---|
+| `new` | System starts data collection | — |
+| `step:name` | "আপনার পূর্ণ নাম জানাবেন?" | Full name |
+| `step:age` | "আপনার বয়স কত?" | Age (18–55) |
+| `step:area` | "আপনি কোথায় থাকেন?" | Current address/area |
+| `step:position` | "কোন পদে আবেদন করতে চান?" | One of 9 valid positions |
+| `step:experience` | "পূর্বে কোথাও কাজ করেছেন?" | Experience duration |
+| `step:phone` | "আপনার মোবাইল নম্বর দিন" | Phone number |
+| `scored` | Data complete; score computed | — |
+| `expired` | — | Session expired after 24h inactivity |
+
+**Business Rule:** If the candidate provides an invalid input at any step (e.g. age outside 18–55, unrecognized position), the system re-prompts for that step rather than advancing.
+
+**Session TTL:** 24 hours from last activity. Expired sessions require restart from step 1.
+
+**Session storage:** `fazle_recruitment_sessions` table
+
+**Source Module:** `modules/recruitment_flow`
+**Source Function:** `advance_session()`, `SESSION_TTL`
+**PKCA Report:** 09_state_machine_coverage_report.md (SM-04), 10_hidden_rule_coverage_report.md (HK-33)
+**Management Authority:** HK-33 approved in PKVC Management Decisions; documented 2026-06-22
+
+---
+
+## Role-Based Recruitment Gate
+
+**Business Rule:** Recruitment flow is blocked for any contact with a role other than candidate, unknown, or new_lead — even if the message text looks like a recruitment inquiry.
+
+**Examples:**
+- An `employee` asking "কীভাবে পদোন্নতি পাওয়া যায়?" → NOT routed to recruitment flow
+- A `repeat_client` asking "নিরাপত্তারক্ষী লাগবে" → NOT routed to recruitment; routed to escort/client flow
+
+**Source Module:** `app/message_router`
+**Source Function:** Routing step 5
+**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-05)
+
+---
+
+## Recruitment-Blocked Roles
+
+| Role | Recruitment Blocked |
+|---|---|
+| candidate | No (this IS recruitment) |
+| unknown | No (may be candidate) |
+| employee | Yes |
+| escort | Yes |
+| supervisor | Yes |
+| accountant | Yes |
+| admin | Yes |
+| family | Yes |
+| vip_client | Yes |
+| client_escort_buyer | Yes |
+| repeat_client | Yes |
+| vendor | Yes |
+
+**Source Module:** `app/message_router`, `app/bridge_poller`
+**PKCA Report:** 11_identity_coverage_report.md

@@ -1,3 +1,11 @@
+---
+title: Admin Transactions Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Admin Transactions Rules
 **KB Article ID:** ADMIN-02-ADMIN-TRANSACTIONS-RULES
 **Source:** `modules/admin_transactions/__init__.py` (551 lines — read 2026-06-23)

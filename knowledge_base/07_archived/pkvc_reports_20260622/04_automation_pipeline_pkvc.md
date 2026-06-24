@@ -1,3 +1,11 @@
+---
+title: PKVC Report — automation_pipeline.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — automation_pipeline.md
 **Article:** `06_developer_system/automation_pipeline.md`
 **Wave:** Wave-1 (initial) + Wave-2B (enriched)

@@ -1,3 +1,11 @@
+---
+title: PKMA Report 19 — Organizational Brain Readiness
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA Report 19 — Organizational Brain Readiness
 
 **Program:** PKMA v1.0

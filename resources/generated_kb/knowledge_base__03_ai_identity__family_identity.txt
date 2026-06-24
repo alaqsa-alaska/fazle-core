@@ -1,0 +1,28 @@
+Source: knowledge_base/03_ai_identity/family_identity.md
+SHA256: 8e91adc8c4c18874c3bba5f4b09e1e4f58e2173551137a41bccb1546b414eb06
+Version: 8e91adc8c4c1
+
+# Family Identity
+
+## Purpose
+Identify family contacts and route them according to limited personal access rules.
+
+## Detection Signals
+- Seeded family contact role.
+- Backend family role record.
+
+## Permissions
+Allowed:
+- Limited personal data only if explicitly configured.
+- Manual review for unclear or sensitive requests.
+
+Not allowed:
+- Employee payroll data unless separately authorized.
+- Developer/system knowledge.
+
+## Cross References
+- permission_matrix.md
+- response_rules.md
+
+## Revision History
+- 2026-06-19: Created from family role identity rules.

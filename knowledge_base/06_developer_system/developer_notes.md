@@ -1,3 +1,11 @@
+---
+title: Developer Notes
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Developer Notes
 
 ## Application Reliability Notes
@@ -22,7 +30,7 @@ These environment flags control the AI subsystem's runtime behavior. They allow 
 
 | Flag | Default | Effect When Set |
 |---|---|---|
-| `OLLAMA_REPLY_DISABLED` | false | `true` → Ollama is NEVER used for customer-facing WhatsApp replies. Polite holding message is returned after Groq fails. Ollama is still used for intent classification and RAG rebuild. |
+| `OLLAMA_REPLY_DISABLED` | false | `true` → Ollama is skipped for customer-facing WhatsApp replies. Fallback becomes Groq → GitHub Models → polite holding message. Ollama is still used for intent classification and RAG rebuild when available. |
 | `AI_SAFE_MODE` | false | `true` → Long replies, low-confidence replies, and uncertain-intent replies become drafts instead of auto-sends. |
 | `AUTO_REPLY_ENABLED` | true | `false` → No customer auto-replies are sent. Only recruitment still replies (controlled by `RECRUITMENT_AUTOREPLY_ENABLED`). |
 | `RECRUITMENT_AUTOREPLY_ENABLED` | true | `false` → Recruitment auto-replies also disabled (requires `AUTO_REPLY_ENABLED=false` first). |
@@ -32,7 +40,7 @@ These environment flags control the AI subsystem's runtime behavior. They allow 
 | `SCHEDULER_ENABLED` | true | `false` → All 15 scheduled jobs disabled. |
 | `OUTBOUND_ENABLED` | true | `false` → No messages sent via outbound queue (dry-run mode). |
 
-**Business Rule:** In production, `OLLAMA_REPLY_DISABLED` is typically set to `true` to prevent Ollama from generating customer-facing responses independently. Ollama remains available for classification and indexing.
+**Business Rule:** In production, Ollama is the primary runtime AI provider. `OLLAMA_REPLY_DISABLED=true` is an emergency bypass for customer-facing reply generation only.
 
 **Source Module:** `app/config.py`
 **PKCA Report:** 08_ai_behavior_coverage_report.md, 07_scheduler_coverage_report.md

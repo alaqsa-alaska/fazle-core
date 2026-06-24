@@ -1,0 +1,23 @@
+Source: knowledge_base/06_developer_system/conversation_parser.md
+SHA256: 877b4cdfe29fc87b0bc7086e1822279a076bea76c44065569a5b8270cf963e43
+Version: 877b4cdfe29f
+
+# Conversation Parser
+
+## Purpose
+Classify conversation intent and state without replacing role-based routing.
+
+## State Signals
+- New candidate.
+- Existing employee request.
+- Escort order.
+- Payment request.
+- Complaint.
+- Unknown/sensitive/internal.
+- Admin reply mapping.
+
+## Admin Reply Mapping
+Parse:
+From: [name], [mobile]
+To: [name], [mobile]
+Then connect admin answer to original user session.

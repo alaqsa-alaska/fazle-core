@@ -1,0 +1,18 @@
+Source: knowledge_base/duplicate_report.md
+SHA256: ac6706b17a7f65f3af0e46529b9c7b9202041740694f624cc61f89c876afcff4
+Version: ac6706b17a7f
+
+# Duplicate Report
+
+| Duplicate Topic | Similarity | Confidence | Merge Risk | Authoritative File | Keep | Archive/Delete |
+|---|---:|---:|---:|---|---|---|
+| Company identity repeated in HR and Fazle System | High | 0.98 | Low | company_identity.md | Official identity | Archive duplicates as source notes |
+| Attendance guard 12-hour rule repeated | High | 0.95 | Low | attendance_business_rules.md | 12h = 1 guard duty day | Archive duplicate wording |
+| Escort attendance duty slip to release slip repeated | High | 0.95 | Low | escort_business_rules.md | 24h/two shifts = 1 escort duty day | Archive duplicate wording |
+| Payment admin/accountant handoff repeated | High | 0.92 | Medium | payment_business_rules.md | Accountant handoff completion | Archive older auto-payment wording |
+| Candidate zero-fee wording repeated with practical fee rules | Medium | 0.88 | High | joining_business_rules.md | Resolved combined rule | Archive unresolved old conflict |
+| Training pay/duration repeated with conflict | Medium | 0.9 | High | salary_business_rules.md | Escort 45 days paid; guard 2 weeks unpaid | Archive conflicting generic training line |
+| Internal disclosure refusal repeated | High | 0.97 | Low | security_rules.md | Standard refusal | Archive duplicate refusal text |
+
+## Decision
+No useful knowledge was deleted. Duplicates are merged into source-of-truth articles and old structure remains for traceability.

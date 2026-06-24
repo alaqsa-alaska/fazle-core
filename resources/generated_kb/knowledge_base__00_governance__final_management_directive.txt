@@ -1,0 +1,207 @@
+Source: knowledge_base/00_governance/final_management_directive.md
+SHA256: 9398125a1e87b44a17083c0c44d3cfdd86f2badf52fc45e780fda08d7440e3cc
+Version: 9398125a1e87
+
+# Final Management Directive — Fazle AI Platform
+**Version:** 1.0.0
+**Issued:** 2026-06-22
+**Authority:** Management — Permanent
+**Status:** IN FORCE
+
+---
+
+## Mission
+
+The Knowledge Base has been built, audited, validated, certified, and approved.
+
+Knowledge Base v1.0 is the Organizational Brain of the Fazle AI Platform.
+
+The responsibility going forward is NOT to redesign the Knowledge Base.
+
+The responsibility is to **PROTECT, MAINTAIN, and USE it correctly.**
+
+---
+
+## Absolute Safety Rule — Production Freeze
+
+**DO NOT modify without explicit management authorization:**
+
+- Production code (Python, any language)
+- Backend API or routes
+- Frontend
+- URLs or ports
+- Database schema or migrations
+- SQL files
+- Runtime configuration
+- Docker or systemd services
+- Environment variables
+- Scheduler jobs
+- OCR implementation
+- AI runtime behavior
+- Parser behavior
+- Payroll behavior
+- Attendance behavior
+- Escort behavior
+- Message routing behavior
+
+This list is not exhaustive. When in doubt, do not touch it.
+
+---
+
+## Knowledge Base Freeze Policy
+
+Knowledge Base v1.0 is under **CONTROLLED FREEZE**.
+
+### Allowed Changes (with revision history entry)
+
+- Typo correction
+- Grammar correction
+- Broken link correction
+- Incorrect reference correction
+- Append-only production discoveries (after verification and management approval)
+- Management decision updates
+- Security corrections
+
+### NOT Allowed Without New Management Directive
+
+- Workflow redesign
+- Business rule replacement
+- Article deletion
+- Article restructuring
+- Folder restructuring
+- Authority changes
+- Knowledge removal
+- Uncontrolled refactoring
+
+---
+
+## Documentation-First Policy
+
+No future production feature may begin until this sequence completes:
+
+```
+Business Requirement
+        ↓
+Knowledge Base Update
+        ↓
+Management Approval
+        ↓
+Implementation
+        ↓
+Validation
+        ↓
+Production Release
+```
+
+**Production follows the Knowledge Base. The Knowledge Base does not follow production.**
+
+---
+
+## Visibility Policy
+
+Every knowledge item carries a visibility classification:
+
+`PUBLIC` | `EMPLOYEE` | `SUPERVISOR` | `ADMIN` | `DEVELOPER` | `RESTRICTED` | `ARCHIVED`
+
+Never expose to candidates or employees:
+- Database internals or table names
+- API routes or endpoint URLs
+- Worker implementation details
+- Financial constants (salary formulas, rates, fees)
+- Security mechanisms
+- Queue internals or retry logic
+- Prompt injection protection
+- Developer-only architecture
+
+---
+
+## Future Knowledge Discoveries Policy
+
+If production contains undocumented knowledge that is discovered:
+
+1. Do NOT immediately modify the Knowledge Base.
+2. Verify the discovery against production source.
+3. Determine status: **Current | Legacy | Deprecated | Experimental | Future**
+4. If Current: prepare an append-only proposal.
+5. Wait for management approval before adding to KB.
+
+---
+
+## Technical Debt Policy
+
+Remaining unresolved items (U-01, U-02, U-03) are **NOT blockers**.
+
+Treat them as technical debt for future v1.0.x versions.
+
+Never block production or Knowledge Base usage because of low-risk unresolved items.
+
+---
+
+## Source of Truth Order
+
+| Priority | Authority |
+|---|---|
+| 1 | Management Decisions |
+| 2 | Knowledge Base v1.0 |
+| 3 | Current Production Code |
+| 4 | Archived Resources |
+
+When Management conflicts with Production: **Management wins as policy.**
+
+Current production behavior must still be documented as "Current Implementation" until production is updated. Never hide production reality.
+
+---
+
+## AI Governance Rule
+
+AI must answer according to this chain:
+
+```
+Role → Visibility → Knowledge Base → Business Rules → Workflow → Developer Rules (if applicable)
+```
+
+Never expose restricted implementation.
+Never bypass visibility classification.
+Never answer beyond authorized knowledge.
+
+---
+
+## Future Implementation Policy
+
+When implementation work begins on any feature:
+
+1. The Knowledge Base is the primary design document.
+2. Implementation must follow the Knowledge Base.
+3. If implementation differs from KB: create a Management Decision to document the divergence.
+4. Never silently diverge from the Knowledge Base.
+
+---
+
+## Permanent Project Rule
+
+**The Organizational Brain is established.**
+
+- Do NOT restart audits
+- Do NOT redesign architecture
+- Do NOT propose new governance frameworks
+- Do NOT create another Knowledge Engineering project
+
+Only perform:
+- Maintenance
+- Controlled Expansion (with approval)
+- Approved Knowledge Updates
+- Implementation aligned with the Knowledge Base
+
+---
+
+## Final Statement
+
+The Knowledge Base is the official Organizational Brain of the Fazle AI Platform.
+
+All future AI behavior, business rules, workflows, identity, RAG, developer documentation, and future production features shall follow the Knowledge Base.
+
+Production implementation may evolve, but the Organizational Brain remains the permanent Source of Truth.
+
+---
+
+*This directive is permanent and supersedes all prior instruction unless explicitly replaced by a new management directive.*
