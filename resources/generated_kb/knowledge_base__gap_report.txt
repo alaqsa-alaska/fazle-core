@@ -1,0 +1,190 @@
+Source: knowledge_base/gap_report.md
+SHA256: babd1490986c494e798712e26ffb34340b832cf9d6736a8be13d4d316ffb9cd2
+Version: babd1490986c
+
+# Knowledge Base Gap Report
+**Date:** 2026-06-19
+**Scope:** Compare production code (`/home/azim/core/`) against knowledge_base new role-centric structure
+**Status:** PENDING APPROVAL — no knowledge_base files were modified
+
+---
+
+## Method
+
+1. Read production code: `app/main.py`, `modules/message_router/__init__.py`, `modules/payment_workflow/__init__.py`, `modules/recruitment_flow/__init__.py`, `modules/attendance/__init__.py`, `modules/escort/__init__.py`, `modules/admin_commands/__init__.py`
+2. Read all `knowledge_base/` new-structure files in `02–06` folders
+3. Compared: what workflows are implemented in code vs. what is documented in knowledge_base
+
+**Rules:** No files deleted. No knowledge_base files modified. No production code changed.
+
+---
+
+## Section 1 — Production Workflows Verified in Code
+
+| # | Workflow | Source File | Status |
+|---|----------|-------------|--------|
+| P-01 | 9-level message routing priority | `modules/message_router/__init__.py:1–21` | Implemented |
+| P-02 | Silent-skip rule (name tokens + blocked role) | `modules/message_router/__init__.py:66–138` | Implemented |
+| P-03 | Safe auto-send intent list | `modules/message_router/__init__.py:72–87` | Implemented |
+| P-04 | Recruitment 6-step intake funnel | `modules/recruitment_flow/__init__.py:64–100` | Implemented |
+| P-05 | 9 valid positions for recruitment | `modules/recruitment_flow/__init__.py:41–62` | Implemented |
+| P-06 | Candidate scoring formula | `modules/recruitment_flow/__init__.py:138–150` | Implemented |
+| P-07 | Attendance keyword detection + draft flow | `modules/attendance/__init__.py:33–100` | Implemented |
+| P-08 | Escort order → admin draft (no client reply) | `modules/escort/__init__.py:1–26` | Implemented |
+| P-09 | ESCORTCONFIRM command → client confirmation | `modules/admin_commands/__init__.py:148–153` | Implemented |
+| P-10 | Escort payment formula: basic_salary/30 × duty_days - deductions | `modules/payment_workflow/__init__.py:96–115` | Implemented |
+| P-11 | Full admin command set (20+ commands) | `modules/admin_commands/__init__.py:60–179` | Implemented |
+| P-12 | PAYROLL COMPUTE/SUBMIT/APPROVE/LOCK/PAID/CANCEL/LIST | `modules/admin_commands/__init__.py:74–91` | Implemented |
+| P-13 | RELEASE <program_id> <date> <D/N> <point> [days=] | `modules/admin_commands/__init__.py:68–72` | Implemented |
+| P-14 | REPORT DAILY / PAYROLL / CASH / RECON / ESCORT / LIST | `modules/admin_commands/__init__.py:98–115` | Implemented |
+| P-15 | BACKUP STATUS / NOW / LIST | `modules/admin_commands/__init__.py:117–125` | Implemented |
+| P-16 | USER LIST / ADD / ROLE / REMOVE / APIKEY | `modules/admin_commands/__init__.py:127–147` | Implemented |
+| P-17 | REVERSE <txn_id> / ADJUST <draft_id> | `modules/admin_commands/__init__.py:154–157` | Implemented |
+| P-18 | Accountant inbound: payment SMS parse + cash shorthand | `modules/message_router/__init__.py:276–299` | Implemented |
+| P-19 | NL admin queries (natural language) | `modules/message_router/__init__.py:214–218` | Implemented |
+| P-20 | Bangla digit normalization in commands | `modules/admin_commands/__init__.py:28–29` | Implemented |
+| P-21 | Draft deduplication: 120-second window | `app/main.py:1679–1698` | Implemented |
+| P-22 | Draft quality gate: reject LLM fallbacks/path leaks | `app/main.py:1700–1721` | Implemented |
+| P-23 | Facebook comment auto-reply with wa.me link | `app/main.py:1124–1131` | Implemented |
+| P-24 | Facebook Messenger integration | `app/main.py:1040–1083` | Implemented |
+| P-25 | Recruitment safe-mode bypass (candidates reply in safe mode) | `app/main.py:373–411` | Implemented |
+| P-26 | RBAC system: viewer/operator/accountant/admin/superadmin | `modules/admin_commands/__init__.py:127–147` | Implemented |
+| P-27 | Advance request NOT in safe auto-send (must draft) | `modules/message_router/__init__.py:72–87` | Implemented |
+| P-28 | Escort payment deductions: food_bill + conveyance + program advances | `modules/payment_workflow/__init__.py:100–115` | Implemented |
+| P-29 | Admin command: PAID <id> <amount> bkash/nagad/cash | `modules/admin_commands/__init__.py:64` | Implemented |
+| P-30 | Supervisor attendance parser path | `modules/message_router/__init__.py:249–258` | Implemented |
+
+---
+
+## Section 2 — Knowledge Base Coverage Audit
+
+| Knowledge Base File | Level | Coverage |
+|---------------------|-------|----------|
+| `05_workflows/payment_workflow.md` | L2 | High-level only (5 lines) — missing formula, command syntax, deductions |
+| `05_workflows/attendance_workflow.md` | L1 | High-level only — missing keyword list, shift times, draft approval steps |
+| `05_workflows/escort_workflow.md` | L2 | High-level only — missing ESCORTCONFIRM syntax, no-client-reply rule |
+| `05_workflows/recruitment_workflow.md` | L1 | High-level only — missing 6-step intake, 9 positions, age rule, scoring |
+| `05_workflows/cash_workflow.md` | L2 | High-level only — missing accountant SMS parse path, shorthand format |
+| `05_workflows/release_slip_workflow.md` | L1 | Not yet read — likely brief |
+| `05_workflows/salary_workflow.md` | L2 | Not yet read — likely brief |
+| `02_admin_knowledge/admin_payment_handling.md` | L2 | Good — C9 correct, advance guideline correct |
+| `02_admin_knowledge/admin_operations_overview.md` | L2 | Good overview — missing command reference |
+| `02_admin_knowledge/admin_attendance_handling.md` | L2 | Not yet detailed — likely brief |
+| `02_admin_knowledge/admin_role_management.md` | L2 | Likely brief |
+| `06_developer_system/identity_brain.md` | L3 | Good — cross-references correct |
+| `06_developer_system/database_rules.md` | L3 | Good — correct principles |
+| `06_developer_system/system_prompt.md` | L3 | Good — compact and correct |
+
+---
+
+## Section 3 — GAP TABLE (Missing from Knowledge Base)
+
+### CRITICAL GAPS (affect AI routing, payment accuracy, or admin operations)
+
+| GAP-ID | Gap Description | Production Evidence | Target KB Location |
+|--------|----------------|---------------------|-------------------|
+| G-01 | **Silent-skip rule** not documented: contacts whose display_name contains "al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office" receive NO reply and NO draft | `message_router:66,96–138` | `06_developer_system/workflow_engine.md` |
+| G-02 | **Admin command full syntax** not documented: RELEASE, ESCORTCONFIRM, REVERSE, ADJUST, PAY-IMPORT, PAYROLL suite, REPORT suite, BACKUP, USER suite missing entirely | `admin_commands/__init__.py:59–178` | `02_admin_knowledge/admin_command_reference.md` (NEW) |
+| G-03 | **RELEASE command format** missing: `RELEASE <program_id> <YYYY-MM-DD> <D\|N> <release_point> [days=<float>]` | `admin_commands/__init__.py:68–72` | `02_admin_knowledge/admin_command_reference.md` |
+| G-04 | **ESCORTCONFIRM format** missing: `ESCORTCONFIRM <order_id> \| <escort_name> \| <escort_mobile> \| <date> \| <shift D/N>` | `admin_commands/__init__.py:148–153` | `05_workflows/escort_workflow.md` + command reference |
+| G-05 | **Escort payment formula** not documented in detail: `daily_rate = basic_salary / 30`, `gross = duty_days × daily_rate`, `net = gross - food_bill - conveyance - program_advances` | `payment_workflow/__init__.py:96–115` | `04_business_rules/escort_business_rules.md` |
+| G-06 | **Advance request excluded from safe auto-send** not stated: advance request intent must go to draft, not auto-reply | `message_router/__init__.py:72–87` (comment) | `04_business_rules/payment_business_rules.md` |
+| G-07 | **Safe auto-send intent list** not documented: recruitment, join, greeting, office_location, salary_query, payment_due, attendance, leave, escort_duty = auto-send allowed; everything else = draft | `message_router/__init__.py:72–87` | `06_developer_system/workflow_engine.md` |
+| G-08 | **Accountant inbound routing** not documented: when accountant sends a message, system checks for: (1) payment SMS (bkash/nagad), (2) cash shorthand entry, (3) advance record query — all before KB/AI | `message_router/__init__.py:276–299` | `06_developer_system/workflow_engine.md` |
+
+---
+
+### HIGH GAPS (affect accuracy or completeness of AI answers)
+
+| GAP-ID | Gap Description | Production Evidence | Target KB Location |
+|--------|----------------|---------------------|-------------------|
+| G-09 | **6-step recruitment intake** not documented: name → age → area → job_preference → experience → phone_confirm; each step has exact question text | `recruitment_flow/__init__.py:64–100` | `05_workflows/recruitment_workflow.md` |
+| G-10 | **Candidate age validation** not documented: must be 18–55 years; outside range is rejected | `recruitment_flow/__init__.py:110–115` | `04_business_rules/recruitment_business_rules.md` |
+| G-11 | **9 valid recruitment positions** not all listed in KB: KB only has 6; code has 9 including Security In-Charge, Ghat Supervisor, Survey Scout as numbered entries (1–9) | `recruitment_flow/__init__.py:41–62` | `01_employee_knowledge/recruitment_policy.md` |
+| G-12 | **Candidate scoring formula** not documented: experience ≥6 yrs = 60pts, ≥3 = 40pts, ≥1 = 20pts | `recruitment_flow/__init__.py:138–150` | `06_developer_system/workflow_engine.md` |
+| G-13 | **Session TTL** not documented: recruitment conversation session expires after 24 hours | `recruitment_flow/__init__.py:19` | `05_workflows/recruitment_workflow.md` |
+| G-14 | **PAID/ADVANCE exact format** not documented: `PAID <draft_id> <amount> bkash\|nagad\|cash` and `ADVANCE <draft_id> <amount> bkash\|nagad\|cash` | `admin_commands/__init__.py:64–65` | `02_admin_knowledge/admin_command_reference.md` |
+| G-15 | **APPROVE multi-ID and Bangla digits** not documented: `APPROVE 165 166 167` and `APPROVE ১৬৫` both work | `admin_commands/__init__.py:28–61` | `02_admin_knowledge/admin_command_reference.md` |
+| G-16 | **Blocked-role skip** not documented: contacts with `role = 'blocked'` in `fazle_contact_roles` receive no reply or draft | `message_router/__init__.py:125–136` | `06_developer_system/workflow_engine.md` |
+| G-17 | **Attendance keyword list** not documented: exact keywords for present (হাজির, উপস্থিত, present, check in…) and absent (অনুপস্থিত, absent, ছুটি, leave…) | `attendance/__init__.py:33–43` | `04_business_rules/attendance_business_rules.md` |
+| G-18 | **Escort payment deduction rule** not documented: deductions are (a) food_bill from program record, (b) conveyance from program record, (c) advances for THIS program in CURRENT payroll month only | `payment_workflow/__init__.py:100–114` | `04_business_rules/escort_business_rules.md` |
+| G-19 | **Escort client draft-only rule** not documented: escort client messages NEVER get a reply to the client — only a silent draft to admin; no acknowledgement is sent | `escort/__init__.py:1–10`, `message_router/__init__.py:182–188` | `05_workflows/escort_workflow.md` + `03_ai_identity/escort_identity.md` |
+| G-20 | **Draft 120-second deduplication** not documented: identical source+recipient+text combos within 120s are silently suppressed | `app/main.py:1679–1698` | `06_developer_system/workflow_engine.md` |
+
+---
+
+### MEDIUM GAPS (RAG quality / completeness)
+
+| GAP-ID | Gap Description | Production Evidence | Target KB Location |
+|--------|----------------|---------------------|-------------------|
+| G-21 | **PAYROLL command suite** not documented: full payroll management via WhatsApp commands | `admin_commands/__init__.py:74–91` | `02_admin_knowledge/admin_command_reference.md` |
+| G-22 | **REPORT commands** not documented: REPORT DAILY, PAYROLL, CASH, RECON, ESCORT, LIST | `admin_commands/__init__.py:98–115` | `02_admin_knowledge/admin_command_reference.md` |
+| G-23 | **USER management commands** not documented: USER LIST / ADD / ROLE / REMOVE / APIKEY | `admin_commands/__init__.py:127–147` | `02_admin_knowledge/admin_command_reference.md` |
+| G-24 | **RBAC roles** not documented: system supports viewer / operator / accountant / admin / superadmin | `admin_commands/__init__.py:132–139` | `03_ai_identity/permission_matrix.md` + command reference |
+| G-25 | **REVERSE and ADJUST commands** not documented: `REVERSE <txn_id> <reason>` and `ADJUST <draft_id> <amount> <method>` | `admin_commands/__init__.py:154–157` | `02_admin_knowledge/admin_command_reference.md` |
+| G-26 | **Recruitment completion message** exact text not in KB: includes helpline 01958 122322 | `recruitment_flow/__init__.py:95–100` | `05_workflows/recruitment_workflow.md` |
+| G-27 | **Recruitment operational role block** not documented: if sender role is admin/employee/supervisor/accountant/escort_client and intent is "recruitment", system returns empty (no reply, no draft) | `message_router/__init__.py:269–274` | `06_developer_system/workflow_engine.md` |
+| G-28 | **Facebook Page comment auto-reply** not documented: comments get a standard WhatsApp redirect reply with `wa.me/8801958122300` | `app/main.py:1124–1131` | `05_workflows/recruitment_workflow.md` |
+| G-29 | **Safe mode recruitment bypass** not documented: even when AUTO_REPLY_ENABLED=false, candidates with recruitment intent receive auto-replies | `app/main.py:373–411` | `06_developer_system/workflow_engine.md` |
+| G-30 | **NL admin query examples** not documented: natural language queries like "show last 10 chats of 01XXXXXXXXX" or "01XXXXXXXXX এর শেষ ১০ চ্যাট" | `message_router/__init__.py:214–218` | `02_admin_knowledge/admin_operations_overview.md` |
+| G-31 | **Draft quality gate** not documented: LLM fallback replies and path leaks are rejected before queue | `app/main.py:1700–1721` | `06_developer_system/workflow_engine.md` |
+| G-32 | **Secondary helpline numbers** not in `company_identity.md`: 01958122311, 01958122301, 01958122302 (approved C-08 decision) | Management conflict decision C-08 | `01_employee_knowledge/company_identity.md` |
+
+---
+
+## Section 4 — Risk Classification
+
+| Risk | Gap IDs | Consequence if Missing |
+|------|---------|----------------------|
+| CRITICAL — payment error | G-05, G-06, G-18 | AI could misstate escort payment amount or incorrectly promise advance auto-reply |
+| CRITICAL — admin routing | G-02, G-03, G-04 | Admin won't know correct command format; RELEASE/ESCORTCONFIRM could fail silently |
+| CRITICAL — identity/privacy | G-01, G-07, G-16 | Silent-skip logic not documented; RAG might answer for blocked/silent contacts |
+| HIGH — workflow accuracy | G-08, G-09, G-10, G-11, G-19 | Accountant path, recruitment funnel, escort no-reply rule not explained to AI |
+| HIGH — candidate intake | G-13, G-26, G-27 | Recruitment session TTL, block rule for operational roles, completion message incorrect |
+| MEDIUM — admin usability | G-21–G-25 | Admin WhatsApp commands for payroll/reports/users not in KB |
+| MEDIUM — RAG completeness | G-28–G-32 | Social media auto-reply, safe mode bypass, NL queries not documented |
+
+---
+
+## Section 5 — Proposed Merge Plan (Awaiting Approval)
+
+The following new or updated files are proposed. No action will be taken until you approve.
+
+### New Files (to create)
+| File | Content | Gaps Addressed |
+|------|---------|----------------|
+| `02_admin_knowledge/admin_command_reference.md` | Full admin command syntax, formats, examples (Level 2) | G-02, G-03, G-04, G-14, G-15, G-21–G-25 |
+
+### Updated Files (additions only, no deletions)
+| File | Addition | Gaps Addressed |
+|------|----------|----------------|
+| `01_employee_knowledge/company_identity.md` | Add secondary helplines: 01958122311, 01958122301, 01958122302 | G-32 |
+| `01_employee_knowledge/recruitment_policy.md` | Add Security In-Charge, Ghat Supervisor, Survey Scout as separate numbered positions | G-11 |
+| `04_business_rules/recruitment_business_rules.md` | Add age validation 18–55, scoring formula | G-10, G-12 |
+| `04_business_rules/payment_business_rules.md` | Add: advance request must draft (not auto-send) | G-06 |
+| `04_business_rules/escort_business_rules.md` | Add: daily_rate formula, deduction scope (food + conveyance + current-month program advances only) | G-05, G-18 |
+| `04_business_rules/attendance_business_rules.md` | Add: present/absent keyword list | G-17 |
+| `05_workflows/escort_workflow.md` | Add: escort client receives NO reply; ESCORTCONFIRM exact format | G-04, G-19 |
+| `05_workflows/recruitment_workflow.md` | Add: 6-step intake flow with exact questions, session TTL 24h, operational role block, completion message with helpline | G-09, G-13, G-26, G-27 |
+| `06_developer_system/workflow_engine.md` | Add: silent-skip rule + name tokens, safe auto-send intent list, advance-request exclusion, accountant inbound routing, blocked-role skip, 120s dedup, draft quality gate, safe-mode recruitment bypass, NL admin query examples, recruitment operational block | G-01, G-07, G-08, G-16, G-20, G-27, G-29, G-30, G-31 |
+| `03_ai_identity/escort_identity.md` | Add: escort client = no reply, no draft to client | G-19 |
+
+---
+
+## Approval Questions
+
+Before merging any content, please confirm:
+
+**Q1.** Approve creating new file `02_admin_knowledge/admin_command_reference.md` with full admin WhatsApp command syntax (APPROVE, REJECT, EDIT, PAID, ADVANCE, RELEASE, ESCORTCONFIRM, PAYROLL suite, REPORT suite, BACKUP, USER suite, REVERSE, ADJUST)?
+
+**Q2.** Approve adding 3 missing recruitment positions (Security In-Charge, Ghat Supervisor, Survey Scout with their numbers 7, 9, 2) to `01_employee_knowledge/recruitment_policy.md`?
+
+**Q3.** Approve adding secondary helpline numbers (01958122311, 01958122301, 01958122302) to `01_employee_knowledge/company_identity.md`? (This was management decision C-08 already approved — confirming execution.)
+
+**Q4.** Approve updating `06_developer_system/workflow_engine.md` with full routing-engine rules including silent-skip, safe auto-send list, advance-request draft rule, accountant inbound routing, blocked-role rule, 120s dedup, draft quality gate?
+
+**Q5.** Approve adding escort payment formula details to `04_business_rules/escort_business_rules.md`?
+
+---
+
+*Gap report generated 2026-06-19. No knowledge_base files were modified.*

@@ -1,4 +1,12 @@
-﻿# Old Structure Mapping
+---
+title: Old Structure Mapping
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
+# Old Structure Mapping
 
 ## Purpose
 Preserve traceability from the earlier domain/documentation-centric structure to the new role-centric AI knowledge architecture.

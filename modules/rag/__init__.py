@@ -1070,12 +1070,12 @@ async def rebuild_index() -> dict[str, Any]:
     async with _IDX.lock:
         _IDX.reset()
         t0 = time.monotonic()
-        sources: list[tuple[str, str, str, bool]] = []
+        sources: list[tuple[str, str, str, bool, frozenset[str]]] = []
         sources.extend(_load_resource_files())
         sources.extend(await _load_kb_rows())
         safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
         unsafe_count = 0
-        for source_id, title, text, source_safe in sources:
+        for source_id, title, text, source_safe, allowed_roles in sources:
             for idx, chunk in enumerate(_chunk_text(text)):
                 tokens = _tokenize(chunk)
                 if not tokens:
@@ -1096,6 +1096,7 @@ async def rebuild_index() -> dict[str, Any]:
                     "tokens": tokens,
                     "len": len(tokens),
                     "safe_for_customer": True,
+                    "allowed_roles": allowed_roles,
                 })
                 safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
         for d in _IDX.docs:

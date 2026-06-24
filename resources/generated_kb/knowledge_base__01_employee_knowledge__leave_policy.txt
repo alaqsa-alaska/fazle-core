@@ -1,0 +1,61 @@
+Source: knowledge_base/01_employee_knowledge/leave_policy.md
+SHA256: eec79e13436732b370d492fc82d9517b7f8ddf524e9990b26906b95d21b7f4ab
+Version: eec79e134367
+
+# Leave Policy
+
+## Purpose
+Explain employee-safe rules for leave, absence, late arrival, resignation, and disciplinary conduct.
+
+## Scope
+This article is visible to employees.
+
+## Leave Rules
+- Sick leave requires a medical certificate or prescription.
+- Family emergency leave requires prior approval.
+- Employees should apply in writing when leave is needed.
+
+## Unauthorized Absence
+Unauthorized absence is treated as a disciplinary issue.
+
+Rules:
+- 1 day unauthorized absence may cause up to 2 days deduction.
+- Salary and attendance bonus may be affected.
+- Absence between the 1st and 10th of the month may delay salary payment to the 20th-25th.
+- 7 or more consecutive unauthorized absent days require medical certificate or company approval before rejoining.
+
+## Late Arrival
+- Employees must arrive at the post at least 15 minutes before duty starts.
+- 3 consecutive late arrivals may cause 1 day salary deduction.
+
+## Resignation
+- Employees must submit written resignation notice 1 month in advance.
+- All company-provided uniform and equipment must be returned.
+- Office will settle dues according to company rules.
+
+## Punishable Offenses
+Punishable offenses may include:
+- habitual absence or late arrival;
+- not wearing required uniform;
+- ignoring company duty instructions;
+- theft, robbery, misconduct, or involvement in unlawful activity;
+- client-related misconduct;
+- abandoning duty post.
+
+## FAQ
+**প্রশ্ন: অসুস্থ হলে কী করতে হবে?**
+উত্তর: ডাক্তারি সনদ বা ব্যবস্থাপত্র অফিসে জমা দিতে হবে।
+
+**প্রশ্ন: চাকরি ছাড়তে চাইলে কী করতে হবে?**
+উত্তর: ১ মাস আগে লিখিত আবেদন দিতে হবে এবং কোম্পানির ইউনিফর্ম ও মালামাল ফেরত দিতে হবে।
+
+## AI Notes
+Do not discuss internal disciplinary investigation processes or management decision logic.
+
+## Cross References
+- attendance_policy.md
+- salary_policy.md
+- faq_employee.md
+
+## Revision History
+- 2026-06-19: Created from official employee policy rules.

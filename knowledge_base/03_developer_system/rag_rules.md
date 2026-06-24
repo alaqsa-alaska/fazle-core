@@ -1,4 +1,12 @@
-﻿# RAG Rules
+---
+title: RAG Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# RAG Rules
 
 ## Purpose
 Define retrieval, context loading, and knowledge visibility rules for RAG and hybrid search.

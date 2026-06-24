@@ -1,3 +1,11 @@
+---
+title: Active Development Plan — Session 2
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Active Development Plan — Session 2
 **Version:** 1.1.0
 **Created:** 2026-06-22

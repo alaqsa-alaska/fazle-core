@@ -1,0 +1,55 @@
+Source: knowledge_base/01_employee_knowledge/release_slip.md
+SHA256: 1deadba8101eb525917389372e152619a426f5243b6ba25d211182c83c7a70ec
+Version: 1deadba8101e
+
+# Release Slip
+
+## Purpose
+Explain what a release slip is and why it is required for escort duty completion and payment.
+
+## Scope
+This article is visible to escorts and relevant employees.
+
+## Definition
+A release slip is the signed release information written on or attached to an escort's duty slip after vessel work is completed.
+
+It usually includes:
+- release date;
+- release time;
+- supervisor or ghat in-charge signature;
+- duty/vessel context.
+
+## Workflow
+1. Escort completes vessel duty.
+2. Ghat in-charge or supervisor writes release date and time and signs the duty slip.
+3. Escort takes a clear photo of the release slip.
+4. Escort sends the photo to the official WhatsApp channel.
+5. Company reviews the release slip.
+6. Final duty days, food money, conveyance, advance adjustment, and payment are calculated.
+
+## Business Rules
+- Release slip is required to finalize escort duty days.
+- Release slip is required before final escort payment.
+- The slip photo must be clear and readable.
+- Missing or unclear signature/date/time may delay payment.
+
+## Examples
+If an escort finishes duty at a destination point, the supervisor writes the release date and time and signs the duty slip. That signed document becomes the release slip.
+
+## FAQ
+**প্রশ্ন: রিলিজ স্লিপ না দিলে কী হবে?**
+উত্তর: রিলিজ স্লিপ ছাড়া মোট ডিউটি দিন এবং চূড়ান্ত পেমেন্ট নিশ্চিত করতে দেরি হতে পারে।
+
+**প্রশ্ন: কীভাবে পাঠাব?**
+উত্তর: পরিষ্কার ছবি তুলে অফিসের নির্ধারিত WhatsApp নম্বরে পাঠাতে হবে।
+
+## AI Notes
+Do not reveal OCR, database update, approval, or internal calculation pipeline to employees.
+
+## Cross References
+- attendance_policy.md
+- salary_policy.md
+- transport_allowance.md
+
+## Revision History
+- 2026-06-19: Created from release slip and escort payment rules.

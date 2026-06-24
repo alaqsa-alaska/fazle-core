@@ -1,4 +1,12 @@
-﻿# Salary Business Rules
+---
+title: Salary Business Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Salary Business Rules
 
 ## Security Guard Salary
 Probationary package may be up to ৳17,000/month. Permanent package may be up to ৳24,700/month.

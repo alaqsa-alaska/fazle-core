@@ -1,3 +1,11 @@
+---
+title: PKVC Certification Index — Wave-2A + Wave-2B
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Certification Index — Wave-2A + Wave-2B
 **Program:** KSP Wave-2B Final Certification Run
 **Date:** 2026-06-22

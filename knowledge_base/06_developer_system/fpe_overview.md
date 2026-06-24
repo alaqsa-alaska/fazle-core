@@ -1,3 +1,11 @@
+---
+title: Fazle Payroll Engine (FPE) — System Overview
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Fazle Payroll Engine (FPE) — System Overview
 
 **Article Type:** Developer System Reference

@@ -1,4 +1,12 @@
-﻿# Response Rules
+---
+title: Response Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Response Rules
 
 ## Purpose
 Define how AI responds by role and visibility.

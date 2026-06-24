@@ -1,3 +1,11 @@
+---
+title: PKVC Report — social_auto_reply_system.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — social_auto_reply_system.md
 **Article:** `06_developer_system/social_auto_reply_system.md`
 **Wave:** Wave-2A (initial) + Wave-2B (enriched)

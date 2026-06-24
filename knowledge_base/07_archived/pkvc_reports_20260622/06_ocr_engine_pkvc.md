@@ -1,3 +1,11 @@
+---
+title: PKVC Report — ocr_engine.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — ocr_engine.md
 **Article:** `06_developer_system/ocr_engine.md`
 **Wave:** Wave-2B (full replacement of 18-line stub)

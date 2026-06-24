@@ -1,3 +1,11 @@
+---
+title: Recruitment Flow System
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Recruitment Flow System
 **KB Article ID:** DEV-06-RECRUITMENT-FLOW-SYSTEM
 **Source:** `modules/recruitment_flow/__init__.py` (365 lines — read 2026-06-23)

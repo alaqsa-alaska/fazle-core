@@ -1,3 +1,11 @@
+---
+title: PKVC Report — identity_brain.md
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report — identity_brain.md
 **Article:** `06_developer_system/identity_brain.md`
 **Wave:** Wave-1 (identity resolution algorithm) + Wave-2B (role_classifier)

@@ -1,0 +1,20 @@
+version: 1
+owner: Fazle Core Admin
+status: active
+runtime_index_default: true
+metadata_required:
+  - title
+  - owner
+  - status
+  - last_verified
+  - runtime_index
+certification:
+  cadence: weekly
+  stale_after_days: 60
+protected_paths:
+  - knowledge_base/07_archived
+  - whatsapp1/store
+  - whatsapp2/store
+notes:
+  - "Knowledge Base content is the authoritative system brain."
+  - "Runtime ingestion must skip archived content and files with runtime_index: false."

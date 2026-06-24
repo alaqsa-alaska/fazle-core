@@ -1,4 +1,12 @@
-﻿# Joining Business Rules
+---
+title: Joining Business Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Joining Business Rules
 
 ## Candidate-Facing Source Of Truth
 No advance payment is mandatory to get the job. The company can help serious candidates join without advance payment.

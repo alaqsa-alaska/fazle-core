@@ -2,7 +2,7 @@
 Fazle Core — Groq AI Client (Secondary Provider)
 Uses Groq's OpenAI-compatible inference endpoint.
 
-Acts as a secondary fallback between GitHub Models and Ollama.
+Acts as the first external fallback after local Ollama.
 Free tier: 14,400 req/day, 30 RPM, 6,000 TPM.
 Model default: llama-3.1-8b-instant (excellent Bengali support).
 

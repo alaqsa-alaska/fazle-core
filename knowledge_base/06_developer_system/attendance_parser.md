@@ -1,3 +1,11 @@
+---
+title: Attendance Parser Module
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Attendance Parser Module
 
 **Source:** `modules/attendance_parser/__init__.py` (281 lines — read 2026-06-23)

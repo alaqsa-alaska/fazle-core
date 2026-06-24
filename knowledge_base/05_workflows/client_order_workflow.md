@@ -1,4 +1,12 @@
-﻿# Client Order Workflow
+---
+title: Client Order Workflow
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Client Order Workflow
 
 ## Trigger
 Client asks for guard, escort, vessel security, service rate, complaint handling, or new service inquiry.

@@ -1,3 +1,11 @@
+---
+title: Escort Roster System
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Escort Roster System
 **KB Article ID:** DEV-06-ESCORT-ROSTER
 **Sources:** `modules/escort_roster/` — `__init__.py` (22), `calculations.py` (148), `db.py` (1054), `extractor.py` (417), `history_sync.py` (948), `routes.py` (522) — all read 2026-06-23

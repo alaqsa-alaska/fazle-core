@@ -1,3 +1,11 @@
+---
+title: PKCA Report 18: Production Traceability Matrix
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKCA Report 18: Production Traceability Matrix
 
 **Date:** 2026-06-22

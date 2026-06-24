@@ -1,0 +1,246 @@
+Source: knowledge_base/00_governance/phase1_rag_analysis.md
+SHA256: 4af437b3a314256070e3169da8f5325d3d06416a41b41de4accee0e1eebb88b4
+Version: 4af437b3a314
+
+# PHASE 1 — Hybrid RAG Integration Analysis
+**Version:** 1.0.0
+**Date:** 2026-06-22
+**Phase:** Master Execution Plan — PHASE 1
+**Status:** ANALYSIS COMPLETE — AWAITING MANAGEMENT APPROVAL
+**Analyst:** Lead Software Architect (Session 2)
+
+---
+
+## Section 1 — Deliverable 1: Current Architecture (Verified)
+
+The current production RAG system (`modules/rag/__init__.py`) is a **BM25-only in-process retrieval system**.
+
+```
+Knowledge Files (resources/*.txt)
+        +
+fazle_knowledge_base (DB rows, is_active=true)
+        ↓
+File-Level Safety Filter (11 excluded dirs + _ prefix + filename keywords + file patterns)
+        ↓
+Chunker (320 chars / 60 overlap)
+        ↓
+Chunk-Level Safety Filter (32 unsafe patterns purged)
+        ↓
+BM25 In-Memory Index (k1=1.5, b=0.75, Unicode tokenizer)
+        ↓
+search(q, k=5, min_score=0.0) / answer(q, k=3, min_score=1.0)
+        ↓
+Context injected into LLM System Prompt
+        ↓
+LLM Reply Chain (Ollama → Groq → GitHub → holding msg)
+        ↓
+Draft Quality Gate
+        ↓
+Customer Reply
+```
+
+**Key characteristics:**
+- No external embedding service (offline-first, VPS-safe)
+- No vector index (Qdrant, FAISS, or similar)
+- No semantic similarity scoring
+- Purely keyword-based retrieval (BM25 term frequency / inverse document frequency)
+- Bilingual tokenizer: `[A-Za-z0-9ঀ-৿]+` (Bangla + English)
+- Rebuild: 18:00 daily via `rag_rebuild` scheduler job + on-startup `ensure_index()`
+
+---
+
+## Section 2 — Deliverable 2: Gap Analysis
+
+### 2A — Architecture Gap (CRITICAL)
+
+| Dimension | Current Production | KB `hybrid_search.md` (Target State) |
+|---|---|---|
+| Retrieval method | BM25 keyword only | BM25 + semantic similarity |
+| Scoring | BM25 score (term frequency based) | BM25 + semantic + role/visibility + recency |
+| Ranking signal 1 | BM25 score | Role and visibility match |
+| Ranking signal 2 | — | Exact business-rule keyword match |
+| Ranking signal 3 | — | Semantic similarity |
+| Ranking signal 4 | — | Recency / source-of-truth marker |
+| Ranking signal 5 | — | Workflow state match |
+| Vector store | None | Not specified (Qdrant in Master Plan) |
+| Embedding model | None | Not specified |
+
+**Assessment:** `hybrid_search.md` documents the **desired future state**, not current production. `rag_strategy.md` accurately documents what is running today. This is a known architectural gap — not a bug.
+
+---
+
+### 2B — Documentation Gaps (MINOR — Low Risk)
+
+| ID | Gap | KB Says | Production Does | Risk |
+|---|---|---|---|---|
+| DOC-01 | Unsafe chunk log label | `[RAG_CHUNK_UNSAFE]` | `[RAG_CHUNK_PURGED]` | Low — cosmetic only |
+| DOC-02 | Missing API in KB | `rag_strategy.md` lists 6 public functions | 7th function `recent_searches()` not documented | Low — internal debug tool |
+| DOC-03 | Tokenizer regex form | `re.findall(r'[ঀ-৿]+\|[a-zA-Z0-9]+', text.lower())` (two alternation groups) | `re.compile(r"[A-Za-z0-9ঀ-৿]+")` (single character class) | Low — functionally equivalent for real Bangla/English text; mixed-script tokens edge case only |
+
+---
+
+### 2C — Parameters Verified (ALL MATCH)
+
+| Parameter | KB Value | Production Value | Status |
+|---|---|---|---|
+| Chunk size | 320 chars | `CHUNK_SIZE = 320` | ✅ MATCH |
+| Chunk overlap | 60 chars | `CHUNK_OVERLAP = 60` | ✅ MATCH |
+| Min token length | 2 chars | `MIN_TOKEN_LEN = 2` | ✅ MATCH |
+| BM25 k1 | 1.5 | `_K1 = 1.5` | ✅ MATCH |
+| BM25 b | 0.75 | `_B = 0.75` | ✅ MATCH |
+| Rebuild schedule | 18:00 daily | `rag_rebuild` at 18:00 | ✅ MATCH |
+| Unsafe chunk patterns | 32 | 32 (counted in source) | ✅ MATCH |
+| Excluded dirs | 11 listed + `_` prefix rule | Same 11 + `name.startswith("_")` | ✅ MATCH |
+| Excluded keywords | 11 keywords | Same 11 | ✅ MATCH |
+| Excluded file patterns | `.bak .backup .old .tmp` | Same 4 | ✅ MATCH |
+| answer() min_score | 1.0 | `min_score=1.0` | ✅ MATCH |
+| search() default k | 5 | `k=5` | ✅ MATCH |
+| answer() default k | 3 | `k=3` | ✅ MATCH |
+
+---
+
+## Section 3 — Deliverable 3: Improvement Proposal
+
+### Proposal RAG-001 — Fix 3 Minor Documentation Gaps (KB Maintenance)
+
+**1. Current Production Behavior:**
+- Log label is `[RAG_CHUNK_PURGED]` (not `[RAG_CHUNK_UNSAFE]`)
+- `recent_searches()` function exists but not in KB
+- Tokenizer uses single character class (functionally same as documented alternation)
+
+**2. Knowledge Base Reference:**
+- `knowledge_base/06_developer_system/rag_strategy.md` — Public API section and Corpus Safety Guarantee section
+
+**3. Gap Analysis:**
+- 3 low-risk documentation inaccuracies (DOC-01, DOC-02, DOC-03)
+- Zero functional gaps — production parameters all match KB documentation
+
+**4. Proposed Implementation:**
+- Correct `[RAG_CHUNK_UNSAFE]` → `[RAG_CHUNK_PURGED]` in KB text (DOC-01)
+- Add `recent_searches()` to Public API table in KB (DOC-02)
+- Update tokenizer regex description in KB to match actual production pattern (DOC-03)
+- All changes are append-only corrections under Controlled Freeze policy
+
+**5. Risk Assessment:** NEGLIGIBLE — corrections only, no production changes, no logic changes
+
+**6. Rollback Strategy:** N/A — documentation only; no production deployment required
+
+---
+
+### Proposal RAG-002 — Hybrid RAG Architecture Implementation
+
+**1. Current Production Behavior:**
+- BM25-only retrieval. No semantic/vector search. Single-signal ranking. Context quality depends entirely on keyword overlap between query and document. Works well for explicit keyword queries; may miss semantically similar content with different terminology.
+
+**2. Knowledge Base Reference:**
+- `knowledge_base/06_developer_system/hybrid_search.md` — defines the target architecture (BM25 + semantic + 5-signal ranking)
+- `knowledge_base/06_developer_system/rag_strategy.md` — defines current verified BM25 implementation
+
+**3. Gap Analysis:**
+- Architecture gap: Current = BM25-only. Target = BM25 + semantic similarity
+- Gap is confirmed and expected — `hybrid_search.md` is a planned future state, not a bug
+- No other ranked signals exist (role match, visibility match, recency, workflow state)
+
+**4. Proposed Implementation (High-Level):**
+
+```
+Phase 1A — Vector Layer Addition (Additive, non-breaking):
+  Add Qdrant local instance (Docker, VPS-safe, offline)
+  Add embedding model (lightweight: paraphrase-multilingual-MiniLM-L12-v2 or similar)
+  Index same chunks that BM25 indexes (same safety filters apply)
+  Run both BM25 and vector search in parallel
+  Merge scores: weighted hybrid (BM25 score + cosine similarity)
+  Fallback: if Qdrant unavailable → BM25-only (current behavior preserved)
+
+Phase 1B — Ranking Signal Enhancement:
+  Add role match boost (from identity resolution context)
+  Add visibility filter (never return RESTRICTED chunks to lower roles)
+  Add recency signal (newer sources ranked higher when score is tied)
+
+Phase 1C — Confidence Thresholds:
+  Current: min_score=1.0 for answer()
+  Proposed: Add vector_min_score threshold for semantic results
+  Combined: require both BM25 AND vector signals above threshold for highest confidence
+```
+
+**5. Risk Assessment:**
+
+| Risk | Probability | Impact | Mitigation |
+|---|---|---|---|
+| Qdrant service failure | Low | High | BM25 fallback preserved — current behavior guaranteed if Qdrant down |
+| Embedding model size too large for VPS | Medium | Medium | Use lightweight multilingual model (<200MB); test on VPS first |
+| Semantic false positives | Medium | Medium | Higher confidence threshold for vector results; keep BM25 as primary |
+| Increased memory usage | Medium | Low | Monitor VPS RAM; Qdrant has low-memory local mode |
+| Breaking existing RAG API | None | None | Additive only — same public API; internal implementation change |
+| Performance degradation | Low | Medium | Target: <100ms search latency; test before enabling in production |
+
+**6. Rollback Strategy:**
+- Add `HYBRID_SEARCH_ENABLED=false` environment flag
+- When false: use current BM25-only path (no code deleted)
+- When true: use hybrid path
+- Rollback = set flag to false; no database migration, no rebuild, no restart required
+
+---
+
+## Section 4 — Deliverable 4: Risk Assessment Summary
+
+| Area | Current Risk | Post-Implementation Risk | Notes |
+|---|---|---|---|
+| Production stability | None | Low (additive change) | BM25 fallback preserved |
+| Data safety | None | None (same safety filters) | All 32 unsafe patterns still apply |
+| VPS resource usage | Baseline | Low-medium increase | Qdrant local + embedding model |
+| API backward compatibility | N/A | None (same public API) | Additive implementation only |
+| Documentation accuracy | 3 minor gaps | None after DOC corrections | Low priority corrections |
+
+**Overall Phase 1 Risk:** LOW — The architecture change is fully additive. Current BM25 system continues to work unchanged.
+
+---
+
+## Section 5 — Deliverable 5: Implementation Plan
+
+**Prerequisites before any implementation:**
+1. Management approval of this proposal
+2. VPS resource audit (RAM, disk available for Qdrant + embedding model)
+3. Embedding model selection (multilingual, offline-capable)
+4. Test environment validation
+
+**Proposed task sequence (pending approval):**
+
+| Task ID | Task | Effort | Dependencies | Risk |
+|---|---|---|---|---|
+| RAG-T1 | Apply DOC-01/02/03 KB corrections | 30 min | None | None |
+| RAG-T2 | VPS resource audit for Qdrant | 1 hour | Management approval | None |
+| RAG-T3 | Select and download embedding model | 2 hours | RAG-T2 | Low |
+| RAG-T4 | Implement Qdrant local instance + Docker | 4 hours | RAG-T3 | Low |
+| RAG-T5 | Implement vector indexer (parallel to BM25) | 6 hours | RAG-T4 | Low |
+| RAG-T6 | Implement hybrid scoring merge | 4 hours | RAG-T5 | Medium |
+| RAG-T7 | Add `HYBRID_SEARCH_ENABLED` flag + fallback | 2 hours | RAG-T6 | Low |
+| RAG-T8 | Test on local with flag=true | 4 hours | RAG-T7 | Low |
+| RAG-T9 | Test VPS deployment with flag=false (BM25 only) | 1 hour | RAG-T8 | None |
+| RAG-T10 | Enable hybrid with flag=true on VPS | 1 hour | RAG-T9 + Management approval | Low |
+
+**Total estimated effort:** ~25 hours of implementation work
+**Delivery sequence:** Tasks T1 (documentation only) can proceed immediately. T2–T10 require explicit management approval per-step.
+
+---
+
+## Section 6 — STOP
+
+**This analysis is complete.**
+
+The following decisions are required from Management before any implementation begins:
+
+1. **Approve or reject Proposal RAG-001** (documentation corrections — 3 minor KB fixes)
+2. **Approve or reject Proposal RAG-002** (Hybrid RAG implementation)
+3. If RAG-002 approved: **Confirm VPS resource availability** for Qdrant + embedding model
+4. If RAG-002 approved: **Confirm embedding model preference** (or delegate selection to architect)
+
+**No production code will be changed until explicit management authorization is received.**
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-22 | PHASE 1 analysis created — KB vs production comparison complete | Session 2 Architect |

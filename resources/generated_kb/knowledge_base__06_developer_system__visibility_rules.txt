@@ -1,0 +1,262 @@
+Source: knowledge_base/06_developer_system/visibility_rules.md
+SHA256: a111b766880c21d87432a76d09a573f7c150548bdf5ca00d6ffdc9d8a1b17081
+Version: a111b766880c
+
+# Visibility Rules
+**KB Article ID:** DEV-06-VISIBILITY
+**Sources:** `modules/rag/__init__.py` (1000+ lines), `knowledge_base/ai_access_matrix.md`, `knowledge_base/03_ai_identity/permission_matrix.md` — all read 2026-06-23
+**Visibility:** Developer / Admin only — do NOT set `safe_for_customer=True`
+**Certified:** 2026-06-23 (Wave-3, W3-AUTH)
+
+---
+
+## Overview
+
+Visibility rules control which KB content is accessible to which users. Currently (KB v1.0 / Phase 1 infrastructure), the system uses a **binary `safe_for_customer` flag** applied at index build time and query time. A role-aware multi-tier system (Phase 3) is planned but not yet implemented.
+
+This article documents:
+1. The three-level visibility model (policy intent)
+2. The current enforcement mechanism (code reality)
+3. The enforcement gap between policy and current implementation
+4. The Phase 3 design for role-aware KB filtering
+
+---
+
+## 1. Three-Level Visibility Model (Policy)
+
+### Level 1 — Public (safe_for_customer=True)
+
+Content safe for any sender, including unverified candidates and external contacts.
+
+Examples:
+- Company identity and office location
+- Recruitment FAQ (job types, eligibility, application process)
+- Office hours and contact number
+- General joining process overview
+- Leave and attendance policy (non-financial summary)
+
+### Level 2 — Internal
+
+Content for employees, supervisors, admins, and developers only — not for candidates or external contacts.
+
+Examples:
+- Employee salary ranges and payslip details
+- Joining fee amounts and form fee amounts
+- Daily escort rates and conveyance tables
+- Attendance deduction rules (employee-specific)
+- Advance payment procedures (employees only)
+- Supervisor attendance reporting workflow
+
+### Level 3 — Restricted
+
+Content never exposed outside authorized admin/developer context. Specifically must never reach candidates, clients, or external contacts.
+
+Examples:
+- `DRAFT_ALWAYS_PHONES` list
+- Authorized admin phone numbers (ADMIN_NUMBERS, FPE_CASH_AUTHORIZED_PHONES)
+- FPE internal transaction and ledger data
+- `modules/escort_roster/` financial calculation internals
+- Developer system articles (system_prompt.md, workflow_engine.md, this article)
+- DB schema and API key documentation
+
+---
+
+## 2. KB Folder × Role Access Matrix (Policy Intent)
+
+From `knowledge_base/ai_access_matrix.md` and folder structure:
+
+| KB Folder | Candidate | Employee | Supervisor | Accountant | Admin | Developer |
+|---|---|---|---|---|---|---|
+| `01_employee_knowledge/` | ✅ limited | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `02_admin_knowledge/` | ❌ | ❌ | ⚠️ limited | ✅ | ✅ | ✅ |
+| `02_admin_system/` | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `03_ai_identity/` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| `03_developer_system/` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `04_business_rules/` | ✅ safe rules only | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `05_workflows/` | ✅ recruitment only | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `06_developer_system/` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `07_archived/` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+Detailed access matrix by knowledge area — from `ai_access_matrix.md`:
+
+| Knowledge Area | Public | Candidate | Employee | Supervisor | Accountant | Admin |
+|---|---|---|---|---|---|---|
+| Company identity | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Recruitment FAQ | Limited | ✅ | Limited | ✅ | ❌ | ✅ |
+| Employee policy | ❌ | Limited | ✅ | ✅ | Limited | ✅ |
+| Attendance workflow internals | ❌ | ❌ | ❌ | Limited | Limited | ✅ |
+| Payment workflow internals | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Identity mapping | ❌ | ❌ | ❌ | Limited | Limited | ✅ |
+| Business rules | ❌ | Safe only | Safe only | Limited | ✅ | ✅ |
+| Developer system | ❌ | ❌ | ❌ | ❌ | ❌ | Limited |
+
+**Enforcement rule from ai_access_matrix.md:** "The AI must filter by role and visibility before retrieval and answer generation."
+
+---
+
+## 3. Current Enforcement Mechanism (Code Reality)
+
+Source: `modules/rag/__init__.py`
+
+### Current `search()` API Signature
+
+```python
+async def search(q: str, k: int = 5, min_score: float = 0.0) -> list[dict[str, Any]]:
+```
+
+**Line 882.** No `role` parameter exists. The search function has no way to filter by caller role.
+
+---
+
+### How `safe_for_customer` Works Today
+
+Enforcement happens in three stages:
+
+#### Stage 1 — Index Build Time (File-Based Exclusion)
+
+`_load_resource_files()` (lines 364–404) applies three filters before any file enters the BM25 index:
+
+**Filter A — Excluded directories** (never indexed):
+```python
+_EXCLUDED_DIRS = frozenset({
+    "_internal_archived", "_internal", "prompts", "debug", "tests",
+    "drafts", "internal", "ai", "training", "examples", "temp",
+})
+```
+Any file inside these directories (relative to `RESOURCES_DIR`) is excluded at index build time.
+
+**Filter B — Excluded filename keywords** (case-insensitive substring match):
+```python
+_EXCLUDED_NAME_KEYWORDS = (
+    "analysis", "prompt", "intent", "debug", "test", "sample",
+    "chain", "reasoning", "internal", "archived", "system_context",
+)
+```
+Any `.txt` file whose name contains one of these keywords is excluded.
+
+**Filter C — Backup/temp file patterns:**
+```python
+_EXCLUDED_FILE_PATTERNS = (".bak", ".backup", ".old", ".tmp")
+```
+Blocks backup and temporary file variants.
+
+**All files that pass these three filters get `safe_for_customer=True`** (line 403). The system is binary: a file either passes all filters (safe) or is excluded entirely.
+
+**KB database rows** (`_load_kb_rows()` line 423): All rows from `fazle_knowledge_base WHERE is_active = true` are marked `safe_for_customer=True` ("KB rows are admin-curated"). No per-row visibility flag exists in the DB.
+
+#### Stage 2 — Chunk-Level Safety Patterns
+
+`_CHUNK_UNSAFE_PATTERNS` (lines 245–255): A tuple of text strings that mark a chunk as unsafe even if its source file passed Stage 1. Includes internal-analysis markers: `"chain_of_thought"`, `"Semantic Analysis"`, `"RAG pipeline"`, `"prompt template"`, `"reasoning_trace"`, etc.
+
+Chunks containing any of these patterns are filtered out before indexing and at query time.
+
+#### Stage 3 — Query Time Confirmation
+
+At vector search time (line 729):
+```python
+if not payload.get("safe_for_customer", False):
+    continue  # skip unsafe chunks
+```
+
+At hybrid RRF merge time (line 859):
+```python
+if not d.get("safe_for_customer", True):  # visibility filter
+    continue
+```
+
+This is a final guard — since all indexed chunks already have `safe_for_customer=True` from Stage 1, this primarily catches any edge case where an unsafe chunk somehow reached the index.
+
+---
+
+### What `search()` Returns
+
+`search()` always returns only `safe_for_customer=True` chunks. The caller has no way to request employee-level or admin-level content — every caller gets the same subset of "safe" content. This is the current production behavior.
+
+---
+
+## 4. Current Enforcement Gap
+
+**Summary:** The `ai_access_matrix.md` describes a fine-grained role × knowledge-area matrix. The current code implements a coarser binary split: indexed (safe) vs not-indexed (excluded by filename). There is no role-aware filtering between employees, supervisors, candidates, or admins at query time.
+
+| Gap | Description |
+|---|---|
+| No role parameter in `search()` | All callers get the same chunks regardless of role |
+| Candidate gets same as employee | If an employee FAQ article is indexed, a candidate can receive the same content |
+| No per-article `allowed_roles` metadata | `fazle_knowledge_base` has no `allowed_roles` column; no role tags on KB files |
+| File-level exclusion is name-based | Relies on filename patterns rather than content policy — brittle |
+| KB DB rows all marked safe | `_load_kb_rows()` marks ALL active KB rows as `safe_for_customer=True` with no per-row override |
+
+---
+
+## 5. Phase 3 Design — Role-Aware RAG
+
+Phase 3 (pending production code authorization per management_decisions.md) will implement role-aware filtering. This section documents the design so any developer or future AI agent can implement it consistently.
+
+### Proposed `search()` API Extension
+
+```python
+async def search(
+    q: str,
+    k: int = 5,
+    min_score: float = 0.0,
+    role: str = "candidate",   # NEW — defaults to most restrictive
+) -> list[dict[str, Any]]:
+```
+
+Default `role="candidate"` is the most restrictive access level. Existing callers that do not pass `role` get only candidate-safe content — identical to current behavior. This makes the change backward-compatible.
+
+### Required Role Values
+
+Ordered from most restrictive to most permissive:
+```
+candidate     — unverified job seeker
+new_lead      — same as candidate (unknown sender, may be job seeker)
+employee      — verified company employee
+supervisor    — verified supervisor (employee with attendance oversight)
+accountant    — verified accountant
+admin         — system administrator
+developer     — full access (internal developer context)
+```
+
+### Implementation Steps
+
+These steps require per-file management authorization before any code changes (GOV-03):
+
+**Step 3-A — Add `allowed_roles` to KB data:**
+- `fazle_knowledge_base` table: add `allowed_roles` column (jsonb or text array) OR use existing metadata JSON field: `{"allowed_roles": ["candidate", "employee"]}`
+- Tag every active KB row per the access matrix in Section 2
+- Add `allowed_roles` metadata to `.txt` resource files (header line or sidecar JSON)
+
+**Step 3-B — Include `allowed_roles` in BM25 doc dicts and Qdrant payloads at build time**
+
+**Step 3-C — Apply role filter at query time:**
+- BM25: `[d for d in results if role in d.get("allowed_roles", ["candidate"])]`
+- Qdrant: add `MatchAny` filter on `allowed_roles` payload field
+
+**Step 3-D — Update call sites (2 files):**
+- `modules/recruitment_ai`: `rag.search(text, k=5, role="candidate")`
+- `modules/message_router` step 15: `rag.search(text, k=3, role=resolved_role_str)`
+
+**Rollback:** Set `role="candidate"` at all call sites → current behavior restored.
+
+---
+
+## 6. Content That Must Never Reach Candidates
+
+Regardless of implementation, the following must always be restricted to Level 2/3 access:
+
+- Escort daily rates and conveyance tables (Level 2)
+- Employee payslip and payroll data (Level 2)
+- Joining fee / form fee amounts (requires management decision before indexing)
+- FPE financial data (Level 3)
+- `DRAFT_ALWAYS_PHONES` and admin phone numbers (Level 3 — security)
+- Articles in `06_developer_system/` (Level 3 developer-only)
+- Supervisor attendance reporting internals (Level 2)
+
+---
+
+## Visibility
+
+This article is **Developer/Admin only**. Do not set `safe_for_customer=True`.
+
+Reason: Contains internal enforcement gaps, exclusion patterns, and Phase 3 implementation design — none of which should be visible to candidates or external contacts.

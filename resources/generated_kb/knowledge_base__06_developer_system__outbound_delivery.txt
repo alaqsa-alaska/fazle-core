@@ -1,0 +1,190 @@
+Source: knowledge_base/06_developer_system/outbound_delivery.md
+SHA256: eaac4518e8b66f4436162af8f194a44509591177b926a636924c420929829de3
+Version: eaac4518e8b6
+
+# Outbound Delivery Module
+**Module:** `modules/outbound/__init__.py`
+**Batch:** 15.1 + 15.2
+**Table:** `fazle_outbound_queue`
+**Status:** Production — controlled by `OUTBOUND_ENABLED` env var
+**Current production value:** `OUTBOUND_ENABLED=true` (activated Session 11, 2026-06-23)
+**Source read:** `modules/outbound/__init__.py` (255 lines); schema verified from live DB 2026-06-23
+
+---
+
+## Purpose
+
+Persistent, async outbound message queue. Decouples message sending from request handlers so that:
+- Send failures do not lose messages (retry with exponential backoff)
+- Circuit breaker state is respected before attempting a send
+- All channels (WhatsApp bridges + Meta/Facebook) are unified through one entry point
+
+---
+
+## Public API
+
+### `enqueue(recipient, body, *, source_bridge, fallback_channel, purpose, idempotency_key, meta)`
+
+Inserts a row into `fazle_outbound_queue`. Returns the `id` if enqueued, or `None` if deduped by `idempotency_key`.
+
+```python
+await enqueue(
+    recipient="8801711111111",
+    body="Your message here",
+    source_bridge="bridge2",         # default
+    fallback_channel="bridge1",      # optional: tried if primary fails
+    purpose="payment-notification",  # free-text label for monitoring
+    idempotency_key="pay-draft-42",  # optional: prevents duplicate delivery
+    meta={"escort_id": 7},           # arbitrary JSONB
+)
+```
+
+Dedup uses `ON CONFLICT (idempotency_key) DO NOTHING`. Two calls with the same `idempotency_key` will enqueue exactly one row.
+
+### `sweep_once(limit=20) → dict`
+
+Picks up to `limit` due rows (status `pending` or `failed`, `next_retry_at <= NOW()`), locks them with `FOR UPDATE SKIP LOCKED`, sends each via `_send_with_channel()`, and updates status.
+
+Returns: `{"picked": int, "sent": int, "failed": int, "dlq": int}` (plus `"paused": True` if `OUTBOUND_ENABLED=false`).
+
+### `start_background_worker(interval_seconds=10) → asyncio.Task`
+
+Launches `_worker_loop()` as a background asyncio task. Idempotent — returns existing task if already running. Interval overridden by `OUTBOUND_SWEEP_INTERVAL_S` env var.
+
+### `stop_background_worker()`
+
+Cancels the worker task cleanly. Called from app lifespan shutdown.
+
+### `pending_count() → int`
+
+Count of rows with status `pending` or `failed`.
+
+### `dlq_count() → int`
+
+Count of all rows with status `dlq`.
+
+### `actionable_dlq_count() → int`
+
+DLQ rows from the last 24 hours, excluding system-generated rows (`purpose` not in `dlq-alert`, `health-summary`, `circuit-alert`). This is the operational metric — use this for alerts, not `dlq_count()`.
+
+---
+
+## Database Schema — `fazle_outbound_queue`
+
+Source: `tests/workflows/test_escort_payment_flow.py:119` + migration `018_atomic_release_and_outbound.sql`.
+
+| Column | Type | Default | Notes |
+|---|---|---|---|
+| `id` | BIGSERIAL | — | PK |
+| `recipient` | TEXT NOT NULL | — | Phone or platform ID |
+| `body` | TEXT NOT NULL | — | Message content |
+| `source_bridge` | TEXT NOT NULL | `'bridge2'` | Primary send channel |
+| `fallback_channel` | TEXT | NULL | Tried if primary fails |
+| `purpose` | TEXT | NULL | Label (e.g. `payment-notification`) |
+| `idempotency_key` | TEXT UNIQUE | NULL | NULL = no dedup |
+| `meta_json` | JSONB | `'{}'` | Arbitrary metadata |
+| `status` | TEXT NOT NULL | `'pending'` | See states below |
+| `attempts` | INT NOT NULL | `0` | Incremented each sweep |
+| `max_attempts` | INT NOT NULL | `5` | After this → DLQ |
+| `next_retry_at` | TIMESTAMPTZ NOT NULL | `NOW()` | Backoff schedule |
+| `sent_at` | TIMESTAMPTZ | NULL | Set on success |
+| `external_id` | TEXT | NULL | Bridge/platform delivery id |
+| `locked_at` | TIMESTAMPTZ | NULL | Set to NOW() when `sending` |
+| `last_error` | TEXT | NULL | Last exception (≤500 chars) |
+| `created_at` | TIMESTAMPTZ NOT NULL | `NOW()` | Immutable |
+| `updated_at` | TIMESTAMPTZ NOT NULL | `NOW()` | Updated on every status change |
+
+Note: `fallback_channel`, `external_id`, `locked_at`, `updated_at` were added in migration `018_atomic_release_and_outbound.sql` (additive, data-preserving).
+
+---
+
+## Status State Machine
+
+```
+pending  ──(sweep_once picks row)──►  sending
+   ▲                                      │
+   │ (retry, next_retry_at backoff)        ├─ success ──► sent  (terminal)
+   └──────────────── failed ◄─────────────┤
+                                           └─ max_attempts reached ──► dlq  (terminal)
+```
+
+| Status | Meaning |
+|---|---|
+| `pending` | Waiting to be sent |
+| `sending` | Locked by sweep_once (in-flight) |
+| `sent` | Delivered — terminal |
+| `failed` | Send error; will retry after backoff |
+| `dlq` | Dead letter queue — exhausted `max_attempts`; terminal |
+
+`sending` rows that are abandoned (e.g. process crash) are NOT automatically replayed. The worker comment notes: "A prior process may have delivered it before losing its acknowledgement." Manual intervention required to reset `sending` rows.
+
+---
+
+## Retry Backoff
+
+Exponential, starting at 2 minutes:
+
+```sql
+next_retry_at = NOW() + INTERVAL '1 minute' * power(2, attempts)
+```
+
+| Attempt | Delay before retry |
+|---|---|
+| 1 | 2 min |
+| 2 | 4 min |
+| 3 | 8 min |
+| 4 | 16 min |
+| 5 → DLQ | 32 min |
+
+---
+
+## Channel Routing — `_send_with_channel(source_bridge, recipient, body)`
+
+| `source_bridge` value | Dispatch |
+|---|---|
+| `bridge2` | `get_bridge2().send_strict()` (default) |
+| `bridge1` | `get_bridge1().send_strict()` |
+| `meta` / `meta_whatsapp` | `social_auto_reply.send_queue._send_meta_whatsapp()` |
+| `messenger` | `social_auto_reply.send_queue._send_messenger()` |
+| `facebook_comment` | `social_auto_reply.send_queue._send_comment()` |
+
+Fallback: If primary channel raises `BridgeSendError` and `fallback_channel` is set, the sweep retries immediately via the fallback channel before marking the row as `failed`.
+
+---
+
+## Circuit Breaker Integration
+
+When `BridgeSendError` is raised and `breaker.record_failure()` returns `True` (circuit just opened):
+
+1. `_alert_circuit_open(source_bridge)` is called
+2. An alert is enqueued to the first `ADMIN_NUMBERS` entry via the **other** bridge
+3. `purpose="circuit-alert"`, `idempotency_key="circuit-open-{bridge}-{YYYYmmddHHMM}"` — one alert per minute per bridge
+4. The failed row is then handled normally (retry or DLQ)
+
+---
+
+## Environment Variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OUTBOUND_ENABLED` | `"false"` | Set to `"true"`, `"1"`, or `"yes"` to enable sweep_once. When false, sweep returns `{"paused": True}` with zero counts. |
+| `OUTBOUND_SWEEP_INTERVAL_S` | `10` | Background worker sweep frequency in seconds |
+| `ADMIN_NUMBERS` | — | Comma-separated phones; first entry receives circuit-open alerts |
+
+---
+
+## System-Generated `purpose` Values
+
+These are internal and excluded from `actionable_dlq_count()`:
+
+| Purpose | Description |
+|---|---|
+| `circuit-alert` | Bridge circuit opened — sent to admin |
+| `dlq-alert` | DLQ threshold alert |
+| `health-summary` | Periodic health summary to admin |
+
+---
+
+## Coverage Note
+
+This module is P0 priority. Prior to Wave-4, it had 30% KB coverage (the only P0 module below 70%). This article was created under KB v2 certification authorization (2026-06-23) to bring the module to full P0 coverage.

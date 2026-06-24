@@ -1,3 +1,11 @@
+---
+title: Contact Sync System
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Contact Sync System
 **KB Article ID:** DEV-06-CONTACT-SYNC
 **Source:** `modules/contact_sync/__init__.py` (357 lines — read 2026-06-23)

@@ -1,4 +1,12 @@
-﻿# Parser Logic
+---
+title: Parser Logic
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Parser Logic
 
 ## Purpose
 Define internal parsing rules for escort order extraction and vessel classification.

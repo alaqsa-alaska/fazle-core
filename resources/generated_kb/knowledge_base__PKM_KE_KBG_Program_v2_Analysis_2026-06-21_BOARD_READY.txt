@@ -1,0 +1,162 @@
+Source: knowledge_base/PKM_KE_KBG_Program_v2_Analysis_2026-06-21_BOARD_READY.md
+SHA256: 113d915c042c28ec54979f5244c31cdb940ee7848311710ae42706297b5c30a4
+Version: 113d915c042c
+
+# FAZLE AI PLATFORM
+# PKM -> KE -> KBG PROGRAM
+## Board-Ready Executive Version
+
+Version: 3.0 (Executive)
+Status: ANALYSIS ONLY
+Date: 2026-06-21
+Company: Al-Aqsa Security and Logistics Services Ltd.
+
+---
+
+## 1) Executive Decision Brief
+The Fazle production system is currently the living operational brain. Critical business and safety logic is still embedded in source code and not fully represented in the knowledge base.
+
+Board decision required:
+- Approve controlled conversion of production knowledge into a governed knowledge base.
+- Approve conflict-resolution protocol for policy/formula mismatches.
+- Approve visibility model (public vs internal vs confidential).
+
+No production changes were made for this report.
+
+---
+
+## 2) Why This Matters
+If hidden logic remains undocumented:
+- Operational continuity depends on code-readers, not organizational memory.
+- Safety guards can be unintentionally bypassed during future changes.
+- Policy and runtime behavior can drift, creating governance and audit risk.
+
+If approved and executed:
+- Every critical workflow becomes reproducible from documentation.
+- High-risk decisions become traceable and auditable.
+- Business continuity improves beyond individual engineers/operators.
+
+---
+
+## 3) What We Found (Board-Level)
+### 3.1 Operational Architecture
+The platform is an identity-first messaging operations engine covering:
+- Recruitment
+- Attendance
+- Escort lifecycle
+- Payment and payroll
+- Admin governance
+- Scheduler automation
+- RAG-based knowledge retrieval
+
+### 3.2 Hidden Critical Logic Exists
+High-impact hidden rules identified in production behavior:
+- Silent-skip and draft-only routing controls
+- Complaint/financial escalation protections
+- Prompt-injection and outbound leakage blockers
+- Loop/flood suppression controls
+- Role-priority identity resolution
+- Multi-stage fallback behavior for AI and delivery
+
+### 3.3 Coverage Gap
+Current KB provides policy and workflow foundations but under-covers:
+- Runtime safety gates
+- Full command governance and RBAC mapping
+- Parser internals and validation boundaries
+- Scheduler and RAG internals
+
+---
+
+## 4) Risk Snapshot
+### R1 - Knowledge Concentration Risk
+Critical behavior remains trapped in code instead of approved operational documents.
+
+### R2 - Governance Drift Risk
+Some policy-level assumptions conflict with runtime formula behavior.
+
+### R3 - Control Surface Risk
+Incomplete documentation of admin commands and role permissions increases misuse risk.
+
+### R4 - Safety Regression Risk
+Undocumented anti-abuse and outbound safety controls may be weakened in future updates.
+
+---
+
+## 5) Conflict Areas Requiring Management Decision
+1. Payment formula alignment across modules and policy docs.
+2. Transport/allowance values where code and policy references diverge.
+3. Draft-estimate vs final-settlement interpretation for release/payment workflows.
+
+Policy rule:
+- No silent overwrite.
+- Every conflict must have ID, risk note, decision owner, and revision record.
+
+---
+
+## 6) Recommended Approval Path
+### Phase A (Immediate, Week 1)
+Approve documentation of critical hidden safeguards:
+- Router safety and suppression matrix
+- Draft and escalation policy
+- Anti-abuse and outbound protection controls
+
+### Phase B (Week 1-2)
+Approve governance documentation:
+- Full admin command reference
+- RBAC permission matrix
+- Scheduler operational runbook
+
+### Phase C (Week 2-3)
+Approve business-engine books:
+- Escort, payment, payroll, attendance, recruitment, identity, bridge, RAG
+
+### Phase D (Week 3+)
+Approve conflict closure and certification:
+- Resolve policy/runtime mismatches
+- Finalize coverage matrix
+- Certify KB as organizational operating reference
+
+---
+
+## 7) Measurable Success Criteria
+Program is complete when:
+- All critical workflows are executable from documentation only.
+- All high-risk runtime rules are documented with proper visibility.
+- Conflict register is fully resolved and signed.
+- Audit and operational teams can validate behavior without code dependency.
+
+---
+
+## 8) Governance and Visibility Model
+Proposed tiers:
+- Public / Employee Safe / Candidate Safe
+- Operations / HR / Admin / Accountant / Management
+- Developer / Internal / System / Confidential / Archived
+
+Hard rule:
+- Internal parser, command, database, and security internals must never be published to public-facing knowledge channels.
+
+---
+
+## 9) Board Actions Required (Approval Checklist)
+- [ ] Approve PKM -> KE -> KBG program execution.
+- [ ] Approve conflict-resolution authority and process.
+- [ ] Approve visibility and publication controls.
+- [ ] Approve phased implementation timeline.
+- [ ] Appoint accountable owner for final sign-off.
+
+---
+
+## 10) Final Statement
+The platform already contains a strong operational brain. This program converts that implicit operational intelligence into explicit institutional knowledge, with governance, traceability, and controlled visibility.
+
+This document is analysis-only and requests board authorization to proceed.
+
+---
+
+## Approval Block
+Decision: PENDING
+
+Board Chair / Authorized Approver: __________________
+Date: __________________
+Notes: __________________

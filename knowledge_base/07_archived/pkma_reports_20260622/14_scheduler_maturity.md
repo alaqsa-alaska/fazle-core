@@ -1,3 +1,11 @@
+---
+title: PKMA Report 14 — Scheduler Maturity
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA Report 14 — Scheduler Maturity
 
 **Program:** PKMA v1.0

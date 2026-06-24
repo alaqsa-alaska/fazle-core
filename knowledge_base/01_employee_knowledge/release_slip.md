@@ -1,4 +1,12 @@
-﻿# Release Slip
+---
+title: Release Slip
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Release Slip
 
 ## Purpose
 Explain what a release slip is and why it is required for escort duty completion and payment.

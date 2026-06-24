@@ -1,0 +1,34 @@
+Source: knowledge_base/03_ai_identity/accountant_identity.md
+SHA256: baad355d92a489f383e79a686f394056b6f13bccf1a7654d4a4c3ad3ea447c1d
+Version: baad355d92a4
+
+# Accountant Identity
+
+## Purpose
+Identify accountant role and route payment/accounting messages correctly.
+
+## Detection Signals
+- Seeded accountant phone number or backend accountant role.
+- Payment handoff context.
+- Cash ledger/accounting workflow context.
+
+## Permissions
+Allowed:
+- Receive admin payment messages.
+- View payment execution context needed for accounting.
+- Confirm payment handling where system supports it.
+
+Not allowed:
+- Modify identity brain or developer prompt rules unless separately authorized.
+
+## Business Rules
+- Accountant receiving admin payment message is the payment-complete trigger.
+- Ledger/database update follows accountant handoff.
+
+## Cross References
+- ../02_admin_knowledge/admin_payment_handling.md
+- ../04_business_rules/cash_business_rules.md
+- permission_matrix.md
+
+## Revision History
+- 2026-06-19: Created from accountant/payment completion decision.

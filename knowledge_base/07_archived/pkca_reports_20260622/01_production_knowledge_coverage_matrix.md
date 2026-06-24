@@ -1,3 +1,11 @@
+---
+title: PKCA Report 01: Production Knowledge Coverage Matrix
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKCA Report 01: Production Knowledge Coverage Matrix
 
 **Program:** Production Knowledge Coverage Audit (PKCA) v1.0

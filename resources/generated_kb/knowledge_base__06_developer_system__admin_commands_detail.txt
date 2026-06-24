@@ -1,0 +1,216 @@
+Source: knowledge_base/06_developer_system/admin_commands_detail.md
+SHA256: 5a03929131b956dd35a0d6c68fe44adbdc64b4915b865caeb195f783254e20ec
+Version: 5a03929131b9
+
+# Admin Commands — Developer Reference
+**KB Article ID:** DEV-06-ADMIN-COMMANDS-DETAIL
+**Source:**
+- `modules/admin_commands/__init__.py` (read 2026-06-23)
+- `modules/admin_commands/nl_router.py` (read 2026-06-23)
+- `modules/admin_commands/date_parser.py` (read 2026-06-23)
+- `modules/rbac/__init__.py` (read 2026-06-23)
+**Visibility:** Developer only
+**Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## 1. Bangla Digit Normalization
+
+**Applied to:** ALL incoming admin command text before any regex match
+
+```python
+_BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+text = text.translate(_BN_DIGITS)
+```
+
+**Effect:** `APPROVE ১৬৫` → parsed identically to `APPROVE 165`. All IDs, amounts, and counts in admin commands support Bengali digit input.
+
+**Scope:** `modules/admin_commands/__init__.py` and `modules/admin_commands/nl_router.py` both apply the same translation before regex.
+
+---
+
+## 2. Command Deduplication
+
+**Algorithm:** In-process LRU keyed by `SHA-1(admin_phone + "|" + text.strip())`
+**TTL:** 30 seconds — same command from same sender within 30s is silently ignored
+**Cache size cap:** 256 entries (LRU eviction)
+**Single-worker assumption:** Works correctly under `uvicorn --workers 1`; may allow duplicate commands under multi-process deployment.
+
+**What counts as "same command":** The full normalized text after stripping. `APPROVE 165` and `approve 165` are the same (text is compared case-insensitively via SHA-1 after lowercasing).
+
+---
+
+## 3. Natural Language Query Router
+
+**Source:** `modules/admin_commands/nl_router.py`
+**Position:** Wired after `is_admin_command()` check in `message_router` admin branch
+**LLM usage:** None — pure regex + keyword matching
+**Language support:** Bangla + English + Banglish
+
+### Current Intent Registry (v1.1.0 — Phase 1.1)
+
+Two intents are shipped in Phase 1.1 (documentation note: "validation slice"):
+
+| Intent | Trigger | Handler |
+|---|---|---|
+| `chat_history` | Phone present + `chat/history/messages/conversation/মেসেজ/চ্যাট/হিস্টরি` keyword | Returns last N messages for phone |
+| `last_contact` | Phone present + `last contact/last seen/সর্বশেষ যোগাযোগ/শেষ মেসেজ` keyword | Returns most recent message + time-ago |
+
+**Prerequisite for both intents:** A valid BD phone number must appear in the query. Without a phone, `classify_nl_intent()` returns `None`.
+
+### `chat_history` Response Format
+
+```
+📜 8801812345678 — শেষ 10টি মেসেজ:
+DD Mon HH:MM → message body (outbound)
+DD Mon HH:MM ← message body (inbound)
+...
+```
+
+- Default count: 10, cap: 200, parsed from `last N` or `শেষ N` in query text
+- Bangla digits accepted in count: `শেষ ১০টি মেসেজ` = count 10
+
+### `last_contact` Response Format
+
+```
+📞 8801812345678 — শেষ যোগাযোগ:
+YYYY-MM-DD HH:MM  (Xd Yh আগে)
+→ পাঠানো: message body   (or ← এসেছে: ...)
+```
+
+### Overflow to File
+
+If response body > `MAX_INLINE_CHARS = 3500`:
+- Full result written to `reports/<timestamp>_<intent>_<phone>.txt`
+- Reply sends first 800 chars + file path pointer
+
+### Phone Extraction
+
+```python
+_PHONE_RE = re.compile(r"(?:\+?88)?(01[3-9]\d{8})")
+```
+
+Accepts: `01812345678`, `8801812345678`, `+8801812345678`. Returns `8801XXXXXXXXX` canonical.
+
+### Data Source
+
+Both intents read `wbom_whatsapp_messages` (`sender_number` and `contact_identifier` columns). Searches using 3 phone variants: `8801XXXXXXXXX`, `01XXXXXXXXX`, `+8801XXXXXXXXX`.
+
+---
+
+## 4. Date Parser — Supported Formats
+
+**Source:** `modules/admin_commands/date_parser.py`
+**Public API:** `parse_date_range(text, *, default_days=None) → (start_dt, end_dt, label) | None`
+**Timezone:** All datetimes are TZ-aware in Asia/Dhaka (+06:00, no DST)
+**End convention:** EXCLUSIVE (e.g. "today" → start=today 00:00, end=tomorrow 00:00)
+**Bangla digits:** Pre-translated before parsing
+
+### Supported Input Formats
+
+| Category | Examples |
+|---|---|
+| **ISO range** | `2026-04-01..2026-04-15`, `2026-04-01 to 2026-04-15`, `2026-04-01-2026-04-15` |
+| **Single ISO date** | `2026-04-15` → covers that day only |
+| **Today** | `today`, `আজ`, `আজকের` |
+| **Yesterday** | `yesterday`, `গতকাল`, `গতকালের` |
+| **Day before yesterday** | `day before yesterday`, `পরশু` |
+| **This week** | `this week`, `এই সপ্তাহ` |
+| **Last week** | `last week`, `গত সপ্তাহ`, `গতো সপ্তাহ` |
+| **This month** | `this month`, `এই মাস`, `এ মাস` |
+| **Last month** | `last month`, `গত মাস` |
+| **This year** | `this year`, `এই বছর` |
+| **Last N days** | `last 7 days`, `past 30 days`, `গত ৭ দিন`, `৭ দিনে` |
+| **Last N weeks** | `last 2 weeks`, `গত ২ সপ্তাহ` |
+| **Last N months** | `last 3 months`, `গত ৩ মাস` |
+| **English month name** | `march`, `jan 2026`, `october 2025` (jan..dec, january..december) |
+| **Bangla month name** | `জানুয়ারি`, `ফেব্রুয়ারি`, `মার্চ`, `এপ্রিল`, `মে`, `জুন`, `জুলাই`, `আগস্ট`, `সেপ্টেম্বর`, `অক্টোবর`, `নভেম্বর`, `ডিসেম্বর` |
+
+**Week convention:** Week starts Saturday (Bangladesh banking convention). `this week` → Saturday 00:00 through Saturday+7.
+
+**Default fallback:** If `default_days` param is provided and no token recognized, returns `last N days` from today.
+
+---
+
+## 5. RBAC Internals
+
+**Source:** `modules/rbac/__init__.py`
+
+### 4 RBAC Tables
+
+| Table | Purpose |
+|---|---|
+| `fazle_roles` | Role definitions (seeded: viewer, operator, accountant, admin, superadmin) |
+| `fazle_admins` | Admin user records (phone, name, api_key_hash, status) |
+| `fazle_admin_roles` | Admin ↔ role mapping (many-to-many) |
+| `fazle_admin_audit` | Immutable audit log — every command attempt, allowed or denied |
+
+### Role Hierarchy (lowest → highest)
+
+`viewer < operator < accountant < admin < superadmin`
+
+Admin's effective role = their highest assigned role. Command access requires admin's max role ≥ command's required role.
+
+### Command → Required Role Map
+
+| Role | Commands |
+|---|---|
+| `viewer` | `status`, `schedule_status`, `report_list`, `report_daily`, `report_payroll`, `report_cash`, `report_recon`, `report_escort`, `backup_status`, `backup_list`, `payroll_list` |
+| `operator` | `approve`, `reject`, `edit`, `paid`, `advance`, `release`, `escortconfirm` |
+| `accountant` | `payimport`, `payroll_compute`, `payroll_trans`, `payroll_paid`, `payroll_cancel` |
+| `admin` | `schedule_run`, `backup_now`, `user_list` |
+| `superadmin` | `user_add`, `user_role`, `user_remove`, `user_apikey` |
+
+**Default for unknown commands:** `admin` (`DEFAULT_REQUIRED_ROLE = "admin"`)
+
+### API Key Storage
+
+```python
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+```
+
+API keys are stored as **SHA-256 hashes** in `fazle_admins.api_key_hash`. The plaintext key is shown once at `USER APIKEY` time and never stored. Lookup: compute SHA-256 of presented key → match against stored hash.
+
+### Superadmin Bootstrap
+
+**Source env var:** `ADMIN_NUMBERS` (comma/semicolon/space-separated list of phone numbers)
+
+On platform startup (or first command from an `ADMIN_NUMBERS` phone), `ensure_bootstrap_admins()` auto-creates these phones as `superadmin` in `fazle_admins` if they don't already exist. This prevents permanent lockout if no admin exists.
+
+**Effect:** Phones in `ADMIN_NUMBERS` always have superadmin access on first sight — they are never denied a command due to missing DB entry.
+
+### `fazle_admin_audit` Table
+
+Every command attempt (allowed or denied) is logged. Key fields:
+
+| Field | Notes |
+|---|---|
+| `admin_phone` | Sender phone |
+| `command` | Command key (e.g. `approve`, `payroll_compute`) |
+| `allowed` | Boolean — whether access was granted |
+| `required_role` | Role required for the command |
+| `admin_role` | Admin's actual role at time of check |
+| `created_at` | Audit timestamp |
+
+---
+
+## 6. Multi-ID Command Support
+
+**Source:** `modules/admin_commands/__init__.py` regex `_APPROVE_RE`
+
+```python
+_APPROVE_RE = re.compile(r"^approve\s+([\d,\s]+)$", re.IGNORECASE)
+```
+
+`APPROVE 165 166 167` or `APPROVE 165,166,167` — processes all IDs in one command. Each ID is approved sequentially; partial failures are reported individually.
+
+**REJECT** also supports multi-ID via `_REJECT_RE`.
+
+---
+
+## Cross-References
+
+- `admin_operations_overview.md` — Full admin command reference (37 commands, RBAC roles, syntax)
+- `workflow_engine.md` — Where NL admin query check is positioned in routing (after `is_admin_command`)
+- `automation_pipeline.md` — `SCHEDULE STATUS` command output (all 15 jobs)

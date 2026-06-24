@@ -1,4 +1,12 @@
-﻿# Parser Engine
+---
+title: Parser Engine
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Parser Engine
 
 ## Purpose
 Parse structured and semi-structured operational messages.

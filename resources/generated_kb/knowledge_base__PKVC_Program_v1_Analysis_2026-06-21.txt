@@ -1,0 +1,314 @@
+Source: knowledge_base/PKVC_Program_v1_Analysis_2026-06-21.md
+SHA256: 20a421331fa0eb13e22d7229b44a9f2e5e474bef8bc1be63df774a7273a7fd73
+Version: 20a421331fa0
+
+# FAZLE AI PLATFORM
+# PRODUCTION KNOWLEDGE VALIDATION & CERTIFICATION PROGRAM
+# PKVC
+
+Version: 1.0
+Status: ANALYSIS ONLY
+Company: Al-Aqsa Security & Logistics Services Ltd.
+Date: 2026-06-21
+
+---
+
+## Objective
+This phase begins only after:
+- Production Knowledge Mining completed
+- Knowledge Extraction completed
+- Knowledge Enrichment completed
+
+This phase does not write code.
+
+This phase does not modify production.
+
+This phase certifies whether the Knowledge Base represents the Production System accurately.
+
+---
+
+## Absolute Safety Rule
+Do not:
+- modify any source code
+- modify any frontend
+- modify any backend
+- modify any API
+- modify any URL
+- modify any port
+- modify any environment variable
+- modify any database
+- modify any schema
+- modify any migration
+- modify any production configuration
+- modify any service
+- modify any module
+- modify any workflow
+- modify any parser
+- modify any scheduler
+- modify any AI prompt
+- modify any bridge
+- modify any deployment
+- modify any Docker
+- modify any Systemd
+- modify any RBAC
+- modify any production data
+
+Analysis only.
+
+---
+
+## Primary Mission
+Validate the Knowledge Base against:
+1. Existing Production Code
+2. Existing Database Behaviour
+3. Existing Running System
+4. Existing Business Operation
+5. Existing Management Decisions
+6. Existing Production Knowledge Mining Reports
+
+Goal:
+Knowledge Base == Production Reality
+
+---
+
+## Validation Principle
+- Production Code is the implementation.
+- Knowledge Base is the documentation.
+- Management Decision is the authority.
+
+If conflicts exist:
+- Never decide automatically.
+- Generate Decision Required reports.
+
+---
+
+## Validate Every Knowledge Article
+For every article verify:
+- Purpose
+- Scope
+- Visibility
+- Workflow
+- Business Rules
+- Validation Rules
+- Exception Rules
+- Parser Behaviour
+- Identity Behaviour
+- Notification Behaviour
+- Database Behaviour
+- Scheduler Behaviour
+- AI Behaviour
+- OCR Behaviour
+- Voice Behaviour
+- Payment Behaviour
+- Payroll Behaviour
+- Attendance Behaviour
+- Escort Behaviour
+- Recruitment Behaviour
+- Admin Behaviour
+- Accountant Behaviour
+- Report Behaviour
+- Audit Behaviour
+- Examples
+- State Machine
+- Commands
+- Message Formats
+- Reply Formats
+- Error Handling
+- Retry Logic
+- Recovery Logic
+- Future Notes
+
+---
+
+## Validate Every Workflow
+Confirm that every workflow matches production:
+- Attendance
+- Escort Order
+- Escort Lifecycle
+- Escort Release
+- Escort Payment
+- Payroll
+- Cash
+- Recruitment
+- Identity
+- Message Router
+- Admin Commands
+- Scheduler
+- OCR
+- Voice
+- RAG
+- Facebook
+- Messenger
+- WhatsApp
+- Notification
+- Audit
+
+---
+
+## Validate Every Business Rule
+Confirm:
+- Every rule exists
+- Every rule is documented
+- Every rule is classified
+- Every rule has examples
+- Every rule has visibility
+- Every rule has authoritative source
+
+---
+
+## Validate Every Parser
+Extract:
+- Input
+- Output
+- Regex
+- Keywords
+- Decision
+- Validation
+- Error Cases
+- Example Messages
+- Unsupported Formats
+
+---
+
+## Validate Database Knowledge
+Verify:
+- Table Purpose
+- Insert Rules
+- Update Rules
+- Delete Rules
+- Idempotency
+- Audit
+- Relationships
+- Triggers
+- State Updates
+- Search Behaviour
+- Reporting Behaviour
+
+---
+
+## Validate AI Knowledge
+Verify:
+- Intent Detection
+- Role Detection
+- Identity Resolution
+- RAG
+- Prompt Chain
+- Provider Chain
+- Safety
+- Draft Rules
+- Auto Reply
+- Manual Review
+
+---
+
+## Validate Knowledge Coverage
+For every production module determine:
+- Fully Documented
+- Partially Documented
+- Missing
+- Duplicate
+- Deprecated
+- Outdated
+- Hidden
+- Unknown
+
+---
+
+## Validate Traceability
+Every Knowledge Article must reference:
+- Production Module
+- Source File
+- Function
+- Business Rule
+- Workflow
+- Related Article
+- Related Report
+- Management Decision
+
+---
+
+## Validate Conflicts
+Never resolve conflicts automatically.
+
+Every conflict must include:
+- Conflict ID
+- Production Behaviour
+- Knowledge Base Behaviour
+- Management Policy
+- Business Impact
+- Risk Level
+- Recommended Resolution
+- Decision Required
+
+---
+
+## Certification Requirements
+The Knowledge Base cannot be certified until:
+- Coverage >= 100%
+- No undocumented production workflow
+- No undocumented parser
+- No undocumented business rule
+- No undocumented state machine
+- No undocumented database behaviour
+- No undocumented notification
+- No undocumented scheduler
+- No undocumented command
+- No undocumented validation rule
+- No undocumented AI behaviour
+- No undocumented identity rule
+- All conflicts resolved by management
+
+---
+
+## Required Reports
+Generate:
+01 Executive Validation Summary
+02 Knowledge Coverage Report
+03 Knowledge Completeness Report
+04 Workflow Validation Report
+05 Business Rule Validation Report
+06 Parser Validation Report
+07 Database Behaviour Validation Report
+08 AI Behaviour Validation Report
+09 Identity Validation Report
+10 Notification Validation Report
+11 Scheduler Validation Report
+12 Command Validation Report
+13 State Machine Validation Report
+14 Traceability Report
+15 Duplicate Validation Report
+16 Conflict Validation Report
+17 Missing Knowledge Validation Report
+18 Knowledge Quality Score
+19 Certification Readiness Report
+20 Management Decision Register
+
+---
+
+## Final Certification Output
+Produce one final conclusion:
+
+Option A: CERTIFIED
+The Knowledge Base accurately represents the Production System.
+
+or
+
+Option B: NOT CERTIFIED
+List every remaining issue.
+
+Include blockers by severity:
+- Critical
+- High
+- Medium
+- Low
+
+---
+
+## Final Rule
+The Production System remains the operational source.
+
+The Knowledge Base becomes the organizational source.
+
+Certification is complete only when no production knowledge remains undocumented.
+
+END.

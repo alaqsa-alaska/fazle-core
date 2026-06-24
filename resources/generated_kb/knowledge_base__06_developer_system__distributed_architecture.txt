@@ -1,0 +1,205 @@
+Source: knowledge_base/06_developer_system/distributed_architecture.md
+SHA256: 72b662a67155e29166d25148c9fe436e54f0335d0163d33b7877f27822e7d11e
+Version: 72b662a67155
+
+# Distributed Architecture — Queue, Orchestration, and Self-Healing
+**KB Article ID:** DEV-06-DISTRIBUTED-ARCHITECTURE
+**Source:**
+- `shared/queue_arbiter.py` (read 2026-06-23)
+- `shared/bridge_orchestrator.py` (read 2026-06-23)
+- `shared/self_heal.py` (read 2026-06-23)
+**Visibility:** Developer only
+**Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## Overview
+
+Three `shared/` modules form the distributed coordination layer of Fazle Core. They operate independently but coordinate through `shared/events.py` (event emission) and `shared/locks.py` (write locking).
+
+| Module | Purpose | Phase |
+|---|---|---|
+| `shared/queue_arbiter.py` | Prevents duplicate message processing across workers | Phase 13B |
+| `shared/bridge_orchestrator.py` | Health tracking, failover, dedup across bridges | Phase 13D |
+| `shared/self_heal.py` | Pressure scoring, auto-recovery, panic mode | Phase 13E |
+
+---
+
+## 1. Queue Arbiter — `shared/queue_arbiter.py`
+
+### Problem Solved
+
+Multiple app instances (fazle-core, payroll-engine, escort-roster) can consume overlapping messages from `fazle_message_queue`. Without coordination: double draft generation, double payroll writes, duplicate escort assignments.
+
+### Solution: Lease Layer
+
+Every consumer acquires a **lease** (backed by PostgreSQL advisory lock + `INSERT ... ON CONFLICT DO NOTHING`) before processing. Only one worker can hold the lease for a given `(message_id, intent)` pair at a time.
+
+### Lease Lifecycle
+
+| State | Transition | Behavior |
+|---|---|---|
+| `pending` | `acquire_lease()` succeeds | Lease granted; worker may process |
+| — | `acquire_lease()` fails | Another worker holds it; skip silently |
+| `processing` | `complete_lease()` | Permanent — same pair can never be re-leased |
+| `processing` | `fail_lease()` | Retry with exponential backoff (if attempts < MAX_ATTEMPTS) |
+| `processing` | `dead_letter_lease()` | Permanently dead-lettered; no retry |
+| `expired` | `recover_stale_leases()` | Stale lease reclaimed after LEASE_TTL_S (default: 120s) |
+
+### Constants
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `LEASE_TTL_S` | 120 | Seconds before a crashed worker's lease is reclaimed |
+| `MAX_ATTEMPTS` | From config | Max retry attempts before permanent dead-letter |
+| `MAX_BACKOFF_S` | 3600 | Cap on exponential retry delay |
+
+### Public API
+
+| Function | Purpose |
+|---|---|
+| `acquire_lease(message_id, intent, worker_id)` | Acquire or skip |
+| `complete_lease(lease_id)` | Mark done (no retry ever) |
+| `fail_lease(lease_id, reason)` | Mark failed (retry if attempts < max) |
+| `dead_letter_lease(lease_id, reason)` | Permanent dead-letter |
+| `recover_stale_leases()` | Recovery sweep — call from scheduler every 60s |
+| `get_dead_letters(limit=50)` | Diagnostic: list dead-lettered leases |
+| `get_arbiter_metrics()` | In-process metrics snapshot |
+| `arbitrated_process(msg_id, intent, worker_id, handler_fn)` | High-level: process one message with full arbitration |
+| `arbitrated_dequeue(limit, worker_id)` | Wraps `queue.dequeue_batch` with lease acquisition |
+
+### Metrics (In-Process)
+
+`processing_latency_ms` (last 1000 samples), `retries`, `lease_conflicts`, `queue_starvation`, `deduplication_hits`.
+
+### Kill Switch
+
+`QUEUE_ARBITER_ENABLED=false` — existing workers fall back to non-arbitrated `dequeue_batch` behavior.
+
+---
+
+## 2. Bridge Orchestrator — `shared/bridge_orchestrator.py`
+
+### Responsibilities
+
+- **Bridge health tracking** — periodic probe of bridge1 and bridge2 every 30 seconds
+- **Bridge failover** — route outbound via next healthy bridge on failure
+- **Cross-bridge deduplication** — SHA-256 content hash prevents same WhatsApp message being processed twice across bridges (2-minute dedup window)
+- **Source prioritization** — bridge2 (OPS/admin) always has highest priority
+- **Admin self-chat routing** — bridge2 sends drafts to admin's own number
+- **Outage buffer + replay** — per-bridge send queue with exponential backoff; drained on reconnect
+- **Lag diagnostics** — RTT samples per bridge + propagation latency
+
+### Bridge Priority
+
+| Bridge | Priority | WhatsApp Number | Role |
+|---|---|---|---|
+| `bridge2` | 0 (highest) | `8801880446111` | OPS / Admin authority |
+| `bridge1` | 1 (lower) | `8801958122300` | Customer-facing |
+
+Failover order for admin messages: `bridge2 → bridge1`.
+
+### Bridge Health States
+
+| State | Condition |
+|---|---|
+| `healthy` | Last probe succeeded; lag < `LAG_DEGRADED_MS` (5000ms) |
+| `degraded` | Last probe succeeded; lag ≥ 5000ms |
+| `outage` | No successful probe in `OUTAGE_THRESHOLD_S` (120s) |
+
+### Constants
+
+| Constant | Value |
+|---|---|
+| `HEALTH_PROBE_INTERVAL_S` | 30 |
+| `DEDUP_TTL_S` | 120 |
+| `LAG_DEGRADED_MS` | 5000.0 |
+| `OUTAGE_THRESHOLD_S` | 120.0 |
+| `RETRY_MAX_ATTEMPTS` | 5 |
+| `RETRY_BACKOFF_S` | [5, 10, 30, 60, 120] |
+| `LAG_SAMPLE_WINDOW` | 20 (rolling avg) |
+| `HISTORICAL_CUTOFF_S` | 300.0 (5 min) |
+| `ADMIN_SELF_NUMBER` | `"8801880446111"` |
+
+**Historical guard:** Messages older than `HISTORICAL_CUTOFF_S` (5 minutes) are never eligible for draft generation.
+
+### BridgeHealth Data Class Fields
+
+`name`, `state`, `last_healthy`, `consecutive_failures`, `last_lag_ms`, `avg_lag_ms`, `message_count`, `dedup_rejected`, `retry_queue_depth`, `reconnect_count`.
+
+---
+
+## 3. Self-Healer — `shared/self_heal.py`
+
+### Purpose
+
+Monitors operational health and executes automatic recovery actions to prevent total orchestration collapse from any single failing module.
+
+### Monitored Conditions
+
+| Signal | Recovery Action |
+|---|---|
+| `queue_stall` (pending > threshold) | `throttle_non_critical` |
+| `stale_locks` (TTL exceeded) | `clean_expired_locks` |
+| `ws_failure` (realtime heartbeat dead) | `restart_ws_broadcaster` |
+| `bridge_outage` (from orchestrator) | `emit_bridge_probe` |
+| `dead_worker` (outbound worker task dead) | `restart_outbound_worker` |
+| `retry_storm` (DLQ > threshold) | `throttle_non_critical` |
+| `stale_heartbeats` (arbiter recovery dead) | `restart_arbiter_recovery` |
+
+### Pressure Score (0.0–1.0)
+
+Weighted sum of normalized signals:
+
+| Signal | Weight |
+|---|---|
+| `bridge_outage` | 0.30 |
+| `dead_worker` | 0.25 |
+| `queue_stall` | 0.20 |
+| `ws_failure` | 0.10 |
+| `retry_storm` | 0.10 |
+| `stale_locks` | 0.05 |
+
+### Panic Mode
+
+| Threshold | Behavior |
+|---|---|
+| `PANIC_THRESHOLD = 0.85` | Enter panic mode: `_panic_mode=True`, `_throttled=True`; emit `SELF_HEAL_PANIC` event |
+| `PANIC_CLEAR = 0.60` | Exit panic mode: `_panic_mode=False`, `_throttled=False`; emit `SELF_HEAL_RECOVERED` event |
+
+Callers check `is_panic_mode()` before launching bulk / non-critical work.
+
+### Constants
+
+| Constant | Value |
+|---|---|
+| `CHECK_INTERVAL_S` | 30 |
+| `QUEUE_STALL_THRESHOLD` | 50 |
+| `QUEUE_STORM_THRESHOLD` | 200 |
+| `RETRY_STORM_THRESHOLD` | 20 |
+| `LOCK_STALE_WARN` | 10 |
+| `AUDIT_LOG_MAX` | 200 |
+
+### Public API
+
+| Function | Purpose |
+|---|---|
+| `start_self_healer()` | Start background check loop (call in lifespan startup) |
+| `stop_self_healer()` | Stop check loop (call in lifespan teardown) |
+| `get_self_heal_diagnostics()` | Returns full diagnostics dict |
+| `is_panic_mode()` | True when system under severe pressure |
+| `get_pressure_score()` | Current 0.0–1.0 pressure |
+| `trigger_check_cycle()` | Immediate check (for admin /api endpoint) |
+
+### Kill Switch
+
+`SELF_HEAL_ENABLED=false` (default true) — disables all checks. Self-healer startup failure is non-fatal to the main app.
+
+---
+
+## Cross-References
+
+- `automation_pipeline.md` — scheduler jobs include `lock_cleanup` (every 5 min) and `bridge_watchdog` (every 5 min)
+- `workflow_engine.md` — message routing depends on bridge health state from orchestrator
+- `admin_ui.md` — `/api/self-heal/diagnostics` endpoint (diagnostics exposed to admin)
+- `runtime_gateway_flags.md` — `QUEUE_ARBITER_ENABLED`, `SELF_HEAL_ENABLED` flags

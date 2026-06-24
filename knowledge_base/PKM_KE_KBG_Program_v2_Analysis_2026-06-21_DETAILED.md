@@ -1,3 +1,11 @@
+---
+title: FAZLE AI PLATFORM
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # FAZLE AI PLATFORM
 # PRODUCTION KNOWLEDGE MINING -> KNOWLEDGE ENRICHMENT -> KNOWLEDGE BASE GENERATION PROGRAM
 

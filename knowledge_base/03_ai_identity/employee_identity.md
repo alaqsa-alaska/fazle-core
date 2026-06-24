@@ -1,4 +1,12 @@
-﻿# Employee Identity
+---
+title: Employee Identity
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Employee Identity
 
 ## Purpose
 Identify active or previous employees and route to employee-safe attendance, salary, advance, duty, leave, or FAQ answers.

@@ -1,3 +1,11 @@
+---
+title: PHASE 1.5 — Hybrid RAG Architecture Design Package
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # PHASE 1.5 — Hybrid RAG Architecture Design Package
 **Version:** 1.0.0
 **Date:** 2026-06-22

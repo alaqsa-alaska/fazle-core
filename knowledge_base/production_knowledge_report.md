@@ -1,3 +1,11 @@
+---
+title: PKE-KBE PRODUCTION KNOWLEDGE REPORT
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # PKE-KBE PRODUCTION KNOWLEDGE REPORT
 ## Fazle AI Platform — Al-Aqsa Security & Logistics Services Ltd.
 **Report Date:** 2026-06-19  
@@ -100,7 +108,7 @@ This report is the output of a complete codebase scan of the Fazle AI Platform (
 **Purpose:** Pydantic settings class. All secrets and feature flags loaded from environment.
 
 **Key Knowledge:**
-- **AI provider priority:** GitHub Models (primary, OpenAI-compatible) → Groq `llama-3.1-8b-instant` (fallback) → Ollama `qwen2.5:3b` (final fallback for intent/RAG/memory only)
+- **AI provider priority:** Ollama `qwen3:8b` (primary local runtime) → Groq `llama-3.1-8b-instant` (fallback) → GitHub Models (secondary fallback)
 - **Bridge DB paths:** `/home/azim/whatsapp1/store/messages.db`, `/home/azim/whatsapp2/store/messages.db`
 - **Draft-always roles:** `accountant, client_escort_buyer, vip_client, repeat_client` — these contacts ALWAYS get drafted, never auto-sent
 - **Draft-always name tokens:** `al-aqsa, escort, client, office, operation, tcis, gms, dalal`
@@ -857,7 +865,7 @@ INBOUND MESSAGE
 │   Hit? → Use prior human-edited answer
 │
 └─ Step 15: AI fallback
-    GitHub Models → Groq → Ollama
+    Ollama → Groq → GitHub Models
 ```
 
 ---

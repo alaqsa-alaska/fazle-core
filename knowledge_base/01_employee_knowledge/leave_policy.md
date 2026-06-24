@@ -1,4 +1,12 @@
-﻿# Leave Policy
+---
+title: Leave Policy
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Leave Policy
 
 ## Purpose
 Explain employee-safe rules for leave, absence, late arrival, resignation, and disciplinary conduct.

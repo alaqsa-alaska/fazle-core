@@ -1,3 +1,11 @@
+---
+title: Master Execution Plan v2 — Organizational Brain Validation & Alignment
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Master Execution Plan v2 — Organizational Brain Validation & Alignment
 **Document ID:** MEP-v2
 **Created:** 2026-06-23

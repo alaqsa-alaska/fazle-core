@@ -1,4 +1,12 @@
-﻿# AI System Prompt Rules
+---
+title: AI System Prompt Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# AI System Prompt Rules
 
 ## Purpose
 Define strict system-level behavior for Fazle AI Platform agents and reply engines.

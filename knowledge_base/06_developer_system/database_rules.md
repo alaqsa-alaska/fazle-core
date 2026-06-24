@@ -1,3 +1,11 @@
+---
+title: Database Rules — Fazle AI Platform
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Database Rules — Fazle AI Platform
 
 **Visibility:** DEVELOPER (table structure, schemas, implementation details)

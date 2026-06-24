@@ -1,3 +1,11 @@
+---
+title: PKVC Report 18: Knowledge Quality Score
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report 18: Knowledge Quality Score
 
 - Date: 2026-06-21

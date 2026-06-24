@@ -1,3 +1,11 @@
+---
+title: 00 Governance — Fazle AI Platform
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # 00 Governance — Fazle AI Platform
 **Version:** 1.0.0
 **Created:** 2026-06-22

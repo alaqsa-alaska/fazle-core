@@ -1,3 +1,11 @@
+---
+title: Recruitment AI — Detailed Developer Reference
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Recruitment AI — Detailed Developer Reference
 **KB Article ID:** DEV-06-RECRUITMENT-AI-DETAIL
 **Source:** `modules/recruitment_ai/__init__.py` (258 lines — read 2026-06-23)

@@ -1,0 +1,15 @@
+Source: knowledge_base/05_workflows/cash_workflow.md
+SHA256: 4c340094c6524d888886e4a6b31ce49d86c845525b0ce9eab6c45b452d5989b4
+Version: 4c340094c652
+
+# Cash Workflow
+
+## Flow
+Admin Payment Message -> Accountant Receipt -> Transaction Parse -> Duplicate Check -> Cash Ledger Entry -> Employee Balance Update -> Payroll/Advance Sync.
+
+## Transaction Fields
+Name, employee ID if available, phone, payment method, amount, purpose, date, source message, admin actor.
+
+## Cross References
+- ../04_business_rules/cash_business_rules.md
+- payment_workflow.md

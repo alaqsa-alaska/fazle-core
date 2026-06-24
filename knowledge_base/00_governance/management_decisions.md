@@ -1,3 +1,11 @@
+---
+title: Management Decisions — Active Register
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Management Decisions — Active Register
 **Version:** 1.0.0
 **Last Updated:** 2026-06-22
@@ -353,3 +361,27 @@ User instruction: "start now. execute all. one by one." — blanket authorizatio
 | 2026-06-23 | Session 9: conversation_layer Full Activation; OCR classification fix (_classify_slip release priority); Phase 6 verifications complete; payment_correction deferred | Management |
 | 2026-06-23 | Session 10: escort_slip_extractor wired into bridge_poller (ESX-WIRE); replaces ocr_processor in image path | Management |
 | 2026-06-23 | Session 11: Production activation — AUTO_REPLY_ENABLED=true, SOCIAL_AUTO_REPLY_SINGLE_ENGINE=true, AGENT_PROACTIVE_OUTBOUND_ENABLED=true; PRIMARY_AI_PROVIDER=groq (GitHub Models rate-limited); fazle-agent dry-run removed | Management |
+
+---
+
+## Session 12 — Ollama Primary Runtime (2026-06-24)
+
+### Management Authorization (Session 12)
+
+User instruction: "Make Ollama as primary, also think about a ollama_daemon.py for better performance."
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S12-01 | `PRIMARY_AI_PROVIDER=ollama` | Ollama is the primary runtime AI provider. Fallback order is now Ollama → Groq → GitHub Models. | 2026-06-24 |
+| S12-02 | `app/ollama_daemon.py` | Add in-process Ollama daemon helper with shared keep-alive HTTP clients, startup warmup, diagnostics, and clean shutdown. | 2026-06-24 |
+
+### Files Authorized for Change (Session 12)
+
+| ID | File | Change |
+|---|---|---|
+| S12-01 | `.env` | `PRIMARY_AI_PROVIDER=ollama` |
+| S12-01 | `app/config.py` | Default provider changed to Ollama; fallback comments updated. |
+| S12-01 | `app/llm.py` | Provider order changed to Ollama → Groq → GitHub Models for classification, replies, recruitment, and Chat Lab. |
+| S12-02 | `app/ollama_daemon.py` | New shared-client Ollama helper. |
+| S12-02 | `app/ollama.py` | Ollama calls now use shared daemon HTTP client instead of creating a new client per request. |
+| S12-02 | `app/main.py` | Startup warmup and shutdown cleanup for Ollama daemon. |

@@ -1,3 +1,11 @@
+---
+title: Escort Slip Extractor
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Escort Slip Extractor
 
 **Source:** `modules/escort_slip_extractor/__init__.py` (948 lines — read 2026-06-23)

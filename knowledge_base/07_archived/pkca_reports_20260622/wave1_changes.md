@@ -1,3 +1,11 @@
+---
+title: Wave-1 Knowledge Synchronization — Change Record
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # Wave-1 Knowledge Synchronization — Change Record
 
 **Program:** Knowledge Synchronization Program (KSP) Wave-1

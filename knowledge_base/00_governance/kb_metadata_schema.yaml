@@ -1,0 +1,36 @@
+type: object
+required:
+  - title
+  - owner
+  - status
+  - last_verified
+  - runtime_index
+properties:
+  title:
+    type: string
+  owner:
+    type: string
+  status:
+    type: string
+    enum: [draft, active, deprecated, archived]
+  last_verified:
+    type: string
+    format: date
+  runtime_index:
+    type: boolean
+  tags:
+    type: array
+    items:
+      type: string
+  module_refs:
+    type: array
+    items:
+      type: string
+  database_refs:
+    type: array
+    items:
+      type: string
+  route_refs:
+    type: array
+    items:
+      type: string

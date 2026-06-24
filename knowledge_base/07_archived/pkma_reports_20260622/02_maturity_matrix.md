@@ -1,3 +1,11 @@
+---
+title: PKMA Report 02 — Knowledge Maturity Matrix
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA Report 02 — Knowledge Maturity Matrix
 
 **Program:** PKMA v1.0

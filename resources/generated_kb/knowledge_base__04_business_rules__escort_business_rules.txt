@@ -1,0 +1,131 @@
+Source: knowledge_base/04_business_rules/escort_business_rules.md
+SHA256: b046fd22d5181e49f26a40d64f2d94063d862eb5facadbd0046edb7eec82fa73
+Version: b046fd22d518
+
+# Escort Business Rules
+
+## Source Of Truth
+- Escort training is 45 days and paid ৳10,000-৳15,000/month.
+- After training, escort payment is duty-based, normally ৳12,000-৳18,000 range.
+- Escort duty day is 24 hours, day plus night.
+- Escort final calculation requires release slip.
+
+## Order Rules
+- Client order creates AI draft, not final confirmation.
+- Admin must review escort name, mobile, start date, and shift before client confirmation.
+- Roster update occurs only after final client confirmation.
+
+## Release Rules
+- Release slip must include release date/time and supervisor/ghat signature.
+- Missing/unclear slip routes to manual review.
+
+## Cross References
+- ../05_workflows/escort_workflow.md
+- ../05_workflows/release_slip_workflow.md
+
+---
+
+## Transport Allowance Rules
+
+### Purpose
+Define the hardcoded transport allowance rates applied to every escort release payment calculation.
+
+### Transport Rate Table (Production Authoritative)
+
+| Destination | Rate (BDT) |
+|---|---|
+| Dhaka / Narayanganj | ৳600 |
+| Faridpur | ৳700 |
+| Mongla | ৳800 |
+| Barishal / Coastal | ৳900 |
+| Khulna / Jessore | ৳1,000 |
+| Default (any other) | ৳600 |
+
+**Business Rule:** Transport allowance is paid to the Master/Sukani, not the escort. It is calculated per program based on the release point destination.
+
+**Validation:** The release point field in the release slip is matched to the destination table. Unrecognized destinations receive the default ৳600 rate.
+
+**Exception:** Transport rates are hardcoded in `escort_lifecycle._TRANSPORT_RATES`. They are NOT synchronized to the `escort_calculation_config` database table. The release slip draft shows an estimate. Changes to rates require a developer code update.
+
+**Management Authority:** Mongla rate of ৳800 approved by management (CON-03, PKVC Decision HK-19).
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Function:** `_TRANSPORT_RATES`
+**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-19)
+
+---
+
+## Food Cost Rules
+
+### Purpose
+Define how food costs are calculated and recorded for escort programs.
+
+### Calculation Rules
+
+**Base rate:** ৳150 BDT per duty day
+
+**Payment recipient:** Master/Sukani (not the escort)
+
+**Time exceptions (when a duty day's food is excluded):**
+
+| Condition | Food Excluded |
+|---|---|
+| Release slip arrives before 10:00 AM | Release-day food is NOT counted |
+| Escort boards (starts duty) after 3:00 PM | Boarding-day food is NOT counted |
+
+**Accounting rule:** Food amount paid is recorded as an escort advance and deducted from the escort's payroll.
+
+**Business Rule:** Food cost is always an estimate in the release draft. It uses the hardcoded ৳150/day rate. The release draft is a DRAFT ONLY until admin approves.
+
+**Example:**
+- Escort on duty 5 days, boards at 9:00 AM, released at 11:00 AM
+- Release-day food included (arrived after 10 AM)
+- Food = 5 × ৳150 = ৳750
+
+**Management Authority:** CON-04 approved in PKVC Management Decisions (food=150/day, time exceptions apply).
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Function:** `_calc_duty_days()`, `_FOOD_RATE`
+**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-20)
+
+---
+
+## Duty Day Validation
+
+### Suspicious Duty Day Rule
+
+**Business Rule:** If calculated duty days exceed 90, the release slip draft includes a SUSPICIOUS warning for admin review.
+
+**Purpose:** Guards against data entry errors where a program appears to have lasted more than 3 months.
+
+**Validation:** Admin must explicitly review and approve releases with duty_days > 90.
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Function:** `build_release_draft()`
+**PKCA Report:** 09_state_machine_coverage_report.md (HK-23)
+
+### Release Date Validation
+
+**Business Rule:** Release dates are rejected if:
+- The date is in the future (future release not allowed)
+- The date is more than 1 year in the past (stale data protection)
+
+**Source Module:** `modules/escort_lifecycle`
+**Source Function:** `_validate_release_date()`
+**PKCA Report:** 09_state_machine_coverage_report.md (HK-22)
+
+---
+
+## Payment Formula
+
+**Management Decision (CON-01, CON-02):**
+
+**Authoritative daily rate formula:** `12000 / 30 * duty_days`
+
+- This gives an effective daily rate of ৳400/day
+- The formula is used in both the payment workflow and payroll module
+- The formula is derived from the ৳12,000 fixed monthly base salary, not a separate fixed daily slab
+
+**Source Module:** `modules/payment_workflow`, `modules/payroll`
+**PKCA Report:** 04_business_rule_coverage_report.md
+**Management Authority:** CON-01 and CON-02 approved in PKVC Management Decisions

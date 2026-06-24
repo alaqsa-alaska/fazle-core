@@ -1,3 +1,11 @@
+---
+title: Admin UI — wa_chat_frontend
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Admin UI — wa_chat_frontend
 **KB Article ID:** DEV-06-ADMIN-UI
 **Source:** `modules/wa_chat_frontend/__init__.py` (821 lines — read 2026-06-23)

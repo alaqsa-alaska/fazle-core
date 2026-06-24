@@ -1,0 +1,680 @@
+Source: knowledge_base/enrichment_report.md
+SHA256: 061db330fa4567a89002965c57e184616bd646625753e76fb09d7f7b720e3a2b
+Version: 061db330fa45
+
+# Knowledge Base Enrichment Report
+**Date:** 2026-06-19
+**Scope:** Full production code vs knowledge_base comparison for Fazle AI Platform
+**Status:** PENDING APPROVAL — zero KB files modified, zero production code read
+
+---
+
+## A. Executive Summary
+
+After reading all key production files (`app/main.py`, `modules/message_router`, `modules/payment_workflow`, `modules/recruitment_flow`, `modules/attendance`, `modules/escort`, `modules/admin_commands`, `modules/rag`, `modules/escort_roster/calculations.py`, `db/migrate.py`) and every knowledge_base file in the new role-centric structure (`01`–`07` folders), the following is confirmed:
+
+**Good news:** The new knowledge_base architecture is structurally sound. Folder layout, visibility levels, cross-references, and the conflict-resolution decisions (C1–C9) are correctly applied.
+
+**Critical finding:** The RAG module (`modules/rag/__init__.py`) does NOT index the new `knowledge_base/` markdown folder. It only indexes `resources/*.txt` files and the `fazle_knowledge_base` DB table. All 40+ new KB markdown files are invisible to the current RAG system. This must be addressed before the KB enrichment has any operational effect.
+
+**32 knowledge gaps** were found (expanded from the earlier gap_report.md). 4 new conflicts were identified that require management decisions.
+
+**1 age validation conflict** was found: production code enforces 18–55 years for candidates but `04_business_rules/recruitment_business_rules.md` says 18–45.
+
+---
+
+## B. Production Knowledge Inventory
+
+### B1. Message Router — 15-step priority pipeline
+
+Steps extracted from `modules/message_router/__init__.py`:
+
+| Step | Rule | Code Lines |
+|------|------|-----------|
+| 0 | Silent-skip: accountant phone + name tokens + blocked role → no reply, no draft | 96–138 |
+| 1 | Family → personal greeting reply, no business workflow | 173–180 |
+| 2 | Escort client roles (escort_client, client_escort_buyer, vip_client, repeat_client) → escort flow if escort content | 183–188 |
+| 3 | Admin → command → NL query → inline help (NO LLM fallback for admin) | 191–245 |
+| 4 | Attendance (any role) → draft → admin notification | 249–258 |
+| 5 | Intent classification: LLM first, then deterministic fallback | 261–265 |
+| 6 | Recruitment block for operational roles → empty return | 269–274 |
+| 6a | Accountant inbound → payment SMS → cash shorthand → advance query → KB → AI | 276–303 |
+| 7 | Recruitment (candidate/new_lead/unknown) → eligibility → reply | 305–324 |
+| 9 | Escort order (non-registered, intent-triggered) | 326–328 |
+| 10 | Employee → verification session → attendance → slip submission → release intent → complaint → advance → salary/payroll | 330–394 |
+| 11 | Advance/payment request (any remaining role) | 396–399 |
+| 12 | Office location FAST PATH: KB-only, hardcoded fallback | 401–417 |
+| 13 | Knowledge Base lookup | 419–422 |
+| 14 | Reviewed reply lookup (admin-edited approved replies) | 424–441 |
+| 15 | AI fallback (LLM generate_reply) | 443–446 |
+
+### B2. Silent-Skip Exact Rules
+
+Three independent triggers, any one causes skip:
+1. **Accountant phone match**: `settings.accountant_phone` → always skip
+2. **Display name tokens**: contact `display_name` in `wbom_contacts` contains any of: `"al-aqsa"`, `"escort"`, `"client"`, `"operation"`, `"tcis"`, `"gms"`, `"dalal"`, `"office"`
+3. **Blocked role**: `fazle_contact_roles.role = 'blocked'` for sender phone → skip
+
+Result: no reply, no draft, no admin notification. Silent discard.
+
+### B3. Safe Auto-Send Intent List
+
+Intents that may auto-send without admin draft review (from `message_router/__init__.py:72–87`):
+- `recruitment` — job queries, vacancy, requirements, joining process
+- `join` — joining date, first-duty scheduling
+- `greeting` — menu / welcome / first contact
+- `office_location` — office address queries
+- `salary_query` — salary schedule (complaint guard still active)
+- `payment_due` — payment date queries (complaint guard active)
+- `attendance` — attendance rules, absence policy
+- `leave` — leave policy, resignation rules
+- `escort_duty` — duty schedule, transport/food policy info
+
+**Explicitly excluded:** `advance_request` — must always draft, never auto-send.
+
+### B4. Admin Commands — Complete List
+
+All commands verified in `modules/admin_commands/__init__.py`:
+
+**Draft Management:**
+```
+APPROVE <id>
+APPROVE <id> <id> <id>           (multiple, space or comma separated)
+APPROVE ১৬৫                       (Bangla digits — mapped to ASCII before processing)
+REJECT <id>  /  REJECT <id> <id>
+EDIT <id> <new reply text>
+STATUS  /  DRAFTS  /  PENDING    (pending drafts count)
+```
+
+**Payment:**
+```
+PAID <draft_id> <amount> [bkash|nagad|cash]      (default: cash)
+ADVANCE <draft_id> <amount> [bkash|nagad|cash]   (default: cash)
+ADJUST <draft_id> <amount> <method>
+REVERSE <transaction_id> <reason>
+PAY-IMPORT <raw text>                             (batch payment import)
+```
+
+**Escort:**
+```
+ESCORTCONFIRM <order_id> | <escort_name> | <escort_mobile> | <date> | <D|N>
+RELEASE <program_id> <YYYY-MM-DD> <D|N> <release_point> [days=<float>]
+```
+
+**Payroll (PAYROLL suite):**
+```
+PAYROLL COMPUTE <YYYY-MM> [employee_id]
+PAYROLL SUBMIT <run_id>
+PAYROLL APPROVE <run_id>
+PAYROLL LOCK <run_id>
+PAYROLL PAID <run_id> <amount> <bkash|nagad|cash> [ref=<reference_code>]
+PAYROLL CANCEL <run_id> <reason>
+PAYROLL LIST <YYYY-MM> [status]
+```
+
+**Reports (REPORT suite):**
+```
+REPORT LIST
+REPORT DAILY [YYYY-MM-DD]
+REPORT PAYROLL <YYYY-MM>
+REPORT CASH [days]               (default 30 days)
+REPORT RECON [days]              (default 7 days)
+REPORT ESCORT <YYYY-MM-DD> <YYYY-MM-DD>
+```
+
+**Scheduler:**
+```
+SCHEDULE STATUS  /  সময়সূচী
+RUN JOB <job_name>  /  কাজ চালাও <job_name>
+```
+
+**System:**
+```
+BACKUP STATUS  /  ব্যাকআপ স্ট্যাটাস
+BACKUP NOW  /  ব্যাকআপ এখন
+BACKUP LIST [n]                  (default 10)
+```
+
+**User Management:**
+```
+USER LIST  /  ইউজার তালিকা
+USER ADD <phone> <name> [role]
+USER ROLE <phone> <viewer|operator|accountant|admin|superadmin>
+USER REMOVE <phone>
+USER APIKEY <phone>
+```
+
+**RBAC roles:** `viewer` / `operator` / `accountant` / `admin` / `superadmin`
+
+### B5. Escort Payment Formula
+
+From `modules/payment_workflow/__init__.py`:
+```
+daily_rate  = basic_salary / 30
+gross       = duty_days × daily_rate
+advances    = sum of advances for THIS escort_program_id IN CURRENT payroll month
+net_payable = max(gross - food_bill - conveyance - advances, 0)
+```
+
+Draft text sent to admin includes: employee name, vessel name, lighter vessel, master mobile, program date, shift (D/N), duty_days, gross, food_bill, conveyance, advance deduction, net payable, bkash/nagad number.
+
+Default daily rate if no salary data: ৳1,200/day (`DEFAULT_DAILY_RATE = 1200`).
+
+### B6. Escort Roster Shift Calculations
+
+From `modules/escort_roster/calculations.py`:
+```
+Each day = 2 shifts: D (day) then N (night)
+Each shift = 0.5 duty day
+Total duty days = total_shifts × 0.5
+Payment (roster) = total_shifts × shift_rate (default ৳200/shift = ৳400/duty day)
+```
+
+Examples:
+- start 2026-05-13 D, end 2026-05-13 D → 1 shift = 0.5 day
+- start 2026-05-13 D, end 2026-05-13 N → 2 shifts = 1.0 day
+- start 2026-05-13 D, end 2026-05-14 N → 4 shifts = 2.0 days
+
+### B7. Recruitment Funnel — Complete 6-Step Intake
+
+From `modules/recruitment_flow/__init__.py`:
+
+**Trigger keywords:** job, চাকরি, vacancy, apply, hire, recruit, নিয়োগ, কাজের, interested, আগ্রহী, পদ, পারব, নেবেন, জয়েন, cv, joining, office location, office address, contact number, whatsapp number, অফিস কোথায়, অফিসের ঠিকানা, যোগাযোগ নম্বর
+
+**Steps and exact question text:**
+
+| Step | Question |
+|------|---------|
+| name | স্বাগতম। আমাদের কাছে আবেদন করার জন্য আপনাকে ধন্যবাদ। আপনার পুরো নাম কি? |
+| age | আপনার বয়স কত বছর? |
+| area | আপনি কোন জেলায় থাকেন? (বর্তমান ঠিকানা) |
+| job_preference | আপনি কোন পদে কাজ করতে চান? [menu of 9 positions] নম্বর বা পদের নাম লিখুন। |
+| experience | এই ক্ষেত্রে আপনার কত বছরের অভিজ্ঞতা আছে? (নতুন হলে 0 লিখুন) |
+| phone_confirm | আপনার কনফার্মেশনের জন্য: আপনার মোবাইল নম্বর কত? (যেটায় কল করতে পারব) |
+
+**Age validation:** 18–55 years (code enforces this; KB currently says 18–45 — CONFLICT)
+
+**9 valid positions (numbered in WhatsApp message):**
+```
+১. Escort
+২. Survey Scout (জাহাজে)
+৩. Security Guard
+৪. Security Supervisor
+৫. Assistant Supervisor
+৬. Operation Officer
+৭. Security In-Charge
+৮. Marketing Officer
+৯. Ghat Supervisor
+```
+
+**Session TTL:** 24 hours from creation
+
+**Scoring formula:**
+- Experience ≥ 6 years: +60 pts
+- Experience ≥ 3 years: +40 pts
+- Experience ≥ 1 year: +20 pts
+- Experience = 0: +0 pts
+- Role preference filled: +20 pts
+- Required fields all filled (name, age, area, job_preference): +20 pts
+- Max: 100 pts
+- hot ≥ 70 | warm ≥ 40 | cold < 40
+
+**Completion message (exact):**
+```
+আপনার তথ্য সফলভাবে সংগ্রহ করা হয়েছে।
+আমাদের টিম শীঘ্রই আপনার সাথে যোগাযোগ করবে।
+আরো জানতে: 01958 122322
+আবেদনের জন্য ধন্যবাদ।
+```
+
+**Already-applied message:**
+```
+আপনার আবেদন ইতিমধ্যে প্রক্রিয়াধীন রয়েছে।
+আমাদের টিম শীঘ্রই যোগাযোগ করবে।
+```
+
+### B8. Attendance Keywords
+
+From `modules/attendance/__init__.py`:
+
+**Present keywords:** হাজির, উপস্থিত, present, হাজির আছি, ডিউটিতে আছি, আছি, on duty, duty start, ডিউটি শুরু, চেক ইন, check in, checked in
+
+**Absent keywords:** অনুপস্থিত, absent, আসতে পারব না, আসতে পারছি না, অসুস্থ, sick, ছুটি, leave
+
+**Location extraction:** regex for: location, loc, পোস্ট, পোষ্ট, সাইট, site, লোকেশন
+
+### B9. Escort Client Order Behavior
+
+From `modules/escort/__init__.py`:
+- Client sends message with MV/lighter/master mobile
+- System extracts: mother_vessel, lighter(s), master_mobile, destination, cargo_type, importer
+- NO reply is sent to client — only a draft to admin
+- Admin fills escort name/mobile and sends `ESCORTCONFIRM` command
+- System sends finalized slip to client and replies to admin with delivery confirmation
+- DB updated to status='confirmed'
+
+**Escort order keywords that trigger detection:** m.v., mother vessel, lighter, escort lagbe, m.t., এমভি, destination, lighter vessel, master number
+
+### B10. RAG System Behavior
+
+From `modules/rag/__init__.py`:
+
+**Sources currently indexed:**
+1. Files under `fazle-core/resources/*.txt` (excludes internal/archived folders)
+2. Active rows of `fazle_knowledge_base` DB table
+
+**CRITICAL: `knowledge_base/` markdown folder is NOT indexed by RAG.**
+
+**Excluded directories:** _internal_archived, _internal, prompts, debug, tests, drafts, internal, ai, training, examples, temp
+
+**Excluded file keywords:** analysis, prompt, intent, debug, test, sample, chain, reasoning, internal, archived, system_context
+
+**Excluded file patterns:** .bak, .backup, .old, .tmp
+
+**Chunk-level safety:** chunks with internal AI analysis patterns are marked unsafe and filtered from customer-facing answers.
+
+### B11. Office Address (Hardcoded in Production)
+
+From `modules/message_router/__init__.py:409–417`:
+```
+আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেড
+আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, খোকনের বিল্ডিং (২য় তলা)
+পাহাড়তলী, চট্টগ্রাম সিটি কর্পোরেশন
+সকাল ৯টা – বিকাল ৫টা (শুক্রবার বন্ধ)
+WhatsApp: 01958 122322
+```
+
+### B12. Employee Release Intent Handling
+
+From `modules/message_router/__init__.py:352–371`:
+- Employee sends release message → system replies confirming receipt + notifies admin
+- Admin must send exact `[RELEASE CONFIRMED]` with: End Date, Shift, Days, Food, Conveyance, Escort, and Lighter
+- Only admin's `[RELEASE CONFIRMED]` message triggers attendance and settlement creation
+
+### B13. Employee Complaint Handling
+
+From `modules/message_router/__init__.py:373–383`:
+- Intents `employee_salary_complaint`, `legal_issue`, `payment_issue` → draft created + standard reply sent
+- Standard reply (exact): "আপনার বার্তা পেয়েছি। দায়িত্বশীল ব্যক্তি শীঘ্রই যোগাযোগ করবেন।"
+
+### B14. Admin NL Queries (Natural Language)
+
+From `modules/message_router/__init__.py:214–218`:
+- Examples work without exact command format:
+  - "show last 10 chats of 01XXXXXXXXX"
+  - "last contact of 01XXXXXXXXX"
+  - "01XXXXXXXXX এর শেষ ১০ চ্যাট"
+  - "draft", "পেন্ডিং", "list" → admin draft list
+  - "payment", "পেমেন্ট", "paid" → payment draft list
+  - "attendance", "হাজিরা", "উপস্থিতি" → attendance summary
+
+### B15. Facebook/Social Integration
+
+From `app/main.py`:
+- **Facebook Page comments** → standard WhatsApp redirect: `wa.me/8801958122300`
+- **Facebook Messenger** → recruitment autoreply if eligible
+- **Social auto-reply daemon** (single engine mode) — handles all social channels
+- When social daemon enabled: bridge event handling short-circuits after social ingest
+
+### B16. DB Tables — Authoritative List
+
+**Core wbom_ tables (must not be renamed):**
+- `wbom_employees` — employee records
+- `wbom_contacts` — contact book with display_name, whatsapp_number, is_active
+- `wbom_whatsapp_messages` — all inbound/outbound messages
+- `wbom_escort_programs` — escort program records
+- `wbom_attendance` — attendance records
+- `wbom_cash_transactions` — payment/advance/conveyance transaction ledger
+- `wbom_relation_types` — contact relationship types
+
+**fazle_ tables (created by migrations):**
+- `fazle_draft_replies` — pending/approved/rejected draft messages
+- `fazle_payment_drafts` — escort payment and advance drafts
+- `fazle_recruitment_sessions` — recruitment conversation state
+- `fazle_knowledge_base` — admin-managed Q&A pairs (indexed by RAG)
+- `fazle_reviewed_replies` — admin-approved edited reply templates
+- `fazle_contact_aliases` — phone number aliases
+- `fazle_contact_roles` — role assignments including blocked
+- `fazle_state_version` — frontend state synchronization
+- `fazle_queue_leases` — outbound message queue
+- `fazle_runtime_nodes` — runtime service registry
+- `fazle_payment_correction_log` — payment correction audit trail
+
+**System/infra tables:**
+- `escort_slip_extractions` — OCR/parsed escort slip data
+- `processed_bridge_messages` — deduplication for bridge webhooks
+- `fazle_service_heartbeats` — bridge poller health
+- `social_*` — social auto-reply tables (8 tables)
+- `llm_learning_memory` — LLM learning records
+- `user_profiles`, `user_memory`, `role_reply_styles`, `phone_normalization_log`
+- `schema_migrations` — migration tracking
+
+---
+
+## C. Existing Code vs Knowledge Base Gap Matrix
+
+| ID | Production Source | Line/Function | Extracted Rule | Current KB File | Coverage Status | Severity | Target KB File | Action |
+|----|------------------|---------------|----------------|-----------------|-----------------|----------|----------------|--------|
+| G-01 | message_router | 66,96–138 | Silent-skip: 8 name tokens + accountant phone + blocked role | None | Missing | CRITICAL | 06_developer_system/workflow_engine.md | Add |
+| G-02 | admin_commands | 59–178 | Full admin command syntax (20+ commands) | None | Missing | CRITICAL | 02_admin_knowledge/admin_command_reference.md | Create new |
+| G-03 | admin_commands | 68–72 | RELEASE command format | None | Missing | CRITICAL | admin_command_reference.md | Add |
+| G-04 | admin_commands | 148–153 | ESCORTCONFIRM pipe-separated format | None | Missing | CRITICAL | admin_command_reference.md + escort_workflow.md | Add |
+| G-05 | payment_workflow | 96–115 | Escort payment formula: daily_rate = basic_salary/30 | None | Missing | CRITICAL | 04_business_rules/escort_business_rules.md | Add |
+| G-06 | message_router | 72–87 | Advance request excluded from safe auto-send | None | Missing | CRITICAL | 04_business_rules/payment_business_rules.md | Add |
+| G-07 | message_router | 72–87 | Safe auto-send intent list (9 intents) | None | Missing | CRITICAL | 06_developer_system/workflow_engine.md | Add |
+| G-08 | message_router | 276–299 | Accountant inbound: SMS parse → cash shorthand → advance query → KB → AI | None | Missing | CRITICAL | 06_developer_system/workflow_engine.md | Add |
+| G-09 | recruitment_flow | 64–100 | 6-step intake with exact questions | 05_workflows/recruitment_workflow.md | Too vague | HIGH | recruitment_workflow.md | Add steps |
+| G-10 | recruitment_flow | 110–115 | Age validation 18–55 | 04_business_rules/recruitment_business_rules.md | CONFLICT — KB says 18–45 | CRITICAL | recruitment_business_rules.md | Fix conflict |
+| G-11 | recruitment_flow | 41–62 | 9 valid positions with numbers | 01_employee_knowledge/recruitment_policy.md | Partially missing | HIGH | recruitment_policy.md | Add 3 positions |
+| G-12 | recruitment_flow | 138–154 | Candidate scoring: exp→pts, buckets | None | Missing | MEDIUM | 06_developer_system/workflow_engine.md | Add |
+| G-13 | recruitment_flow | 19 | Session TTL 24 hours | None | Missing | HIGH | 05_workflows/recruitment_workflow.md | Add |
+| G-14 | admin_commands | 64–65 | PAID/ADVANCE exact format with methods | None | Missing | CRITICAL | admin_command_reference.md | Add |
+| G-15 | admin_commands | 28–61 | APPROVE multi-ID + Bangla digits | None | Missing | HIGH | admin_command_reference.md | Add |
+| G-16 | message_router | 125–136 | Blocked role: fazle_contact_roles.role='blocked' → skip | None | Missing | HIGH | 06_developer_system/workflow_engine.md | Add |
+| G-17 | attendance | 33–43 | Present/absent keyword lists | 04_business_rules/attendance_business_rules.md | Too vague | HIGH | attendance_business_rules.md | Add keywords |
+| G-18 | payment_workflow | 100–114 | Deduction scope: food + conveyance + current-month program advances | None | Missing | CRITICAL | 04_business_rules/escort_business_rules.md | Add |
+| G-19 | escort/__init__ | 1–26 | Escort client = NO reply, only admin draft | None | Missing | CRITICAL | 05_workflows/escort_workflow.md + 03_ai_identity/escort_identity.md | Add |
+| G-20 | app/main.py | 1679–1698 | Draft 120s deduplication | None | Missing | MEDIUM | 06_developer_system/workflow_engine.md | Add |
+| G-21 | admin_commands | 74–91 | PAYROLL command suite | None | Missing | MEDIUM | admin_command_reference.md | Add |
+| G-22 | admin_commands | 98–115 | REPORT command suite | None | Missing | MEDIUM | admin_command_reference.md | Add |
+| G-23 | admin_commands | 127–147 | USER management commands | None | Missing | MEDIUM | admin_command_reference.md | Add |
+| G-24 | admin_commands | 127–147 | RBAC roles: viewer/operator/accountant/admin/superadmin | None | Missing | MEDIUM | 03_ai_identity/permission_matrix.md + admin_command_reference.md | Add |
+| G-25 | admin_commands | 154–157 | REVERSE and ADJUST commands | None | Missing | MEDIUM | admin_command_reference.md | Add |
+| G-26 | recruitment_flow | 95–100 | Exact completion message text with helpline | None | Missing | MEDIUM | 05_workflows/recruitment_workflow.md | Add |
+| G-27 | message_router | 269–274 | Operational roles cannot enter recruitment flow | None | Missing | HIGH | 06_developer_system/workflow_engine.md | Add |
+| G-28 | app/main.py | 1124–1131 | Facebook comment → wa.me/8801958122300 reply | None | Missing | MEDIUM | 05_workflows/recruitment_workflow.md | Add |
+| G-29 | app/main.py | 373–411 | Safe-mode recruitment bypass for candidates | None | Missing | MEDIUM | 06_developer_system/workflow_engine.md | Add |
+| G-30 | message_router | 214–218 | NL admin query examples | None | Missing | MEDIUM | 02_admin_knowledge/admin_operations_overview.md | Add |
+| G-31 | app/main.py | 1700–1721 | Draft quality gate: reject LLM fallbacks + path leaks | None | Missing | MEDIUM | 06_developer_system/workflow_engine.md | Add |
+| G-32 | company_identity.md | — | Secondary helplines: 01958122311, 01958122301, 01958122302 | 01_employee_knowledge/company_identity.md | Missing (C-08 approved) | HIGH | company_identity.md | Add |
+| G-33 | escort_roster/calculations | 1–80 | Shift counting: 1 shift = 0.5 day, ৳200/shift default | None | Missing | HIGH | 04_business_rules/escort_business_rules.md + 05_workflows/escort_workflow.md | Add |
+| G-34 | message_router | 352–371 | Employee release: [RELEASE CONFIRMED] admin trigger | None | Missing | HIGH | 05_workflows/release_slip_workflow.md | Add |
+| G-35 | message_router | 373–383 | Employee complaint → standard reply + draft | None | Missing | MEDIUM | 04_business_rules/ai_response_rules.md | Add |
+| G-36 | modules/rag | 38–40 | RAG does NOT index knowledge_base/ folder | None | Missing | CRITICAL | 06_developer_system/rag_strategy.md | Document + flag |
+| G-37 | message_router | 401–417 | Office location fast path + hardcoded fallback address | 01_employee_knowledge/company_identity.md | Partially — address may be there | HIGH | company_identity.md | Verify exact match |
+| G-38 | admin_commands | 218–265 | Every admin command runs RBAC check + audit log | None | Missing | MEDIUM | 02_admin_knowledge/admin_role_management.md | Add |
+| G-39 | message_router | 424–441 | Reviewed reply lookup (admin-approved replies) | None | Missing | MEDIUM | 06_developer_system/workflow_engine.md | Add |
+| G-40 | recruitment_flow | 20–26 | Operational roles excluded from recruitment funnel entirely | None | Missing | HIGH | 06_developer_system/workflow_engine.md | Add |
+
+---
+
+## D. Critical Missing Workflows
+
+**D1. Silent-Skip Pipeline (G-01, G-16)**
+Entirely absent from KB. The system silently discards messages from: (a) the accountant's own phone, (b) any contact with "al-aqsa"/"escort"/"client"/"operation"/"tcis"/"gms"/"dalal"/"office" in their display name, (c) any contact with `role = 'blocked'`. No reply, no draft, no error. This is not documented anywhere.
+
+**D2. Admin Command Reference (G-02–G-04, G-14–G-15, G-21–G-25)**
+The entire admin command suite (20+ commands) is completely absent from the knowledge base. Admin operators using WhatsApp have no documented reference. The admin command reference file does not exist yet.
+
+**D3. RAG Indexing Gap (G-36)**
+The new `knowledge_base/` folder is NOT indexed by the current RAG system. The RAG system only reads `resources/*.txt` and `fazle_knowledge_base` table. All enrichment work done on the KB will be invisible to the AI until the RAG indexer is updated to also include `knowledge_base/**/*.md` files. This is a systemic gap that requires a developer decision about whether to update the RAG module or populate the `fazle_knowledge_base` DB table with the KB content.
+
+**D4. [RELEASE CONFIRMED] Protocol (G-34)**
+The exact `[RELEASE CONFIRMED]` admin message format and its required fields (End Date, Shift, Days, Food, Conveyance, Escort, Lighter) are not documented in the KB. Without this, an admin cannot correctly complete a release.
+
+**D5. Escort Client No-Reply Rule (G-19)**
+Escort clients (escort_client, client_escort_buyer) NEVER receive a reply until admin completes ESCORTCONFIRM. This is not documented. An AI reading the KB could incorrectly suggest sending a reply to an escort client.
+
+---
+
+## E. Payment/Cash Ledger Gap Details
+
+**E1. Payment Formula Gaps (G-05, G-18)**
+- `daily_rate = basic_salary / 30` — not in KB
+- `net_payable = gross - food_bill - conveyance - program_advances` — not in KB
+- Deduction scope: only advances for THIS escort_program_id in CURRENT payroll month — critical detail missing
+- Default daily rate if no salary: ৳1,200/day — not in KB
+- Net cannot go below ৳0 — not in KB
+
+**E2. Advance Request Must Draft (G-06)**
+The `advance_request` intent is explicitly excluded from the safe auto-send list with a code comment. This means employee advance requests always go to draft for admin review, even if the general policy would allow auto-reply. Not documented in KB.
+
+**E3. Accountant Inbound Flow (G-08)**
+When the accountant sends a message, the router checks in this sequence before reaching KB or AI:
+1. Is it an accountant summary acknowledgement? → ack and return
+2. Is it an advance record query? → query DB and return
+3. Does it look like a payment SMS (bkash/nagad)? → parse and record
+4. Is it a cash shorthand entry? → parse and record
+5. Otherwise → KB then AI
+
+None of these accountant-specific routing steps are documented.
+
+**E4. Payment Methods (E4)**
+Payment methods in code: `bkash`, `nagad`, `cash` — all lowercase in command matching. The `cash_business_rules.md` covers methods generally but doesn't specify the exact command keywords.
+
+---
+
+## F. Escort Roster Gap Details
+
+**F1. Shift Counting Rules (G-33)**
+The escort_roster/calculations.py implements shift-based day counting: each day has D (day) and N (night) shifts. 1 shift = 0.5 duty day. The KB says "24 hours = 1 duty day" which is correct conceptually but lacks the shift mechanics used for settlement calculation.
+
+**F2. Roster vs Payment Calculation Difference**
+Two different calculation paths exist:
+- **Escort Roster** (`escort_roster/calculations.py`): uses shift_rate (৳200/shift default) for operational tracking
+- **Payment Workflow** (`payment_workflow/__init__.py`): uses `basic_salary / 30` for salary-based settlement
+
+These serve different purposes. The KB conflates them. Should clarify: roster tracks operational duty; settlement uses salary formula.
+
+**F3. Admin RELEASE Trigger (G-34)**
+Only the RELEASE command can finalize an escort program (set end date, shift, duty days) in the roster. Employees cannot self-finalize. This constraint is absent from the KB.
+
+**F4. ESCORTCONFIRM Delivery (G-04)**
+After admin sends ESCORTCONFIRM, the system:
+- Updates escort_program to status='confirmed' with escort name/mobile
+- Sends the finalized slip to the original client
+- Replies to admin with delivery confirmation
+
+The exact ESCORTCONFIRM pipe format is missing from the KB: `ESCORTCONFIRM <order_id> | <escort_name> | <escort_mobile> | <date> | <D|N>`
+
+---
+
+## G. Recruitment Flow Gap Details
+
+**G1. Age Conflict (G-10) — MANAGEMENT DECISION REQUIRED**
+- Production code: 18–55 (recruitment_flow/__init__.py:110–115)
+- KB (recruitment_business_rules.md): "Age 18-45"
+- Both are active. Code enforces 55, KB says 45. This is a real conflict.
+
+**G2. Position List (G-11)**
+KB recruitment_policy.md lists fewer positions than the 9 in production code. All 9 must be documented with their WhatsApp menu numbers (১–৯).
+
+**G3. Session Behavior (G-13, G-40)**
+- Session TTL 24 hours: not in KB
+- Operational role block: if sender is admin/employee/accountant/supervisor/escort_client and intent is "recruitment" → return empty (no reply, no draft). Not in KB.
+- Already-applied message: not in KB
+
+**G4. Intake Trigger Keywords (G-09)**
+The full list of intake trigger keywords is not in KB. AI systems using the KB might miss triggers that the production code would catch.
+
+**G5. Scoring Formula (G-12)**
+Scoring is used internally for CRM prioritization (hot/warm/cold leads). The formula is a Level 3 developer detail, not needed for AI answer generation, but useful for developer system documentation.
+
+---
+
+## H. Attendance Gap Details
+
+**H1. Keyword Detection (G-17)**
+Exact present/absent keywords should be in KB (attendance_business_rules.md) so AI understands what triggers the attendance detection path. Currently only general description exists.
+
+**H2. Supervisor Path (G-30, P-30)**
+Supervisor attendance can be submitted as a batch (is_supervisor_attendance). This distinct path from individual employee attendance is not documented.
+
+**H3. Location Extraction (not in KB)**
+Attendance messages can include location using keywords like: `location:`, `loc:`, `পোস্ট:`, `সাইট:`, `লোকেশন:`. This extraction is not documented.
+
+**H4. Draft-Before-Save Rule**
+The KB mentions admin approval but does not make clear: attendance records are NEVER written to `wbom_attendance` directly from an employee message. Every attendance goes through `fazle_draft_replies` first. Admin APPROVE or authorized workflow triggers the actual save. This is partially documented but could be clearer.
+
+---
+
+## I. Admin Command Gap Details
+
+**I1. Missing Command Reference File**
+No `02_admin_knowledge/admin_command_reference.md` file exists. This is the most important single missing file for admin usability.
+
+**I2. RBAC Enforcement (G-38)**
+Every admin command first checks RBAC (`rbac.check_permission`). If the admin phone does not have the required role, the command is denied with: "⛔ অনুমতি নেই: কমান্ড `{cmd}` চালাতে `{required_role}` রোল প্রয়োজন।" This behavior is not documented.
+
+**I3. Duplicate Command Suppression**
+Admin commands have a 30-second in-process dedup: if the same text is sent twice by the same admin within 30 seconds, the second one is silently dropped. This prevents double-execution from WhatsApp message delivery retries.
+
+**I4. Natural Language Fallback**
+Admin messages that don't match any command pattern return a formatted help message (not LLM). The exact help text is shown in code: includes APPROVE/REJECT/EDIT/PAID/STATUS/DRAFTS/NL query examples with Bangla digit note.
+
+---
+
+## J. Routing and Identity Gap Details
+
+**J1. Family Role**
+Family identity receives a special personal greeting reply ("এটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন") and NO business workflow is triggered. Partially in KB (family_identity.md exists) but not cross-referenced to routing behavior.
+
+**J2. Unknown Role + Recruitment Intent**
+Unknown senders whose message matches recruitment keywords enter the recruitment funnel. Unknown senders with other intents go through KB then AI. This distinction is not explicit in KB.
+
+**J3. Office Location Special Path**
+The office location intent has its own fast path: KB-only lookup, hardcoded fallback, no reviewed-reply lookup, no AI. This deterministic behavior is not documented in KB.
+
+**J4. Reviewed Reply Memory**
+After KB but before AI, the system checks `fazle_reviewed_replies` for admin-approved edited replies. This mid-tier lookup layer is not documented anywhere in KB.
+
+---
+
+## K. Role Visibility Risk Report
+
+| Risk | Description | Recommendation |
+|------|-------------|----------------|
+| HIGH | RAG does not index knowledge_base/ — all enrichment is operationally invisible | Flag to developer for RAG module update |
+| HIGH | `06_developer_system/workflow_engine.md` is extremely sparse (4 lines) — major gap for developer-level RAG context | Enrich this file |
+| MEDIUM | `02_admin_system/` legacy folder still present alongside `02_admin_knowledge/` — if RAG ever indexes knowledge_base/, both could be returned for admin queries | Admin must archive or exclude 02_admin_system from indexing |
+| MEDIUM | `03_developer_system/` legacy folder contains Level 3 system prompt with 13-step processing flow — could leak if RAG indexes knowledge_base/ without level filter | Must not be indexed by RAG without visibility gate |
+| LOW | `07_archived/` content is correctly segregated but has no visibility tag — relies on RAG excluding it via path | Add `visibility: archived-only` frontmatter to files when RAG integration begins |
+
+---
+
+## L. Proposed New KB Files
+
+| File | Level | Purpose | Gaps Addressed |
+|------|-------|---------|----------------|
+| `02_admin_knowledge/admin_command_reference.md` | L2 | Complete admin WhatsApp command syntax, formats, examples, RBAC roles | G-02, G-03, G-04, G-14, G-15, G-21–G-25, G-38 |
+
+---
+
+## M. Proposed KB File Updates
+
+All additions only. No deletions. Existing content preserved.
+
+| File | What to Add | Gaps Addressed |
+|------|------------|----------------|
+| `01_employee_knowledge/company_identity.md` | Secondary helplines: 01958122311, 01958122301, 01958122302 | G-32 |
+| `01_employee_knowledge/recruitment_policy.md` | All 9 positions with Bengali numbers (১–৯) including Security In-Charge (৭), Ghat Supervisor (৯), Survey Scout (২) | G-11 |
+| `04_business_rules/recruitment_business_rules.md` | Fix age 18–45 → 18–55 (pending conflict resolution Q-A); add scoring formula | G-10, G-12 |
+| `04_business_rules/payment_business_rules.md` | Advance request must draft (never auto-send); advance intent explicitly excluded | G-06 |
+| `04_business_rules/escort_business_rules.md` | Daily rate formula; deduction scope detail; DEFAULT_DAILY_RATE ৳1,200; shift calc: 1 shift = 0.5 day | G-05, G-18, G-33 |
+| `04_business_rules/attendance_business_rules.md` | Present/absent keyword lists; location extraction keywords | G-17 |
+| `04_business_rules/ai_response_rules.md` | Employee complaint standard reply text; employee release request standard reply | G-35 |
+| `05_workflows/escort_workflow.md` | Escort client = NO reply rule; ESCORTCONFIRM exact format; RELEASE command format | G-04, G-19, G-03 |
+| `05_workflows/recruitment_workflow.md` | 6-step intake with exact questions; session TTL 24h; operational role block; completion messages; intake trigger keywords | G-09, G-13, G-26, G-27, G-40 |
+| `05_workflows/release_slip_workflow.md` | [RELEASE CONFIRMED] admin trigger format and required fields | G-34 |
+| `06_developer_system/workflow_engine.md` | Full routing pipeline; silent-skip rules + name tokens; safe auto-send intent list; advance exclusion; accountant inbound routing; blocked-role skip; 120s draft dedup; draft quality gate; safe-mode recruitment bypass; NL admin query examples; reviewed reply lookup layer; office location fast path | G-01, G-07, G-08, G-16, G-20, G-27, G-29, G-30, G-31, G-39 |
+| `06_developer_system/rag_strategy.md` | RAG currently indexes resources/*.txt + fazle_knowledge_base table only; knowledge_base/ markdown NOT yet indexed; required action for integration; visibility gate requirement | G-36 |
+| `03_ai_identity/escort_identity.md` | Escort client = no reply until ESCORTCONFIRM; roles that trigger escort silent-draft behavior | G-19 |
+| `02_admin_knowledge/admin_operations_overview.md` | NL query examples; admin help message content | G-30 |
+| `02_admin_knowledge/admin_role_management.md` | RBAC roles (viewer/operator/accountant/admin/superadmin); RBAC check on every command; audit log behavior | G-24, G-38 |
+
+---
+
+## N. Files That Must Not Be Touched
+
+The following production files must NOT be modified as part of KB enrichment:
+
+| File | Reason |
+|------|--------|
+| `app/main.py` | Core FastAPI app, all webhook routes, safe-mode, send APIs, dashboard |
+| `modules/message_router/__init__.py` | 15-step routing pipeline — every rule in here is the production source of truth |
+| `modules/payment_workflow/__init__.py` | Escort payment and advance draft creation |
+| `modules/recruitment_flow/__init__.py` | 6-step intake funnel with session management |
+| `modules/attendance/__init__.py` | Attendance keyword detection and draft flow |
+| `modules/escort/__init__.py` | Escort order parsing and admin draft routing |
+| `modules/admin_commands/__init__.py` | Full admin command parser and executor |
+| `modules/rag/__init__.py` | RAG indexer — updating to index knowledge_base/ is a separate developer task |
+| `modules/escort_roster/calculations.py` | Shift counting math |
+| `modules/payment_ingest/__init__.py` | Payment SMS and cash shorthand parsing |
+| `db/migrate.py` + `db/migrations/*.sql` | DB migration runner and schema definitions |
+| `app/config.py` | All configuration settings |
+| `.env` files | Environment variables |
+| `modules/fazle_payroll_engine/` | Full payroll engine |
+| Any frontend HTML/JS | Dashboard, payroll SPA, wa-chat SPA |
+
+---
+
+## O. Safe Enrichment Plan
+
+### Phase O-1: Create new file (no conflicts)
+1. Create `02_admin_knowledge/admin_command_reference.md` — full command reference
+   - Contains all 20+ admin commands with exact formats and examples
+   - RBAC roles and audit behavior
+   - Bangla digit support note
+   - Level 2 visibility (admin only)
+
+### Phase O-2: Add to existing files (additions only, approved conflicts resolved first)
+2. `01_employee_knowledge/company_identity.md` — add 3 secondary helplines (C-08 already approved)
+3. `01_employee_knowledge/recruitment_policy.md` — add missing 3 positions with Bengali numbering
+4. `04_business_rules/payment_business_rules.md` — add advance-request draft-only rule
+5. `04_business_rules/escort_business_rules.md` — add payment formula and deduction scope
+6. `04_business_rules/attendance_business_rules.md` — add keyword lists
+7. `05_workflows/escort_workflow.md` — add no-reply rule and ESCORTCONFIRM format
+8. `05_workflows/recruitment_workflow.md` — add full 6-step intake details
+9. `05_workflows/release_slip_workflow.md` — add [RELEASE CONFIRMED] protocol
+10. `06_developer_system/workflow_engine.md` — full routing rules (largest single enrichment)
+11. `06_developer_system/rag_strategy.md` — add RAG gap note (G-36)
+12. `03_ai_identity/escort_identity.md` — add no-reply rule
+13. `02_admin_knowledge/admin_operations_overview.md` — add NL query examples
+14. `02_admin_knowledge/admin_role_management.md` — add RBAC roles and enforcement
+
+### Phase O-3: Conflict-dependent (wait for decisions)
+15. `04_business_rules/recruitment_business_rules.md` — update age rule ONLY after Q-A decision on age 45 vs 55
+
+---
+
+## P. Approval Questions
+
+**Q-A (CRITICAL — code conflict):**
+Production code enforces candidate age validation **18–55 years**. The current KB says **18–45**. The code is the working production behavior. The KB appears to have been written with a stricter policy. Which is correct: should KB be updated to 18–55 to match production code, OR should we document that the policy is 18–45 but the code currently allows up to 55 (and flag the code for future update)?
+
+**Q-B (CRITICAL — RAG gap):**
+The new `knowledge_base/` markdown folder is NOT currently indexed by the RAG system. All KB enrichment will be invisible to AI until this is fixed. Two options:
+1. Developer updates `modules/rag/__init__.py` to also scan `knowledge_base/**/*.md` — this is a code change (which we do not make as part of KB work); OR
+2. All approved KB content is also inserted into the `fazle_knowledge_base` DB table as Q&A pairs (this can be done through the /kb admin dashboard without code changes).
+Which approach do you prefer?
+
+**Q-C (HIGH — legacy folders):**
+Legacy folders `02_admin_system/` and `03_developer_system/` still exist inside `knowledge_base/`. If RAG is ever updated to index `knowledge_base/`, these would be indexed alongside the new role-centric structure. Recommend archiving them to `07_archived/`. OK to proceed? (Requires moving files, not deleting — all content preserved.)
+
+**Q-D (MEDIUM — escort shift rate):**
+The escort roster uses ৳200/shift (operational tracking) while the payment workflow uses `basic_salary/30/day` (salary-based settlement). Should the KB document BOTH with a clear explanation of when each applies, or only document the salary-based formula that determines actual payment?
+
+**Q-E (MEDIUM — RBAC in KB):**
+The RBAC system supports 5 roles: viewer, operator, accountant, admin, superadmin. Should these be documented in `03_ai_identity/permission_matrix.md` (currently only mentions the 13 identity roles for AI routing) or only in `02_admin_knowledge/admin_role_management.md`?
+
+**Q-1 (Approve new file):**
+Approve creating `02_admin_knowledge/admin_command_reference.md` with full admin WhatsApp command syntax?
+
+**Q-2 (Approve position update):**
+Approve adding all 9 recruitment positions with Bengali numbers to `01_employee_knowledge/recruitment_policy.md`?
+
+**Q-3 (Approve helplines):**
+Approve adding secondary helplines (01958122311, 01958122301, 01958122302) to `company_identity.md`? (C-08 decision already approved — this is execution only.)
+
+**Q-4 (Approve workflow_engine enrichment):**
+Approve full enrichment of `06_developer_system/workflow_engine.md` with 15-step routing pipeline, silent-skip rules, safe auto-send intents, accountant inbound routing, blocked-role behavior, draft dedup/quality gate?
+
+**Q-5 (Approve escort rules):**
+Approve adding escort payment formula, deduction scope, shift-to-day conversion, ESCORTCONFIRM format, and no-client-reply rule to the relevant escort files?
+
+**Q-6 (Approve recruitment workflow detail):**
+Approve adding 6-step intake flow with exact questions, session TTL, operational role block, completion message, and scoring formula to `05_workflows/recruitment_workflow.md`?
+
+---
+
+*Enrichment report generated 2026-06-19. No production files modified. No knowledge_base files modified. All findings are read-only analysis.*

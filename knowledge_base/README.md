@@ -1,4 +1,12 @@
-﻿# Fazle AI Platform Knowledge Base
+---
+title: Fazle AI Platform Knowledge Base
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Fazle AI Platform Knowledge Base
 
 ## Purpose
 This is the role-centric, source-of-truth knowledge base for the Fazle AI Platform and Al-Aqsa Security & Logistics Services Ltd.

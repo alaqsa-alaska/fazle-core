@@ -1,4 +1,12 @@
-﻿# Identity Brain
+---
+title: Identity Brain
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Identity Brain
 
 ## Purpose
 Define role detection, priority order, unknown sub-role classification, and visibility routing for Fazle AI identity logic.

@@ -1,3 +1,11 @@
+---
+title: Identity Brain
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Identity Brain
 **KB Article ID:** DEV-06-IDENTITY-BRAIN
 **Sources:** `modules/identity_brain/__init__.py` (393 lines — read 2026-06-23), `modules/role_classifier/__init__.py`

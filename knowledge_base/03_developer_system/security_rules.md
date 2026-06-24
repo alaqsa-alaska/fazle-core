@@ -1,4 +1,12 @@
-﻿# Security Rules
+---
+title: Security Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Security Rules
 
 ## Purpose
 Define hidden security, disclosure, and visibility rules for the Fazle AI Platform.

@@ -1,3 +1,11 @@
+---
+title: PKCA v2 — Production Knowledge Coverage Audit
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKCA v2 — Production Knowledge Coverage Audit
 **Program:** Production Knowledge Coverage Audit (PKCA)
 **Version:** v2 (Wave-4 post-enrichment)

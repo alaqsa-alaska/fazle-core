@@ -1,3 +1,11 @@
+---
+title: PKCA Report 20: Management Summary
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKCA Report 20: Management Summary
 
 **Program:** Production Knowledge Coverage Audit (PKCA) v1.0

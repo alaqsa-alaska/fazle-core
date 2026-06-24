@@ -1,3 +1,11 @@
+---
+title: PKCA Report 09: State Machine Coverage Report
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKCA Report 09: State Machine Coverage Report
 
 **Date:** 2026-06-22

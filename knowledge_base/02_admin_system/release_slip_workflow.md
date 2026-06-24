@@ -1,4 +1,12 @@
-﻿# Release Slip Workflow
+---
+title: Release Slip Workflow
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Release Slip Workflow
 
 ## Purpose
 Define the admin-only release slip handling workflow for escort duty completion, attendance finalization, and payment preparation.

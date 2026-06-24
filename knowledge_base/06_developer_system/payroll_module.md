@@ -1,3 +1,11 @@
+---
+title: Core Payroll Module — Developer Reference
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Core Payroll Module — Developer Reference
 **KB Article ID:** DEV-06-PAYROLL-MODULE
 **Source:**

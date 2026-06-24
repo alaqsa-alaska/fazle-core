@@ -1,4 +1,12 @@
-﻿# AI Access Matrix
+---
+title: AI Access Matrix
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# AI Access Matrix
 
 | Knowledge Area | Public | Candidate | Employee | Escort | Supervisor | Operation Officer | Female Operation Officer | Recruitment Officer | HR | Accountant | Admin | Developer | System/AI |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|

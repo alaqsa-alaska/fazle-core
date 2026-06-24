@@ -1,3 +1,11 @@
+---
+title: PKVC v2 — Production Knowledge Verification / Conflict Check
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC v2 — Production Knowledge Verification / Conflict Check
 **Program:** Production Knowledge Verification and Conflict Check (PKVC)
 **Version:** v2 (Wave-4 post-enrichment)

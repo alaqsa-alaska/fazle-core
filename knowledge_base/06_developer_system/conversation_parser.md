@@ -1,4 +1,12 @@
-﻿# Conversation Parser
+---
+title: Conversation Parser
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Conversation Parser
 
 ## Purpose
 Classify conversation intent and state without replacing role-based routing.

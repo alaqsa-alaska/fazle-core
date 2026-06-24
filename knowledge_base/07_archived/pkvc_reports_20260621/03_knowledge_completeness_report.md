@@ -1,3 +1,11 @@
+---
+title: PKVC Report 03: Knowledge Completeness Report
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report 03: Knowledge Completeness Report
 
 - Date: 2026-06-21

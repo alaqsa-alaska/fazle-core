@@ -1,4 +1,12 @@
-﻿# Transport Allowance
+---
+title: Transport Allowance
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Transport Allowance
 
 ## Purpose
 Explain employee-safe transport allowance and conveyance support rules.

@@ -1,0 +1,199 @@
+Source: knowledge_base/06_developer_system/payroll_module.md
+SHA256: 392ad54d3a52dfd365baac65f32952fd806e16bfdc7beea7d7f4631e61fb41d3
+Version: 392ad54d3a52
+
+# Core Payroll Module — Developer Reference
+**KB Article ID:** DEV-06-PAYROLL-MODULE
+**Source:**
+- `modules/payroll/__init__.py` (read 2026-06-23)
+- `tests/conftest.py` (DDL reference — same schema as production migrations)
+**Visibility:** Developer / Admin (state machine, schemas) | Accountant (state names only)
+**Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## Purpose and Scope
+
+`modules/payroll` is the **monthly salary cycle module** — it manages the approval workflow for payroll runs. It is distinct from the Fazle Payroll Engine (FPE), which parses raw WhatsApp payment messages.
+
+| Module | Answers the question |
+|---|---|
+| `modules/payroll` | "Has this payroll run been reviewed, approved, and paid?" |
+| `fazle_payroll_engine` | "What was actually paid to whom, when, via what method?" |
+
+**See also:** `fpe_overview.md` for the FPE transaction layer.
+
+---
+
+## State Machine — `wbom_payroll_runs.status`
+
+**Source constant:** `ALLOWED_TRANSITIONS` in `modules/payroll/__init__.py`
+
+```python
+ALLOWED_TRANSITIONS = {
+    "draft":     {"reviewed", "cancelled"},
+    "reviewed":  {"approved", "draft", "cancelled"},
+    "approved":  {"locked", "reviewed", "cancelled"},
+    "locked":    {"paid", "approved", "cancelled"},
+    "paid":      set(),          # terminal — no further transitions
+    "cancelled": set(),          # terminal — no further transitions
+}
+```
+
+**State diagram:**
+
+```
+          ┌─────────────────────────────────────────────┐
+          │               PAYROLL RUN                    │
+          │                                              │
+  compute │    ┌─────────┐                              │
+  ────────┼──> │  draft  │ <──────────────────┐         │
+          │    └────┬────┘                    │         │
+          │         │ PAYROLL SUBMIT           │ reopen  │
+          │         ↓                         │         │
+          │    ┌──────────┐                   │         │
+          │    │ reviewed │ ──────────────────┘         │
+          │    └────┬─────┘                             │
+          │         │ PAYROLL APPROVE                    │
+          │         ↓                                   │
+          │    ┌──────────┐                             │
+          │    │ approved │ ──────────────────┐         │
+          │    └────┬─────┘                  │ un-approve│
+          │         │ PAYROLL LOCK            │         │
+          │         ↓                         │         │
+          │    ┌────────┐                    ↓         │
+          │    │ locked │ ──────────────> approved      │
+          │    └────┬───┘                             │
+          │         │ PAYROLL PAID                      │
+          │         ↓                                   │
+          │    ┌────────┐                              │
+          │    │  paid  │  (terminal)                  │
+          │    └────────┘                              │
+          │                                             │
+          │    Any non-paid state → cancelled (terminal) │
+          └─────────────────────────────────────────────┘
+```
+
+**Admin commands that drive transitions:**
+
+| Command | Transition |
+|---|---|
+| `PAYROLL COMPUTE` | Creates `draft` |
+| `PAYROLL SUBMIT` | `draft → reviewed` |
+| `PAYROLL APPROVE` | `reviewed → approved` |
+| `PAYROLL LOCK` | `approved → locked` |
+| `PAYROLL PAID` | `locked → paid` |
+| `PAYROLL CANCEL` | Any non-paid state → `cancelled` |
+
+All transitions write to `wbom_payroll_approval_log` (actor, from_status, to_status, reason).
+
+---
+
+## `wbom_payroll_runs` — Column Schema
+
+**Source:** `tests/conftest.py` (same DDL as production `db/migrations/`)
+**UNIQUE constraint:** `(employee_id, period_year, period_month) WHERE status <> 'cancelled'` (idempotency)
+
+| Column | Type | Default | Notes |
+|---|---|---|---|
+| `run_id` | SERIAL | auto | PK |
+| `employee_id` | INT | — | FK → `wbom_employees(employee_id)` |
+| `period_year` | INT | — | 4-digit year |
+| `period_month` | INT | — | 1–12 |
+| `status` | VARCHAR(20) | `'draft'` | State machine status (see ALLOWED_TRANSITIONS above) |
+| `basic_salary` | DECIMAL(10,2) | 0 | Employee's basic_salary at compute time |
+| `total_programs` | INT | 0 | Count of completed escort programs in period |
+| `per_program_rate` | DECIMAL(10,2) | 0 | Rate per program day (PAY-01: 400.0) |
+| `program_allowance` | DECIMAL(10,2) | 0 | `total_days × per_program_rate` |
+| `other_allowance` | DECIMAL(10,2) | 0 | Manual additional allowance |
+| `total_advances` | DECIMAL(10,2) | 0 | Sum of advance transactions in period |
+| `total_deductions` | DECIMAL(10,2) | 0 | Sum of deduction transactions |
+| `gross_salary` | DECIMAL(10,2) | 0 | `basic_salary + program_allowance + other_allowance` |
+| `net_salary` | DECIMAL(10,2) | 0 | `gross_salary - total_advances - total_deductions` |
+| `computed_by` | VARCHAR(50) | — | Admin phone or `'scheduler'` |
+| `submitted_by` | VARCHAR(50) | — | Admin who ran PAYROLL SUBMIT |
+| `approved_by` | VARCHAR(50) | — | Admin who ran PAYROLL APPROVE |
+| `locked_by` | VARCHAR(50) | — | Admin who ran PAYROLL LOCK |
+| `paid_by` | VARCHAR(50) | — | Admin who ran PAYROLL PAID |
+| `paid_at` | TIMESTAMPTZ | — | Timestamp of PAYROLL PAID |
+| `payment_method` | VARCHAR(20) | — | `bkash\|nagad\|cash\|bank\|unknown` |
+| `payment_reference` | TEXT | — | Reference number provided with PAYROLL PAID |
+| `payout_idempotency_key` | TEXT UNIQUE | — | Prevents double-payment; set at PAYROLL PAID time |
+| `correction_reason` | TEXT | — | Reason if status reversed (e.g. approved → reviewed) |
+| `computed_at` | TIMESTAMPTZ | NOW() | When compute_run() was called |
+| `updated_at` | TIMESTAMPTZ | NOW() | Last status transition time |
+| `created_at` | TIMESTAMPTZ | NOW() | Row creation time |
+
+---
+
+## `wbom_payroll_run_items` — Column Schema
+
+Line-item breakdown within a payroll run. Multiple rows per `run_id`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `item_id` | SERIAL | PK |
+| `run_id` | INT | FK → `wbom_payroll_runs(run_id)` ON DELETE CASCADE |
+| `component_type` | VARCHAR(50) | e.g. `basic_salary`, `program_allowance`, `advance_deduction` |
+| `component_label` | VARCHAR(200) | Human-readable label |
+| `amount` | DECIMAL(10,2) | Absolute value |
+| `sign` | VARCHAR(1) | `'+'` (addition) or `'-'` (deduction) |
+| `source_table` | VARCHAR(50) | Table the amount was sourced from (e.g. `escort_roster_entries`) |
+| `source_id` | INT | Row ID in `source_table` |
+| `notes` | TEXT | Free-form note |
+
+---
+
+## `wbom_payroll_approval_log` — Column Schema
+
+Immutable audit trail. One row per state transition.
+
+| Column | Type | Notes |
+|---|---|---|
+| `log_id` | SERIAL | PK |
+| `run_id` | INT | FK → `wbom_payroll_runs(run_id)` |
+| `action` | VARCHAR(50) | Command that triggered the transition |
+| `from_status` | VARCHAR(20) | Previous status |
+| `to_status` | VARCHAR(20) | New status |
+| `actor` | VARCHAR(50) | Admin phone who performed the action |
+| `reason` | TEXT | Optional reason (correction_reason on rollback) |
+| `note` | TEXT | Free-form note |
+| `payload_json` | JSONB | Full command payload for forensic review |
+| `created_at` | TIMESTAMPTZ | Transition timestamp |
+
+---
+
+## Compute Logic (`compute_run()`)
+
+**Source:** `modules/payroll/__init__.py`
+
+1. **Idempotent:** If a non-cancelled run already exists for `(employee_id, period_year, period_month)`, returns the existing run — no recompute.
+2. Fetches `wbom_employees` for `basic_salary`.
+3. Fetches `wbom_escort_programs` rows with `status='Completed'` and `COALESCE(end_date, program_date)` in the period.
+4. Sums `COALESCE(day_count, 1)` across all programs for `total_days`.
+5. `program_allowance = round(total_days × per_program_rate, 2)` where `per_program_rate` defaults to `DEFAULT_PER_PROGRAM_RATE = 400.0`.
+6. Writes `wbom_payroll_runs` + `wbom_payroll_run_items` in one atomic transaction.
+
+**Net salary formula:**
+```
+gross_salary  = basic_salary + program_allowance + other_allowance
+net_salary    = gross_salary - total_advances - total_deductions
+```
+
+---
+
+## Constants
+
+| Constant | Value | Notes |
+|---|---|---|
+| `DEFAULT_PER_PROGRAM_RATE` | `400.0` | ৳/day (PAY-01: 12,000 ÷ 30); matches `payment_workflow.DEFAULT_DAILY_RATE` |
+
+---
+
+## Cross-References
+
+- `fpe_overview.md` — FPE transaction layer that feeds the totals used by compute_run()
+- `payment_business_rules.md` — PAY-01 rate formula, CR-05 resolution
+- `02_admin_system/payroll_rules.md` — Admin-facing payroll chain explanation
+- `automation_pipeline.md` — `daily_payroll_compute` scheduler job
+- `admin_operations_overview.md` — PAYROLL command group (Group 4)

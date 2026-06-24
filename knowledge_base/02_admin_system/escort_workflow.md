@@ -1,4 +1,12 @@
-﻿# Escort Workflow
+---
+title: Escort Workflow
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Escort Workflow
 
 ## Purpose
 Define the admin-only workflow for vessel escort order processing, assignment, confirmation, duty tracking, release, and payment draft handling.

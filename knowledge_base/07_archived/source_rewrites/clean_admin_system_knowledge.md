@@ -1,4 +1,12 @@
-﻿# Clean Rewrite: Admin System Knowledge
+---
+title: Clean Rewrite: Admin System Knowledge
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
+# Clean Rewrite: Admin System Knowledge
 
 This source is normalized into:
 - 02_admin_knowledge/admin_operations_overview.md

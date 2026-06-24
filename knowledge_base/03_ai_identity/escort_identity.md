@@ -1,4 +1,12 @@
-﻿# Escort Identity
+---
+title: Escort Identity
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Escort Identity
 
 ## Purpose
 Identify escort workers and route their messages to duty slip, release slip, attendance, advance, conveyance, and final payment workflows.

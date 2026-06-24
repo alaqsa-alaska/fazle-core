@@ -1,3 +1,11 @@
+---
+title: PKVC Report 19: Certification Readiness Report
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report 19: Certification Readiness Report
 
 - Date: 2026-06-21

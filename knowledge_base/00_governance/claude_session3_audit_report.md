@@ -1,3 +1,11 @@
+---
+title: Claude Session 3 — Independent Audit Report
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Claude Session 3 — Independent Audit Report
 **Report ID:** AUDIT-SESSION3-2026-06-23
 **Audit Date:** 2026-06-23

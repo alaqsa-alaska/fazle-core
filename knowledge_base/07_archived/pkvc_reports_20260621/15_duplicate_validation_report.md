@@ -1,3 +1,11 @@
+---
+title: PKVC Report 15: Duplicate Validation Report
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKVC Report 15: Duplicate Validation Report
 
 - Date: 2026-06-21

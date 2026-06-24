@@ -1,4 +1,12 @@
-﻿# Accountant Identity
+---
+title: Accountant Identity
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Accountant Identity
 
 ## Purpose
 Identify accountant role and route payment/accounting messages correctly.

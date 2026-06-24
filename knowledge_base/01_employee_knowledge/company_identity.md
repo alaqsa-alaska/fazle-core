@@ -1,4 +1,12 @@
-﻿# Company Identity
+---
+title: Company Identity
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Company Identity
 
 ## Purpose
 Provide the official public identity, contact details, office address, and service description for Al-Aqsa Security & Logistics Services Ltd.

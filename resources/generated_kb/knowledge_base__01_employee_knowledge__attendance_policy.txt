@@ -1,0 +1,86 @@
+Source: knowledge_base/01_employee_knowledge/attendance_policy.md
+SHA256: dba7f9d1e2d9a402f67ac766931e42fdfa9114cdaebcf3ed040efad441a5667b
+Version: dba7f9d1e2d9
+
+# Attendance Policy
+
+## Purpose
+Explain attendance rules for security guards, escorts, and field employees in employee-safe language.
+
+## Scope
+This article is visible to employees and candidates where attendance policy is relevant.
+
+## Definitions
+- Security Guard Duty Day: one completed 12-hour shift.
+- Escort Duty Day: one completed 24-hour duty day covering day and night duty.
+- Duty Slip: document issued when escort duty begins.
+- Release Slip: document signed after escort duty ends.
+
+## Security Guard Attendance
+Security guard duty generally follows two shifts:
+- Day shift: starts at 8:00 AM.
+- Night shift: starts at 8:00 PM.
+
+Attendance confirmation windows:
+- Day shift attendance should be confirmed by 10:00 AM.
+- Night shift attendance should be confirmed by 10:00 PM.
+
+One completed 12-hour shift counts as one duty day for a security guard.
+
+## Escort Attendance
+Escort attendance is not counted only by daily messages. It is counted from:
+- duty start date, confirmed by Duty Slip; and
+- duty end date, confirmed by Release Slip.
+
+For escorts, 24 hours, meaning day and night duty together, counts as one duty day.
+
+## Attendance Confirmation Methods
+Attendance may be confirmed by:
+- Operation Officer or Supervisor confirmation.
+- Employee self-attendance message from the registered WhatsApp number.
+
+An attendance message may include:
+- name;
+- mobile number;
+- duty location;
+- client name;
+- duty selfie if requested.
+
+## Workflow
+1. Employee reports or supervisor confirms attendance.
+2. Attendance information is reviewed according to company rules.
+3. Approved attendance is used for salary, bonus, leave, late, and deduction calculations.
+
+## Business Rules
+- Employees must be present at the duty post at least 15 minutes before duty starts.
+- Unauthorized absence may cause salary and attendance bonus deduction.
+- 1 day unauthorized absence may cause up to 2 days deduction.
+- 3 consecutive late arrivals may cause 1 day salary deduction.
+- 7 or more consecutive unauthorized absent days require medical certificate or company approval before rejoining.
+- Duty selfie may be requested as proof of current duty location.
+
+## Examples
+If a guard completes a 12-hour day shift, it counts as one attendance day.
+
+If an escort works from duty start to release and completes full day-night cycles, each 24-hour cycle counts as one escort duty day.
+
+## Exceptions
+Medical absence requires a medical certificate. Family emergency leave requires prior approval.
+
+## FAQ
+**প্রশ্ন: আমার হাজিরা কীভাবে গণনা হয়?**
+উত্তর: সিকিউরিটি গার্ডের ক্ষেত্রে ১২ ঘণ্টার একটি পূর্ণ শিফট একদিনের হাজিরা হিসেবে গণনা হয়। এসকর্টের ক্ষেত্রে দিন ও রাত মিলিয়ে ২৪ ঘণ্টা একদিনের ডিউটি হিসেবে গণনা হয়।
+
+**প্রশ্ন: দেরি করলে কী হবে?**
+উত্তর: ডিউটির কমপক্ষে ১৫ মিনিট আগে পোস্টে থাকতে হবে। পরপর ৩ দিন দেরি করলে ১ দিনের বেতন কর্তন হতে পারে।
+
+## AI Notes
+Do not explain database tables, admin approval, automation, or internal attendance engine logic to employees.
+
+## Cross References
+- leave_policy.md
+- salary_policy.md
+- release_slip.md
+
+## Revision History
+- 2026-06-19: Created using management decision that guard duty day is 12 hours and escort duty day is 24 hours.

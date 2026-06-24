@@ -1,0 +1,25 @@
+Source: knowledge_base/04_business_rules/cash_business_rules.md
+SHA256: 09505cfb3e48672c44f502c3ade73f6ac497b7edfcc368c8ff36ddf5da7a6e5a
+Version: 09505cfb3e48
+
+# Cash Business Rules
+
+## Purpose
+Define cash ledger behavior and accountant handoff rules.
+
+## Rules
+- Accountant handoff from admin payment message is payment completion trigger.
+- Each payment message becomes a transaction record.
+- Multiple payment transactions may exist in one admin message.
+- Ledger update must preserve transaction amount, method, employee/name, phone, purpose, and date.
+- Duplicate prevention must run before final ledger update.
+
+## Payment Methods
+- bKash.
+- Nagad.
+- Cash.
+- Conveyance marker may be included as conv.
+
+## Cross References
+- payment_business_rules.md
+- ../05_workflows/cash_workflow.md

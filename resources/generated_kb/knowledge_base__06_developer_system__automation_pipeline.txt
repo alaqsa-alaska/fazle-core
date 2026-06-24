@@ -1,0 +1,266 @@
+Source: knowledge_base/06_developer_system/automation_pipeline.md
+SHA256: 96e9d47355486ee8be63118a376320f4553ffe43fea6f18869f9a47aa60d51f7
+Version: 96e9d4735548
+
+# Automation Pipeline
+
+## Purpose
+Define safe automation boundaries and document the production AI, outbound, and scheduler subsystems that constitute the Fazle AI Platform's automation layer.
+
+## Auto Allowed
+- Clear candidate FAQ.
+- Safe employee policy answer.
+- Non-sensitive office/contact answer.
+
+## Draft/Admin Required
+- Payment.
+- Attendance finalization.
+- Escort confirmation.
+- Release slip ambiguity.
+- Unknown identity.
+- Sensitive/internal request.
+
+## Maintenance
+
+**WhatsApp reply drafts** (`fazle_draft_replies`): expire after **24 hours** (DRAFT_TTL_HOURS=24 in .env). Admin has 24h to approve or reject before auto-expiry.
+
+**Escort roster draft entries** (`escort_roster_entries`): expire after 48 hours via `expire_stale_drafts(hours=48)` in `escort_roster/db.py`. These are a different table from reply drafts — the two TTLs are independent and govern different objects.
+
+---
+
+## LLM Provider Chains
+
+### Purpose
+The platform uses one Ollama-first LLM chain. Local Ollama is preferred for runtime privacy, cost control, and Knowledge Base grounding. External providers are fallbacks only.
+
+### Reply Generation Chain (Customer-Facing WhatsApp)
+
+| Priority | Provider | Model | Rate Limit | Fallback Trigger |
+|---|---|---|---|---|
+| 1 (Primary) | Ollama (local) | qwen3:8b | Local VPS capacity | Ollama fails or OLLAMA_REPLY_DISABLED=true for reply generation |
+| 2 (Fallback) | Groq | llama-3.1-8b-instant | 14,400 req/day / 30 RPM | Ollama fails/skipped |
+| 3 (Secondary fallback) | GitHub Models | openai/gpt-4.1 | Plan limit | Groq fails |
+| 4 (Final fallback) | Polite holding message | N/A | N/A | All providers fail |
+
+**Fallback holding message (exact text):**
+```
+আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।
+```
+
+**Business Rule:** When all LLM providers fail, the system always returns the polite holding message rather than sending no reply or raising an error to the user.
+
+**Exception:** When `OLLAMA_REPLY_DISABLED=true`, Ollama is skipped for reply generation. The fallback chain becomes Groq → GitHub Models → polite holding message.
+
+**Source Module:** `app/llm.py`
+**Source Function:** `generate_reply()`, `_FALLBACK_REPLY`
+**PKCA Report:** 08_ai_behavior_coverage_report.md
+**Management Authority:** Production evidence; documented 2026-06-22
+
+### Intent Classification Chain (Different Priority Order)
+
+| Priority | Provider | Model | Fallback Trigger |
+|---|---|---|---|
+| 1 (Primary) | Ollama | qwen3:8b | Fails or returns 'unknown' |
+| 2 (Fallback) | Groq | llama-3.1-8b-instant | Ollama fails/unknown |
+| 3 (Secondary fallback) | GitHub Models | openai/gpt-4.1 | Groq fails/unknown |
+
+**Business Rule:** Intent classification uses Ollama first. Groq and GitHub Models are used only if local classification fails or returns `unknown`.
+
+**Source Module:** `app/llm.py`
+**PKCA Report:** 08_ai_behavior_coverage_report.md
+
+### Automated Reply Suffix
+
+Every auto-generated WhatsApp reply (non-draft, system-sent) has this suffix appended:
+
+```
+─────────────────
+🤖 Automated Reply System
+এই বার্তাটি স্বয়ংক্রিয়ভাবে তৈরি হয়েছে। ভুল হতে পারে।
+```
+
+**Business Rule:** The suffix is appended exactly once. The system checks `_AUTOMATED_SUFFIX_ANCHOR` before appending to prevent double-append on retry.
+
+**Source Module:** `app/bridge.py`
+**Source Function:** `_AUTOMATED_SUFFIX`, `_AUTOMATED_SUFFIX_ANCHOR`
+
+---
+
+## Outbound Queue
+
+### Purpose
+All outbound WhatsApp messages pass through a persistent queue with delivery guarantees, retry logic, and dead-letter handling.
+
+### State Machine
+
+```
+pending → sending (sweep picks up row)
+        → sent (bridge confirmed delivery; external_id set)
+        → failed (bridge error; retry after exponential backoff)
+        → dlq (max_attempts exceeded)
+```
+
+### Business Rules
+
+| Rule | Behavior |
+|---|---|
+| Idempotency | Each enqueue call requires an `idempotency_key`; duplicate keys are silently ignored |
+| Exponential backoff | Each failed attempt doubles the retry delay |
+| DLQ threshold | Message moves to DLQ when `attempts >= max_attempts` |
+| DLQ alert | `dlq_alert` scheduler job alerts admin every 15 min when actionable DLQ count > 0 |
+| Global kill switch | `OUTBOUND_ENABLED=false` stops all outbound sends |
+| Multi-channel | Supports bridge1, bridge2, meta, messenger, comment channels |
+
+**Validation:** Idempotency key prevents duplicate payment notifications and duplicate admin alerts.
+**Exception:** DLQ messages do not auto-retry. Admin must investigate and re-enqueue.
+
+**Source Module:** `modules/outbound`
+**Source Function:** `enqueue()`, `sweep_once()`, `dlq_count()`, `actionable_dlq_count()`
+**PKCA Report:** 09_state_machine_coverage_report.md, 07_scheduler_coverage_report.md
+
+---
+
+## Scheduler Jobs
+
+### Purpose
+APScheduler runs 15 background jobs in the `Asia/Dhaka` timezone. All jobs are registered and active in production. Every job run is recorded in `fazle_scheduled_jobs`.
+
+**Timezone:** `Asia/Dhaka` (override: `SCHEDULER_TIMEZONE` env)
+**Kill switch:** `SCHEDULER_ENABLED=false` disables all jobs
+
+### Complete Job Inventory
+
+| Job Name | Schedule | Env Override | Purpose |
+|---|---|---|---|
+| `daily_payroll_compute` | 02:00 daily | `PAYROLL_AUTO_COMPUTE_HOUR` | Compute payroll for all active employees; notifies admin with count |
+| `dlq_alert` | Every 15 min | `DLQ_ALERT_INTERVAL_MIN` | Alert admin if actionable DLQ > 0 in last 24h |
+| `health_summary` | Every 6h | — | Alert admin if any health probe is degraded |
+| `agent_incident_summary` | Every 6h | — | Summarize unresolved monitoring incidents by severity |
+| `stale_escort_reminder` | 09:00 daily | `ESCORT_STALE_DAYS` (default: 30) | Alert for escort programs Active/Assigned > N days |
+| `payment_reconciliation` | Hourly | — | Re-match unmatched staging payments against employees |
+| `backup_staleness_alert` | 03:00 daily | `BACKUP_STALE_HOURS` (default: 48) | Alert if newest DB backup > N hours old |
+| `combined_draft_cleanup` | Hourly | — | Expire escort + payment drafts older than 24h |
+| `daily_memory_review` | 09:00 daily | `MEMORY_REVIEW_HOUR` | Extract facts from last 24h conversations (50 senders max, 4s inter-call sleep for rate limit) |
+| `rag_rebuild` | 18:00 daily | `RAG_REBUILD_HOUR` | Rebuild BM25 RAG index from resources/*.txt + fazle_knowledge_base |
+| `lock_cleanup` | Every 5 min | — | Clean expired processing locks from shared.locks |
+| `draft_ttl_cleanup` | Every 30 min | `draft_ttl_hours` (config) | Mark pending drafts as 'expired' based on draft_ttl_hours setting |
+| `bridge_watchdog` | Every 5 min | — | Alert admin if any bridge has been silent > 10 min |
+| `daily_admin_digest` | 08:00 daily | `DAILY_DIGEST_HOUR` | Send daily summary to admin via bridge1 |
+| `daily_db_backup` | 02:30 daily | `DAILY_BACKUP_HOUR` / `DAILY_BACKUP_MIN` | Run pg_dump database backup |
+
+### Job Audit
+Every job run records to `fazle_scheduled_jobs`:
+- Fields: `job_name`, `last_run_at`, `last_status`, `last_duration_ms`, `last_error`, `next_run_at`, `run_count`
+- Pattern: `INSERT ... ON CONFLICT (job_name) DO UPDATE`
+
+### Idempotency
+All notification jobs use idempotency keys to prevent duplicate alerts:
+- Format: `{purpose}-{date}` or `{purpose}-{content-hash}`
+- Passed to `outbound.enqueue()` as `idempotency_key` parameter
+
+### Admin Commands (via WhatsApp or wa_chat_frontend)
+- `SCHEDULE STATUS` — Show all job statuses (requires viewer role)
+- `RUN JOB <name>` — Trigger any registered job immediately (requires admin role)
+
+**Source Module:** `modules/scheduler/__init__.py`
+**Source Function:** `start_scheduler()`, `trigger_job()`, `get_status()`
+**PKCA Report:** 07_scheduler_coverage_report.md
+**Management Authority:** All 15 jobs verified ACTIVE in production 2026-06-22
+
+---
+
+## Draft Quality Gate
+
+**Purpose:** Prevents malformed, empty, leaked-path, or LLM-fallback text from being saved as a draft or sent as an auto-reply.
+
+**Module:** `modules/draft_quality/__init__.py`
+**Called by:** `app/main.py` — invoked before every draft creation and auto-send attempt
+
+**4 Quality Criteria (in evaluation order):**
+
+| Criterion | Reason Code | Behavior |
+|---|---|---|
+| Reply is None or whitespace-only | `empty` | Rejected |
+| Reply exactly matches LLM fallback text | `llm_fallback` | Rejected (catches both fallback strings exactly) |
+| Reply contains bad-pattern string | `bad_pattern:<prefix>` | Rejected — see table below |
+| Reply exceeds 4,000 characters | `too_long` | Rejected |
+
+**Bad Patterns (exact substring match):**
+
+| Pattern | Why Blocked |
+|---|---|
+| `file://` | Local file path leaked into reply |
+| `/home/azim` | VPS server path leaked into reply |
+| `` Created []( `` | Broken markdown link from RAG output |
+| `Traceback (most recent call last)` | Python exception leaked |
+| ` ``` ` | Code block — not appropriate for customer reply |
+| `<|` | LLM control token leaked |
+| `/scripts/` | Internal path leaked |
+| `/venv/` | Virtual environment path leaked |
+
+**LLM Fallback Exact Strings (both are blocked):**
+- v1: `"আমি এই মুহূর্তে সাড়া দিতে পারছি না। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।"`
+- v2: `"আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।"` (this is the holding message — detected exactly)
+
+**Enable/disable:** `DRAFT_QUALITY_GATE=false` disables the gate. Not recommended in production.
+
+**Emoji stripping:** Before quality evaluation, all emoji are stripped from the reply text (`strip_reply_emoji()`). Emoji-only replies that become empty after stripping → `empty`.
+
+**Source Module:** `modules/draft_quality/__init__.py`
+**Source Functions:** `check_draft_quality()`, `strip_reply_emoji()`, `BAD_PATTERNS`, `MAX_DRAFT_LEN = 4000`
+**Production Evidence:** Verified 2026-06-22 by reading production code
+**PKMA Reference:** PKMA Report 18, DEV-01 (gap: draft quality gate was missing from previous documentation)
+
+---
+
+## Memory Extractor (Fire-and-Forget)
+
+**Purpose:** Extracts long-term facts from recent conversations and saves to `user_memory` for future context-aware replies.
+
+**Module:** `modules/memory_extractor/`
+**Trigger:** Spawned as background asyncio task by main message processor — fire-and-forget (exception-safe)
+**Schedule:** Also runs as `daily_memory_review` scheduler job at 09:00 daily (50 senders, 4s sleep between LLM calls for rate limiting)
+
+**Behavior:**
+- Called immediately after reply generation for the current sender (non-blocking)
+- Also called by `_ensure_profile(phone)` on new contact first contact
+- Reads last 24h of conversations (scheduler mode) or current conversation (inline mode)
+- Calls LLM to extract structured facts: personal_info, work_info, conversation_fact, pending_matter, important_event
+- Saves to `user_memory` (AI domain) with `source='github_models_extracted'`
+- Failure is silently logged — does NOT block the reply pipeline
+
+**Fire-and-forget pattern:**
+```
+try:
+    asyncio.create_task(extract_and_save_memory(phone, messages))
+except Exception:
+    log.debug("[memory_extractor] task spawn failed: %s", err)
+```
+
+**Source Module:** `modules/memory_extractor/__init__.py`
+**Source Function:** `extract_and_save_memory()`, `_ensure_profile()`
+**PKMA Reference:** PKMA Report 18, DEV-01 (gap: memory extractor not previously documented)
+
+---
+
+## Visibility Rules for This Article
+
+**Visibility:** Developer / Admin
+**AI Exposure:** LLM provider order, draft quality gate criteria, memory extractor behavior, bad patterns, and scheduler internals must NOT be exposed to candidates or employees. Scheduler job names and intervals are Developer-only.
+
+---
+
+## Cross References
+- `../04_business_rules/ai_response_rules.md`
+- `06_developer_system/security_rules.md`
+- `06_developer_system/developer_notes.md`
+- `06_developer_system/rag_strategy.md`
+- `06_developer_system/database_rules.md` (Domain 9 — AI tables for memory/learning)
+
+---
+
+## Revision History
+
+| Date | Change | Author |
+|---|---|---|
+| 2026-06-22 | Wave-2B: Added Draft Quality Gate section (4 criteria, 8 bad patterns, 2 LLM fallback strings, emoji stripping, DRAFT_QUALITY_GATE flag) and Memory Extractor section (fire-and-forget asyncio task, daily_memory_review scheduler job, _ensure_profile, 4s rate-limit sleep). Previous article was 167 lines (LLM chains + outbound queue + scheduler inventory only). | KSP Wave-2B |

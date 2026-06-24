@@ -1,3 +1,11 @@
+---
+title: Project Context — Fazle AI Platform
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
 # Project Context — Fazle AI Platform
 **Version:** 1.0.0
 **Created:** 2026-06-22
@@ -119,11 +127,11 @@ WhatsApp / Facebook / Meta
    Message Router (identity + intent)
       ↓           ↓
 Identity Brain   Intent Classifier
-   (role)          (Groq → GitHub → Ollama)
+   (role)          (Ollama → Groq → GitHub)
       ↓
    RAG Layer (BM25 in-process, bilingual)
           ↓
-   LLM Reply Chain (GitHub → Groq → Ollama → holding msg)
+   LLM Reply Chain (Ollama → Groq → GitHub → holding msg)
           ↓
    Draft Quality Gate
           ↓

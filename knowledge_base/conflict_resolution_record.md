@@ -1,4 +1,12 @@
-﻿# Conflict Resolution Record
+---
+title: Conflict Resolution Record
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Conflict Resolution Record
 
 ## Purpose
 Preserve management decisions used to generate the current knowledge base.

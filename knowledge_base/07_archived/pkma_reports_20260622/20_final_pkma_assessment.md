@@ -1,3 +1,11 @@
+---
+title: PKMA Report 20 — Final Assessment
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-06-24
+runtime_index: false
+---
+
 # PKMA Report 20 — Final Assessment
 
 **Program:** Production Knowledge Maturity Assessment (PKMA) v1.0
