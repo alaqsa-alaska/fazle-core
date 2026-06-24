@@ -1454,6 +1454,13 @@ async def kb_spa():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "kb.html"))
 
 
+@app.get("/chat-lab", response_class=HTMLResponse)
+@app.get("/open-chat", response_class=HTMLResponse)
+async def chat_lab_spa():
+    """Chat Lab — Admin Knowledge Q&A powered by Ollama + KB + read-only DB + internet."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "open-chat.html"))
+
+
 @app.get("/wa-chat", response_class=HTMLResponse)
 async def wa_chat_spa():
     """WhatsApp-like 3-panel chat frontend SPA."""
@@ -2390,8 +2397,12 @@ async def rag_reindex():
     return {"ok": True, "stats": s}
 
 
-# ── Chat Lab endpoints ─────────────────────────────────────────────────────────
+# ── Chat Lab — Admin Knowledge Q&A ────────────────────────────────────────────
+# Full Ollama brain: KB (RAG) + read-only production DB tools + internet fetch
+# + Ollama memory DB (writable). Production DB is NEVER written by AI.
 _CHAT_ALLOWED_MODELS = {"qwen3:14b", "qwen3:8b", "qwen2.5:3b"}
+
+_CHAT_TIMEOUT_S = 240
 
 
 @app.get("/chat/models", dependencies=[Depends(require_api_key)])
@@ -2410,16 +2421,47 @@ async def chat_models():
     return {"models": models, "default": settings.ollama_model}
 
 
+@app.get("/chat/memory/stats", dependencies=[Depends(require_api_key)])
+async def chat_memory_stats():
+    """Return Ollama memory DB statistics."""
+    try:
+        from modules import ollama_memory
+        stats = await ollama_memory.list_memory_stats()
+        return {"ok": True, "stats": stats}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/chat/memory/history", dependencies=[Depends(require_api_key)])
+async def chat_memory_history(limit: int = 20):
+    """Return recent Q&A history from Ollama memory DB."""
+    try:
+        from modules import ollama_memory
+        rows = await ollama_memory.get_recent_questions(limit=min(limit, 50))
+        return {"ok": True, "history": rows, "count": len(rows)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "history": []}
+
+
 @app.post("/chat/message", dependencies=[Depends(require_api_key)])
 async def chat_message(request: Request):
     """
-    Chat Lab: RAG search → Ollama generation with conversation history.
+    Chat Lab — Admin Knowledge Q&A (Phase 4+5 enhanced).
+
+    Context pipeline (in order):
+      1. Ollama memory — past Q&A facts relevant to this question
+      2. RAG — knowledge_base KB articles
+      3. Read-only DB tools — employees, contacts, escort, payroll, attendance,
+         messages, bridge status (auto-detected from question)
+      4. Internet fetch — if question asks for external info
 
     Body JSON:
-      q           str   — user question (required)
-      model       str   — model override (optional; must be in allowed list)
+      q           str   — admin question (required)
+      model       str   — model override (optional)
       history     list  — [{role, content}] last N turns (optional)
-      app_context bool  — use RAG knowledge base (default true)
+      app_context bool  — use KB/RAG (default true)
+      db_context  bool  — use read-only DB tools (default true)
+      web_context bool  — allow internet fetch if URL in question (default true)
     """
     try:
         body = await request.json()
@@ -2432,68 +2474,148 @@ async def chat_message(request: Request):
 
     requested_model = (body.get("model") or "").strip() or None
     if requested_model and requested_model not in _CHAT_ALLOWED_MODELS:
-        raise HTTPException(status_code=400, detail=f"model not allowed; choose from {sorted(_CHAT_ALLOWED_MODELS)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"model not allowed; choose from {sorted(_CHAT_ALLOWED_MODELS)}",
+        )
 
     history = body.get("history") or []
     if not isinstance(history, list):
         history = []
 
     app_context: bool = body.get("app_context", True)
-
-    context = ""
-    citations: list = []
-    top_score = None
-
-    if app_context:
-        from modules import rag
-        res = await rag.answer(q, k=3, min_score=1.0)
-        if res:
-            context = res.get("answer", "")
-            citations = res.get("citations", [])
-            top_score = res.get("top_score")
+    db_context: bool = body.get("db_context", True)
+    web_context: bool = body.get("web_context", True)
 
     settings = get_settings()
     active_model = requested_model or settings.ollama_model
 
-    # Hard deadline well inside nginx's 300s window so we return a clean
-    # message rather than letting nginx cut the connection mid-response.
-    _CHAT_TIMEOUT_S = 240
+    # ── 1. Ollama memory context (past relevant facts) ──────────────────────
+    memory_context = ""
+    try:
+        from modules import ollama_memory
+        recent_qs = await ollama_memory.get_recent_questions(limit=5)
+        if recent_qs:
+            mem_lines = [
+                f"[Memory Q{i+1}] {rq['question'][:120]}: {rq['answer_summary'][:200]}"
+                for i, rq in enumerate(recent_qs)
+                if rq.get("answer_summary")
+            ]
+            if mem_lines:
+                memory_context = "আগের প্রশ্নের স্মৃতি:\n" + "\n".join(mem_lines)
+    except Exception as e:
+        log.debug("ollama_memory read failed: %s", e)
+
+    # ── 2. RAG / KB context ─────────────────────────────────────────────────
+    rag_context = ""
+    citations: list = []
+    top_score = None
+    if app_context:
+        try:
+            from modules import rag
+            res = await rag.answer(q, k=4, min_score=0.8)
+            if res:
+                rag_context = res.get("answer", "")
+                citations = res.get("citations", [])
+                top_score = res.get("top_score")
+        except Exception as e:
+            log.debug("RAG search failed: %s", e)
+
+    # ── 3. Read-only production DB tools ────────────────────────────────────
+    db_tool_results: list[dict] = []
+    db_tools_used: list[str] = []
+    if db_context:
+        try:
+            from modules import ai_readonly_tools
+            tools_needed = ai_readonly_tools.detect_tools_needed(q)
+            for tool_name in tools_needed[:3]:  # max 3 tools per query
+                result = await ai_readonly_tools.run_tool(tool_name, q)
+                if result.get("data"):
+                    db_tool_results.append(result)
+                    db_tools_used.append(tool_name)
+        except Exception as e:
+            log.debug("ai_readonly_tools failed: %s", e)
+
+    # ── 4. Internet fetch (if URL in question and web_context enabled) ──────
+    web_result: dict | None = None
+    if web_context:
+        import re as _re
+        url_match = _re.search(r"https?://[^\s\"'<>]+", q)
+        if url_match:
+            try:
+                from modules import ai_readonly_tools
+                web_result = await ai_readonly_tools.fetch_web_page(url_match.group())
+            except Exception as e:
+                log.debug("web fetch failed: %s", e)
+
+    # ── Build combined context block ─────────────────────────────────────────
+    context_parts: list[str] = []
+    if memory_context:
+        context_parts.append(memory_context)
+    if rag_context:
+        context_parts.append("জ্ঞানভাণ্ডার (KB):\n" + rag_context)
+    for tool_result in db_tool_results:
+        tool_name = tool_result["tool"]
+        data = tool_result["data"]
+        if isinstance(data, list) and data:
+            # Format as compact text table
+            keys = list(data[0].keys())[:6]
+            lines = [", ".join(str(row.get(k, "")) for k in keys) for row in data[:15]]
+            context_parts.append(f"[{tool_name}]:\n" + "\n".join(lines))
+        elif isinstance(data, dict):
+            context_parts.append(f"[{tool_name}]: " + ", ".join(f"{k}={v}" for k, v in list(data.items())[:8]))
+    if web_result and web_result.get("ok") and web_result.get("content"):
+        context_parts.append("ওয়েব তথ্য:\n" + web_result["content"][:1500])
+
+    combined_context = "\n\n".join(context_parts)
+
+    # ── Generate answer ──────────────────────────────────────────────────────
     try:
         answer = await asyncio.wait_for(
-            ai.generate_chat_reply(q, context, history, model=active_model),
+            ai.generate_chat_reply(q, combined_context, history, model=active_model),
             timeout=_CHAT_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
-        log.warning("[chat/message] LLM timed out after %ss for model=%s", _CHAT_TIMEOUT_S, active_model)
+        log.warning("[chat/message] LLM timeout after %ss model=%s", _CHAT_TIMEOUT_S, active_model)
         return JSONResponse(
             status_code=504,
             content={
                 "error": "llm_timeout",
                 "answer": "মডেলটি সময়মতো উত্তর দিতে পারেনি। একটু পরে আবার চেষ্টা করুন।",
                 "model": active_model,
-                "rag_used": app_context and bool(context),
+                "rag_used": bool(rag_context),
                 "timeout_s": _CHAT_TIMEOUT_S,
             },
         )
 
-    if answer:
-        return {
-            "answer": answer,
-            "model": active_model,
-            "rag_used": app_context and bool(context),
-            "citations": citations,
-            "top_score": top_score,
-        }
+    if not answer:
+        answer = combined_context[:500] or "উত্তর পাওয়া যায়নি। অফিসে যোগাযোগ করুন।"
 
-    # Fallback: return raw chunks if LLM failed
-    log.warning("[chat/message] LLM failed; returning raw chunks as fallback")
+    # ── 5. Save Q&A to Ollama memory DB (fire and forget) ───────────────────
+    async def _save_memory() -> None:
+        try:
+            from modules import ollama_memory
+            src_refs = citations + db_tools_used
+            if web_result and web_result.get("url"):
+                src_refs.append(web_result["url"])
+            await ollama_memory.record_question(
+                question=q,
+                answer_summary=answer[:500] if answer else "",
+                source_refs=src_refs,
+            )
+        except Exception:
+            pass
+    asyncio.create_task(_save_memory())
+
     return {
-        "answer": context or "উত্তর পাওয়া যায়নি। অফিসে যোগাযোগ করুন।",
+        "answer": answer,
         "model": active_model,
-        "rag_used": bool(context),
+        "rag_used": bool(rag_context),
+        "db_tools_used": db_tools_used,
+        "web_fetched": bool(web_result and web_result.get("ok")),
         "citations": citations,
         "top_score": top_score,
-        "fallback": True,
+        "memory_context_used": bool(memory_context),
     }
 
 
