@@ -39,6 +39,7 @@ from .historical_sync import run_historical_sync_once
 from .ingestion import ingest_message
 from .normalizer import normalize_bd_phone, normalize_name, normalize_search_text, collapse_search_text
 from .models import (
+    IncomeCreateRequest,
     IngestionRequest,
     ManualTxnRequest,
     ReversalRequest,
@@ -2470,4 +2471,65 @@ async def get_income_transaction(income_id: int):
     )
     if not row:
         raise HTTPException(404, "Income transaction not found")
+    return dict(row)
+
+
+@router.post("/income", dependencies=[Depends(_require_api_key)])
+async def create_income_transaction(req: IncomeCreateRequest):
+    """Manually create an income transaction using existing table columns."""
+    # Validate date format
+    try:
+        txn_date = date.fromisoformat(req.txn_date)
+    except ValueError:
+        raise HTTPException(400, "txn_date must be YYYY-MM-DD")
+
+    clean_name = (req.received_from or "").strip()
+    if not clean_name:
+        raise HTTPException(400, "received_from is required")
+    if not req.income_head.strip():
+        raise HTTPException(400, "income_head is required")
+    if req.amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+    if not req.money_received_by.strip():
+        raise HTTPException(400, "money_received_by is required")
+
+    mobile = normalize_bd_phone(req.mobile_number or "") if req.mobile_number else None
+    period = txn_date.strftime("%Y-%m")
+
+    # Pack income_head and money_received_by into source_message_text
+    source_text = f"[{req.income_head.strip()}] Received by: {req.money_received_by.strip()}"
+
+    # Generate a txn_ref if not provided
+    txn_ref = (req.money_receipt_no or "").strip() or None
+    if not txn_ref:
+        import uuid as _uuid
+        txn_ref = f"MAN-{_uuid.uuid4().hex[:10].upper()}"
+
+    # Idempotency guard on txn_ref
+    existing = await fetch_val(
+        "SELECT id FROM fpe_income_transactions WHERE txn_ref = $1", txn_ref
+    )
+    if existing:
+        raise HTTPException(409, f"Income with ref '{txn_ref}' already exists (id={existing})")
+
+    from app.database import db_conn as _db_conn
+    async with _db_conn() as conn:
+        new_id = await conn.fetchval(
+            """
+            INSERT INTO fpe_income_transactions
+                (txn_ref, employee_name_raw, amount, txn_date, accounting_period,
+                 reported_by_phone, source_message_text)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id
+            """,
+            txn_ref,
+            clean_name,
+            Decimal(str(req.amount)),
+            txn_date,
+            period,
+            mobile,
+            source_text,
+        )
+
+    row = await fetch_one("SELECT * FROM fpe_income_transactions WHERE id = $1", new_id)
     return dict(row)

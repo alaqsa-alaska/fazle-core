@@ -182,3 +182,13 @@ class ReversalRequest(BaseModel):
     txn_id: int
     reason: str
     created_by: str = "admin"
+
+
+class IncomeCreateRequest(BaseModel):
+    txn_date: str                        # YYYY-MM-DD
+    income_head: str
+    received_from: str
+    amount: float
+    money_received_by: str
+    mobile_number: Optional[str] = None
+    money_receipt_no: Optional[str] = None

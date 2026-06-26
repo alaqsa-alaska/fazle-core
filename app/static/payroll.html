@@ -139,6 +139,8 @@ input,select,textarea{padding:7px 10px;border:1.5px solid var(--border);border-r
 input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bottom:4px}
 .form-group{margin-bottom:12px}
+.form-label{font-size:11px;color:var(--muted);display:block;margin-bottom:3px}
+.form-input{padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg);color:var(--fg)}
 
 /* ─── Tabs (content sections) ────────────────────────────────────────────── */
 .tab{display:none}.tab.active{display:block}
@@ -739,6 +741,57 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
         <button class="btn sm secondary" onclick="exportIncomeCSV()">⬇ CSV</button>
       </div>
     </div>
+
+    <!-- ── Income Entry Form ──────────────────────────────────────────────── -->
+    <div class="card" id="incomeEntryCard" style="margin-bottom:16px;border:1px solid var(--accent);border-radius:8px;padding:16px">
+      <h3 style="margin:0 0 12px;font-size:0.95rem;color:var(--accent)">➕ New Income Entry</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">
+        <div>
+          <label class="form-label">Date <span style="color:var(--err)">*</span></label>
+          <input id="incEntryDate" type="date" class="form-input" style="width:100%">
+        </div>
+        <div>
+          <label class="form-label">Income Head <span style="color:var(--err)">*</span></label>
+          <select id="incEntryHead" class="form-input" style="width:100%">
+            <option value="">— select —</option>
+            <option>Form Fee</option>
+            <option>Training Fee</option>
+            <option>ID Card + Safety Vest</option>
+            <option>Client Bill</option>
+            <option>Security Deposit</option>
+            <option>Uniform Charge</option>
+            <option>Fines</option>
+            <option>Others</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label">Received From <span style="color:var(--err)">*</span></label>
+          <input id="incEntryFrom" type="text" class="form-input" placeholder="Name" style="width:100%">
+        </div>
+        <div>
+          <label class="form-label">Mobile Number</label>
+          <input id="incEntryMobile" type="text" class="form-input" placeholder="01XXXXXXXXX" style="width:100%" maxlength="14">
+        </div>
+        <div>
+          <label class="form-label">Amount (৳) <span style="color:var(--err)">*</span></label>
+          <input id="incEntryAmt" type="number" class="form-input" placeholder="0" min="1" step="any" style="width:100%">
+        </div>
+        <div>
+          <label class="form-label">Money Receipt No.</label>
+          <input id="incEntryReceipt" type="text" class="form-input" placeholder="MR-XXXX" style="width:100%">
+        </div>
+        <div>
+          <label class="form-label">Money Received By <span style="color:var(--err)">*</span></label>
+          <input id="incEntryReceivedBy" type="text" class="form-input" placeholder="Name" style="width:100%">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
+        <button class="btn sm secondary" onclick="cancelIncomeEntry()">Cancel</button>
+        <button class="btn sm" id="incEntrySaveBtn" onclick="saveIncomeEntry()">💾 Save</button>
+      </div>
+      <div id="incEntryMsg" style="margin-top:8px;font-size:12px;display:none"></div>
+    </div>
+
     <div class="stat-grid" id="incomeStats">
       <div class="stat"><div class="num" id="incomeTotal">—</div><div class="lbl">Total Transactions</div></div>
       <div class="stat"><div class="num" id="incomeTotalAmt">—</div><div class="lbl">Total Amount (৳)</div></div>
@@ -1106,7 +1159,7 @@ function loadTab(name) {
   if (name === 'review')        loadReview(true);
   if (name === 'sync')          loadSync();
   if (name === 'cash')          { cashCurrentPage = 1; stagingCurrentPage = 1; loadCash(true); loadStagingPayments(true); }
-  if (name === 'income')        { incomeCurrentPage = 1; loadIncome(true); }
+  if (name === 'income')        { incomeCurrentPage = 1; incomeEntryResetDate(); loadIncome(true); }
 }
 
 function refreshCurrent() { loadTab(currentTab); loadHeaderStatus(); }
@@ -3329,13 +3382,13 @@ async function loadIncome(resetPage = false) {
     // Summary stats
     const s = data.summary || {};
     const el = document.getElementById('incomeTotal');
-    if (el) el.textContent = fmt(incomeTotalRecs);
+    if (el) el.textContent = fmtNum(incomeTotalRecs);
     const elA = document.getElementById('incomeTotalAmt');
-    if (elA) elA.textContent = fmt(Math.round(s.total_amount || 0));
+    if (elA) elA.textContent = fmtNum(Math.round(s.total_amount || 0));
     const elT = document.getElementById('incomeToday');
-    if (elT) elT.textContent = fmt(Math.round(s.today_amount || 0));
+    if (elT) elT.textContent = fmtNum(Math.round(s.today_amount || 0));
     const elM = document.getElementById('incomeMonth');
-    if (elM) elM.textContent = fmt(Math.round(s.month_amount || 0));
+    if (elM) elM.textContent = fmtNum(Math.round(s.month_amount || 0));
 
     // Render rows
     if (!rows.length) {
@@ -3345,7 +3398,7 @@ async function loadIncome(resetPage = false) {
         <tr style="cursor:pointer" onclick="openIncomeDetail(${r.id})">
           <td>${r.txn_date || '—'}</td>
           <td>${esc(r.employee_name)}${r.auto_created_employee ? ' <span class="pill" style="background:var(--warn);color:#fff;font-size:10px">auto</span>' : ''}</td>
-          <td style="font-weight:600">৳${fmt(r.amount)}</td>
+          <td style="font-weight:600">৳${fmtAmt(r.amount)}</td>
           <td>${esc(r.reported_by_phone || '—')}</td>
           <td>${esc(r.accounting_period || '—')}</td>
           <td style="font-size:11px;color:var(--muted)">${esc(r.txn_ref || '—')}</td>
@@ -3379,7 +3432,7 @@ async function openIncomeDetail(id) {
       ['Period',       r.accounting_period],
       ['Employee',     r.employee_name],
       ['Emp ID Phone', r.employee_id_phone],
-      ['Amount',       '৳' + fmt(r.amount)],
+      ['Amount',       '৳' + fmtAmt(r.amount)],
       ['Reported By',  r.reported_by_phone],
       ['Auto Employee',r.auto_created_employee ? 'Yes (auto-created)' : 'No'],
       ['Message',      r.message_body],
@@ -3397,6 +3450,70 @@ async function openIncomeDetail(id) {
     document.getElementById('detailPanel').classList.add('open');
   } catch(e) {
     showToast('Could not load income detail: ' + e.message, 'err');
+  }
+}
+
+function incomeEntryResetDate() {
+  const d = document.getElementById('incEntryDate');
+  if (d) d.value = new Date().toISOString().slice(0,10);
+}
+
+function cancelIncomeEntry() {
+  ['incEntryHead','incEntryFrom','incEntryMobile','incEntryAmt','incEntryReceipt','incEntryReceivedBy']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  incomeEntryResetDate();
+  const msg = document.getElementById('incEntryMsg');
+  if (msg) msg.style.display = 'none';
+}
+
+async function saveIncomeEntry() {
+  const dateVal      = document.getElementById('incEntryDate')?.value?.trim() || '';
+  const head         = document.getElementById('incEntryHead')?.value?.trim() || '';
+  const receivedFrom = document.getElementById('incEntryFrom')?.value?.trim() || '';
+  const mobile       = document.getElementById('incEntryMobile')?.value?.trim() || '';
+  const amtRaw       = document.getElementById('incEntryAmt')?.value?.trim() || '';
+  const receiptNo    = document.getElementById('incEntryReceipt')?.value?.trim() || '';
+  const receivedBy   = document.getElementById('incEntryReceivedBy')?.value?.trim() || '';
+
+  const msg = document.getElementById('incEntryMsg');
+  const showMsg = (text, ok) => {
+    msg.textContent = text;
+    msg.style.color = ok ? 'var(--ok)' : 'var(--err)';
+    msg.style.display = 'block';
+  };
+
+  if (!dateVal)      { showMsg('Date is required.', false); return; }
+  if (!head)         { showMsg('Income Head is required.', false); return; }
+  if (!receivedFrom) { showMsg('Received From is required.', false); return; }
+  if (!amtRaw || isNaN(Number(amtRaw)) || Number(amtRaw) <= 0) {
+    showMsg('Valid amount is required.', false); return;
+  }
+  if (!receivedBy)   { showMsg('Money Received By is required.', false); return; }
+
+  const btn = document.getElementById('incEntrySaveBtn');
+  if (btn) btn.disabled = true;
+
+  try {
+    const payload = {
+      txn_date:          dateVal,
+      income_head:       head,
+      received_from:     receivedFrom,
+      mobile_number:     mobile || null,
+      amount:            Number(amtRaw),
+      money_receipt_no:  receiptNo || null,
+      money_received_by: receivedBy,
+    };
+    await api('/income', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    showMsg('Saved successfully!', true);
+    showToast('Income entry saved.', 'ok');
+    cancelIncomeEntry();
+    incomeCurrentPage = 1;
+    await loadIncome(true);
+  } catch(e) {
+    showMsg('Error: ' + e.message, false);
+    showToast('Save failed: ' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
