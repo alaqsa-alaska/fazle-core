@@ -48,6 +48,26 @@ BATCH_SIZE = 20         # messages per worker tick
 MAX_ATTEMPTS = 5        # give up after this many failures
 
 
+def _eligible_for_accounting_review(pdata: dict) -> bool:
+    """Only complete money/payment parses may enter the Accounting Review queue."""
+    name_raw = (pdata.get("employee_name_raw") or "").strip()
+    payout_phone = normalize_bd_phone(pdata.get("payout_phone") or "")
+    payout_method = (pdata.get("payout_method") or "").strip().lower()
+    amount_raw = pdata.get("amount")
+    try:
+        amount = Decimal(str(amount_raw)) if amount_raw is not None and str(amount_raw).strip() else None
+    except Exception:
+        amount = None
+    return bool(
+        name_raw
+        and payout_phone
+        and payout_method
+        and payout_method != "unknown"
+        and amount is not None
+        and amount > 0
+    )
+
+
 # ── Worker management ─────────────────────────────────────────────────────────
 
 _tasks: list[asyncio.Task] = []
@@ -259,8 +279,17 @@ async def _tick_zero_loss_gauges() -> None:
     try:
         from app.database import fetch_val
         from modules import observability as obs
+        from .routes import _cleanup_stale_review_queue_rows
+
+        await _cleanup_stale_review_queue_rows()
         pending_review = await fetch_val(
-            "SELECT COUNT(*) FROM fpe_unmatched_messages WHERE review_status='pending'"
+            "SELECT COUNT(*) FROM fpe_unmatched_messages "
+            "WHERE review_status='pending' "
+            "AND detected_amount IS NOT NULL "
+            "AND COALESCE(BTRIM(detected_employee_name), '') <> '' "
+            "AND COALESCE(BTRIM(detected_payout_phone), '') <> '' "
+            "AND COALESCE(BTRIM(detected_payout_method), '') <> '' "
+            "AND LOWER(detected_payout_method) <> 'unknown'"
         ) or 0
         dlq = await fetch_val(
             "SELECT COUNT(*) FROM fpe_message_processing_state "
@@ -309,13 +338,15 @@ async def _process_parsed_batch() -> None:
             vr = validate_for_accounting(msg_type, pdata)
             if not vr.valid:
                 confidence = float(row["confidence"]) if row["confidence"] is not None else None
-                await store_unmatched(
-                    msg_id, vr.failure_code, row["raw_content"],
-                    detected_payout_phone=normalize_bd_phone(pdata.get("payout_phone")),
-                    detected_employee_name=pdata.get("employee_name_raw"),
-                    detected_payout_method=pdata.get("payout_method") or "unknown",
-                    parser_confidence=confidence,
-                )
+                if _eligible_for_accounting_review(pdata):
+                    await store_unmatched(
+                        msg_id, vr.failure_code, row["raw_content"],
+                        detected_amount=Decimal(str(pdata.get("amount"))) if pdata.get("amount") is not None else None,
+                        detected_payout_phone=normalize_bd_phone(pdata.get("payout_phone")),
+                        detected_employee_name=pdata.get("employee_name_raw"),
+                        detected_payout_method=pdata.get("payout_method") or "unknown",
+                        parser_confidence=confidence,
+                    )
                 await mark_processing_status(msg_id, "skipped")
                 _diag_status, _diag_reason = "skipped", vr.failure_code
                 log.info(
@@ -439,15 +470,16 @@ async def _process_parsed_batch() -> None:
                 # IMPORTANT: amount detected but no employee. Money MUST remain
                 # visible in the review queue. Do NOT insert into the immutable
                 # ledger — that would corrupt accounting integrity.
-                await store_unmatched(
-                    msg_id, "no_employee_match", row["raw_content"],
-                    detected_amount=amount,
-                    detected_payout_phone=payout_phone,
-                    detected_employee_name=name_raw,
-                    detected_payout_method=method_str,
-                    detected_txn_date=txn_date,
-                    parser_confidence=confidence,
-                )
+                if _eligible_for_accounting_review(pdata):
+                    await store_unmatched(
+                        msg_id, "no_employee_match", row["raw_content"],
+                        detected_amount=amount,
+                        detected_payout_phone=payout_phone,
+                        detected_employee_name=name_raw,
+                        detected_payout_method=method_str,
+                        detected_txn_date=txn_date,
+                        parser_confidence=confidence,
+                    )
                 await mark_processing_status(msg_id, "failed", "employee match returned None")
                 _diag_status, _diag_reason = "failed", "no_employee_match"
                 continue
@@ -482,14 +514,15 @@ async def _process_parsed_batch() -> None:
             _diag_reason = str(exc)[:200]
             log.error("[fpe.worker.acct] failed msg_id=%d: %s", msg_id, exc, exc_info=True)
             try:
-                await store_unmatched(
-                    msg_id, "accounting_failed", row["raw_content"],
-                    detected_amount=Decimal(pdata.get("amount")) if pdata.get("amount") else None,
-                    detected_payout_phone=normalize_bd_phone(pdata.get("payout_phone")),
-                    detected_employee_name=pdata.get("employee_name_raw"),
-                    detected_payout_method=pdata.get("payout_method"),
-                    parser_confidence=float(row["confidence"]) if row["confidence"] is not None else None,
-                )
+                if _eligible_for_accounting_review(pdata):
+                    await store_unmatched(
+                        msg_id, "accounting_failed", row["raw_content"],
+                        detected_amount=Decimal(pdata.get("amount")) if pdata.get("amount") else None,
+                        detected_payout_phone=normalize_bd_phone(pdata.get("payout_phone")),
+                        detected_employee_name=pdata.get("employee_name_raw"),
+                        detected_payout_method=pdata.get("payout_method"),
+                        parser_confidence=float(row["confidence"]) if row["confidence"] is not None else None,
+                    )
             except Exception as ue:
                 log.debug("[fpe.worker.acct] store_unmatched failed: %s", ue)
             await mark_processing_status(msg_id, "failed", str(exc)[:500])

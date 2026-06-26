@@ -14,6 +14,21 @@ Payment Request -> Identity Verification -> Duty/Slip Verification -> Method/Num
 ## Completion Rule
 Payment is considered complete when admin's payment message reaches accountant WhatsApp.
 
+## Critical Distinction
+
+Employee/Escort request and Admin instruction are different workflows:
+
+| Item | Employee/Escort Request | Admin -> Accountant Instruction |
+|---|---|---|
+| Intent | Wants advance/payment | Confirms payment instruction |
+| Verification | Required | Not required after admin handoff |
+| Intermediate state | `fazle_payment_drafts.pending` | None |
+| Final ledger write | No | Yes, direct `wbom_cash_transactions` |
+| AI role | Conversation + draft support | No decision; code parser executes |
+| Employee create | No | Yes, if lookup mobile is missing |
+
+AI must never create a final transaction from an employee request. Only an Admin -> Accountant instruction may create the final cash transaction.
+
 ## Required Data
 Employee ID or name, phone/payment number, method, amount, purpose, admin sender, accountant recipient, timestamp.
 
@@ -26,7 +41,7 @@ Employee ID or name, phone/payment number, method, amount, purpose, admin sender
 ## Payment Draft State Machine
 
 ### Purpose
-All payment and advance requests create a draft in `fazle_payment_drafts`. The draft follows a defined lifecycle.
+Employee-origin payment and advance requests create a draft in `fazle_payment_drafts`. The draft follows a defined lifecycle. Admin -> Accountant payment instructions bypass drafts and create final transactions directly.
 
 ### States
 

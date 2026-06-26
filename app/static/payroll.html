@@ -89,9 +89,16 @@ main{padding:20px 24px;max-width:1440px;margin:0 auto;width:100%;flex:1}
 
 .stat{background:var(--surface);border:1px solid var(--border);border-radius:8px;
   padding:14px 16px;text-align:center}
+.stat.clickable{cursor:pointer;transition:transform .12s ease, box-shadow .12s ease,border-color .12s ease}
+.stat.clickable:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(15,23,42,.08);border-color:var(--accent3)}
 .stat .num{font-size:28px;font-weight:700;color:var(--accent2);line-height:1}
 .stat .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;
   letter-spacing:.6px;margin-top:6px}
+.title-search{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.title-search .search-box{display:flex;align-items:center;gap:8px;min-width:240px;flex:1;max-width:360px;background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:0 12px}
+.title-search .search-box input{border:none;background:transparent;padding:9px 0;width:100%}
+.title-search .search-box input:focus{border:none}
+.inline-help{font-size:11px;color:var(--muted)}
 
 /* ─── Tables ─────────────────────────────────────────────────────────────── */
 .tbl-wrap{overflow-x:auto}
@@ -214,6 +221,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <button data-tab="transactions" onclick="navigate('transactions')">💸 Transactions</button>
   <button data-tab="search" onclick="navigate('search')">🔍 Search</button>
   <button data-tab="employees" onclick="navigate('employees')">👥 Employees</button>
+  <button data-tab="addemployee" onclick="navigate('addemployee')">➕ Add Employee</button>
   <button data-tab="unmatched" onclick="navigate('unmatched')">❓ Unmatched</button>
   <button data-tab="review" onclick="navigate('review')">🛡️ Review Queue</button>
   <button data-tab="sync" onclick="navigate('sync')">🔄 Sync</button>
@@ -246,7 +254,16 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     </div>
 
     <div class="card">
-      <h2>🕐 Recent Transactions</h2>
+      <div class="title-search">
+        <h2 style="margin-bottom:0;border-bottom:none;padding-bottom:0">🕐 Recent Transactions</h2>
+        <div class="suggest-wrap" style="width:100%;max-width:360px">
+          <div class="search-box">
+            <span aria-hidden="true">🔍</span>
+            <input id="ovEmpSearch" type="text" autocomplete="off" placeholder="Search employee name or ID/mobile">
+          </div>
+          <div id="ovEmpSearchDrop" class="suggest-drop"></div>
+        </div>
+      </div>
       <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <div><label>From</label><input id="ovFrom" type="date" oninput="loadOverviewRecent(true)" style="width:140px"></div>
         <div><label>To</label><input id="ovTo" type="date" oninput="loadOverviewRecent(true)" style="width:140px"></div>
@@ -256,6 +273,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
         <button class="btn sm secondary" onclick="ovPreset('30d')">Last 30 days</button>
         <button class="btn sm secondary" onclick="ovPreset('all')">All time</button>
       </div>
+      <div id="ovEmpSearchPicked" class="inline-help"></div>
       <div id="ovSummary" class="stat-grid compact"></div>
       <div class="tbl-wrap" id="recentTxns"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
       <div class="pager" style="flex-wrap:wrap;gap:6px">
@@ -392,10 +410,14 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
             <option value="id_desc">ID descending</option>
           </select></div>
         <div style="flex:1;min-width:220px"><label>Search (name / phone / id)</label>
-          <input id="empQuery" type="text" placeholder="Type and press Enter…"
-                 onkeydown="if(event.key==='Enter')loadEmployees(true)" style="width:100%"></div>
+          <div class="suggest-wrap">
+            <input id="empQuery" type="text" autocomplete="off" placeholder="Type name, alias, phone, or employee ID…"
+                 onkeydown="if(event.key==='Enter')loadEmployees(true)" style="width:100%">
+            <div id="empQueryDrop" class="suggest-drop"></div>
+          </div>
+        </div>
         <button class="btn sm" onclick="loadEmployees(true)">Search</button>
-        <button class="btn sm secondary" onclick="document.getElementById('empQuery').value='';loadEmployees(true)">Clear</button>
+        <button class="btn sm secondary" onclick="clearEmployeeFilters()">Clear</button>
       </div>
       <div id="empCount" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
       <div class="tbl-wrap" id="empTable"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
@@ -415,6 +437,38 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
           <option value="100">100</option>
           <option value="200">200</option>
         </select>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-addemployee" class="tab">
+    <div class="card">
+      <h2>➕ Add New Employee</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Create the employee first so manual payment entry and review suggestions can resolve the mobile/employee ID immediately.</p>
+      <div style="max-width:560px">
+        <div class="form-group">
+          <label>Employee Mobile / Employee ID *</label>
+          <input id="newEmpMobile" type="text" placeholder="01XXXXXXXXX" style="width:100%">
+        </div>
+        <div class="form-group">
+          <label>Employee Name *</label>
+          <input id="newEmpName" type="text" placeholder="Full name" style="width:100%">
+        </div>
+        <div class="form-group">
+          <label>Role / Type</label>
+          <input id="newEmpRole" type="text" placeholder="Staff" style="width:100%">
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="newEmpStatus" style="width:100%">
+            <option value="active" selected>Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onclick="submitNewEmployeeFromTab()">Create Employee</button>
+          <button class="btn secondary" onclick="resetNewEmployeeForm()">Clear</button>
+        </div>
       </div>
     </div>
   </section>
@@ -529,8 +583,17 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Use for cash payments, corrections, or transactions not captured via WhatsApp.</p>
       <div style="max-width:480px">
         <div class="form-group">
-          <label>Employee ID *</label>
-          <input id="mEmpId" type="number" placeholder="e.g. 3" style="width:100%">
+          <label>Employee ID / Mobile *</label>
+          <div class="suggest-wrap">
+            <input id="mEmpLookup" type="text" autocomplete="off" placeholder="Type employee mobile / name" style="width:100%">
+            <div id="mEmpDrop" class="suggest-drop"></div>
+          </div>
+          <input id="mEmpId" type="hidden">
+          <div id="mEmpPicked" class="inline-help">Employee not selected yet.</div>
+        </div>
+        <div class="form-group">
+          <label>Employee Name</label>
+          <input id="mEmpName" type="text" readonly placeholder="Auto-filled from employee record" style="width:100%;background:var(--surface)">
         </div>
         <div class="form-group">
           <label>Amount (BDT) *</label>
@@ -757,6 +820,7 @@ let API_KEY = '';
 let currentTab = 'overview';
 let txnOffset = 0, txnTotal = 0, txnPages = 1;
 let TXN_LIMIT = 20;
+let txnCategoryFilter = '';
 // Overview Recent Transactions pagination state
 let ovOffset = 0, ovTotal = 0, ovPages = 1;
 const OV_LIMIT = 20;
@@ -775,6 +839,13 @@ let cashSearchTimer = null;
 // ── Income state ─────────────────────────────────────────────────────────────
 let incomeCurrentPage = 1, incomeTotalPages = 1, incomeTotalRecs = 0;
 let incomeSearchTimer = null;
+let overviewSuggestTimer = null;
+let overviewSelectedEmployee = null;
+let employeeFilterSelectedId = null;
+let manualSelectedEmployee = null;
+let overviewSuggestItems = [];
+let employeeSuggestItems = [];
+let manualSuggestItems = [];
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 async function doLogin() {
@@ -820,8 +891,172 @@ function showToast(msg, type = '') {
   t._timer = setTimeout(() => t.style.display = 'none', 3500);
 }
 
+async function fetchEmployeeSuggestions(q, limit = 10) {
+  const data = await api('/employees/suggest?q=' + encodeURIComponent(q) + '&limit=' + limit);
+  return data.results || [];
+}
+
+function suggestMarkup(rows, pickFnName) {
+  if (!rows.length) return '<div class="suggest-empty">No employees found</div>';
+  return rows.map((r, i) => `
+    <div class="suggest-row" onmousedown="event.preventDefault();${pickFnName}(${i})">
+      <div>
+        <div class="name">${esc(r.display_name || r.full_name || '(unnamed)')}</div>
+        <div class="meta">ID: ${esc(r.employee_id_phone || ('#' + r.employee_id))} · ${esc(r.mobile_number || '—')}</div>
+      </div>
+      <div class="right">
+        <span class="amt">৳${fmtAmt(r.total_paid || 0)}</span>
+        <span>${esc(r.match_type || '')}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function closeSuggestById(id) {
+  const drop = document.getElementById(id);
+  if (drop) {
+    drop.classList.remove('open');
+    drop.innerHTML = '';
+  }
+}
+
+function wireOverviewEmployeeSearch() {
+  const input = document.getElementById('ovEmpSearch');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    if (overviewSelectedEmployee && input.dataset.selectedLabel !== input.value.trim()) {
+      overviewSelectedEmployee = null;
+      input.dataset.selectedLabel = '';
+      document.getElementById('ovEmpSearchPicked').textContent = '';
+      loadOverviewRecent(true);
+    }
+    const q = input.value.trim();
+    clearTimeout(overviewSuggestTimer);
+    if (!q) { overviewSuggestItems = []; closeSuggestById('ovEmpSearchDrop'); return; }
+    overviewSuggestTimer = setTimeout(async () => {
+      try {
+        overviewSuggestItems = await fetchEmployeeSuggestions(q, 10);
+        const drop = document.getElementById('ovEmpSearchDrop');
+        drop.innerHTML = suggestMarkup(overviewSuggestItems, 'pickOverviewEmployee');
+        drop.classList.add('open');
+      } catch (_) {}
+    }, 220);
+  });
+  input.addEventListener('blur', () => setTimeout(() => closeSuggestById('ovEmpSearchDrop'), 180));
+}
+
+function pickOverviewEmployee(idx) {
+  const row = overviewSuggestItems[idx];
+  if (!row) return;
+  overviewSelectedEmployee = row.employee_id;
+  const input = document.getElementById('ovEmpSearch');
+  input.value = row.display_name || row.full_name || '';
+  input.dataset.selectedLabel = input.value.trim();
+  document.getElementById('ovEmpSearchPicked').textContent =
+    `Filtered by ${row.display_name || row.full_name} (${row.employee_id_phone || row.mobile_number || ('#' + row.employee_id)})`;
+  closeSuggestById('ovEmpSearchDrop');
+  loadOverviewRecent(true);
+}
+
+function wireEmployeesSuggest() {
+  const input = document.getElementById('empQuery');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    if (employeeFilterSelectedId && input.dataset.selectedLabel !== input.value.trim()) {
+      employeeFilterSelectedId = null;
+      input.dataset.selectedLabel = '';
+    }
+    const q = input.value.trim();
+    if (!q) { employeeSuggestItems = []; closeSuggestById('empQueryDrop'); return; }
+    clearTimeout(input._timer);
+    input._timer = setTimeout(async () => {
+      try {
+        employeeSuggestItems = await fetchEmployeeSuggestions(q, 10);
+        const drop = document.getElementById('empQueryDrop');
+        drop.innerHTML = suggestMarkup(employeeSuggestItems, 'pickEmployeeFilterSuggest');
+        drop.classList.add('open');
+      } catch (_) {}
+    }, 220);
+  });
+  input.addEventListener('blur', () => setTimeout(() => closeSuggestById('empQueryDrop'), 180));
+}
+
+function pickEmployeeFilterSuggest(idx) {
+  const row = employeeSuggestItems[idx];
+  if (!row) return;
+  employeeFilterSelectedId = row.employee_id;
+  const input = document.getElementById('empQuery');
+  input.value = row.display_name || row.full_name || '';
+  input.dataset.selectedLabel = input.value.trim();
+  closeSuggestById('empQueryDrop');
+  loadEmployees(true);
+}
+
+function clearEmployeeFilters() {
+  employeeFilterSelectedId = null;
+  const input = document.getElementById('empQuery');
+  input.value = '';
+  input.dataset.selectedLabel = '';
+  loadEmployees(true);
+}
+
+function wireManualEmployeeLookup() {
+  const input = document.getElementById('mEmpLookup');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    manualSelectedEmployee = null;
+    document.getElementById('mEmpId').value = '';
+    document.getElementById('mEmpName').value = '';
+    document.getElementById('mEmpPicked').textContent = 'Looking up employee…';
+    const q = input.value.trim();
+    if (!q) {
+      manualSuggestItems = [];
+      document.getElementById('mEmpPicked').textContent = 'Employee not selected yet.';
+      closeSuggestById('mEmpDrop');
+      return;
+    }
+    clearTimeout(input._timer);
+    input._timer = setTimeout(async () => {
+      try {
+        manualSuggestItems = await fetchEmployeeSuggestions(q, 10);
+        const drop = document.getElementById('mEmpDrop');
+        drop.innerHTML = suggestMarkup(manualSuggestItems, 'pickManualEmployee');
+        drop.classList.add('open');
+        if (!manualSuggestItems.length) {
+          document.getElementById('mEmpPicked').textContent = 'Employee not found. Use Add New Employee first.';
+        }
+      } catch (_) {}
+    }, 220);
+  });
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      if (manualSuggestItems.length) pickManualEmployee(0);
+    }
+  });
+  input.addEventListener('blur', () => setTimeout(() => closeSuggestById('mEmpDrop'), 180));
+}
+
+function pickManualEmployee(idx) {
+  const row = manualSuggestItems[idx];
+  if (!row) return;
+  manualSelectedEmployee = row;
+  document.getElementById('mEmpId').value = row.employee_id;
+  document.getElementById('mEmpLookup').value = row.employee_id_phone || row.mobile_number || '';
+  document.getElementById('mEmpLookup').dataset.selectedLabel = document.getElementById('mEmpLookup').value.trim();
+  document.getElementById('mEmpName').value = row.display_name || row.full_name || '';
+  document.getElementById('mEmpPicked').textContent = `Selected ${row.display_name || row.full_name}`;
+  if (!document.getElementById('mPhone').value) {
+    document.getElementById('mPhone').value = row.mobile_number || row.employee_id_phone || '';
+  }
+  closeSuggestById('mEmpDrop');
+}
+
 // ── Tab Switching / SPA Routing ──────────────────────────────────────────────
-const VALID_TABS = ['overview','transactions','search','employees','unmatched','review','sync','manual','cash','income'];
+const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','cash','income'];
 
 function tabFromPath() {
   const p = location.pathname.replace(/\/+$/, '');
@@ -866,6 +1101,7 @@ function loadTab(name) {
   if (name === 'transactions')  { txnOffset = 0; loadTransactions(); }
   if (name === 'search')        initEmpSearchTab();
   if (name === 'employees')     loadEmployees();
+  if (name === 'addemployee')   resetNewEmployeeForm(false);
   if (name === 'unmatched')     loadUnmatched();
   if (name === 'review')        loadReview(true);
   if (name === 'sync')          loadSync();
@@ -885,6 +1121,9 @@ function initApp() {
   const dateEl = document.getElementById('mDate');
   if (dateEl) dateEl.value = today.toISOString().slice(0,10);
 
+  wireOverviewEmployeeSearch();
+  wireEmployeesSuggest();
+  wireManualEmployeeLookup();
   loadHeaderStatus();
   // Activate tab from URL (deep-link / refresh support)
   const initialTab = tabFromPath();
@@ -925,10 +1164,10 @@ async function loadOverview() {
     const e = emps.value || {};
     const u = unmatched.value || {};
     document.getElementById('overviewStats').innerHTML = `
-      <div class="stat"><div class="num">${fmtNum(h.total_transactions || 0)}</div><div class="lbl">Total Transactions</div></div>
-      <div class="stat"><div class="num">${fmtNum(e.total || 0)}</div><div class="lbl">Active Employees</div></div>
-      <div class="stat"><div class="num">${fmtNum(h.pending_processing || 0)}</div><div class="lbl">Processing Queue</div></div>
-      <div class="stat"><div class="num">${fmtNum(h.total_messages_ingested || 0)}</div><div class="lbl">Msgs Ingested</div></div>
+      <div class="stat clickable" onclick="openOverviewCard('total_transactions')"><div class="num">${fmtNum(h.total_transactions || 0)}</div><div class="lbl">Total Transactions</div></div>
+      <div class="stat clickable" onclick="openOverviewCard('active_employees')"><div class="num">${fmtNum(e.total || 0)}</div><div class="lbl">Active Employees</div></div>
+      <div class="stat clickable" onclick="openOverviewCard('processing_queue')"><div class="num">${fmtNum(h.pending_processing || 0)}</div><div class="lbl">Processing Queue</div></div>
+      <div class="stat clickable" onclick="openOverviewCard('msgs_ingested')"><div class="num">${fmtNum(h.total_messages_ingested || 0)}</div><div class="lbl">Msgs Ingested</div></div>
     `;
 
     if (thisPeriod.status === 'fulfilled') {
@@ -941,14 +1180,14 @@ async function loadOverview() {
       });
       const txnThisMonth = thisPeriod.value.transactions || [];
       document.getElementById('monthSummary').innerHTML = `
-        <div class="stat"><div class="num">৳${fmtAmt(totalAmt)}</div><div class="lbl">Paid This Month</div></div>
-        <div class="stat"><div class="num">৳${fmtAmt(advAmt)}</div><div class="lbl">Advances</div></div>
-        <div class="stat"><div class="num">${txnThisMonth.length}</div><div class="lbl">Transactions</div></div>
-        <div class="stat"><div class="num">${fmtNum(u.total || 0)}</div><div class="lbl">Unmatched</div></div>
+        <div class="stat clickable" onclick="openOverviewCard('paid_this_month')"><div class="num">৳${fmtAmt(totalAmt)}</div><div class="lbl">Paid This Month</div></div>
+        <div class="stat clickable" onclick="openOverviewCard('advances')"><div class="num">৳${fmtAmt(advAmt)}</div><div class="lbl">Advances</div></div>
+        <div class="stat clickable" onclick="openOverviewCard('month_transactions')"><div class="num">${txnThisMonth.length}</div><div class="lbl">Transactions</div></div>
+        <div class="stat clickable" onclick="openOverviewCard('unmatched')"><div class="num">${fmtNum(u.total || 0)}</div><div class="lbl">Unmatched</div></div>
       `;
       document.getElementById('methodStats').innerHTML =
         Object.entries(byMethod).sort((a,b)=>b[1]-a[1]).map(([m,amt]) =>
-          `<div class="stat"><div class="num" style="font-size:20px">৳${fmtAmt(amt)}</div><div class="lbl">${(m||'').toUpperCase()}</div></div>`
+          `<div class="stat clickable" onclick="openOverviewCard('method:${m || 'unknown'}')"><div class="num" style="font-size:20px">৳${fmtAmt(amt)}</div><div class="lbl">${(m||'').toUpperCase()}</div></div>`
         ).join('') || '<div class="stat"><div class="num" style="font-size:14px;color:var(--muted)">No data</div><div class="lbl">This Month</div></div>';
     }
 
@@ -965,6 +1204,7 @@ async function loadOverviewRecent(resetPage = false) {
   let q = `?page_size=${OV_LIMIT}&page=${Math.floor(ovOffset / OV_LIMIT) + 1}`;
   if (from) q += '&from=' + from;
   if (to)   q += '&to=' + to;
+  if (overviewSelectedEmployee) q += '&employee_id=' + overviewSelectedEmployee;
   document.getElementById('recentTxns').innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
   try {
     const d = await api('/transactions' + q);
@@ -1005,6 +1245,62 @@ function ovPreset(kind) {
   loadOverviewRecent(true);
 }
 
+function openOverviewCard(kind) {
+  const today = new Date();
+  const month = today.toISOString().slice(0, 7);
+  if (kind === 'total_transactions') {
+    navigate('transactions');
+    clearTxnFilters();
+    txnPreset('all');
+    return;
+  }
+  if (kind === 'active_employees') {
+    navigate('employees');
+    document.getElementById('empStatus').value = 'active';
+    clearEmployeeFilters();
+    return;
+  }
+  if (kind === 'processing_queue') {
+    navigate('review');
+    document.getElementById('rvStatus').value = 'pending';
+    loadReview(true);
+    return;
+  }
+  if (kind === 'msgs_ingested') {
+    navigate('sync');
+    showToast('Opened sync/message context. No dedicated ingested-message list endpoint exists yet.', 'ok');
+    return;
+  }
+  if (kind === 'paid_this_month' || kind === 'month_transactions') {
+    navigate('transactions');
+    clearTxnFilters();
+    document.getElementById('txnPeriod').value = month;
+    txnCategoryFilter = '';
+    loadTransactions(true);
+    return;
+  }
+  if (kind === 'advances') {
+    navigate('transactions');
+    clearTxnFilters();
+    document.getElementById('txnPeriod').value = month;
+    txnCategoryFilter = 'advance';
+    loadTransactions(true);
+    return;
+  }
+  if (kind === 'unmatched') {
+    navigate('unmatched');
+    loadUnmatched();
+    return;
+  }
+  if (kind.startsWith('method:')) {
+    navigate('transactions');
+    clearTxnFilters();
+    document.getElementById('txnPeriod').value = month;
+    document.getElementById('txnMethod').value = kind.split(':')[1];
+    loadTransactions(true);
+  }
+}
+
 // ── Transactions ─────────────────────────────────────────────────────────────
 async function loadTransactions(resetPage = false) {
   if (resetPage) txnOffset = 0;
@@ -1016,6 +1312,7 @@ async function loadTransactions(resetPage = false) {
   let q = `?page_size=${TXN_LIMIT}&page=${Math.floor(txnOffset / TXN_LIMIT) + 1}`;
   if (period) q += '&period=' + period;
   if (method) q += '&method=' + method;
+  if (txnCategoryFilter) q += '&txn_category=' + txnCategoryFilter;
   if (empId)  q += '&employee_id=' + empId;
   if (from)   q += '&from=' + from;
   if (to)     q += '&to=' + to;
@@ -1025,6 +1322,7 @@ async function loadTransactions(resetPage = false) {
     const d = await api('/transactions' + q);
     txnTotal = d.total || 0;
     txnPages = d.pages || 1;
+    window.__lastTxnRows = d.transactions || [];
     const start = txnOffset + 1;
     const end = Math.min(txnOffset + TXN_LIMIT, txnTotal);
     document.getElementById('txnCount').textContent = txnTotal
@@ -1103,6 +1401,7 @@ function clearTxnFilters() {
   document.getElementById('txnTo').value = '';
   document.getElementById('txnMethod').value = '';
   document.getElementById('txnEmpId').value = '';
+  txnCategoryFilter = '';
   txnOffset = 0;
   loadTransactions();
 }
@@ -1117,7 +1416,7 @@ function renderTxnTable(rows, compact = false) {
       <th>Mobile No</th>
       <th>Amount</th>
       <th>Method / Remarks</th>
-      <th>Period</th>
+      ${compact ? '' : '<th>Period</th>'}
       <th></th>
     </tr></thead>
     <tbody>
@@ -1144,7 +1443,7 @@ function renderTxnTable(rows, compact = false) {
         <td class="mono">${phone}</td>
         <td class="amount">৳${fmtAmt(r.amount)}</td>
         <td>${methodPill(r.payout_method)}${remarks}</td>
-        <td class="mono">${r.accounting_period || '—'}</td>
+        ${compact ? '' : `<td class="mono">${r.accounting_period || '—'}</td>`}
         <td><button class="btn sm secondary" onclick="openTxnDetail(${r.id})">View</button> <button class="btn sm secondary" onclick="openEditTxn(${r.id})">✏️</button> <button class="btn sm secondary" style="color:#dc3545;border-color:#dc3545" onclick="confirmDeleteTxn(${r.id})">🗑</button></td>
       </tr>`;
     }).join('')}
@@ -1218,6 +1517,7 @@ async function loadEmployees(resetPage = false) {
   const sort = sortEl ? sortEl.value : 'name_asc';
   const q = (document.getElementById('empQuery').value || '').trim();
   let url = `/employees?status=${status}&sort=${sort}&page_size=${EMP_LIMIT}&page=${Math.floor(empOffset / EMP_LIMIT) + 1}`;
+  if (employeeFilterSelectedId) url += '&employee_id=' + employeeFilterSelectedId;
   if (q) url += '&q=' + encodeURIComponent(q);
   document.getElementById('empTable').innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
   try {
@@ -1274,75 +1574,47 @@ function empChangePageSize() { const v = parseInt(document.getElementById('empPa
 
 // ── Phase 18B: Add Employee ───────────────────────────────────────────────────
 function openAddEmployee() {
-  openPanel('➕ Add New Employee', `
-    <form id="addEmpForm" onsubmit="event.preventDefault();saveNewEmployee()">
-      <div style="display:grid;gap:10px">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>Full Name *</label>
-            <input id="addEmpName" type="text" required placeholder="e.g. রহিম উদ্দিন" style="width:100%"></div>
-          <div><label>Mobile *</label>
-            <input id="addEmpMobile" type="text" required placeholder="e.g. 01712345678" style="width:100%"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>Designation</label>
-            <input id="addEmpDesig" type="text" placeholder="Staff" style="width:100%"></div>
-          <div><label>Joining Date</label>
-            <input id="addEmpJoin" type="date" style="width:100%"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>bKash Number</label>
-            <input id="addEmpBkash" type="text" placeholder="Optional" style="width:100%"></div>
-          <div><label>Nagad Number</label>
-            <input id="addEmpNagad" type="text" placeholder="Optional" style="width:100%"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>Basic Salary (৳)</label>
-            <input id="addEmpSalary" type="number" min="0" step="0.01" placeholder="0" style="width:100%"></div>
-          <div><label>NID Number</label>
-            <input id="addEmpNid" type="text" placeholder="Optional" style="width:100%"></div>
-        </div>
-        <div><label>Emergency Contact</label>
-          <input id="addEmpEmerg" type="text" placeholder="Optional" style="width:100%"></div>
-        <div><label>Address</label>
-          <textarea id="addEmpAddr" rows="2" placeholder="Optional" style="width:100%;resize:vertical"></textarea></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button type="submit" class="btn sm">💾 Create Employee</button>
-          <button type="button" class="btn sm secondary" onclick="closePanel()">Cancel</button>
-        </div>
-      </div>
-    </form>
-  `);
+  navigate('addemployee');
 }
 
-async function saveNewEmployee() {
-  const name    = (document.getElementById('addEmpName').value || '').trim();
-  const mobile  = (document.getElementById('addEmpMobile').value || '').trim();
-  const desig   = (document.getElementById('addEmpDesig').value || '').trim() || 'Staff';
-  const join    = (document.getElementById('addEmpJoin').value || '').trim();
-  const bkash   = (document.getElementById('addEmpBkash').value || '').trim();
-  const nagad   = (document.getElementById('addEmpNagad').value || '').trim();
-  const salary  = parseFloat(document.getElementById('addEmpSalary').value) || null;
-  const nid     = (document.getElementById('addEmpNid').value || '').trim();
-  const emerg   = (document.getElementById('addEmpEmerg').value || '').trim();
-  const addr    = (document.getElementById('addEmpAddr').value || '').trim();
-  if (!name || !mobile) { showToast('Name and Mobile are required', 'err'); return; }
+function resetNewEmployeeForm(clearToast = true) {
+  ['newEmpMobile', 'newEmpName', 'newEmpRole'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  const status = document.getElementById('newEmpStatus');
+  if (status) status.value = 'active';
+  if (clearToast) showToast('Employee form cleared', 'ok');
+}
+
+async function submitNewEmployeeFromTab() {
+  const name   = (document.getElementById('newEmpName').value || '').trim();
+  const mobile = (document.getElementById('newEmpMobile').value || '').trim();
+  const role   = (document.getElementById('newEmpRole').value || '').trim() || 'Staff';
+  const status = (document.getElementById('newEmpStatus').value || 'active').trim();
+  if (!name || !mobile) { showToast('Employee name and mobile are required', 'err'); return; }
   try {
-    const r = await fetch('/api/admin/employees', {
+    const r = await fetch('/api/fpe/employees', {
       method: 'POST',
       headers: {'Content-Type':'application/json','X-Internal-Key': API_KEY},
       body: JSON.stringify({
-        employee_name: name, employee_mobile: mobile, designation: desig,
-        joining_date: join || null, bkash_number: bkash || null,
-        nagad_number: nagad || null, basic_salary: salary,
-        nid_number: nid || null, emergency_contact: emerg || null,
-        address: addr || null,
+        full_name: name,
+        employee_mobile: mobile,
+        role: role,
+        status: status,
       }),
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
-    showToast(`Employee '${name}' created (ID ${d.employee.employee_id})`, 'ok');
-    closePanel();
+    showToast(`Employee '${name}' created`, 'ok');
+    resetNewEmployeeForm(false);
+    employeeFilterSelectedId = d.employee.id;
     await loadEmployees(true);
+    if (document.getElementById('empQuery')) {
+      document.getElementById('empQuery').value = d.employee.full_name || name;
+      document.getElementById('empQuery').dataset.selectedLabel = document.getElementById('empQuery').value.trim();
+    }
+    navigate('employees');
   } catch(e) { showToast('Create failed: ' + e.message, 'err'); }
 }
 
@@ -1950,6 +2222,9 @@ async function submitManual() {
   if (!empId || !amount || !date || !reason) {
     showToast('Fill all required fields (*)', 'err'); return;
   }
+  if (!manualSelectedEmployee) {
+    showToast('Employee not found. Use Add New Employee first.', 'err'); return;
+  }
 
   try {
     const r = await api('/transactions/manual', {
@@ -1966,7 +2241,9 @@ async function submitManual() {
     });
     showToast('✓ Transaction created: #' + (r.transaction?.id || '?'), 'ok');
     // Clear form
-    ['mEmpId','mAmount','mPhone','mReason'].forEach(id => document.getElementById(id).value = '');
+    ['mEmpId','mEmpLookup','mEmpName','mAmount','mPhone','mReason'].forEach(id => document.getElementById(id).value = '');
+    manualSelectedEmployee = null;
+    document.getElementById('mEmpPicked').textContent = 'Employee not selected yet.';
     document.getElementById('mDate').value = new Date().toISOString().slice(0,10);
   } catch(e) {
     showToast('Error: ' + e.message, 'err');
@@ -2317,7 +2594,7 @@ function catPill(c) {
 // ═══════════════════════════════════════════════════════════════════════════
 let rvOffset = 0, rvTotal = 0, rvLimit = 50, rvItems = [];
 let rvSelected = new Set();
-let rvReviewerCache = localStorage.getItem('fpe_reviewer') || '';
+let rvReviewerCache = localStorage.getItem('fpe_reviewer') || 'admin';
 
 function confidenceBand(c){
   if (c == null) return {label:'—', cls:'muted'};
@@ -2348,18 +2625,20 @@ async function loadReview(reset){
           <div class="stat"><div class="num" style="color:${s.dlq>0?'var(--err)':''}">${fmtNum(s.dlq)}</div><div class="lbl">DLQ</div></div>`;
       }
       if (r) {
-        const ok = !!r.ok;
-        const delta = r.delta ?? '0';
-        const cls = ok ? 'ok' : 'warn';
+        const parserAvailable = !!r.parser_total_available;
+        const ok = parserAvailable ? !!r.ok : null;
+        const delta = r.delta;
+        const cls = parserAvailable ? (ok ? 'ok' : 'warn') : 'info';
+        const statusLabel = parserAvailable ? (ok ? 'Reconciled' : 'Delta Detected') : 'Parser total unavailable';
         document.getElementById('reconBanner').innerHTML = `
-          <div class="card" style="border-left:4px solid ${ok?'var(--ok)':'var(--warn)'}">
+          <div class="card" style="border-left:4px solid ${parserAvailable ? (ok?'var(--ok)':'var(--warn)') : 'var(--muted)'}">
             <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
-              <span class="pill ${cls}">${ok ? 'Reconciled' : 'Delta Detected'}</span>
-              <span style="font-size:13px"><b>Ledger delta:</b> ৳${fmtNum(Number(delta))}</span>
+              <span class="pill ${cls}" title="parser_detected_sum = total parser-detected WhatsApp/payment amount; ledger_sum = posted cash ledger total; unmatched_review_sum = amount still waiting in review. Negative delta usually means parser totals are unavailable or review values are incomplete.">${statusLabel}</span>
+              <span style="font-size:13px"><b>Ledger delta:</b> ${parserAvailable ? '৳' + fmtNum(Number(delta)) : 'Parser total unavailable'}</span>
               <span style="font-size:12px;color:var(--muted)">
-                parser=${rvFmtAmt(r.parser_sum)} ·
+                parser=${parserAvailable ? rvFmtAmt(r.parser_detected_sum) : 'Parser total unavailable'} ·
                 ledger=${rvFmtAmt(r.ledger_sum)} ·
-                unmatched=${rvFmtAmt(r.unmatched_sum)}
+                unmatched=${rvFmtAmt(r.unmatched_review_sum)}
               </span>
               <span style="font-size:11px;color:var(--muted)">${esc(r.invariant || '')}</span>
             </div>
@@ -2431,8 +2710,10 @@ function rvRenderTable(){
         <td>
           <button class="btn sm" onclick="rvOpenDetail(${r.id})">View</button>
           ${r.review_status === 'pending' ? `
-            <button class="btn sm" onclick="rvOpenApprove(${r.id})">Approve</button>
-            <button class="btn sm danger" onclick="rvOpenReject(${r.id})">Reject</button>` : ''}
+            <button class="btn sm" onclick="rvApproveOneClick(${r.id})">Approve</button>
+            <button class="btn sm danger" onclick="rvDismissOneClick(${r.id}, false)">Reject</button>
+            <button class="btn sm secondary" onclick="rvDismissOneClick(${r.id}, true)">Duplicate</button>
+            <button class="btn sm secondary" onclick="rvRequeueOneClick(${r.id})">Requeue</button>` : ''}
         </td>
       </tr>`;
     }).join('')}
@@ -2505,13 +2786,78 @@ async function rvOpenDetail(id){
     </div>
     ${it.review_status === 'pending' ? `
       <div style="margin-top:14px;display:flex;gap:6px;flex-wrap:wrap">
-        <button class="btn sm" onclick="rvOpenApprove(${id})">Approve Transaction</button>
-        <button class="btn sm danger" onclick="rvOpenReject(${id})">Reject</button>
-        <button class="btn sm secondary" onclick="rvRequeueParser(${it.fpe_wa_message_id})">Requeue Parser</button>
+        <button class="btn sm" onclick="rvApproveOneClick(${id})">Approve Transaction</button>
+        <button class="btn sm danger" onclick="rvDismissOneClick(${id}, false)">Reject</button>
+        <button class="btn sm secondary" onclick="rvDismissOneClick(${id}, true)">Duplicate</button>
+        <button class="btn sm secondary" onclick="rvRequeueOneClick(${id})">Requeue Parser</button>
       </div>` : ''}
     ${auditHtml}`;
   document.getElementById('detailPanel').classList.add('open');
   document.getElementById('panelBg').style.display = 'block';
+}
+
+function rvGetReviewer() {
+  const reviewer = (localStorage.getItem('fpe_reviewer') || rvReviewerCache || 'admin').trim() || 'admin';
+  localStorage.setItem('fpe_reviewer', reviewer);
+  rvReviewerCache = reviewer;
+  return reviewer;
+}
+
+async function rvApproveOneClick(id) {
+  const item = rvItems.find(x => x.id === id);
+  if (!item) return;
+  const candidate = item.auto_employee;
+  if (!candidate || !candidate.employee_id) {
+    showToast('No exact employee match available for one-click approve. Open Employee Search or Add New Employee first.', 'err');
+    return;
+  }
+  const qs = new URLSearchParams({
+    employee_id: String(candidate.employee_id),
+    reviewer: rvGetReviewer(),
+    txn_category: 'salary',
+  });
+  if (item.detected_payout_method) qs.set('payout_method', item.detected_payout_method);
+  if (item.detected_txn_date) qs.set('txn_date_override', item.detected_txn_date);
+  try {
+    const r = await api(`/admin/needs-review/${id}/promote?${qs.toString()}`, {method:'POST'});
+    showToast(`Promoted to ledger as txn #${r.txn_id}`, 'ok');
+    closeModal();
+    closePanel();
+    loadReview(true);
+  } catch(e) {
+    showToast('Promote failed: ' + e.message, 'err');
+  }
+}
+
+async function rvDismissOneClick(id, asDuplicate) {
+  const reviewer = rvGetReviewer();
+  const reason = asDuplicate ? 'duplicate' : 'not_payment';
+  const qs = new URLSearchParams({
+    reviewer,
+    reason,
+    as_duplicate: String(!!asDuplicate),
+  });
+  try {
+    await api(`/admin/needs-review/${id}/dismiss?${qs.toString()}`, {method:'POST'});
+    showToast(asDuplicate ? 'Marked duplicate' : 'Rejected', 'ok');
+    closeModal();
+    loadReview(true);
+  } catch(e) {
+    showToast((asDuplicate ? 'Duplicate' : 'Reject') + ' failed: ' + e.message, 'err');
+  }
+}
+
+async function rvRequeueOneClick(id) {
+  const item = rvItems.find(x => x.id === id);
+  if (!item || !item.fpe_wa_message_id) { showToast('No message id available', 'err'); return; }
+  try {
+    await api(`/admin/dlq/${item.fpe_wa_message_id}/requeue?reviewer=${encodeURIComponent(rvGetReviewer())}`, {method:'POST'});
+    showToast('Requeued for parser', 'ok');
+    closeModal();
+    loadReview(true);
+  } catch(e) {
+    showToast('Requeue failed: ' + e.message, 'err');
+  }
 }
 
 // ── Approve modal: search employee + confirm ──────────────────────────────
@@ -2690,10 +3036,8 @@ async function rvSubmitReject(id){
 
 async function rvRequeueParser(waId){
   if (!waId) { showToast('No fpe_wa_message_id for this row', 'err'); return; }
-  const reviewer = prompt('Reviewer name?', rvReviewerCache); if (!reviewer) return;
-  localStorage.setItem('fpe_reviewer', reviewer); rvReviewerCache = reviewer;
   try {
-    await api(`/admin/dlq/${waId}/requeue?reviewer=${encodeURIComponent(reviewer)}`, {method:'POST'});
+    await api(`/admin/dlq/${waId}/requeue?reviewer=${encodeURIComponent(rvGetReviewer())}`, {method:'POST'});
     showToast('✓ Requeued for parser', 'ok');
     loadReview(true);
   } catch(e){ showToast('Requeue failed: ' + e.message, 'err'); }
@@ -2702,10 +3046,8 @@ async function rvRequeueParser(waId){
 // ── Bulk actions ───────────────────────────────────────────────────────────
 async function bulkReview(kind){
   if (rvSelected.size === 0) { showToast('Select at least one row', 'err'); return; }
-  const reviewer = prompt(`Reviewer name? (${rvSelected.size} rows, action=${kind})`, rvReviewerCache);
-  if (!reviewer) return;
-  localStorage.setItem('fpe_reviewer', reviewer); rvReviewerCache = reviewer;
-  const reason = prompt('Reason / note?', kind) || kind;
+  const reviewer = rvGetReviewer();
+  const reason = kind;
   let ok = 0, fail = 0;
   for (const id of Array.from(rvSelected)) {
     try {

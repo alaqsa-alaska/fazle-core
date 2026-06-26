@@ -479,6 +479,52 @@ async def _probe_outbound() -> dict:
         return {"status": "critical", "error": str(e)[:200]}
 
 
+async def _probe_qdrant() -> dict:
+    """Endpoint/client-based Qdrant probe; does not depend on systemd names."""
+    try:
+        from modules import rag
+        status = await rag.qdrant_status()
+        if status.get("status") == "ok" and not status.get("collection_exists", True):
+            status["status"] = "degraded"
+            status["error"] = f"collection {status.get('collection')} missing"
+        return status
+    except Exception as e:
+        return {"status": "degraded", "error": str(e)[:200]}
+
+
+async def _first_existing_column(table: str, candidates: tuple[str, ...]) -> Optional[str]:
+    rows = await fetch_all(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=$1 AND column_name = ANY($2::text[])
+        """,
+        table,
+        list(candidates),
+    )
+    found = {r["column_name"] for r in rows}
+    for column in candidates:
+        if column in found:
+            return column
+    return None
+
+
+async def _whatsapp_message_time_expr() -> tuple[str, str]:
+    """
+    Return a safe timestamp expression for wbom_whatsapp_messages reports.
+
+    Production uses received_at; older/generated code sometimes assumed
+    created_at. This helper makes dashboard/report queries schema-aware.
+    """
+    column = await _first_existing_column(
+        "wbom_whatsapp_messages",
+        ("received_at", "source_timestamp", "processed_at", "created_at"),
+    )
+    if not column:
+        return "NOW()", "none"
+    return column, column
+
+
 def _probe_disk() -> dict:
     try:
         usage = shutil.disk_usage("/")
@@ -507,15 +553,16 @@ def _probe_mem() -> dict:
 
 
 async def _build_health(deep: bool = False) -> dict:
-    db_p, ollama_p, llm_p, ob_p, hb1_p, hb2_p = await asyncio.gather(
+    db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p = await asyncio.gather(
         _probe_db(),
         _safe_ollama(),
-        _safe_llm(),
+        _probe_qdrant(),
         _probe_outbound(),
         _probe_heartbeat("bridge_poller:bridge1"),
         _probe_heartbeat("bridge_poller:bridge2"),
         return_exceptions=False,
     )
+    llm_p = await _safe_llm() if deep else {"status": "skipped", "reason": "deep health only"}
     bridge1_db = _probe_file_age("/home/azim/whatsapp1/store/messages.db", "bridge1")
     bridge2_db = _probe_file_age("/home/azim/whatsapp2/store/messages.db", "bridge2")
     # SQLite mtime is activity, not liveness. A fresh poller heartbeat proves
@@ -539,6 +586,7 @@ async def _build_health(deep: bool = False) -> dict:
         "disk": disk_p,
         "mem": mem_p,
         "ollama": ollama_p,
+        "qdrant": qdrant_p,
         "llm": llm_p,
     }
     statuses = [p.get("status", "ok") for p in probes.values()]
@@ -776,10 +824,29 @@ async def rag_rebuild(_key: str = Depends(require_api_key)):
     """
     try:
         from modules import rag
+        qdrant_before = await rag.qdrant_status()
         stats = await rag.rebuild_index()
-        return {"status": "rebuilt", "stats": stats, "ts": time.time()}
+        qdrant_after = await rag.qdrant_status()
+        return {
+            "status": "rebuilt",
+            "stats": stats,
+            "qdrant_before": qdrant_before,
+            "qdrant_after": qdrant_after,
+            "ts": time.time(),
+        }
     except Exception as exc:
         log.error("[rag] /api/rag/rebuild failed: %s", exc)
+        return {"status": "error", "error": str(exc), "ts": time.time()}
+
+
+@app.get("/api/rag/qdrant-status")
+async def rag_qdrant_status(_key: str = Depends(require_api_key)):
+    """Configured Qdrant status via API/client, independent of systemd service names."""
+    try:
+        from modules import rag
+        return {"status": "ok", "qdrant": await rag.qdrant_status(), "ts": time.time()}
+    except Exception as exc:
+        log.error("[rag] /api/rag/qdrant-status failed: %s", exc)
         return {"status": "error", "error": str(exc), "ts": time.time()}
 
 
@@ -791,7 +858,12 @@ async def rag_stats(_key: str = Depends(require_api_key)):
     """
     try:
         from modules import rag
-        return {"status": "ok", "stats": await rag.stats(), "ts": time.time()}
+        return {
+            "status": "ok",
+            "stats": await rag.stats(),
+            "qdrant": await rag.qdrant_status(),
+            "ts": time.time(),
+        }
     except Exception as exc:
         log.error("[rag] /api/rag/stats failed: %s", exc)
         return {"status": "error", "error": str(exc), "ts": time.time()}
@@ -1047,6 +1119,13 @@ async def _handle_meta_message(msg: dict, value: dict):
 
     # send_to_admin is a dict: {admin_phone, text, bridge} — used for payment drafts
     if send_to_admin:
+        if send_to_admin.get("purpose") == "draft-only-contact-review":
+            await _save_draft(
+                "meta",
+                sender,
+                send_to_admin.get("text") or text,
+                classify(text) or "draft_only_contact",
+            )
         await _notify_admin(send_to_admin)
 
 
@@ -1442,8 +1521,8 @@ async def payroll_spa():
 
 @app.get("/payroll/{tab}", response_class=HTMLResponse)
 async def payroll_spa_tab(tab: str):
-    """SPA deep-link routes (overview/transactions/search/employees/unmatched/sync/manual)."""
-    allowed = {"overview", "transactions", "search", "employees", "unmatched", "review", "sync", "manual", "cash", "income"}
+    """SPA deep-link routes (overview/transactions/search/employees/addemployee/unmatched/sync/manual)."""
+    allowed = {"overview", "transactions", "search", "employees", "addemployee", "unmatched", "review", "sync", "manual", "cash", "income"}
     if tab not in allowed:
         raise HTTPException(status_code=404, detail="Unknown payroll tab")
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "payroll.html"))
@@ -2283,16 +2362,21 @@ async def b20_overview():
         async def _n(sql):
             r = await fetch_one(sql)
             return int(r["n"]) if r and r.get("n") is not None else 0
+        msg_time_expr, msg_time_column = await _whatsapp_message_time_expr()
         out["counts"] = {
             "active_employees": await _n("SELECT COUNT(*) AS n FROM wbom_employees WHERE status='active'"),
             "contacts": await _n("SELECT COUNT(*) AS n FROM wbom_contacts"),
             "messages": await _n("SELECT COUNT(*) AS n FROM wbom_whatsapp_messages"),
+            "messages_last_24h": await _n(
+                f"SELECT COUNT(*) AS n FROM wbom_whatsapp_messages WHERE {msg_time_expr} > NOW() - INTERVAL '24 hours'"
+            ),
             "escort_programs": await _n("SELECT COUNT(*) AS n FROM wbom_escort_programs"),
             "recruitment_leads": await _n("SELECT COUNT(*) AS n FROM fazle_recruitment_sessions"),
             "pending_drafts": await _n("SELECT COUNT(*) AS n FROM fazle_draft_replies WHERE status='pending' OR status IS NULL"),
             "pending_payment_drafts": await _n("SELECT COUNT(*) AS n FROM fazle_payment_drafts WHERE status='pending'"),
             "admin_users": await _n("SELECT COUNT(*) AS n FROM fazle_admins WHERE status='active'"),
         }
+        out["message_timestamp_column"] = msg_time_column
     except Exception as e:
         out["counts"] = {}
         out["errors"].append(f"counts: {e}")
@@ -2357,7 +2441,7 @@ async def b20_overview():
 @app.get("/rag/stats", dependencies=[Depends(require_api_key)])
 async def rag_stats():
     from modules import rag
-    return await rag.stats()
+    return {"stats": await rag.stats(), "qdrant": await rag.qdrant_status(), "ts": time.time()}
 
 
 @app.get("/rag/search", dependencies=[Depends(require_api_key)])
@@ -2406,8 +2490,10 @@ async def rag_answer(q: str, k: int = 3, min_score: float = 1.0, llm: bool = Tru
 @app.post("/rag/reindex", dependencies=[Depends(require_api_key)])
 async def rag_reindex():
     from modules import rag
+    qdrant_before = await rag.qdrant_status()
     s = await rag.build_index()
-    return {"ok": True, "stats": s}
+    qdrant_after = await rag.qdrant_status()
+    return {"ok": True, "stats": s, "qdrant_before": qdrant_before, "qdrant_after": qdrant_after}
 
 
 # ── Chat Lab — Admin Knowledge Q&A ────────────────────────────────────────────
@@ -2416,6 +2502,12 @@ async def rag_reindex():
 _CHAT_ALLOWED_MODELS = {"qwen3:14b", "qwen3:8b", "qwen2.5:3b"}
 
 _CHAT_TIMEOUT_S = 240
+
+_EXACT_DB_ANSWER_TOOLS = {
+    "get_daily_payments",
+    "get_employee_month_payments",
+    "get_lighter_assignment",
+}
 
 
 @app.get("/chat/models", dependencies=[Depends(require_api_key)])
@@ -2537,17 +2629,64 @@ async def chat_message(request: Request):
     # ── 3. Read-only production DB tools ────────────────────────────────────
     db_tool_results: list[dict] = []
     db_tools_used: list[str] = []
-    if db_context:
-        try:
-            from modules import ai_readonly_tools
-            tools_needed = ai_readonly_tools.detect_tools_needed(q)
+    exact_tools_needed: list[str] = []
+    try:
+        from modules import ai_readonly_tools
+        tools_needed = ai_readonly_tools.detect_tools_needed(q)
+        exact_tools_needed = [t for t in tools_needed if t in _EXACT_DB_ANSWER_TOOLS]
+
+        # Exact operational questions are database facts, not model opinions.
+        # Force DB tools even if the caller turns db_context off.
+        if db_context or exact_tools_needed:
             for tool_name in tools_needed[:3]:  # max 3 tools per query
                 result = await ai_readonly_tools.run_tool(tool_name, q)
-                if result.get("data"):
+                if result.get("data") is not None:
                     db_tool_results.append(result)
                     db_tools_used.append(tool_name)
-        except Exception as e:
-            log.debug("ai_readonly_tools failed: %s", e)
+    except Exception as e:
+        log.debug("ai_readonly_tools failed: %s", e)
+
+    # Exact-data operational questions should not be reinterpreted by the LLM.
+    # Return the tool answer directly so qwen cannot invent names/amounts when
+    # RAG has weak context or no live DB evidence.
+    for tool_result in db_tool_results:
+        if tool_result.get("tool") in _EXACT_DB_ANSWER_TOOLS and tool_result.get("answer"):
+            answer = str(tool_result["answer"])
+
+            async def _save_exact_memory() -> None:
+                try:
+                    from modules import ollama_memory
+                    await ollama_memory.record_question(
+                        question=q,
+                        answer_summary=answer[:500],
+                        source_refs=[str(tool_result.get("tool"))],
+                    )
+                except Exception:
+                    pass
+            asyncio.create_task(_save_exact_memory())
+
+            return {
+                "answer": answer,
+                "model": "deterministic-db-tool",
+                "rag_used": bool(rag_context),
+                "db_tools_used": db_tools_used,
+                "web_fetched": False,
+                "citations": citations,
+                "top_score": top_score,
+                "memory_context_used": bool(memory_context),
+            }
+    if exact_tools_needed:
+        return {
+            "answer": "এই প্রশ্নের উত্তর live database থেকে দিতে হবে, কিন্তু এখন DB tool থেকে নির্ভরযোগ্য ফল পাওয়া যায়নি। তাই ভুল তথ্য না দিয়ে উত্তর বন্ধ রাখা হলো।",
+            "model": "deterministic-db-tool",
+            "rag_used": bool(rag_context),
+            "db_tools_used": db_tools_used,
+            "web_fetched": False,
+            "citations": citations,
+            "top_score": top_score,
+            "memory_context_used": bool(memory_context),
+            "error": "exact_db_tool_unavailable",
+        }
 
     # ── 4. Internet fetch (if URL in question and web_context enabled) ──────
     web_result: dict | None = None

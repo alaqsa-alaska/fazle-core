@@ -5,8 +5,12 @@ Pipeline:
   raw bKash / Nagad SMS or admin paste
     → parse_payment_sms()  → {amount, mobile, name?, method, trxid?}
     → match_employee()     → (employee_id, ratio, match_type)
-    → ingest_payment_sms() → INSERT wbom_staging_payments (status=pending|auto_approved|rejected)
-    → auto_finalize_if_high_confidence() → creates fazle_payment_drafts + finalize_payment()
+    → ingest_payment_sms() → INSERT wbom_staging_payments (status=pending|unmatched)
+
+  Admin → Accountant final instruction
+    → parse_admin_cash_shorthand()
+    → match/create employee by ID: mobile if present, otherwise payout mobile
+    → INSERT wbom_cash_transactions directly (no draft)
        on (mobile exact OR name_ratio>=0.92) AND amount > 0
 
 Idempotency:
@@ -235,10 +239,12 @@ async def ingest_payment_sms(
     text: str,
     sender_number: Optional[str] = None,
     message_id: Optional[int] = None,
-    auto_finalize: bool = True,
+    auto_finalize: bool = False,
 ) -> dict:
     """
-    Parse SMS → match → stage. Optionally auto-finalize on high confidence.
+    Parse SMS → match → stage. Generic SMS/request ingestion never creates a
+    final transaction by default. Final ledger writes are reserved for explicit
+    Admin → Accountant payment instructions.
     Always returns a dict with at least {ok, status} and parsed fields.
     """
     parsed = parse_payment_sms(text)
@@ -251,7 +257,7 @@ async def _ingest_parsed(
     parsed: dict,
     sender_number: Optional[str] = None,
     message_id: Optional[int] = None,
-    auto_finalize: bool = True,
+    auto_finalize: bool = False,
 ) -> dict:
     """Shared ingest core — called by ingest_payment_sms and ingest_admin_cash_entry."""
     eid, ratio, mtype = await match_employee(parsed["mobile"], parsed.get("name"))
@@ -383,17 +389,24 @@ def looks_like_payment_sms(text: str) -> bool:
     return hits >= 1 and bool(re.search(r"\d{4,}", text))
 
 
-# ── Admin cash shorthand: "Saiful op +880 1849-258074(N) 305/-" ──────────────
+# ── Admin → Accountant final instruction ─────────────────────────────────────
+# Examples:
+#   ID: 01795122311 Manik Mea 01789123456(B) 5000/-
+#   Manik Mea 01789123456(N) 200/-
+#   Saiful op +880 1849-258074(C) 305/-
+
+_ADMIN_PHONE_PAT = r"(?:\+?880[\s\-]?1[3-9](?:[\s\-]?\d){8}|0?1[3-9](?:[\s\-]?\d){8})"
 
 _SHORTHAND_RE = re.compile(
-    r"(\+?880[\s\-]?(?:\d[\d\s\-]{8,12})|0?1[3-9]\d{8})"
-    r"\s*\(\s*([NBCRnbcr])\s*\)"
-    r"[\s,]*"
-    r"([\d,]+)\s*/-",
+    rf"^\s*(?:ID\s*[:\-]?\s*(?P<employee_id_mobile>{_ADMIN_PHONE_PAT})\s+)?"
+    r"(?P<name>.+?)\s+"
+    rf"(?P<payout_mobile>{_ADMIN_PHONE_PAT})"
+    r"\s*\(\s*(?P<method>N|B|C|R|BANK)\s*\)"
+    r"[\s,]*(?P<amount>[\d,]+)\s*/-",
     re.IGNORECASE,
 )
 _SHORTHAND_METHOD: dict[str, str] = {
-    "n": "nagad", "b": "bkash", "c": "cash", "r": "rocket",
+    "n": "nagad", "b": "bkash", "c": "cash", "r": "rocket", "bank": "bank",
 }
 
 
@@ -404,30 +417,141 @@ def is_admin_cash_shorthand(text: str) -> bool:
 
 def parse_admin_cash_shorthand(text: str) -> Optional[dict]:
     """
-    Parse shorthand like "Saiful op +880 1849-258074(N) 305/-" into a parsed dict.
+    Parse final Admin → Accountant payment instruction into a parsed dict.
     Returns None if the pattern is not matched or required fields are missing.
     """
     m = _SHORTHAND_RE.search(text)
     if not m:
         return None
-    phone = _norm_mobile(m.group(1))
-    method = _SHORTHAND_METHOD.get(m.group(2).lower(), "cash")
-    amount = _amount(m.group(3))
-    if not phone or not amount:
+    payout_mobile = _norm_mobile(m.group("payout_mobile"))
+    employee_id_mobile = _norm_mobile(m.group("employee_id_mobile")) if m.group("employee_id_mobile") else None
+    method = _SHORTHAND_METHOD.get(m.group("method").lower(), "cash")
+    amount = _amount(m.group("amount"))
+    if not payout_mobile or not amount:
         return None
-    name_raw = text[: m.start()].strip().strip(",;")
-    name = name_raw if 2 <= len(name_raw) <= 60 else None
-    return {"amount": amount, "mobile": phone, "name": name, "method": method, "trxid": None}
+    name = re.sub(r"\s+", " ", m.group("name").strip(" ,;:-"))
+    lookup_mobile = employee_id_mobile or payout_mobile
+    return {
+        "amount": amount,
+        "mobile": lookup_mobile,
+        "employee_id_mobile": lookup_mobile,
+        "payout_mobile": payout_mobile,
+        "name": name if 2 <= len(name) <= 80 else None,
+        "method": method,
+        "trxid": None,
+    }
+
+
+async def _match_or_create_instruction_employee(parsed: dict) -> tuple[int, str, str]:
+    """Find/create wbom employee for a final admin-accountant instruction."""
+    lookup_mobile = parsed.get("employee_id_mobile") or parsed.get("mobile")
+    payout_mobile = parsed.get("payout_mobile") or parsed.get("mobile")
+    name = parsed.get("name") or "Unknown"
+
+    eid, _ratio, _mtype = await match_employee(lookup_mobile, name)
+    if eid:
+        row = await fetch_one(
+            "SELECT employee_id, employee_name, employee_mobile FROM wbom_employees WHERE employee_id=$1",
+            eid,
+        )
+        return int(row["employee_id"]), row["employee_name"], row["employee_mobile"]
+
+    # Final admin instruction is authoritative: create minimal employee when
+    # no lookup key exists. employee_mobile remains the employee-id-mobile key.
+    employee_mobile = lookup_mobile or payout_mobile
+    if not employee_mobile:
+        raise RuntimeError("missing employee lookup mobile")
+    eid = await fetch_val(
+        """INSERT INTO wbom_employees
+               (employee_name, employee_mobile, designation, status, joining_date)
+           VALUES ($1, $2, 'Staff', 'Active', CURRENT_DATE)
+           ON CONFLICT (employee_mobile) DO UPDATE
+              SET employee_name = COALESCE(NULLIF(EXCLUDED.employee_name, ''), wbom_employees.employee_name),
+                  status = 'Active'
+           RETURNING employee_id""",
+        name,
+        employee_mobile,
+    )
+    return int(eid), name, employee_mobile
 
 
 async def ingest_admin_cash_entry(
     text: str,
     sender_number: Optional[str] = None,
+    message_id: Optional[int] = None,
 ) -> dict:
     """
-    Parse an admin cash shorthand message and stage it via the shared ingest core.
+    Parse a final Admin → Accountant instruction and write the ledger directly.
+    This path intentionally does not create `fazle_payment_drafts`.
     """
     parsed = parse_admin_cash_shorthand(text)
     if not parsed:
         return {"ok": False, "status": "unparsed", "reason": "Could not parse cash shorthand"}
-    return await _ingest_parsed(parsed, sender_number, None, True)
+
+    employee_id, employee_name, employee_mobile = await _match_or_create_instruction_employee(parsed)
+    idem = f"admin-accountant-message:{message_id}" if message_id is not None else None
+    if idem:
+        existing = await fetch_one(
+            "SELECT transaction_id FROM wbom_cash_transactions WHERE idempotency_key=$1",
+            idem,
+        )
+        if existing:
+            return {
+                "ok": True,
+                "status": "duplicate",
+                "transaction_id": existing["transaction_id"],
+                "duplicate_of": existing["transaction_id"],
+                "employee_id": employee_id,
+                "employee_name": employee_name,
+                **parsed,
+            }
+
+    row = await fetch_one(
+        """INSERT INTO wbom_cash_transactions
+              (employee_id, amount, transaction_type, payment_method,
+               payment_mobile, payment_number, employee_phone,
+               transaction_date, remarks, created_by, source,
+               idempotency_key, whatsapp_message_id)
+           VALUES ($1, $2, 'advance', $3, $4::text, $4::text, $5,
+                   CURRENT_DATE, $6, $7, 'admin-accountant-instruction',
+                   $8, $9)
+           ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+           RETURNING transaction_id""",
+        employee_id,
+        parsed["amount"],
+        parsed["method"],
+        parsed.get("payout_mobile") or parsed.get("mobile"),
+        parsed.get("employee_id_mobile") or employee_mobile,
+        f"Admin→Accountant instruction: {text.strip()[:500]}",
+        sender_number,
+        idem,
+        message_id,
+    )
+    if not row and idem:
+        existing = await fetch_one(
+            "SELECT transaction_id FROM wbom_cash_transactions WHERE idempotency_key=$1",
+            idem,
+        )
+        return {
+            "ok": True,
+            "status": "duplicate",
+            "transaction_id": existing["transaction_id"] if existing else None,
+            "employee_id": employee_id,
+            "employee_name": employee_name,
+            **parsed,
+        }
+
+    txn_id = row["transaction_id"] if row else None
+    log.info(
+        "[pay-ingest] final admin-accountant txn=%s employee_id=%s amount=%s method=%s",
+        txn_id, employee_id, parsed["amount"], parsed["method"],
+    )
+    return {
+        "ok": True,
+        "status": "finalized",
+        "transaction_id": txn_id,
+        "employee_id": employee_id,
+        "employee_name": employee_name,
+        "employee_mobile": employee_mobile,
+        **parsed,
+    }

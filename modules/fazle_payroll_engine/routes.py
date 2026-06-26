@@ -22,7 +22,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 from decimal import Decimal
@@ -34,7 +34,7 @@ from fastapi.security import APIKeyHeader
 from app.config import get_settings
 from app.database import execute, fetch_all, fetch_one, fetch_val
 from .accounting import create_transaction, reverse_transaction
-from .employee import _resolve_canonical
+from .employee import _resolve_canonical, create_employee_manual
 from .historical_sync import run_historical_sync_once
 from .ingestion import ingest_message
 from .normalizer import normalize_bd_phone, normalize_name, normalize_search_text, collapse_search_text
@@ -49,6 +49,9 @@ from .models import (
 log = logging.getLogger("fazle.fpe.routes")
 
 router = APIRouter(prefix="/api/fpe", tags=["fazle_payroll_engine"])
+
+REVIEW_QUEUE_RETENTION_HOURS = 24
+EMPLOYEE_INACTIVE_DAYS = 90
 
 # Local copy of require_api_key to avoid circular import (app.main → fpe → app.main)
 _API_KEY_HEADER = APIKeyHeader(name="X-Internal-Key", auto_error=False)
@@ -67,6 +70,172 @@ async def _require_api_key(key: str = Depends(_API_KEY_HEADER)):
         except Exception:
             pass
     raise HTTPException(status_code=403, detail="Unauthorized")
+
+
+def _review_queue_candidate_sql(alias: str = "u") -> str:
+    """Rows eligible for the accounting review queue."""
+    return (
+        f"{alias}.detected_amount IS NOT NULL "
+        f"AND COALESCE(BTRIM({alias}.detected_employee_name), '') <> '' "
+        f"AND COALESCE(BTRIM({alias}.detected_payout_phone), '') <> '' "
+        f"AND COALESCE(BTRIM({alias}.detected_payout_method), '') <> '' "
+        f"AND LOWER({alias}.detected_payout_method) <> 'unknown'"
+    )
+
+
+async def _cleanup_stale_review_queue_rows() -> dict[str, int]:
+    """
+    Hard-delete stale review-queue rows older than 24 hours.
+
+    This only targets transient review data:
+      - fpe_unmatched_messages rows (review queue storage)
+      - related fpe_review_audit_logs rows
+    It never touches canonical ledger transactions.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=REVIEW_QUEUE_RETENTION_HOURS)
+    stale_rows = await fetch_all(
+        "SELECT id FROM fpe_unmatched_messages WHERE created_at < $1 LIMIT 5000",
+        cutoff,
+    )
+    stale_ids = [int(r["id"]) for r in stale_rows]
+    if not stale_ids:
+        return {"deleted_reviews": 0, "deleted_audit_logs": 0}
+
+    deleted_logs = await fetch_val(
+        "SELECT COUNT(*) FROM fpe_review_audit_logs WHERE review_item_id = ANY($1::bigint[])",
+        stale_ids,
+    ) or 0
+    await execute(
+        "DELETE FROM fpe_review_audit_logs WHERE review_item_id = ANY($1::bigint[])",
+        stale_ids,
+    )
+    await execute(
+        "DELETE FROM fpe_unmatched_messages WHERE id = ANY($1::bigint[])",
+        stale_ids,
+    )
+    log.info(
+        "[fpe.cleanup] deleted %d stale review rows and %d audit rows older than %dh",
+        len(stale_ids),
+        int(deleted_logs),
+        REVIEW_QUEUE_RETENTION_HOURS,
+    )
+    return {"deleted_reviews": len(stale_ids), "deleted_audit_logs": int(deleted_logs)}
+
+
+async def _mark_stale_employees_inactive() -> int:
+    """Mark employees inactive when their latest payment is older than 90 days."""
+    cutoff = date.today() - timedelta(days=EMPLOYEE_INACTIVE_DAYS)
+    rows = await fetch_all(
+        """
+        WITH latest_paid AS (
+            SELECT employee_id, MAX(txn_date) AS last_payment_date
+            FROM fpe_cash_transactions
+            WHERE employee_id IS NOT NULL
+              AND NOT is_reversal
+              AND deleted_at IS NULL
+            GROUP BY employee_id
+        )
+        SELECT e.id
+        FROM fpe_employees e
+        JOIN latest_paid lp ON lp.employee_id = e.id
+        WHERE e.status = 'active'
+          AND lp.last_payment_date < $1
+        """,
+        cutoff,
+    )
+    employee_ids = [int(r["id"]) for r in rows]
+    if not employee_ids:
+        return 0
+
+    await execute(
+        "UPDATE fpe_employees SET status = 'inactive', updated_at = NOW() "
+        "WHERE id = ANY($1::int[]) AND status = 'active'",
+        employee_ids,
+    )
+    log.info(
+        "[fpe.maintenance] marked %d employees inactive using %d-day payment inactivity window",
+        len(employee_ids),
+        EMPLOYEE_INACTIVE_DAYS,
+    )
+    return len(employee_ids)
+
+
+async def _resolve_review_employee_candidate(
+    *,
+    detected_name: Optional[str],
+    detected_phone: Optional[str],
+) -> Optional[dict]:
+    """
+    Resolve a review item to one canonical employee using exact evidence only.
+
+    This keeps approve/reject actions one-click for admins without guessing:
+      1. exact phone / employee-id / phone alias
+      2. exact normalized name, only when it resolves to one canonical employee
+    """
+    phone = normalize_bd_phone(detected_phone) if detected_phone else None
+    if phone:
+        phone_row = await fetch_one(
+            """
+            SELECT e.id, e.full_name, e.employee_id_phone, e.primary_phone, e.canonical_employee_id
+            FROM fpe_employees e
+            LEFT JOIN fpe_employee_aliases a
+              ON a.employee_id = e.id AND a.alias_type = 'phone'
+            WHERE e.status = 'active'
+              AND (
+                e.employee_id_phone = $1
+                OR e.primary_phone = $1
+                OR a.alias_value = $1
+              )
+            ORDER BY e.id ASC
+            LIMIT 1
+            """,
+            phone,
+        )
+        if phone_row:
+            canon = await _resolve_canonical(dict(phone_row))
+            return {
+                "employee_id": canon["id"],
+                "employee_name": canon.get("full_name"),
+                "employee_id_phone": canon.get("employee_id_phone"),
+                "match_type": "exact_phone",
+            }
+
+    if detected_name:
+        name_norm = normalize_name(detected_name)
+        if name_norm:
+            name_rows = await fetch_all(
+                """
+                SELECT id, canonical_employee_id, full_name, primary_phone, employee_id_phone
+                FROM fpe_employees
+                WHERE status = 'active'
+                  AND (
+                    name_normalized = $1
+                    OR lower(full_name) = lower($2)
+                    OR id IN (
+                        SELECT employee_id
+                        FROM fpe_employee_aliases
+                        WHERE alias_type = 'name' AND alias_value = $1
+                    )
+                  )
+                LIMIT 5
+                """,
+                name_norm,
+                detected_name.strip(),
+            )
+            canon_map: dict[int, dict] = {}
+            for row in name_rows:
+                canon = await _resolve_canonical(dict(row))
+                canon_map[canon["id"]] = canon
+            if len(canon_map) == 1:
+                canon = next(iter(canon_map.values()))
+                return {
+                    "employee_id": canon["id"],
+                    "employee_name": canon.get("full_name"),
+                    "employee_id_phone": canon.get("employee_id_phone"),
+                    "match_type": "exact_name",
+                }
+
+    return None
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -104,6 +273,7 @@ async def list_transactions(
     employee_id: Optional[int] = Query(None),
     period: Optional[str] = Query(None, description="YYYY-MM"),
     method: Optional[str] = Query(None),
+    txn_category: Optional[str] = Query(None),
     date_from: Optional[date] = Query(None, alias="from"),
     date_to: Optional[date] = Query(None, alias="to"),
     page: Optional[int] = Query(None, ge=1),
@@ -133,6 +303,10 @@ async def list_transactions(
     if method:
         conditions.append(f"payout_method = ${i}")
         params.append(method)
+        i += 1
+    if txn_category:
+        conditions.append(f"txn_category = ${i}")
+        params.append(txn_category)
         i += 1
     if date_from:
         conditions.append(f"txn_date >= ${i}")
@@ -180,6 +354,7 @@ async def list_transactions(
         WHERE {where.replace('employee_id', 't.employee_id')
                     .replace('accounting_period', 't.accounting_period')
                     .replace('payout_method', 't.payout_method')
+                    .replace('txn_category', 't.txn_category')
                     .replace('NOT is_reversal', 'NOT t.is_reversal')
                     .replace('deleted_at IS NULL', 't.deleted_at IS NULL')}
         ORDER BY t.txn_date DESC, t.id DESC
@@ -253,6 +428,15 @@ async def reverse_txn(txn_id: int, req: ReversalRequest):
 
 @router.post("/transactions/manual", dependencies=[Depends(_require_api_key)])
 async def create_manual_txn(req: ManualTxnRequest):
+    emp = await fetch_one(
+        "SELECT id, status FROM fpe_employees WHERE id = $1",
+        req.employee_id,
+    )
+    if not emp:
+        raise HTTPException(400, "Employee not found. Use Add New Employee first.")
+    if emp["status"] != "active":
+        raise HTTPException(400, "Selected employee is inactive.")
+
     create_req = TransactionCreateRequest(
         employee_id=req.employee_id,
         amount=req.amount,
@@ -300,6 +484,7 @@ def _pick_best_name(*candidates: Optional[str]) -> Optional[str]:
 async def list_employees(
     status: str = Query("active"),
     q: Optional[str] = Query(None, description="search by name / phone / id_phone"),
+    employee_id: Optional[int] = Query(None, gt=0),
     page: Optional[int] = Query(None, ge=1),
     page_size: Optional[int] = Query(None, ge=1, le=500),
     limit: int = Query(200, le=500),
@@ -319,8 +504,13 @@ async def list_employees(
         limit = ps
         offset = (pg - 1) * ps
 
+    await _mark_stale_employees_inactive()
+
     params: list = [status]
     where = ["e.status = $1", "e.canonical_employee_id IS NULL"]
+    if employee_id is not None:
+        params.append(employee_id)
+        where.append(f"e.id = ${len(params)}")
     if q:
         params.append(f"%{q.strip()}%")
         i = len(params)
@@ -434,6 +624,21 @@ async def list_employees(
         "pages": pages_resp,
         "employees": employees,
     }
+
+
+@router.post("/employees", dependencies=[Depends(_require_api_key)])
+async def create_employee(payload: dict):
+    """Create a new FPE employee from the protected payroll SPA."""
+    try:
+        employee = await create_employee_manual(
+            full_name=(payload.get("full_name") or payload.get("employee_name") or "").strip(),
+            employee_mobile=(payload.get("employee_mobile") or payload.get("employee_id_phone") or "").strip(),
+            role_or_type=(payload.get("role") or payload.get("role_type") or payload.get("department")),
+            status=(payload.get("status") or "active").strip() or "active",
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"status": "created", "employee": employee}
 
 
 @router.get("/employees/search", dependencies=[Depends(_require_api_key)])
@@ -1314,6 +1519,7 @@ async def get_ledger(emp_id: int, periods: int = Query(12, le=36)):
 
 @router.get("/unmatched", dependencies=[Depends(_require_api_key)])
 async def list_unmatched(reviewed: bool = Query(False), limit: int = Query(50, le=200)):
+    await _cleanup_stale_review_queue_rows()
     rows = await fetch_all(
         """
         SELECT u.id, u.fpe_wa_message_id, u.reason, u.raw_content,
@@ -1544,6 +1750,7 @@ async def admin_reconcile(
     source: Optional[str] = Query(None, regex=r"^(bridge1|bridge2|meta)$"),
 ):
     """Reconciliation invariant: ledger_sum + unmatched_review_sum == parser_sum."""
+    await _cleanup_stale_review_queue_rows()
     return await compute_reconciliation(period=period, source=source)
 
 
@@ -1555,8 +1762,9 @@ async def admin_needs_review(
     offset: int = Query(0, ge=0),
 ):
     """Pending Accounting Candidates — money detected but not yet in ledger."""
+    await _cleanup_stale_review_queue_rows()
     args: list = [status]
-    where = "u.review_status = $1"
+    where = f"u.review_status = $1 AND {_review_queue_candidate_sql('u')}"
     if reason:
         args.append(reason)
         where += f" AND u.reason = ${len(args)}"
@@ -1589,7 +1797,14 @@ async def admin_needs_review(
         f"SELECT COUNT(*) FROM fpe_unmatched_messages u WHERE {where.replace('$1', '$1')}",
         *args[: len(args) - 2],
     ) or 0
-    return {"total": int(total), "items": [dict(r) for r in rows]}
+    items = [dict(r) for r in rows]
+    for item in items:
+        candidate = await _resolve_review_employee_candidate(
+            detected_name=item.get("detected_employee_name"),
+            detected_phone=item.get("detected_payout_phone"),
+        )
+        item["auto_employee"] = candidate
+    return {"total": int(total), "items": items}
 
 
 @router.post(
@@ -1616,6 +1831,7 @@ async def admin_needs_review_promote(
         overrides via amount_override (audited via review_note).
       * Idempotent: a second promotion is rejected if promoted_txn_id is set.
     """
+    await _cleanup_stale_review_queue_rows()
     row = await fetch_one(
         """
         SELECT u.id, u.fpe_wa_message_id, u.review_status, u.promoted_txn_id,
@@ -1726,6 +1942,7 @@ async def admin_needs_review_dismiss(
     as_duplicate: bool = Query(False),
 ):
     """Mark a review row as dismissed (or duplicate). Row is preserved."""
+    await _cleanup_stale_review_queue_rows()
     row = await fetch_one(
         "SELECT id, review_status FROM fpe_unmatched_messages WHERE id=$1",
         unmatched_id,
@@ -1865,24 +2082,28 @@ async def admin_gap_scan_runs(limit: int = Query(50, ge=1, le=500)):
 @router.get("/admin/review-summary", dependencies=[Depends(_require_api_key)])
 async def admin_review_summary():
     """Dashboard cards for /payroll/review."""
+    await _cleanup_stale_review_queue_rows()
     pending = await fetch_val(
-        "SELECT COUNT(*) FROM fpe_unmatched_messages WHERE review_status='pending'"
+        "SELECT COUNT(*) FROM fpe_unmatched_messages "
+        f"WHERE review_status='pending' AND {_review_queue_candidate_sql('fpe_unmatched_messages')}"
     ) or 0
     low_conf = await fetch_val(
         "SELECT COUNT(*) FROM fpe_unmatched_messages "
-        "WHERE review_status='pending' AND parser_confidence IS NOT NULL AND parser_confidence < 0.5"
+        f"WHERE review_status='pending' AND {_review_queue_candidate_sql('fpe_unmatched_messages')} "
+        "AND parser_confidence IS NOT NULL AND parser_confidence < 0.5"
     ) or 0
     pending_amount = await fetch_val(
         "SELECT COALESCE(SUM(detected_amount),0) FROM fpe_unmatched_messages "
-        "WHERE review_status='pending' AND detected_amount IS NOT NULL"
+        f"WHERE review_status='pending' AND {_review_queue_candidate_sql('fpe_unmatched_messages')}"
     ) or 0
     rejected = await fetch_val(
         "SELECT COUNT(*) FROM fpe_unmatched_messages "
-        "WHERE review_status IN ('dismissed','duplicate')"
+        f"WHERE review_status IN ('dismissed','duplicate') AND {_review_queue_candidate_sql('fpe_unmatched_messages')}"
     ) or 0
     promoted_today = await fetch_val(
         "SELECT COUNT(*) FROM fpe_unmatched_messages "
-        "WHERE review_status='promoted' AND reviewed_at::date = CURRENT_DATE"
+        f"WHERE review_status='promoted' AND {_review_queue_candidate_sql('fpe_unmatched_messages')} "
+        "AND reviewed_at::date = CURRENT_DATE"
     ) or 0
     dlq = await fetch_val(
         "SELECT COUNT(*) FROM fpe_message_processing_state "

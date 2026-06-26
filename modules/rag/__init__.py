@@ -260,6 +260,58 @@ def _qdrant_ensure_collection() -> None:
     else:
         log.debug("[rag] Qdrant collection %r already exists", QDRANT_COLLECTION_NAME)
 
+
+async def qdrant_status() -> dict[str, Any]:
+    """
+    Endpoint-oriented Qdrant health/status probe.
+
+    This intentionally checks the configured Qdrant API/client path rather than
+    relying on an OS service name, because production may run Qdrant in a
+    container or embedded fallback.
+    """
+    if not HYBRID_SEARCH_ENABLED:
+        return {
+            "status": "disabled",
+            "hybrid_search_enabled": False,
+            "collection": QDRANT_COLLECTION_NAME,
+        }
+
+    try:
+        client = _get_qdrant_client()
+
+        def _probe() -> dict[str, Any]:
+            collections = client.get_collections().collections
+            names = [c.name for c in collections]
+            out: dict[str, Any] = {
+                "status": "ok",
+                "hybrid_search_enabled": True,
+                "mode": "server" if _QDRANT_HOST else "embedded",
+                "host": _QDRANT_HOST or None,
+                "port": _QDRANT_PORT if _QDRANT_HOST else None,
+                "collection": QDRANT_COLLECTION_NAME,
+                "collection_exists": QDRANT_COLLECTION_NAME in names,
+                "collections": names,
+            }
+            if QDRANT_COLLECTION_NAME in names:
+                info = client.get_collection(QDRANT_COLLECTION_NAME)
+                out["points_count"] = int(getattr(info, "points_count", 0) or 0)
+                out["vectors_count"] = int(getattr(info, "vectors_count", 0) or 0)
+                out["optimizer_status"] = str(getattr(info, "optimizer_status", "") or "")
+            return out
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _probe)
+    except Exception as exc:
+        return {
+            "status": "degraded",
+            "hybrid_search_enabled": True,
+            "mode": "server" if _QDRANT_HOST else "embedded",
+            "host": _QDRANT_HOST or None,
+            "port": _QDRANT_PORT if _QDRANT_HOST else None,
+            "collection": QDRANT_COLLECTION_NAME,
+            "error": str(exc)[:300],
+        }
+
 # ── END HYBRID RAG Milestone 1 Scaffold ───────────────────────────────────────
 
 # ── PATCH 1: Ingestion exclude-lists ──────────────────────────────────────────

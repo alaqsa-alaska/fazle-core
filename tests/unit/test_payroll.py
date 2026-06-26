@@ -36,8 +36,8 @@ class TestPayrollCompute:
         )
 
         assert result is not None
-        # basic_salary=9000, program_allowance=5×800=4000, gross=13000, net=13000
-        assert result.get("gross_salary") == pytest.approx(13000.0, rel=0.01)
+        # basic_salary=9000, program_allowance=5×400=2000, gross=11000, net=11000
+        assert result.get("gross_salary") == pytest.approx(11000.0, rel=0.01)
 
     async def test_advances_deducted_from_net(
         self, test_db_pool, seed_employee, seed_escort_program
@@ -71,9 +71,9 @@ class TestPayrollCompute:
             computed_by="test-admin",
         )
 
-        # net = gross(9000+2400) - advances(1500) = 9900
-        assert result["total_advances"] == pytest.approx(1500.0)
-        assert result["net_salary"] == pytest.approx(9900.0, rel=0.01)
+        # net = gross(9000+1200) - advances(1500) = 8700
+        assert result["total_advances"] == pytest.approx(1500.0, rel=0.01)
+        assert result["net_salary"] == pytest.approx(8700.0, rel=0.01)
 
     async def test_net_salary_never_negative(
         self, test_db_pool, seed_employee, seed_escort_program

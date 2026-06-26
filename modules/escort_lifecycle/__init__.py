@@ -673,11 +673,14 @@ async def _lookup_active_program_by_phone(phone: str) -> Optional[dict]:
         return None
     try:
         row = await fetch_one(
-            """SELECT ep.program_id, ep.mother_vessel, ep.lighter_name,
+            """SELECT ep.program_id, ep.mother_vessel,
+                      ep.lighter_vessel AS lighter_name,
                       ep.program_date::text AS program_date,
-                      ep.location, ep.escort_name,
-                      ep.lighter_master_mobile
+                      ep.destination AS location,
+                      COALESCE(emp.employee_name, ep.escort_name) AS escort_name,
+                      ep.master_mobile AS lighter_master_mobile
                FROM wbom_escort_programs ep
+               LEFT JOIN wbom_employees emp ON emp.employee_id = ep.escort_employee_id
                WHERE regexp_replace(ep.escort_mobile, '\\D', '', 'g')
                      LIKE '%' || RIGHT(regexp_replace($1, '\\D', '', 'g'), 11)
                AND ep.status NOT IN ('Completed', 'Cancelled')
@@ -687,6 +690,46 @@ async def _lookup_active_program_by_phone(phone: str) -> Optional[dict]:
         return dict(row) if row else None
     except Exception as _e:
         log.debug(f"[release-ocr] program lookup failed for phone={phone}: {_e}")
+        return None
+
+
+async def _lookup_active_program_by_slip(ocr_result: dict) -> Optional[dict]:
+    """DB READ ONLY: fallback match by OCR vessel/lighter/escort fields."""
+    vessel = (ocr_result.get("vessel") or "").strip()
+    escort = (ocr_result.get("employee_name") or "").strip()
+    if len(vessel) < 3 and len(escort) < 3:
+        return None
+    try:
+        row = await fetch_one(
+            """SELECT ep.program_id, ep.mother_vessel,
+                      ep.lighter_vessel AS lighter_name,
+                      ep.program_date::text AS program_date,
+                      ep.destination AS location,
+                      COALESCE(emp.employee_name, ep.escort_name) AS escort_name,
+                      ep.master_mobile AS lighter_master_mobile
+               FROM wbom_escort_programs ep
+               LEFT JOIN wbom_employees emp ON emp.employee_id = ep.escort_employee_id
+               WHERE ep.status NOT IN ('Completed', 'Cancelled')
+                 AND (
+                      ($1 <> '' AND (
+                          ep.lighter_vessel ILIKE '%' || $1 || '%'
+                          OR ep.mother_vessel ILIKE '%' || $1 || '%'
+                      ))
+                      OR ($2 <> '' AND (
+                          emp.employee_name ILIKE '%' || $2 || '%'
+                          OR ep.escort_name ILIKE '%' || $2 || '%'
+                      ))
+                 )
+               ORDER BY ep.program_date DESC, ep.program_id DESC
+               LIMIT 1""",
+            vessel, escort,
+        )
+        return dict(row) if row else None
+    except Exception as _e:
+        log.debug(
+            "[release-ocr] slip-field program lookup failed vessel=%r escort=%r err=%s",
+            vessel, escort, _e,
+        )
         return None
 
 
@@ -708,8 +751,15 @@ async def handle_ocr_release_slip(
 
     # DB lookup: find active escort program by sender phone — enriches OCR gaps
     program = await _lookup_active_program_by_phone(phone)
+    match_source = "phone" if program else ""
+    if not program:
+        program = await _lookup_active_program_by_slip(ocr_result)
+        match_source = "slip-fields" if program else ""
     if program:
-        log.info(f"[release-ocr] active program found: program_id={program.get('program_id')} for phone={phone}")
+        log.info(
+            "[release-ocr] active program found: program_id=%s match_source=%s phone=%s",
+            program.get("program_id"), match_source, phone,
+        )
         # Fill in any fields the OCR missed, using DB as authoritative source
         if not ocr_result.get("employee_name") and program.get("escort_name"):
             ocr_result = dict(ocr_result)
@@ -728,7 +778,7 @@ async def handle_ocr_release_slip(
     # Append DB program context to admin draft
     if program:
         prog_lines = [
-            f"\n📋 DB Program (auto-matched by phone):",
+            f"\n📋 DB Program (auto-matched by {match_source or 'unknown'}):",
             f"  Program ID: {program.get('program_id')}",
             f"  Mother Vessel: {program.get('mother_vessel', '?')}",
             f"  Lighter: {program.get('lighter_name', '?')}",
@@ -758,6 +808,7 @@ async def handle_ocr_release_slip(
             "incomplete": bool(missing),
             "program_id": program.get("program_id") if program else None,
             "db_program_matched": bool(program),
+            "db_match_source": match_source,
             "confidence_score": ocr_result.get("confidence_score", 0),
             "draft_type": "release_slip",
         }),

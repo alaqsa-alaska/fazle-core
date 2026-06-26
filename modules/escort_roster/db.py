@@ -136,6 +136,7 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
         "running": "active",
         "completed": "completed",
         "cancelled": "cancelled",
+        "expired": "expired",
     }
     roster_status = status_map.get(prog_status.lower(), "draft")
 
@@ -782,19 +783,14 @@ async def cleanup_draft_entries(actor: str = "system") -> dict:
 
 async def expire_stale_drafts(hours: int = 48, actor: str = "scheduler") -> dict:
     """
-    Delete draft entries whose expires_at has passed (or is not set and
-    created_at is older than `hours`).
+    Expire stale draft entries and their source programs without hard delete.
+    Keeping the rows preserves audit trail and prevents payroll/attendance gaps.
     """
-    # Find stale drafts
     stale = await fetch_all(
         """
         SELECT * FROM escort_roster_entries
         WHERE roster_status = 'draft'
-          AND (
-                (expires_at IS NOT NULL AND expires_at < NOW())
-                OR
-                (expires_at IS NULL AND created_at < NOW() - ($1 || ' hours')::INTERVAL)
-              )
+          AND created_at < NOW() - ($1 || ' hours')::INTERVAL
         """,
         str(hours),
     )
@@ -807,7 +803,7 @@ async def expire_stale_drafts(hours: int = 48, actor: str = "scheduler") -> dict
             program_id=d.get("program_id"),
             action="draft_expired",
             old_data=d,
-            new_data=None,
+            new_data={"roster_status": "expired", "program_status": "expired"},
             performed_by=actor,
             source="scheduler",
         )
@@ -815,16 +811,24 @@ async def expire_stale_drafts(hours: int = 48, actor: str = "scheduler") -> dict
     program_ids = [r["program_id"] for r in stale]
     await execute(
         """
-        DELETE FROM escort_roster_entries
-        WHERE roster_status = 'draft'
-          AND (
-                (expires_at IS NOT NULL AND expires_at < NOW())
-                OR
-                (expires_at IS NULL AND created_at < NOW() - ($1 || ' hours')::INTERVAL)
-              )
+        UPDATE escort_roster_entries
+           SET roster_status = 'expired',
+               updated_at = NOW()
+         WHERE roster_status = 'draft'
+           AND created_at < NOW() - ($1 || ' hours')::INTERVAL
         """,
         str(hours),
     )
+    if program_ids:
+        await execute(
+            """
+            UPDATE wbom_escort_programs
+               SET status = 'expired'
+             WHERE program_id = ANY($1::int[])
+               AND status = 'draft'
+            """,
+            program_ids,
+        )
     count = len(stale)
     log.info(f"[expire_drafts] Expired {count} stale drafts (>{hours}h, actor={actor})")
     return {"expired": count, "message": f"Expired {count} stale draft(s) older than {hours}h"}

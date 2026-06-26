@@ -9,13 +9,24 @@ runtime_index: true
 # Escort Workflow
 
 ## Flow
-Client Order -> AI Parser -> Escort Draft -> Admin Edit -> Client Confirmation -> Escort Assignment -> Duty Start -> Release Slip -> Payment Draft -> Admin Payment Handling -> Accountant.
+Client Order -> Role + Intent Detection -> Escort Parser -> One Draft Program Per Lighter -> Admin Draft -> Admin Completed Assignment -> Existing Draft Row Update -> Roster Sync -> Client Confirmation Slip -> Duty Start -> Release Slip -> Payment Draft -> Admin Payment Handling -> Accountant.
+
+Corrected safe path:
+```
+Client WhatsApp
+  -> Contact prefix/role check: Escort / TCIS / escort-buyer
+  -> Code parser validates Mother Vessel + Lighter Vessel + Master Mobile
+  -> Draft program row + draft roster row
+  -> Admin adds Escort Name + Escort Mobile
+  -> Existing draft program/roster row updates to confirmed
+  -> Roster sync
+```
 
 ## Required Order Fields
 Mother vessel, lighter vessel, master mobile, destination/release point, product, capacity, escort name/mobile, start date, shift.
 
 ## Admin Required
-Admin review is mandatory before final client confirmation and assignment.
+Admin review is mandatory before final client confirmation and assignment. Escort buyer/client contacts do not receive a direct AI auto-reply for an order; the system creates an admin draft.
 
 ## Cross References
 - client_order_workflow.md
@@ -81,7 +92,7 @@ ESCORTCONFIRM 142|মোঃ রফিকুল|01711234567|2026-06-25|D
 ## Escort Order Parser Formats
 
 ### Purpose
-The AI parser supports 4 distinct client message formats for escort orders. All 4 formats extract the same set of required fields.
+The escort buyer/client parser has one source of truth: `modules/escort.parse_escort_message()`. It supports messy single-line and multi-line order messages and extracts the same operational fields into one canonical structure.
 
 | Format | Description | Example |
 |---|---|---|
@@ -90,12 +101,29 @@ The AI parser supports 4 distinct client message formats for escort orders. All 
 | MV-block | Multi-MV grouped sections | One block per mother vessel with lighters listed below |
 | Numbered | Lighter vessels numbered 1., 2., 3. | Used in multi-lighter programs |
 
-**Business Rule:** If the parser cannot extract all required fields, the order goes to manual review draft. Admin fills in the missing fields.
+**Golden Rule:** Any vessel grouped with a mobile number is a Lighter Vessel, even if the line also contains `MV`. A vessel line without a mobile number and with `MV`, `M.V.`, `Mother Vessel`, `এমভি`, or `At-O/A` is a Mother Vessel candidate.
 
-**Required fields:** mother_vessel, lighter_vessel, master_mobile, destination, product, capacity, start_date, shift
+**Business Rule:** If the parser cannot extract all required fields, the order goes to manual review draft. Admin fills in the missing fields. The client does not receive a direct auto-reply for an escort order.
+
+**Client Order Detect Rule:** Auto order creation requires buyer context plus Mother Vessel, Lighter Vessel, and Lighter/Master Mobile. General messages, complaints, release/slip text, and messages containing Escort Name + Escort Mobile are not client orders.
+
+**Extracted fields:** mother_vessel, importer, cargo_type, lighter_vessel, master_mobile, destination, capacity, date_hint, shift, remarks for additional mobiles
+
+**Admin Draft Rule:** The draft sent to admin includes cargo, client phone, mother vessel, importer, lighter vessel, master mobile, destination, capacity, blank escort name/mobile, date with `(D/N)` or detected shift, company footer, and automated-system warning.
+
+**Confirmation Match Rule:** When admin sends the completed assignment, the system matches an existing draft by mother vessel, lighter vessel, master mobile, date, and stored client phone when available. Matching drafts are updated to `confirmed`; duplicate confirmed rows are not created.
+
+**No Duplicate Roster Rule:** One client order creates at most one draft program row and one draft roster row per lighter. Admin confirmation updates that linked roster row; it must not create a second roster duty.
+
+**Admin Confirmation Rule:** A draft can become `confirmed` only from an admin-origin message/slip that includes Escort Name and Escort Mobile.
+
+**Draft Expiry Rule:** Unconfirmed drafts expire by status after the configured TTL. The system sets program status and roster status to `expired`; it does not hard delete operational rows.
+
+**Employee Rule:** Escort mobile is stored as `wbom_employees.employee_mobile`. If no active employee exists for that mobile, the system auto-creates an active `Escort` employee row and links the generated numeric `employee_id` to the escort program.
 
 **Source Module:** `modules/escort`
-**Source Function:** `parse_escort_order()`, `_MV_LABEL_RE`, `_IMPORTER_RE`
+**Source Function:** `parse_escort_message()`
+**Detailed Rules:** `knowledge_base/06_developer_system/escort_order_parser.md`
 **PKCA Report:** 05_parser_coverage_report.md
 
 ---

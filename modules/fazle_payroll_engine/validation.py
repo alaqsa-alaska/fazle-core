@@ -59,8 +59,11 @@ MESSAGE_RULES: dict[str, MessageTypeRule] = {
     # Standard WhatsApp payment message (owner-sent)
     "payment": MessageTypeRule(
         handler="standard_payment",
-        required_fields=["amount"],
+        required_fields=["employee_name_raw", "payout_phone", "payout_method", "amount"],
         failure_codes={
+            "missing_employee_name_raw": "missing_employee_name",
+            "missing_payout_phone":   "missing_payout_phone",
+            "missing_payout_method":  "missing_payout_method",
             "missing_amount":       "no_amount_in_parse",
             "non_positive_amount":  "non_positive_amount",
             "no_employee":          "no_employee_match",
