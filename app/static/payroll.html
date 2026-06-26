@@ -16,16 +16,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-s
 
 /* ─── Login Overlay ─────────────────────────────────────────────────────── */
 #loginOverlay{position:fixed;inset:0;background:rgba(15,23,42,.7);display:flex;
-  align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px)}
+  align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px);
+  padding:20px}
 #loginBox{background:#fff;padding:32px;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.25);
   min-width:360px;max-width:90vw}
 #loginBox h2{color:var(--accent);margin-bottom:6px;font-size:20px}
 #loginBox p{color:var(--muted);margin-bottom:20px;font-size:13px}
 #loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;
-  font-size:14px;margin-bottom:12px;outline:none;transition:border-color .2s}
+  font-size:14px;margin-bottom:12px;outline:none;transition:border-color .2s;min-height:44px}
 #loginBox input:focus{border-color:var(--accent)}
-#loginBox .btn{width:100%;padding:11px;font-size:15px}
+#loginBox .btn{width:100%;padding:12px;font-size:14px;min-height:44px}
 #loginErr{min-height:18px;color:var(--err);font-size:13px;margin-top:6px}
+
+@media(max-width:600px){
+  #loginOverlay{padding:12px}
+  #loginBox{padding:24px;min-width:100%;border-radius:12px}
+  #loginBox h2{font-size:18px;margin-bottom:12px}
+  #loginBox p{font-size:12px;margin-bottom:16px}
+  #loginBox input{padding:12px;font-size:16px;margin-bottom:12px}
+  #loginBox .btn{padding:14px;font-size:14px;min-height:48px}
+}
 
 /* ─── Layout ─────────────────────────────────────────────────────────────── */
 #app{display:none;min-height:100vh;flex-direction:column}
@@ -184,12 +194,130 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 .modal-footer{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
 
 /* ─── Responsive ──────────────────────────────────────────────────────────── */
-@media(max-width:600px){
-  header h1{font-size:14px}
-  main{padding:12px}
-  nav button{padding:12px 14px;font-size:12px}
-  .stat-grid{grid-template-columns:repeat(2,1fr)}
+@media(max-width:768px){
+  header h1{font-size:15px}
+  main{padding:14px}
+  nav button{padding:12px 14px;font-size:11.5px}
+  .stat{padding:12px 14px}
+  .stat .num{font-size:24px}
+  .stat .lbl{font-size:10px}
+  .card{padding:14px 16px}
+  .card h2{font-size:13px;margin-bottom:12px}
+  table{font-size:12px}
+  th,td{padding:7px 10px}
+  .btn{padding:9px 14px;font-size:12px}
+  .btn.sm{padding:6px 10px}
+  .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  #detailPanel{width:100%;right:-100% !important}
+  #modalOverlay{justify-content:flex-end;align-items:flex-end}
+  #modal{width:100%;border-radius:16px 16px 0 0;max-height:90vh}
 }
+
+@media(max-width:600px){
+  body{font-size:13px}
+  header{padding:0 12px;height:52px}
+  header h1{font-size:13px}
+  header span:first-child{font-size:20px}
+  .badge{padding:2px 8px;font-size:11px}
+  .btn.sm{padding:5px 8px;font-size:11px;min-height:36px;min-width:36px}
+  
+  /* Touch-friendly button sizing */
+  .btn{padding:12px 16px;font-size:13px;min-height:44px;border-radius:8px}
+  .btn.sm{min-height:40px;padding:8px 12px}
+  
+  main{padding:12px 10px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  
+  /* Navigation: horizontal scrollable tabs */
+  nav{overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap}
+  nav button{padding:14px 16px;font-size:12px;min-height:50px;flex-shrink:0}
+  
+  /* Stats grid on mobile: 2 columns */
+  .stat-grid{grid-template-columns:repeat(2,1fr);gap:10px}
+  .stat-grid.compact{grid-template-columns:repeat(2,1fr)}
+  .stat{padding:12px;text-align:center;border-radius:8px}
+  .stat .num{font-size:20px}
+  .stat .lbl{font-size:10px;margin-top:4px}
+  
+  /* Cards */
+  .card{padding:12px 14px;margin-bottom:12px;border-radius:8px}
+  .card h2{font-size:12px;margin-bottom:10px;padding-bottom:8px}
+  
+  /* Forms */
+  .form-group{margin-bottom:10px}
+  input,select,textarea{padding:10px 12px;font-size:16px;border-radius:6px;min-height:44px}
+  label{font-size:11px;margin-bottom:4px}
+  .row{gap:6px;margin-bottom:10px}
+  
+  /* Tables: make scrollable */
+  table{font-size:12px;white-space:nowrap}
+  th,td{padding:8px;font-size:12px}
+  
+  /* Detail panel: full screen on mobile */
+  #detailPanel{width:100% !important;right:-100% !important;border-radius:12px 12px 0 0;max-height:90vh}
+  #detailPanel.open{right:0}
+  
+  /* Modal: full screen on mobile */
+  #modal{width:calc(100% - 20px);max-height:85vh;border-radius:12px;margin:10px}
+  #modalOverlay{justify-content:center;align-items:flex-end;padding-bottom:20px}
+  .modal-body{max-height:70vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  
+  /* Toast: adjust for mobile */
+  #toast{bottom:20px;right:12px;left:12px;max-width:none;font-size:12px}
+  
+  /* Empty state */
+  .empty{padding:30px 20px;font-size:12px}
+  
+  /* Search box */
+  .title-search{flex-direction:column;gap:10px}
+  .title-search .search-box{max-width:100%}
+  
+  /* Pager */
+  .pager{justify-content:center;flex-wrap:wrap;gap:6px}
+  
+  /* Pagination buttons */
+  .pager .btn{padding:8px 10px;font-size:11px;min-height:36px}
+}
+
+@media(max-width:480px){
+  body{font-size:12px;line-height:1.4}
+  header{height:48px;padding:0 8px}
+  header h1{font-size:12px}
+  nav button{padding:12px 12px;font-size:11px;min-height:48px}
+  main{padding:8px}
+  
+  .btn{padding:11px 14px;font-size:12px;min-height:44px}
+  .stat-grid{gap:8px}
+  .stat{padding:10px;border-radius:6px}
+  .stat .num{font-size:18px}
+  
+  .card{padding:10px 12px;margin-bottom:10px}
+  .card h2{font-size:11.5px}
+  
+  table{font-size:11px}
+  th,td{padding:6px 8px}
+  
+  input,select,textarea{padding:9px 10px;font-size:14px}
+}
+
+/* Touch interaction improvements */
+@media (hover:none) and (pointer:coarse){
+  .btn:active{transform:scale(0.98);opacity:0.9}
+  nav button:active{opacity:0.7}
+  .stat.clickable:active{transform:scale(0.98);box-shadow:0 4px 12px rgba(15,23,42,.12)}
+  input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px rgba(26,71,42,.1)}
+}
+
+/* Landscape mode adjustments */
+@media(max-width:900px) and (orientation:landscape){
+  header{height:48px}
+  header h1{font-size:13px}
+  nav{height:44px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  nav button{padding:10px 12px;font-size:11px}
+  main{padding:10px;max-height:calc(100vh - 104px);overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .stat-grid{grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
+  .card{margin-bottom:8px;padding:10px}
+}
+
 </style>
 </head>
 <body>
@@ -745,14 +873,14 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     <!-- ── Income Entry Form ──────────────────────────────────────────────── -->
     <div class="card" id="incomeEntryCard" style="margin-bottom:16px;border:1px solid var(--accent);border-radius:8px;padding:16px">
       <h3 style="margin:0 0 12px;font-size:0.95rem;color:var(--accent)">➕ New Income Entry</h3>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
         <div>
           <label class="form-label">Date <span style="color:var(--err)">*</span></label>
-          <input id="incEntryDate" type="date" class="form-input" style="width:100%">
+          <input id="incEntryDate" type="date" class="form-input" style="width:100%;min-height:44px;padding:10px 12px">
         </div>
         <div>
           <label class="form-label">Income Head <span style="color:var(--err)">*</span></label>
-          <select id="incEntryHead" class="form-input" style="width:100%">
+          <select id="incEntryHead" class="form-input" style="width:100%;min-height:44px;padding:10px 12px">
             <option value="">— select —</option>
             <option>Form Fee</option>
             <option>Training Fee</option>
@@ -766,28 +894,28 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
         </div>
         <div>
           <label class="form-label">Received From <span style="color:var(--err)">*</span></label>
-          <input id="incEntryFrom" type="text" class="form-input" placeholder="Name" style="width:100%">
+          <input id="incEntryFrom" type="text" class="form-input" placeholder="Name" style="width:100%;min-height:44px;padding:10px 12px">
         </div>
         <div>
           <label class="form-label">Mobile Number</label>
-          <input id="incEntryMobile" type="text" class="form-input" placeholder="01XXXXXXXXX" style="width:100%" maxlength="14">
+          <input id="incEntryMobile" type="text" class="form-input" placeholder="01XXXXXXXXX" style="width:100%;min-height:44px;padding:10px 12px" maxlength="14">
         </div>
         <div>
           <label class="form-label">Amount (৳) <span style="color:var(--err)">*</span></label>
-          <input id="incEntryAmt" type="number" class="form-input" placeholder="0" min="1" step="any" style="width:100%">
+          <input id="incEntryAmt" type="number" class="form-input" placeholder="0" min="1" step="any" style="width:100%;min-height:44px;padding:10px 12px">
         </div>
         <div>
           <label class="form-label">Money Receipt No.</label>
-          <input id="incEntryReceipt" type="text" class="form-input" placeholder="MR-XXXX" style="width:100%">
+          <input id="incEntryReceipt" type="text" class="form-input" placeholder="MR-XXXX" style="width:100%;min-height:44px;padding:10px 12px">
         </div>
         <div>
           <label class="form-label">Money Received By <span style="color:var(--err)">*</span></label>
-          <input id="incEntryReceivedBy" type="text" class="form-input" placeholder="Name" style="width:100%">
+          <input id="incEntryReceivedBy" type="text" class="form-input" placeholder="Name" style="width:100%;min-height:44px;padding:10px 12px">
         </div>
       </div>
-      <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
-        <button class="btn sm secondary" onclick="cancelIncomeEntry()">Cancel</button>
-        <button class="btn sm" id="incEntrySaveBtn" onclick="saveIncomeEntry()">💾 Save</button>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;justify-content:flex-end">
+        <button class="btn sm secondary" onclick="cancelIncomeEntry()" style="min-height:44px;flex:1;min-width:100px">Cancel</button>
+        <button class="btn sm" id="incEntrySaveBtn" onclick="saveIncomeEntry()" style="min-height:44px;flex:1;min-width:100px">💾 Save</button>
       </div>
       <div id="incEntryMsg" style="margin-top:8px;font-size:12px;display:none"></div>
     </div>
