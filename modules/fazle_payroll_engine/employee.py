@@ -324,6 +324,95 @@ async def get_employee_by_id(employee_id: int) -> Optional[dict]:
     )
 
 
+async def create_employee_manual(
+    *,
+    full_name: str,
+    employee_mobile: str,
+    role_or_type: Optional[str] = None,
+    status: str = "active",
+) -> dict:
+    """
+    Create an employee explicitly from the admin UI.
+
+    Business rules:
+      - Employee mobile is the visible employee ID.
+      - Manual entry must target an existing employee, so admin-created rows
+        should become available to suggestions immediately.
+      - No accounting rows are touched here.
+    """
+    mobile = normalize_bd_phone(employee_mobile)
+    if not mobile:
+        raise ValueError("valid employee mobile is required")
+
+    clean_name = (full_name or "").strip()
+    if not _is_valid_human_name(clean_name):
+        raise ValueError("valid employee name is required")
+
+    clean_status = (status or "active").strip().lower()
+    if clean_status not in {"active", "inactive"}:
+        raise ValueError("status must be active or inactive")
+
+    name_norm = normalize_name(clean_name)
+    lock_key = _advisory_key_for(mobile, mobile, name_norm)
+
+    async with db_conn() as con:
+        async with con.transaction():
+            await con.execute("SELECT pg_advisory_xact_lock($1)", lock_key)
+
+            existing = await con.fetchrow(
+                """
+                SELECT id, employee_code, full_name, primary_phone, employee_id_phone,
+                       canonical_employee_id, status, department, created_source
+                FROM fpe_employees
+                WHERE employee_id_phone = $1 OR primary_phone = $1
+                LIMIT 1
+                """,
+                mobile,
+            )
+            if existing:
+                raise ValueError("employee already exists for this mobile")
+
+            new_id = await con.fetchval(
+                """
+                INSERT INTO fpe_employees
+                    (full_name, name_normalized, primary_phone, employee_id_phone,
+                     department, status, created_source, resolution_status)
+                VALUES ($1, $2, $3, $4, $5, $6, 'admin_manual_create', 'resolved')
+                RETURNING id
+                """,
+                clean_name,
+                name_norm,
+                mobile,
+                mobile,
+                (role_or_type or "Staff").strip() or "Staff",
+                clean_status,
+            )
+            code = f"EMP-{new_id:05d}"
+            await con.execute(
+                "UPDATE fpe_employees SET employee_code = $1, updated_at = NOW() WHERE id = $2",
+                code,
+                new_id,
+            )
+            await con.execute(
+                "INSERT INTO fpe_employee_aliases (employee_id, alias_type, alias_value) "
+                "VALUES ($1, 'phone', $2) ON CONFLICT (alias_type, alias_value) DO NOTHING",
+                new_id,
+                mobile,
+            )
+            if name_norm:
+                await con.execute(
+                    "INSERT INTO fpe_employee_aliases (employee_id, alias_type, alias_value) "
+                    "VALUES ($1, 'name', $2) ON CONFLICT (alias_type, alias_value) DO NOTHING",
+                    new_id,
+                    name_norm,
+                )
+
+    row = await fetch_one("SELECT * FROM fpe_employees WHERE id = $1", new_id)
+    if not row:
+        raise ValueError("employee creation failed")
+    return dict(row)
+
+
 # ── Internal ──────────────────────────────────────────────────────────────────
 
 def _make_result(row: dict, match_type: str) -> EmployeeMatchResult:

@@ -749,3 +749,157 @@ Use corrected examples to improve extraction prompts and tests. Never learn fina
 
 কিন্তু system বর্তমানে “একটি payroll/escort application” নয়; এটি কয়েকটি overlapping subsystem-এর সমষ্টি। সবচেয়ে নিরাপদ পরবর্তী পদক্ষেপ হলো নতুন feature যোগ করার আগে release/payment breakage ঠিক করা, employee identity reconcile করা, এবং প্রতিটি business action-এর জন্য একটি canonical write path নির্ধারণ করা।
 
+---
+
+## 15. Current System Delta Review — 2026-06-25
+
+**Review date:** 2026-06-25  
+**Mode:** Read-only code comparison against the 2026-06-13 audit report  
+**Live DB note:** This update did not re-run live database row counts. The snapshot counts in section 1 remain the original 2026-06-13 evidence until a fresh DB inspection is performed.
+
+### 15.1 Summary of Changes Since the Original Audit
+
+Yes — important changes happened after the original audit. The biggest improvements are in escort release settlement and admin-confirmed release handling:
+
+- Release finalization now requires explicit admin confirmation by default.
+- Release close, attendance backfill, payment draft creation, and roster projection now run inside one database transaction.
+- The previous `shift_type` query breakage in escort payment draft creation is removed; current code reads `shift`, `end_shift`, `day_count`, `food_bill`, and `conveyance`.
+- The previous `wbom_employees.contact_id` release-confirmation breakage is removed; current code identifies employees by normalized `employee_mobile`, with fallback to active program `escort_mobile`.
+- Escort payment drafts now persist structured `food_bill`, `conveyance`, `advance_deduction`, `gross_amount`, and `expected_amount`.
+- Release OCR drafts now include validation/warning behavior and remain draft-only until admin sends `[RELEASE CONFIRMED]`.
+- Confirmed escort assignment still resolves `escort_employee_id` and auto-syncs roster, as already documented in the June 13 fixed-status section.
+
+However, several original architectural gaps remain:
+
+- Approved payment drafts still write only to `wbom_cash_transactions`; FPE sync exists as an adapter but is not called by `finalize_payment()`.
+- Monthly payroll still uses WBOM cash advances and a fixed per-day escort rate, not the richer FPE ledger or the exact settlement draft components.
+- Roster remains both a projection and a directly editable surface, so source-of-truth ambiguity still exists.
+- Employee identity remains split between WBOM and FPE creation/matching paths.
+- Operational review frontends for release slips, payment drafts, reconciliation, and lifecycle timelines are still not visible in the active app surface reviewed here.
+
+### 15.2 Previous vs Current Workflow
+
+| Area | Previous system/workflow from 2026-06-13 audit | Current system/workflow observed on 2026-06-25 | Change status |
+|---|---|---|---|
+| Escort client order | Client message -> parse vessel/lighter -> save draft program -> admin fills escort name/mobile -> confirmed program -> roster sync -> clean slip to client. | Same broad flow. Current code still uses `handle_escort_client_message()`, `save_escort_programs()`, `handle_admin_escort_completion()`, `_resolve_escort_employee_id()`, and `_sync_roster_after_confirm()`. If no matching draft exists, admin completion can create a confirmed program directly. | Mostly unchanged; direct confirmed-from-admin fallback is an important resilience path. |
+| Escort extraction | Labeled blocks, numbered inline format, and `Mv.` block format, with formatted BD phone normalization. | Same strategy chain remains active in `parse_escort_message()`: labeled -> inline -> `Mv.` block. `+880` formatted phone normalization remains present. | No regression found. |
+| Assignment confirmation | Admin completed slip updates DB, resolves `escort_employee_id`, syncs roster, and sends clean final slip to client. | Same behavior remains. Current `_update_program_confirmed()` sets `status='confirmed'`, escort fields, optional date/shift/lighter fields, and `escort_employee_id`; roster sync follows. | Still fixed. |
+| Text release flow | Employee release text could close the program, backfill attendance, and create draft; audit warned partial completion was possible. | `handle_release_event()` returns `admin_confirmation_required` unless `admin_confirmed=True`. The employee text path should no longer finalize money/actions directly. | Improved; financial release is admin-gated. |
+| OCR release flow | OCR created an admin draft with estimates; admin sends `[RELEASE CONFIRMED]`; outgoing poller detects confirmation. | Same flow, with stronger draft warnings: missing required fields, future/old dates, implausible day counts, low OCR confidence, and draft-only estimate language. | Improved validation/review posture. |
+| Release finalization | Audit identified broken queries and non-transactional close + attendance + payment draft creation. | `_handle_release_event_tx()` runs under `conn.transaction()`: active program lookup, shift/day calculation, `close_program()`, `backfill_attendance_for_program()`, `create_escort_payment_draft(conn=conn)`, and roster upsert happen in one transaction. | P0 partial-release risk significantly reduced. |
+| Escort payment calculation | Audit said payment draft selected missing `shift_type`; amount used `basic_salary / 30`, with inconsistent food/conveyance treatment. | `create_escort_payment_draft()` now selects valid program fields: `shift`, `end_shift`, `day_count`, `food_bill`, `conveyance`. Net payable is `(basic_salary / 30 * duty_days) - food_bill - conveyance - advances`. | Query breakage fixed; formula is more structured, but rate unification is still incomplete. |
+| Advance deduction | Audit said previous advances were deducted from last 60 days, not tied to program/period. | Current escort payment draft deducts advances only when `employee_id`, `program_id`, current payroll month, and non-reversed conditions match. | Improved specificity. |
+| Payment approval | Admin `PAID`/`ADVANCE` finalizes draft, writes WBOM cash transaction, sends accountant message. | Same final approval shape remains. `finalize_payment()` is transactional and idempotent by `payment-draft:<draft_id>`, but it does not call `sync_wbom_transaction()`. | WBOM idempotency improved, FPE canonical posting still missing. |
+| WBOM -> FPE sync | Audit noted `wbom_fpe_sync` existed but was outdated/not automatically invoked. | `modules/payment_ingest/wbom_fpe_sync.py` now has a current adapter using `match_or_create_employee()` and `create_transaction()`, plus date-range backfill. It is still not wired into `finalize_payment()` or payroll paid transitions. | Adapter improved; automatic write-path integration still pending. |
+| Monthly payroll | WBOM payroll computes basic salary + completed escort days * fixed rate - WBOM advances; state machine draft -> reviewed -> approved -> locked -> paid. | Same model remains. `mark_paid()` updates payroll run state and audit log but does not create an FPE transaction. | Largely unchanged. |
+| Roster projection | Audit said roster is a secondary projection but also directly editable, causing ambiguity. | `sync_program_to_roster()` projection remains, and release finalization now upserts roster transactionally. Direct roster editing paths still exist. | Projection sync improved; two-way source ambiguity remains. |
+| Safe mode / internal operational sends | Audit identified admin notifications being suppressed when auto-reply was disabled, then noted a fix for internal notifications. | Current knowledge base indicates production activation changed `AUTO_REPLY_ENABLED=true` on 2026-06-23, and code has admin approval/draft paths that bypass the customer auto-reply gate. | Current runtime policy changed from the original snapshot; verify `.env` during ops audit. |
+
+### 15.3 Changed Items After the Changed Block
+
+#### Change 1 — Release Finalization Is Now Transactional
+
+**Previous system/workflow:**  
+`close_program()`, attendance backfill, and payment draft creation could happen as separate writes. If payment draft creation failed after program closure, the program could be marked completed without a payable draft.
+
+**Current system/workflow:**  
+`handle_release_event(admin_confirmed=True)` opens one transaction and calls `_handle_release_event_tx()`. Inside that transaction it:
+
+1. Finds the active program.
+2. Calculates duty shifts/days using roster shift logic.
+3. Updates `wbom_escort_programs` to `Completed`.
+4. Backfills `wbom_attendance`.
+5. Creates or updates one `fazle_payment_drafts` escort-payment row.
+6. Upserts `escort_roster_entries` with `roster_status='completed'`.
+
+**Current assessment:**  
+The original P0 partial-release finding is substantially addressed in code. Remaining risk is operational/data-level: existing old completed programs and drafts may still need backfill/reconciliation.
+
+#### Change 2 — Release Requires Admin Confirmation
+
+**Previous system/workflow:**  
+Employee release text or OCR release processing could be interpreted as part of the close/payment workflow, and the audit recommended making media/OCR draft-only.
+
+**Current system/workflow:**  
+`handle_release_event()` refuses to finalize unless `admin_confirmed=True`. OCR produces a draft for admin review; only an outgoing admin message containing `[RELEASE CONFIRMED]` reaches `handle_admin_release_confirmation()` and then finalizes.
+
+**Current assessment:**  
+This aligns better with the audit recommendation: media/OCR extracts candidate fields, while admin confirmation triggers the domain write.
+
+#### Change 3 — Schema Breakages in Release/Payment Were Fixed
+
+**Previous system/workflow:**  
+The audit found two concrete breakages:
+
+- `create_escort_payment_draft()` selected `shift_type`, but live `wbom_escort_programs` did not have that column.
+- Release confirmation lookup joined `wbom_employees.contact_id`, but live `wbom_employees` did not have that column.
+
+**Current system/workflow:**  
+Current code no longer references `shift_type` in payment draft creation. It uses `shift`, `end_shift`, `day_count`, `food_bill`, and `conveyance`. Release confirmation lookup now uses normalized `employee_mobile`, with fallback to active program `escort_mobile`.
+
+**Current assessment:**  
+Both specific P0 schema/query issues appear fixed.
+
+#### Change 4 — Settlement Draft Components Are More Structured
+
+**Previous system/workflow:**  
+Food and conveyance were mostly OCR draft estimates and not reliably persisted into the payment draft. Payment draft calculation could diverge from roster calculation.
+
+**Current system/workflow:**  
+`close_program()` writes `food_bill` and `conveyance` into `wbom_escort_programs`; `create_escort_payment_draft()` writes `gross_amount`, `food_bill`, `conveyance`, `advance_deduction`, and `expected_amount` into `fazle_payment_drafts`; release roster upsert copies those values into `escort_roster_entries`.
+
+**Current assessment:**  
+Structured settlement fields are now present in the release/payment path. Full unification is not complete because payroll still recomputes escort pay using a fixed `DEFAULT_PER_PROGRAM_RATE` and period-level WBOM advances.
+
+#### Change 5 — WBOM-to-FPE Adapter Improved but Is Not Automatic
+
+**Previous system/workflow:**  
+The audit said `wbom_fpe_sync` existed, looked outdated, and was not automatically invoked from important WBOM write paths.
+
+**Current system/workflow:**  
+`sync_wbom_transaction()` now reads one `wbom_cash_transactions` row, resolves/creates an FPE employee, and calls FPE `create_transaction()` with a synthetic `wa_message_id` like `wbom:<transaction_id>`. `backfill_wbom_to_fpe()` can sync a recent range.
+
+**Current assessment:**  
+The adapter itself looks updated. The main gap remains: `finalize_payment()` inserts WBOM cash and updates the draft, but does not call `sync_wbom_transaction()`. Payroll `mark_paid()` also does not post to FPE.
+
+#### Change 6 — Payroll Workflow Is Mostly Unchanged
+
+**Previous system/workflow:**  
+Monthly payroll used WBOM completed escort programs, fixed per-day program rate, and WBOM cash advances within the period.
+
+**Current system/workflow:**  
+`compute_run()` still computes:
+
+```text
+basic salary
++ completed escort day_count × DEFAULT_PER_PROGRAM_RATE
+- WBOM advance transactions in month
+= net salary
+```
+
+State transitions remain:
+
+```text
+draft -> reviewed -> approved -> locked -> paid
+                    \-> cancelled
+```
+
+**Current assessment:**  
+No major payroll unification change was found. The audit’s payroll recommendations still stand: integrate canonical FPE transactions, use unified settlement components/rates, and post paid payroll runs to the immutable ledger.
+
+### 15.4 Current Priority List
+
+| Priority | Item | Current recommendation |
+|---|---|---|
+| P0 | FPE canonical posting after payment approval | Call `sync_wbom_transaction()` or directly create FPE transaction inside `finalize_payment()` after WBOM insert, within a reliable idempotent flow. |
+| P0 | Backfill old release/payment data | Reconcile old completed programs, expired payment drafts, missing `escort_employee_id`, missing attendance, and roster rows created before the transactional release fix. |
+| P1 | Payroll settlement unification | Replace fixed payroll escort allowance with the same settlement components used by release/payment drafts, or make payroll read approved settlement rows. |
+| P1 | Roster source-of-truth cleanup | Keep roster as a projection, or route edits through the operational escort program service. Avoid roster-only operational changes. |
+| P1 | Employee identity reconciliation | Continue linking WBOM and FPE employees and prevent FPE auto-created employees from silently bypassing operational profile review. |
+| P1 | Operational review UI | Add/review pages for release slip drafts, payment drafts, WBOM/FPE reconciliation, and program lifecycle timeline. |
+
+### 15.5 Updated Final Assessment
+
+The system is no longer in the exact same state as the 2026-06-13 audit. The most dangerous release workflow breakages have been addressed in the active code: release finalization is admin-gated, transactional, and writes structured settlement values into payment draft and roster records.
+
+The broader architectural assessment remains mostly valid. Fazle Core still has overlapping WBOM, FPE, roster, payroll, draft, and WhatsApp subsystems. The next highest-value work is not another feature layer; it is wiring every approved money movement into the canonical FPE ledger, reconciling old data created before the fixes, and making payroll consume the same settlement truth that release/payment already writes.

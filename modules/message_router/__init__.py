@@ -20,6 +20,7 @@ Routing priority:
 """
 
 import logging
+import re
 from typing import Optional
 
 from app.config import get_settings
@@ -35,6 +36,7 @@ from modules.escort import (
     handle_escort_client_message,
     handle_admin_escort_completion,
     is_completed_escort_draft,
+    parse_escort_message,
 )
 from modules.knowledge_base import get_reply as kb_get_reply
 from modules.recruitment_flow import (
@@ -62,7 +64,7 @@ log = logging.getLogger("fazle.router")
 # Roles that trigger the escort client flow
 _ESCORT_ROLES = frozenset({"escort_client", "client_escort_buyer", "vip_client", "repeat_client"})
 
-# TASK 1: Name tokens that trigger silent-skip (no reply, no draft, no queue)
+# Legacy fallback only; runtime source of truth is app.config draft-always settings.
 _SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office")
 
 # Phase 4.5 / 6E: Intents cleared for auto-send (recruitment + employee info + office location).
@@ -86,18 +88,81 @@ _SAFE_AUTOSEND_INTENTS: frozenset[str] = frozenset({
     "escort_duty",      # duty schedule, transport/food policy info
 })
 
+_ESCORT_ASSIGNMENT_FIELDS_RE = re.compile(
+    r"escort\s*(?:name)?\s*:\s*\S.+?escort\s*(?:mobile|mob|number)?\s*:\s*(?:\+?880|0)1[3-9][\d\s\-]{8,}",
+    re.IGNORECASE | re.DOTALL,
+)
+_SLIP_OR_RELEASE_HINT_RE = re.compile(
+    r"(?:\b(?:release|released|completion|completed|duty\s+slip|release\s+slip|"
+    r"food|conveyance|transport|car\s*fare)\b|ভাড়া|ভাড়া|খাবার|রিলিজ|স্লিপ|পালিয়েছে|পালিয়েছে)",
+    re.IGNORECASE,
+)
+
 
 def _phone_variants(phone: str) -> list[str]:
     """Return all normalized forms of a phone number for DB lookup."""
     return get_phone_variants(phone)
 
 
+def _contact_name_has_escort_order_prefix(identity: dict) -> bool:
+    name = (identity.get("display_name") or "").strip().lower()
+    return name.startswith(("escort", "tcis"))
+
+
+def _has_client_supplied_escort_assignment(text: str) -> bool:
+    return bool(_ESCORT_ASSIGNMENT_FIELDS_RE.search(text or ""))
+
+
+def _looks_like_slip_or_complaint(text: str) -> bool:
+    return bool(_SLIP_OR_RELEASE_HINT_RE.search(text or "")) or _has_client_supplied_escort_assignment(text)
+
+
+def _is_strict_escort_order_text(text: str) -> bool:
+    """Code-based order gate: mother vessel + lighter + master mobile, no assignment fields."""
+    if not text or _looks_like_slip_or_complaint(text):
+        return False
+    try:
+        order = parse_escort_message(text)
+    except Exception as exc:
+        log.debug("[escort-gate] parse failed: %s", exc)
+        return False
+    if not order.get("mother_vessel"):
+        return False
+    return any(
+        (lighter.get("lighter_vessel") and lighter.get("master_mobile"))
+        for lighter in (order.get("lighters") or [])
+    )
+
+
+def _admin_review_note(
+    *,
+    sender: str,
+    source: str,
+    purpose: str,
+    title: str,
+    text: str,
+    role: str = "",
+) -> dict:
+    return {
+        "admin_phone": get_primary_admin(),
+        "bridge": source,
+        "purpose": purpose,
+        "text": (
+            f"{title}\n"
+            f"Sender: {sender}\n"
+            f"Role: {role or 'unknown'}\n\n"
+            f"{text}"
+        ),
+    }
+
+
 async def _should_silent_skip(sender: str) -> tuple[bool, str]:
-    """Return (should_skip, reason) for contacts that must receive no reply, no draft.
+    """Return (should_skip, reason) for blocked or draft-only contacts.
 
     Rules:
       1. sender == ACCOUNTANT_PHONE → skip
-      2. wbom_contacts.display_name contains 'al-aqsa', 'escort', or 'client' → skip
+      2. configured draft-always display_name match → caller creates admin draft
+      3. blocked contact role → skip
     """
     settings = get_settings()
     sender = normalize_phone(sender) or sender.strip()
@@ -115,9 +180,13 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
                 break
         if contact:
             name_lower = (contact.get("display_name") or "").lower()
-            for token in _SILENT_SKIP_NAME_TOKENS:
+            name_tokens = settings.draft_always_name_list or list(_SILENT_SKIP_NAME_TOKENS)
+            for token in name_tokens:
                 if token in name_lower:
                     return True, f"display_name contains '{token}' ({contact['display_name']!r})"
+            for prefix in settings.draft_name_prefix_list:
+                if prefix and name_lower.startswith(prefix):
+                    return True, f"display_name starts with '{prefix}' ({contact['display_name']!r})"
     except Exception as _e:
         log.debug("[SILENT_SKIP] contact lookup error for %s: %s", sender, _e)
 
@@ -157,11 +226,29 @@ async def process_message(
     settings = get_settings()
     sender = normalize_phone(sender) or sender.strip()
 
-    # TASK 2: Silent-skip excluded contacts before any processing or draft creation
+    # TASK 2: Silent-skip excluded contacts before any processing or draft creation.
+    # Escort work messages are operational inputs, so they must still create
+    # admin-review drafts even when the contact name contains "client/escort".
     _skip, _skip_reason = await _should_silent_skip(sender)
     if _skip:
-        log.info("[SILENT_SKIP] %s → no reply, no draft (%s)", sender, _skip_reason)
-        return "", None
+        if is_completed_escort_draft(text) or _looks_like_escort_order(text):
+            log.info("[SILENT_SKIP_BYPASS] %s → escort workflow allowed (%s)", sender, _skip_reason)
+        elif "display_name contains" in _skip_reason or "display_name starts with" in _skip_reason:
+            log.info("[DRAFT_ONLY_CONTACT] %s → admin draft, no auto-reply (%s)", sender, _skip_reason)
+            return "", {
+                "admin_phone": get_primary_admin(),
+                "bridge": source,
+                "purpose": "draft-only-contact-review",
+                "text": (
+                    "📩 DRAFT-ONLY CONTACT MESSAGE\n"
+                    f"Sender: {sender}\n"
+                    f"Reason: {_skip_reason}\n\n"
+                    f"{text}"
+                ),
+            }
+        else:
+            log.info("[SILENT_SKIP] %s → no reply, no draft (%s)", sender, _skip_reason)
+            return "", None
 
     identity = await detect_identity(sender, text)
     role_str = identity["role"]
@@ -179,13 +266,59 @@ async def process_message(
             None,
         )
 
+    if role_str != "admin" and _looks_like_slip_or_complaint(text):
+        title = "⚠️ ESCORT REVIEW DRAFT — ORDER নয়"
+        if _has_client_supplied_escort_assignment(text):
+            title = "⚠️ ESCORT COMPLAINT/ASSIGNMENT-LIKE MESSAGE — ADMIN REVIEW"
+        return "", _admin_review_note(
+            sender=sender,
+            source=source,
+            purpose="escort-review-not-order",
+            title=title,
+            text=(
+                f"{text}\n\n"
+                "Note: Client message contains escort assignment/slip/release/food/conveyance context. "
+                "Do not create escort order automatically; admin must verify against DB/roster."
+            ),
+            role=role_str,
+        )
+
     # ── 2. ESCORT CLIENT roles — never reply, always draft to admin ───────────
     if role_str in _ESCORT_ROLES:
-        # Only trigger escort flow if message has escort content
+        has_order_prefix = _contact_name_has_escort_order_prefix(identity)
         intent_check = classify(text)
-        if intent_check in ("client_order", "escort_duty") or _looks_like_escort_order(text):
+        strict_order = _is_strict_escort_order_text(text)
+        if (has_order_prefix or role_str in {"escort_client", "client_escort_buyer"}) and strict_order:
             return await handle_escort_client_message(text, sender, source)
+        if intent_check in ("client_order", "escort_duty") or _looks_like_escort_order(text):
+            return "", _admin_review_note(
+                sender=sender,
+                source=source,
+                purpose="escort-client-non-order-review",
+                title="⚠️ ESCORT CLIENT MESSAGE — STRICT ORDER MATCH হয়নি",
+                text=(
+                    f"{text}\n\n"
+                    "Required for auto order: Escort/TCIS buyer context + Mother Vessel + Lighter Vessel + Master Mobile."
+                ),
+                role=role_str,
+            )
         # Otherwise fall through to normal routing below
+
+    # Completed escort slips sent by a client/non-admin are not final admin
+    # confirmations. Keep them visible by sending them to admin review.
+    if role_str != "admin" and is_completed_escort_draft(text):
+        return "", {
+            "admin_phone": get_primary_admin(),
+            "bridge": source,
+            "purpose": "escort-completed-slip-review",
+            "text": (
+                "⚠️ COMPLETED ESCORT SLIP RECEIVED FROM NON-ADMIN\n"
+                f"Sender: {sender}\n"
+                f"Detected role: {role_str}\n\n"
+                f"{text}\n\n"
+                "Review and resend/confirm from admin number if this should create or update an escort program."
+            ),
+        }
 
     # ── 3. ADMIN ───────────────────────────────────────────────────────────────
     if role_str == "admin":
@@ -475,7 +608,14 @@ def _fmt_ingest_reply(result: dict) -> str:
     amt = result.get("amount", 0)
     method = result.get("method", "")
     if status == "duplicate":
-        return f"⚠️ ইতিমধ্যে রেকর্ড আছে (staging #{result.get('staging_id')})।"
+        ref = result.get("transaction_id") or result.get("staging_id")
+        return f"⚠️ ইতিমধ্যে রেকর্ড আছে (#{ref})।"
+    if status == "finalized":
+        return (
+            f"✅ Final transaction saved — {result.get('employee_name') or emp}, "
+            f"৳{amt:.0f} ({method})।\n"
+            f"Txn ID: {result.get('transaction_id')}"
+        )
     if status == "unmatched":
         mob = result.get("mobile", "?")
         return (
@@ -495,14 +635,8 @@ def get_primary_admin() -> str:
 
 
 def _looks_like_escort_order(text: str) -> bool:
-    """Check if message contains escort order keywords."""
-    import re
-    pattern = re.compile(
-        r"\b(m\.?v\.?|mother\s*vessel|lighter|escort\s*lagbe|m\.?t\.|"
-        r"এমভি|destination|lighter\s*vessel|master\s*number)\b",
-        re.IGNORECASE,
-    )
-    return bool(pattern.search(text))
+    """Strict code-based check for a real escort order, not a complaint/slip."""
+    return _is_strict_escort_order_text(text)
 
 
 def _resolve_forward_target(command_text: str, settings) -> Optional[str]:

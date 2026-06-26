@@ -347,14 +347,45 @@ async def job_backup_staleness() -> dict:
 
 
 async def job_combined_draft_cleanup() -> dict:
-    """P15-01/P15-02 — hourly: expire draft entries older than 24h (escort + payment)."""
+    """P15-01/P15-02 — hourly: clean draft entries older than 24h."""
     results: dict = {"status": "ok"}
+
+    # General admin-review reply drafts: delete pending rows after 24h if the
+    # admin has not acted. Reviewed/sent/approved/rejected rows are preserved.
+    try:
+        from app.config import get_settings as _get_settings
+        from app.database import fetch_val as _fetch_val
+
+        ttl = int(_get_settings().draft_ttl_hours)
+        deleted_general: int = await _fetch_val(
+            """
+            WITH deleted AS (
+                DELETE FROM fazle_draft_replies
+                 WHERE COALESCE(status, 'pending') = 'pending'
+                   AND COALESCE(reviewed, false) = false
+                   AND created_at < NOW() - ($1 || ' hours')::INTERVAL
+                RETURNING id
+            )
+            SELECT count(*) FROM deleted
+            """,
+            str(ttl),
+        )
+        if deleted_general:
+            log.info("[scheduler] combined_draft_cleanup: deleted %d stale reply drafts", deleted_general)
+        results["reply_drafts_deleted"] = deleted_general
+        results["reply_draft_ttl_hours"] = ttl
+    except Exception as e:
+        log.warning("[scheduler] combined_draft_cleanup reply-draft error: %s", e)
+        results["reply_draft_error"] = str(e)
 
     # Escort roster drafts
     try:
         from modules.escort_roster.db import expire_stale_drafts
-        escort_result = await expire_stale_drafts(hours=24, actor="scheduler")
+        from app.config import get_settings as _get_settings
+        ttl = int(_get_settings().draft_ttl_hours)
+        escort_result = await expire_stale_drafts(hours=ttl, actor="scheduler")
         results["escort"] = escort_result
+        results["escort_draft_ttl_hours"] = ttl
     except Exception as e:
         log.warning(f"[scheduler] combined_draft_cleanup escort error: {e}")
         results["escort"] = {"error": str(e)}

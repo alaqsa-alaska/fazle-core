@@ -37,12 +37,14 @@ log = logging.getLogger("fazle.escort")
 
 # ── TypedDicts ─────────────────────────────────────────────────────────────────
 
-class LighterInfo(TypedDict):
+class LighterInfo(TypedDict, total=False):
     lighter_vessel: str
     master_name: Optional[str]
     master_mobile: Optional[str]
     capacity: Optional[str]
     destination: Optional[str]
+    shift: Optional[str]
+    remarks: Optional[str]
 
 
 class EscortOrder(TypedDict):
@@ -51,6 +53,7 @@ class EscortOrder(TypedDict):
     cargo_type: Optional[str]
     lighters: list           # list[LighterInfo]
     date_hint: Optional[str]
+    shift: Optional[str]
     raw_text: str
 
 
@@ -82,16 +85,23 @@ _MV_LABEL_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _IMPORTER_RE = re.compile(
-    r"(?:a/?c\.?\s*|account\s*:?\s*)\*?([A-Za-z][\w\s]{2,25}?)(?=\s*[\n$]|$)",
+    r"(?:a/?c\.?\s*[:.\-]?\s*|account\s*:?\s*)\*?([A-Za-z][\w\s&.\-/]{2,80}?)(?=\s*[\n$]|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 _CARGO_RE = re.compile(
-    r"\b(wheat|corn|soybean|soya(?:bean)?\s*meal|coal|sugar|rice|salt|y\.?\s*peas|yellow\s*peas|"
-    r"গম|ভুট্টা|চিনি|কয়লা)\b",
+    r"\b(soybeans?\s*meals?|soyabean\s*meal|soybean\s*meal|soya\s*meal|"
+    r"soyabean\s*ext|soybean\s*ext|soyabean|soybean|soya|wheat|corn|"
+    r"mustard(?:\s*oil)?|coal|sugar|rice|salt|yellow\s*peas|y\.?\s*peas|"
+    r"y\s*peas|গম|ভুট্টা|চিনি|কয়লা|চাল|লবণ)\b",
     re.IGNORECASE,
 )
-_CAPACITY_RE = re.compile(r"(\d[\d,]+)\s*m\.?t\.?", re.IGNORECASE)
+_CAPACITY_RE = re.compile(r"(\d[\d,]*)\s*(?:m\s*\.?\s*t\.?|mt|mts)\b", re.IGNORECASE)
+_CAPACITY_LABEL_RE = re.compile(r"(?:cap|capacity)\s*[:.\-]?\s*(\d[\d,]*)\b", re.IGNORECASE)
 _DATE_RE = re.compile(r"\b(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\b")
+_SHIFT_RE = re.compile(
+    r"\(\s*([DN])\s*\)|\b(Day|Night)\b|\b(?:shift\s*[:.\-]?\s*([DN])|([DN])\s*shift)\b",
+    re.IGNORECASE,
+)
 
 # Completed draft detection
 _CD_ESCORT_NAME_RE = re.compile(
@@ -148,6 +158,42 @@ _MASTER_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MV_LABEL_ANY_RE = re.compile(r"\b(?:m\.?\s*v\.?|mother\s+vessel|এমভি|at[-\s]*o/?a)\b", re.IGNORECASE)
+_SERIAL_PREFIX_RE = re.compile(r"^\s*(?:[-–]?\s*\d{1,3}\s*[\).\-/]?\s*)")
+
+_CARGO_MAP = [
+    (re.compile(r"soy(?:a|a?bean)?s?\s*meals?|soya\s*meal", re.I), "Soybean Meal"),
+    (re.compile(r"soy(?:a|a?bean)?\s*ext", re.I), "Soybean Extract"),
+    (re.compile(r"soyabean|soybean|soya", re.I), "Soybean"),
+    (re.compile(r"wheat|গম", re.I), "Wheat"),
+    (re.compile(r"corn|ভুট্টা", re.I), "Corn"),
+    (re.compile(r"mustard(?:\s*oil)?", re.I), "Mustard"),
+    (re.compile(r"coal|কয়লা", re.I), "Coal"),
+    (re.compile(r"sugar|চিনি", re.I), "Sugar"),
+    (re.compile(r"rice|চাল", re.I), "Rice"),
+    (re.compile(r"salt|লবণ", re.I), "Salt"),
+    (re.compile(r"yellow\s*peas|y\.?\s*peas|y\s*peas", re.I), "Yellow Peas"),
+]
+
+_KNOWN_IMPORTER_RE = re.compile(
+    r"\b(new\s+hope(?:\s+feed)?(?:\s*&\s*new\s+hope\s+animal)?|"
+    r"kazi\s+firm|abul\s+khair|nabil|akij|sarkar|quality)\b",
+    re.IGNORECASE,
+)
+
+_DEST_ALIASES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\b(?:n\.?\s*bari|nagar\s*bari|nagarbari)\b", re.I), "Nagarbari"),
+    (re.compile(r"\b(?:n\.?\s*para|noapara|nowapara|nopara|rupsi)\b", re.I), "Noapara"),
+    (re.compile(r"\b(?:n\.?\s*g[oa]nj|narayan\s*g[oa]nj|narayanganj|rupshi|rupahi)\b", re.I), "Narayanganj"),
+    (re.compile(r"\bashuganj\b", re.I), "Ashuganj"),
+    (re.compile(r"\baricha\b", re.I), "Aricha"),
+    (re.compile(r"\bbhairab\b", re.I), "Bhairab"),
+    (re.compile(r"\bchandpur\b", re.I), "Chandpur"),
+    (re.compile(r"\bbarishal|barisal\b", re.I), "Barishal"),
+    (re.compile(r"\bmongla\b", re.I), "Mongla"),
+    (re.compile(r"\b(?:local|ctg|chittagong)\b", re.I), "Chittagong"),
+)
+
 
 # ── Mobile helpers ─────────────────────────────────────────────────────────────
 
@@ -165,7 +211,7 @@ def _extract_mobile(text: str) -> Optional[str]:
     """Extract and normalize the first mobile number from text (plain or formatted)."""
     m = _MOBILE_RE.search(text)
     if m:
-        return m.group(1)
+        return _normalize_mobile(m.group(1))
     m = _MOBILE_FMT_RE.search(text)
     if m:
         return _normalize_mobile(m.group(0))
@@ -173,6 +219,214 @@ def _extract_mobile(text: str) -> Optional[str]:
 
 
 # ── Extraction helpers ─────────────────────────────────────────────────────────
+
+def _extract_all_mobiles(text: str) -> list[str]:
+    seen: list[str] = []
+    for m in _MOBILE_FMT_RE.finditer(text):
+        mobile = _normalize_mobile(m.group(0))
+        if mobile and mobile not in seen:
+            seen.append(mobile)
+    return seen
+
+
+def _normalize_capacity(value: str, *, allow_bare: bool = False) -> Optional[str]:
+    m = _CAPACITY_LABEL_RE.search(value or "") or _CAPACITY_RE.search(value or "")
+    if m:
+        digits = re.sub(r"\D", "", m.group(1))
+        return f"{digits} MT" if digits else None
+    if not allow_bare:
+        return None
+    scrubbed = _MOBILE_FMT_RE.sub(" ", value or "")
+    # Field messages often end a lighter line with bare 900/1000/1200.
+    # Keep the range narrow so serials, dates, and phone fragments do not turn
+    # into capacity.
+    bare = re.search(r"(?<!\d)(9\d{2}|1[01]\d{2}|1200)(?!\d)", scrubbed)
+    digits = bare.group(1) if bare else ""
+    return f"{digits} MT" if digits else None
+
+
+def _extract_shift(text: str) -> Optional[str]:
+    m = _SHIFT_RE.search(text or "")
+    if not m:
+        return None
+    for group in m.groups():
+        if not group:
+            continue
+        value = group.upper()
+        if value in ("D", "N"):
+            return value
+        if value == "DAY":
+            return "D"
+        if value == "NIGHT":
+            return "N"
+    return None
+
+
+def _normalize_cargo(text: str) -> Optional[str]:
+    for pattern, value in _CARGO_MAP:
+        if pattern.search(text or ""):
+            return value
+    return None
+
+
+def _normalize_destination(text: str) -> Optional[str]:
+    if not text:
+        return None
+    for pattern, value in _DEST_ALIASES:
+        if pattern.search(text):
+            return value
+    labeled = re.search(
+        r"(?:dest(?:ination)?|o/?a\s+to|o/?a|alongside|at[-\s]*o/?a)\s*[:.\-]?\s*([A-Za-z][A-Za-z\s.\-]{2,30})",
+        text,
+        re.IGNORECASE,
+    )
+    if labeled:
+        return labeled.group(1).strip(" .,-")
+    return None
+
+
+def _clean_vessel_name(raw: str, *, force_mv: bool = False) -> str:
+    name = raw or ""
+    name = re.sub(r"\$+", "", name)
+    name = _SERIAL_PREFIX_RE.sub("", name)
+    name = re.sub(r"\b(?:mother\s+vessel|lighter\s+vessel|lighter|vessel|mv|m\.v\.|m/v|এমভি)\b", "", name, flags=re.I)
+    name = re.sub(r"(?:a/?c\.?\s*[:.\-]?.*)$", "", name, flags=re.I)
+    name = re.sub(r"(?:cap(?:acity)?|dest(?:ination)?|master|mob(?:ile)?|phone)\s*[:.\-]?.*$", "", name, flags=re.I)
+    name = _MOBILE_FMT_RE.sub("", name)
+    name = _CAPACITY_RE.sub("", name)
+    name = _CARGO_RE.sub("", name)
+    for pattern, _value in _DEST_ALIASES:
+        name = pattern.sub("", name)
+    name = re.sub(r"\s+", " ", name).strip(" -|:/,.\n\t")
+    if force_mv and name and not name.upper().startswith("MV "):
+        return f"MV {name.upper()}"
+    return name.upper() if force_mv else name
+
+
+def _strip_inline_importer_from_mv(line: str) -> str:
+    cargo_m = _CARGO_RE.search(line or "")
+    if not cargo_m:
+        return line
+    before_cargo = line[:cargo_m.start()].strip(" .,-")
+    importer_matches = list(_KNOWN_IMPORTER_RE.finditer(before_cargo))
+    if not importer_matches:
+        return before_cargo
+    last = importer_matches[-1]
+    if before_cargo[last.end():].strip(" .,-"):
+        return before_cargo
+    return before_cargo[:last.start()].strip(" .,-") or before_cargo
+
+
+def _line_has_mobile(line: str) -> bool:
+    return bool(_extract_mobile(line))
+
+
+def _extract_mother_vessel_canonical(lines: list[str], full_text: str) -> Optional[str]:
+    candidates: list[str] = []
+    for line in lines:
+        if _line_has_mobile(line):
+            continue
+        if _MV_LABEL_ANY_RE.search(line):
+            line_for_mv = _strip_inline_importer_from_mv(line)
+            if re.search(r"\bat[-\s]*o/?a\b", line, re.I):
+                m = re.search(r"\bat[-\s]*o/?a\s*[:.\-]?\s*(.+)$", line, re.I)
+                if m:
+                    candidates.append(_strip_inline_importer_from_mv(m.group(1)))
+                    continue
+            candidates.append(line_for_mv)
+
+    if not candidates:
+        # Common field habit: mother vessel is the first or last non-mobile line.
+        non_mobile = [ln for ln in lines if not _line_has_mobile(ln)]
+        for line in (non_mobile[:1] + non_mobile[-1:]):
+            if _MV_LABEL_ANY_RE.search(line):
+                candidates.append(line)
+
+    for candidate in candidates:
+        name = _clean_vessel_name(candidate, force_mv=True)
+        if name:
+            return name
+    return _extract_mother_vessel(full_text)
+
+
+def _extract_importer(text: str) -> Optional[str]:
+    m = _IMPORTER_RE.search(text or "")
+    if m:
+        importer = m.group(1).strip(" .,-")
+        importer = re.split(r"\b(?:wheat|corn|soy|coal|sugar|rice|salt|cap|capacity|dest|destination)\b", importer, flags=re.I)[0]
+        return importer.strip(" .,-") or None
+
+    for line in (text or "").splitlines():
+        if _line_has_mobile(line) or not _MV_LABEL_ANY_RE.search(line) or not _CARGO_RE.search(line):
+            continue
+        before_cargo = line[:_CARGO_RE.search(line).start()].strip(" .,-")
+        importer_matches = list(_KNOWN_IMPORTER_RE.finditer(before_cargo))
+        if importer_matches:
+            return importer_matches[-1].group(1).strip(" .,-")
+    return None
+
+
+def _line_context(lines: list[str], idx: int) -> str:
+    start = max(0, idx - 2)
+    end = min(len(lines), idx + 3)
+    return "\n".join(lines[start:end])
+
+
+def _extract_lighter_name_from_context(lines: list[str], idx: int, raw_mobile: str) -> Optional[str]:
+    line = lines[idx]
+    mobile_pos = line.find(raw_mobile)
+    before = line[:mobile_pos] if mobile_pos >= 0 else _MOBILE_FMT_RE.split(line)[0]
+    name = _clean_vessel_name(before)
+    if name and not re.fullmatch(r"(?:master|mob|mobile|phone|tel|mst|m no)", name, flags=re.I):
+        return name
+
+    # If the mobile is on a separate Master/Mob line, the previous vessel-like
+    # line is the lighter. This resolves "02) MV AL MORIUM" + next-line mobile.
+    for j in range(idx - 1, max(-1, idx - 4), -1):
+        prev = lines[j].strip()
+        if not prev or _line_has_mobile(prev):
+            continue
+        if re.search(r"\b(?:a/?c|cap|capacity|dest|destination|o/?a|alongside)\b", prev, re.I):
+            continue
+        candidate = _clean_vessel_name(prev)
+        if candidate:
+            return candidate
+    return None
+
+
+def _parse_mobile_grouped_lighters(lines: list[str]) -> list[LighterInfo]:
+    lighters: list[LighterInfo] = []
+    seen: set[tuple[str, str]] = set()
+    for idx, line in enumerate(lines):
+        mobile_matches = list(_MOBILE_FMT_RE.finditer(line))
+        mobiles = [_normalize_mobile(m.group(0)) for m in mobile_matches]
+        mobiles = [m for m in mobiles if m]
+        if not mobiles:
+            continue
+        context = _line_context(lines, idx)
+        name = _extract_lighter_name_from_context(lines, idx, mobile_matches[0].group(0))
+        if not name:
+            continue
+        capacity = _normalize_capacity(line, allow_bare=True) or _normalize_capacity(context, allow_bare=True)
+        destination = _normalize_destination(line) or _normalize_destination(context)
+        shift = _extract_shift(context)
+        remarks = None
+        if len(mobiles) > 1:
+            remarks = "Additional mobile(s): " + ", ".join(mobiles[1:])
+        key = (name.lower(), mobiles[0])
+        if key in seen:
+            continue
+        seen.add(key)
+        lighters.append(LighterInfo(
+            lighter_vessel=name,
+            master_name=None,
+            master_mobile=mobiles[0],
+            capacity=capacity,
+            destination=destination,
+            shift=shift,
+            remarks=remarks,
+        ))
+    return lighters
 
 def _extract_mother_vessel(text: str) -> Optional[str]:
     # If 'At-O/A MV ...' pattern present, use that as the mother vessel
@@ -391,24 +645,38 @@ def _parse_mv_block_lighters(text: str) -> list:
 
 
 def parse_escort_message(text: str) -> EscortOrder:
-    """Extract all vessel/lighter info from a client escort message."""
-    mother_vessel = _extract_mother_vessel(text)
+    """Extract vessel/lighter info from a client escort-buying order.
 
-    imp_m = _IMPORTER_RE.search(text)
-    importer = imp_m.group(1).strip() if imp_m else None
+    Canonical rule: a vessel line with a mobile number is a lighter vessel,
+    even when it contains an MV label. A vessel line without a mobile number
+    and with an MV/Mother/At-O/A label is the mother vessel.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    mother_vessel = _extract_mother_vessel_canonical(lines, text)
 
-    cargo_m = _CARGO_RE.search(text)
-    cargo_type = cargo_m.group(0).strip() if cargo_m else None
+    importer = _extract_importer(text)
+    cargo_type = _normalize_cargo(text)
 
     date_m = _DATE_RE.search(text)
     date_hint = date_m.group(1) if date_m else None
+    shift = _extract_shift(text)
 
-    # Try labeled first, then inline numbered, then Mv. block format
-    lighters = _parse_labeled_lighters(text)
+    # Canonical phone-first parser, then legacy fallbacks.
+    lighters = _parse_mobile_grouped_lighters(lines)
+    if not lighters:
+        lighters = _parse_labeled_lighters(text)
     if not lighters:
         lighters = _parse_inline_lighters(text)
     if not lighters:
         lighters = _parse_mv_block_lighters(text)
+
+    for lighter in lighters:
+        if lighter.get("capacity"):
+            lighter["capacity"] = _normalize_capacity(lighter["capacity"]) or lighter["capacity"]
+        if lighter.get("destination"):
+            lighter["destination"] = _normalize_destination(lighter["destination"]) or lighter["destination"]
+        if shift and not lighter.get("shift"):
+            lighter["shift"] = shift
 
     return EscortOrder(
         mother_vessel=mother_vessel,
@@ -416,6 +684,7 @@ def parse_escort_message(text: str) -> EscortOrder:
         cargo_type=cargo_type,
         lighters=lighters,
         date_hint=date_hint,
+        shift=shift,
         raw_text=text,
     )
 
@@ -425,18 +694,37 @@ def parse_escort_message(text: str) -> EscortOrder:
 _TODAY = lambda: date.today().strftime("%d.%m.%Y")
 
 
-def build_admin_draft(mv: str, lighter: LighterInfo, date_str: Optional[str] = None) -> str:
+def build_admin_draft(
+    mv: str,
+    lighter: LighterInfo,
+    date_str: Optional[str] = None,
+    *,
+    client_phone: str = "",
+    importer: Optional[str] = None,
+    cargo_type: Optional[str] = None,
+    shift: Optional[str] = None,
+) -> str:
     """Build the standardized draft to send to admin for one lighter."""
     d = date_str or _TODAY()
+    shift_label = shift or lighter.get("shift") or "D/N"
     lines = [
+        f"Cargo: {cargo_type or ''}",
+        f"Client: {client_phone or ''}",
+        "",
         f"Mother Vessel: {mv or ''}",
+        f"Importer: {importer or ''}",
         f"Lighter Vessel: {lighter['lighter_vessel']}",
         f"Master Mobile: {lighter['master_mobile'] or ''}",
         f"Destination: {lighter.get('destination') or ''}",
+        f"Capacity: {lighter.get('capacity') or ''}",
         "Escort Name:",
         "Escort Mobile:",
-        f"{d} (D/N)",
+        f"{d} ({shift_label})",
         "Al-Aqsa Security & Logistics Services Ltd",
+        "",
+        "─────────────────",
+        "Automated Reply System",
+        "এই বার্তাটি স্বয়ংক্রিয়ভাবে তৈরি হয়েছে। ভুল হতে পারে।",
     ]
     return "\n".join(lines)
 
@@ -446,21 +734,18 @@ def build_admin_message(order: EscortOrder, sender_phone: str) -> str:
     mv = order["mother_vessel"] or "Unknown MV"
     parts = []
 
-    if order["importer"] or order["cargo_type"]:
-        meta = []
-        if order["importer"]:
-            meta.append(f"A/c: {order['importer']}")
-        if order["cargo_type"]:
-            meta.append(f"Cargo: {order['cargo_type']}")
-        parts.append(" | ".join(meta))
-
-    parts.append(f"Client: {sender_phone}")
-    parts.append("")
-
     for i, lighter in enumerate(order["lighters"], 1):
         if len(order["lighters"]) > 1:
             parts.append(f"--- Lighter {i} ---")
-        parts.append(build_admin_draft(mv, lighter, order.get("date_hint")))
+        parts.append(build_admin_draft(
+            mv,
+            lighter,
+            order.get("date_hint"),
+            client_phone=sender_phone,
+            importer=order.get("importer"),
+            cargo_type=order.get("cargo_type"),
+            shift=order.get("shift"),
+        ))
         parts.append("")
 
     if not order["lighters"]:
@@ -471,8 +756,17 @@ def build_admin_message(order: EscortOrder, sender_phone: str) -> str:
             master_mobile=None,
             capacity=None,
             destination=None,
+            shift=order.get("shift"),
         )
-        parts.append(build_admin_draft(mv, dummy, order.get("date_hint")))
+        parts.append(build_admin_draft(
+            mv,
+            dummy,
+            order.get("date_hint"),
+            client_phone=sender_phone,
+            importer=order.get("importer"),
+            cargo_type=order.get("cargo_type"),
+            shift=order.get("shift"),
+        ))
 
     return "\n".join(parts)
 
@@ -582,6 +876,7 @@ async def save_escort_programs(
     ]
 
     mv_clean = mv.upper().replace("MV ", "").strip()
+    order_shift = order.get("shift") or "D"
 
     for lighter in lighters_to_save:
         remarks_data = {
@@ -592,6 +887,8 @@ async def save_escort_programs(
             "capacity": lighter.get("capacity"),
             "importer": order.get("importer"),
             "cargo_type": order.get("cargo_type"),
+            "date_hint": order.get("date_hint"),
+            "shift": lighter.get("shift") or order_shift,
         }
         try:
             # Dedup guard: if a non-cancelled program for same MV+lighter exists
@@ -603,16 +900,18 @@ async def save_escort_programs(
                     SELECT program_id FROM wbom_escort_programs
                     WHERE  UPPER(REPLACE(mother_vessel, 'MV ', '')) = $1
                       AND  LOWER(lighter_vessel) = LOWER($2)
+                      AND  COALESCE(master_mobile, '') = COALESCE($3, COALESCE(master_mobile, ''))
                       AND  status NOT IN ('cancelled')
                       AND  program_date >= CURRENT_DATE - INTERVAL '30 days'
                     ORDER BY program_id DESC LIMIT 1
                     """,
-                    mv_clean, lv_clean,
+                    mv_clean, lv_clean, lighter.get("master_mobile") or None,
                 )
                 if dup:
                     pid = dup["program_id"]
                     log.info(f"[escort] dedup skip: mv={mv} lv={lighter['lighter_vessel']} existing={pid}")
                     program_ids.append(pid)
+                    await _sync_roster_draft(pid)
                     continue
 
             row = await fetch_one(
@@ -621,7 +920,7 @@ async def save_escort_programs(
                     mother_vessel, lighter_vessel, master_mobile,
                     destination, status, contact_id,
                     program_date, shift, remarks
-                ) VALUES ($1, $2, $3, $4, 'draft', $5, CURRENT_DATE, 'D', $6)
+                ) VALUES ($1, $2, $3, $4, 'draft', $5, CURRENT_DATE, $6, $7)
                 RETURNING program_id
                 """,
                 mv,
@@ -629,41 +928,54 @@ async def save_escort_programs(
                 lighter["master_mobile"] or "",
                 lighter.get("destination") or "",
                 contact_id,
+                lighter.get("shift") or order_shift,
                 json.dumps(remarks_data, ensure_ascii=False),
             )
             if row:
                 pid = row["program_id"]
                 program_ids.append(pid)
                 log.info(f"[escort] saved program_id={pid} mv={mv} lv={lighter['lighter_vessel']}")
+                await _sync_roster_draft(pid)
         except Exception as e:
             log.error(f"[escort] save error: {e}")
 
     return program_ids
 
 
-async def _find_pending_program(mv: Optional[str], lv: Optional[str]) -> Optional[dict]:
-    """Find most recent 'draft' program matching MV and/or lighter name."""
+async def _find_pending_program(
+    mv: Optional[str],
+    lv: Optional[str],
+    *,
+    master_mobile: Optional[str] = None,
+    program_date=None,
+    client_phone: Optional[str] = None,
+) -> Optional[dict]:
+    """Find most recent draft using MV/lighter plus mobile/date/client context."""
     mv_clean = (mv or "").upper().replace("MV.", "").replace("MV ", "").strip()
     lv_clean = (lv or "").strip()
+    master_norm = _normalize_mobile(master_mobile or "") if master_mobile else None
 
     try:
         if mv_clean and lv_clean:
-            # Exact lv match
             row = await fetch_one(
-                """SELECT program_id, remarks, mother_vessel, lighter_vessel, destination
+                """SELECT program_id, remarks, mother_vessel, lighter_vessel,
+                          destination, master_mobile, program_date
                    FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                      AND LOWER(lighter_vessel) = LOWER($2)
+                     AND ($3::text IS NULL OR COALESCE(master_mobile, '') = $3)
+                     AND ($4::date IS NULL OR program_date = $4)
                      AND status = 'draft'
                    ORDER BY program_date DESC LIMIT 1""",
-                mv_clean, lv_clean,
+                mv_clean, lv_clean, master_norm, program_date,
             )
-            if row:
+            if row and _remarks_client_matches(row["remarks"], client_phone):
                 return dict(row)
 
             # Fuzzy lv match: fetch all mv candidates and pick best similarity
             candidates = await fetch_all(
-                """SELECT program_id, remarks, mother_vessel, lighter_vessel, destination
+                """SELECT program_id, remarks, mother_vessel, lighter_vessel,
+                          destination, master_mobile, program_date
                    FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                      AND lighter_vessel IS NOT NULL AND lighter_vessel != ''
@@ -676,6 +988,12 @@ async def _find_pending_program(mv: Optional[str], lv: Optional[str]) -> Optiona
                 lv_lower = lv_clean.lower()
                 best, best_ratio = None, 0.0
                 for c in candidates:
+                    if master_norm and (c["master_mobile"] or "") != master_norm:
+                        continue
+                    if program_date and c["program_date"] != program_date:
+                        continue
+                    if not _remarks_client_matches(c["remarks"], client_phone):
+                        continue
                     ratio = SequenceMatcher(
                         None, lv_lower, (c["lighter_vessel"] or "").lower()
                     ).ratio()
@@ -690,18 +1008,31 @@ async def _find_pending_program(mv: Optional[str], lv: Optional[str]) -> Optiona
 
         if mv_clean:
             row = await fetch_one(
-                """SELECT program_id, remarks, mother_vessel, lighter_vessel, destination
+                """SELECT program_id, remarks, mother_vessel, lighter_vessel,
+                          destination, master_mobile, program_date
                    FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
+                     AND ($2::text IS NULL OR COALESCE(master_mobile, '') = $2)
+                     AND ($3::date IS NULL OR program_date = $3)
                      AND status = 'draft'
                    ORDER BY program_date DESC LIMIT 1""",
-                mv_clean,
+                mv_clean, master_norm, program_date,
             )
-            if row:
+            if row and _remarks_client_matches(row["remarks"], client_phone):
                 return dict(row)
     except Exception as e:
         log.error(f"[escort] find program error: {e}")
     return None
+
+
+def _remarks_client_matches(remarks_text: Optional[str], client_phone: Optional[str]) -> bool:
+    if not client_phone:
+        return True
+    try:
+        remarks = json.loads(remarks_text or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return (remarks.get("sender_phone") or "") == client_phone
 
 
 def _parse_program_date(date_str: Optional[str]):
@@ -718,8 +1049,17 @@ def _parse_program_date(date_str: Optional[str]):
     return None
 
 
-async def _resolve_escort_employee_id(escort_mobile: str) -> Optional[int]:
-    """Look up wbom_employees.employee_id by escort_mobile."""
+async def _resolve_escort_employee_id(
+    escort_mobile: str,
+    escort_name: Optional[str] = None,
+    *,
+    auto_create: bool = False,
+) -> Optional[int]:
+    """Look up or create wbom_employees row by escort mobile.
+
+    wbom_employees.employee_id is a numeric primary key; the escort mobile is
+    stored as employee_mobile and used as the stable identity anchor.
+    """
     if not escort_mobile:
         return None
     try:
@@ -731,7 +1071,26 @@ async def _resolve_escort_employee_id(escort_mobile: str) -> Optional[int]:
             "SELECT employee_id FROM wbom_employees WHERE employee_mobile = ANY($1) AND status = 'Active' LIMIT 1",
             variants,
         )
-        return row["employee_id"] if row else None
+        if row:
+            return row["employee_id"]
+        if not auto_create:
+            return None
+
+        mobile_to_store = variants[1] if len(variants) > 1 else variants[0]
+        emp_id = await fetch_val(
+            """INSERT INTO wbom_employees
+                   (employee_name, employee_mobile, designation, status, joining_date)
+               VALUES ($1, $2, 'Escort', 'Active', CURRENT_DATE)
+               ON CONFLICT (employee_mobile) DO UPDATE
+                   SET employee_name = COALESCE(NULLIF(EXCLUDED.employee_name, ''), wbom_employees.employee_name),
+                       designation = 'Escort',
+                       status = 'Active'
+               RETURNING employee_id""",
+            escort_name or "Unknown Escort",
+            mobile_to_store,
+        )
+        log.info(f"[escort] auto-created/resolved escort employee_id={emp_id} mobile={mobile_to_store}")
+        return emp_id
     except Exception as e:
         log.warning(f"[escort] employee_id lookup error: {e}")
     return None
@@ -745,6 +1104,16 @@ async def _sync_roster_after_confirm(program_id: int) -> None:
         log.info(f"[escort] roster synced after confirmation: program_id={program_id}")
     except Exception as _sync_err:
         log.warning(f"[escort] roster sync failed after confirmation: {_sync_err}")
+
+
+async def _sync_roster_draft(program_id: int) -> None:
+    """Create/update the draft roster row for a draft escort program."""
+    try:
+        from modules.escort_roster.db import sync_program_to_roster
+        await sync_program_to_roster(program_id, actor="auto_draft")
+        log.info(f"[escort] roster draft synced: program_id={program_id}")
+    except Exception as _sync_err:
+        log.warning(f"[escort] roster draft sync failed: {_sync_err}")
 
 
 async def _update_program_confirmed(
@@ -810,14 +1179,40 @@ async def _create_confirmed_from_admin(
         destination = draft.get("destination") or ""
 
         # Resolve escort_employee_id from mobile
-        emp_id = await _resolve_escort_employee_id(escort_mobile)
+        emp_id = await _resolve_escort_employee_id(escort_mobile, escort_name, auto_create=True)
         if emp_id:
             log.info(f"[escort] resolved escort_employee_id={emp_id} mobile={escort_mobile}")
 
         # Clean MV for comparison
         mv_clean = re.sub(r"^MV\.?\s+", "", mv, flags=re.IGNORECASE).strip().upper()
 
-        # Dedup check: if confirmed record already exists for this escort on same MV, update it.
+        # Dedup check: prefer the same vessel/lighter/master/date. This prevents
+        # a completed draft from creating a second confirmed row on re-runs.
+        existing = await fetch_one(
+            """SELECT program_id FROM wbom_escort_programs
+               WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
+                 AND ($2::text = '' OR LOWER(lighter_vessel) = LOWER($2))
+                 AND ($3::text = '' OR COALESCE(master_mobile, '') = $3)
+                 AND ($4::date IS NULL OR program_date = $4)
+                 AND status = 'confirmed'
+               ORDER BY program_id DESC LIMIT 1""",
+            mv_clean, lv, draft.get("master_mobile") or "", program_date,
+        )
+        if existing:
+            pid = existing["program_id"]
+            log.info(
+                f"[escort] confirmed record already exists (program_id={pid}) "
+                f"— updating missing fields from admin msg"
+            )
+            await _update_program_confirmed(
+                pid, escort_name, escort_mobile,
+                lighter_vessel=lv, shift=shift, program_date=program_date,
+                escort_employee_id=emp_id,
+            )
+            await _sync_roster_after_confirm(pid)
+            return pid
+
+        # Legacy fallback: same MV + escort name when vessel details were weak.
         if escort_name:
             existing = await fetch_one(
                 """SELECT program_id FROM wbom_escort_programs
@@ -938,7 +1333,13 @@ async def handle_admin_escort_completion(
         f"lv={draft['lighter_vessel']} escort={draft['escort_name']}"
     )
 
-    program = await _find_pending_program(draft["mother_vessel"], draft["lighter_vessel"])
+    program_date = _parse_program_date(draft.get("date_str"))
+    program = await _find_pending_program(
+        draft["mother_vessel"],
+        draft["lighter_vessel"],
+        master_mobile=draft.get("master_mobile"),
+        program_date=program_date,
+    )
 
     if not program:
         log.warning(
@@ -979,7 +1380,11 @@ async def handle_admin_escort_completion(
     client_bridge = remarks.get("source_bridge", source)
 
     # Resolve escort_employee_id from mobile
-    emp_id = await _resolve_escort_employee_id(draft["escort_mobile"] or "")
+    emp_id = await _resolve_escort_employee_id(
+        draft["escort_mobile"] or "",
+        draft.get("escort_name"),
+        auto_create=True,
+    )
     if emp_id:
         log.info(f"[escort] resolved escort_employee_id={emp_id} mobile={draft['escort_mobile']}")
 
@@ -990,7 +1395,7 @@ async def handle_admin_escort_completion(
         draft["escort_mobile"] or "",
         lighter_vessel=draft.get("lighter_vessel"),
         shift=draft.get("shift"),
-        program_date=_parse_program_date(draft.get("date_str")),
+        program_date=program_date,
         escort_employee_id=emp_id,
     )
 

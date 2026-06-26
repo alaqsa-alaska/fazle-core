@@ -960,7 +960,7 @@ async def _cmd_pay_import(raw_text: str, admin_phone: str) -> str:
     """Admin pastes a bKash/Nagad SMS or free-form line. Ingest, match, preview."""
     from modules.payment_ingest import ingest_payment_sms
     try:
-        res = await ingest_payment_sms(raw_text, sender_number=admin_phone, auto_finalize=True)
+        res = await ingest_payment_sms(raw_text, sender_number=admin_phone, auto_finalize=False)
     except Exception as e:
         log.error(f"[admin] pay-import error: {e}")
         return f"❌ পেমেন্ট ইমপোর্ট ত্রুটি: {e}"

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.database import fetch_val, execute
@@ -121,10 +122,14 @@ async def create_draft_reply(
                 return None
 
             # ── 4. INSERT ─────────────────────────────────────────────────────
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
             meta = json.dumps({
                 "role": role,
                 "context": context,
                 "source_module": source_module,
+                "draft_policy": "draft_always_no_autoreply_when_matched",
+                "auto_delete_after_hours": 24,
+                "expires_at": expires_at.isoformat(),
             })
 
             try:

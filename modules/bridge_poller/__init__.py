@@ -28,6 +28,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -644,6 +645,27 @@ async def _check_social_daemon_health() -> bool:
         return True  # DB failure — assume alive, avoid disabling social engine
 
 
+def _requires_legacy_workflow(text: str, msg: dict) -> bool:
+    """Operational messages must use Fazle's workflow router, not social recruiting."""
+    t = (text or "").lower()
+    try:
+        from modules.escort import is_completed_escort_draft
+        if is_completed_escort_draft(text):
+            return True
+    except Exception:
+        pass
+    operational_tokens = (
+        "m.v", "mv ", "mother vessel", "lighter", "lighter vessel",
+        "escort", "এস্কর্ট", "এমভি", "master number", "destination",
+        "release", "রিলিজ", "[release confirmed]",
+    )
+    if any(token in t for token in operational_tokens):
+        return True
+    if msg.get("media_type") in ("image", "document", "application"):
+        return True
+    return False
+
+
 async def _record_reply(phone: str):
     success = await _redis_cooldown_set(phone)
     if not success:
@@ -723,6 +745,54 @@ async def _poll_bridge(config: dict):
                     continue
 
                 _extracted_text = ""  # filled by media processors below; stored in extracted_text column
+                core_message_id = await _save_raw_core_copy(bridge_name, msg, phone, text)
+
+                # Bridge-side OCR may already populate processed_text. Previously
+                # release images with processed_text skipped the release workflow
+                # because the full OCR block only ran when text was empty.
+                if msg.get("media_type") == "image" and text:
+                    try:
+                        _processed_ocr_text = text
+                        from modules.ocr_processor import (
+                            classify_slip_type as _classify_slip_type,
+                            _extract_fields as _extract_ocr_fields,
+                            _compute_confidence as _compute_ocr_confidence,
+                        )
+                        if _classify_slip_type(text) == "release_slip":
+                            _extracted_text = _processed_ocr_text
+                            fields = _extract_ocr_fields(text, "release_slip")
+                            conf_pct = _compute_ocr_confidence(text, fields)
+                            compat = {
+                                "slip_type": "release_slip",
+                                "employee_name": fields.get("employee_name"),
+                                "vessel": fields.get("vessel"),
+                                "date": fields.get("date"),
+                                "location": fields.get("location"),
+                                "amount": fields.get("amount"),
+                                "confidence_score": conf_pct,
+                                "raw_text": text,
+                            }
+                            from modules.escort_lifecycle import handle_ocr_release_slip
+                            draft_txt = await handle_ocr_release_slip(compat, source=bridge_name, phone=phone)
+                            if draft_txt:
+                                _admin_phone = (
+                                    _settings.admin_bridge2_number
+                                    or _settings.admin_bridge1_number
+                                    or ((_settings.admin_number_list or [""])[0])
+                                    or _settings.admin_meta_number
+                                )
+                                await _notify_admin_bridge({
+                                    "admin_phone": _admin_phone,
+                                    "text": f"📋 Release Slip (from {phone}):\n\n{draft_txt}",
+                                    "bridge": "bridge2",
+                                    "purpose": "release-slip-review",
+                                })
+                            text = "✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"
+                    except Exception as _pre_ocr_err:
+                        log.error(
+                            "[%s] processed_text release-slip handling error msg_id=%s: %s",
+                            bridge_name, msg_id, _pre_ocr_err,
+                        )
 
                 # ── Phase 22: 2-step OCR for images without pre-processed text ─
                 if msg.get("media_type") == "image" and not text and msg.get("filename"):
@@ -757,6 +827,11 @@ async def _poll_bridge(config: dict):
                                 log.info("[IMG_ELIGIBLE_FOR_OCR] bridge=%s msg_id=%s reason=%s", bridge_name, msg_id, reason)
                             else:
                                 log.info("[IMG_SKIPPED_NOT_ELIGIBLE] bridge=%s msg_id=%s reason=%s", bridge_name, msg_id, reason)
+                                await _finalize_core_copy(
+                                    core_message_id, bridge_name, msg, phone, text,
+                                    msg_type=msg.get("type") or "image",
+                                    status="skipped", error=f"image_not_eligible:{reason}",
+                                )
                                 continue  # Not a probable slip/document image — safe terminal skip
 
                         # STEP 2: Full extraction via escort_slip_extractor (3-pass OCR + field parsing)
@@ -766,6 +841,11 @@ async def _poll_bridge(config: dict):
                             ocr_result = await _extract_slip(file_path, source_label=bridge_name)
                         except Exception as _ocr_err:
                             log.error(f"[{bridge_name}] extraction error for {file_path}: {_ocr_err}")
+                            await _finalize_core_copy(
+                                core_message_id, bridge_name, msg, phone, text,
+                                msg_type=msg.get("type") or "image",
+                                status="failed", error=f"ocr_error:{_ocr_err}",
+                            )
                             continue
 
                         # completion_date present → supervisor stamped second date → duty-completion document
@@ -786,14 +866,22 @@ async def _poll_bridge(config: dict):
                                 "master_mobile": ocr_result.get("master_mobile"),
                                 "start_date": ocr_result.get("start_date"),
                             }
+                            _extracted_text = ocr_result.get("raw_ocr_text", "") or _extracted_text
                             from modules.escort_lifecycle import handle_ocr_release_slip
                             try:
                                 draft_txt = await handle_ocr_release_slip(compat, source=bridge_name, phone=phone)
                                 if draft_txt:
+                                    _admin_phone = (
+                                        _settings.admin_bridge2_number
+                                        or _settings.admin_bridge1_number
+                                        or ((_settings.admin_number_list or [""])[0])
+                                        or _settings.admin_meta_number
+                                    )
                                     await _notify_admin_bridge({
-                                        "admin_phone": _settings.admin_bridge2_number,
+                                        "admin_phone": _admin_phone,
                                         "text": f"📋 Release Slip (from {phone}):\n\n{draft_txt}",
                                         "bridge": "bridge2",
+                                        "purpose": "release-slip-review",
                                     })
                                 missing = ocr_result.get("missing_fields", [])
                                 if missing or conf_pct < 60:
@@ -807,6 +895,11 @@ async def _poll_bridge(config: dict):
                                 text = escort_reply
                             except Exception as _rs_err:
                                 log.error(f"[{bridge_name}] release slip handling error: {_rs_err}")
+                                await _finalize_core_copy(
+                                    core_message_id, bridge_name, msg, phone, text,
+                                    msg_type=msg.get("type") or "image",
+                                    status="failed", error=f"release_slip_error:{_rs_err}",
+                                )
                                 continue
                             # Fall through to normal routing to send escort_reply
 
@@ -827,8 +920,18 @@ async def _poll_bridge(config: dict):
                                     })
                                     text = "ছবিটি স্পষ্ট নয়। অনুগ্রহ করে ভালো আলোতে আবার ছবি তুলে পাঠান।"
                                 else:
+                                    await _finalize_core_copy(
+                                        core_message_id, bridge_name, msg, phone, text,
+                                        msg_type=msg.get("type") or "image",
+                                        status="skipped", error="unknown_image_no_active_program",
+                                    )
                                     continue  # Unknown image, no active program — skip
                             except Exception:
+                                await _finalize_core_copy(
+                                    core_message_id, bridge_name, msg, phone, text,
+                                    msg_type=msg.get("type") or "image",
+                                    status="failed", error="unknown_image_active_program_check_failed",
+                                )
                                 continue
 
                         else:
@@ -867,6 +970,11 @@ async def _poll_bridge(config: dict):
                                 "stt_failed",
                             )
                             await _mark_processed(msg_id, bridge_name, phone)
+                            await _finalize_core_copy(
+                                core_message_id, bridge_name, msg, phone, text,
+                                msg_type=msg.get("type") or "audio",
+                                status="failed", error=f"stt_failed:{_audio_err}",
+                            )
                             continue
                     # ── Parts C+D: PDF/document pipeline ───────────────────
                     elif (
@@ -925,6 +1033,12 @@ async def _poll_bridge(config: dict):
                         await _mark_processed(msg_id, bridge_name, phone)
                         log.info("[DOC_MARK_PROCESSED] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
                         if _doc_ack_sent:
+                            await _finalize_core_copy(
+                                core_message_id, bridge_name, msg, phone, text,
+                                msg_type=msg.get("type") or "document",
+                                extracted_text=_extracted_text,
+                                status="done",
+                            )
                             continue
                     # Mark non-image and already-normalized messages immediately as before.
                     await _mark_processed(msg_id, bridge_name, phone)
@@ -938,12 +1052,13 @@ async def _poll_bridge(config: dict):
                 id_conf = identity["identity_confidence"]
                 id_name = (identity.get("display_name") or "").strip()
 
-                # Save inbound with identity metadata + new central-message fields
-                await _save_message(
-                    bridge_name, phone, text, "inbound",
+                # Update the raw core copy with identity metadata + extracted fields.
+                await _finalize_core_copy(
+                    core_message_id, bridge_name, msg, phone, text,
                     identity_role=id_role, identity_confidence=id_conf,
                     msg_type=msg.get("type") or "text",
                     extracted_text=_extracted_text,
+                    status="processing",
                 )
                 inbound_saved += 1
                 try:
@@ -957,9 +1072,13 @@ async def _poll_bridge(config: dict):
                 # (we still kept them in DB above for audit).
                 if phone.startswith("unresolved:"):
                     unresolved_router_skipped += 1
+                    await _mark_core_queue_status(bridge_name, msg, "skipped", "unresolved_lid")
                     continue
 
-                if os.getenv("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "true").lower() in ("1", "true", "yes"):
+                if (
+                    os.getenv("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "true").lower() in ("1", "true", "yes")
+                    and not _requires_legacy_workflow(text, msg)
+                ):
                     if await _check_social_daemon_health():
                         try:
                             from modules.social_auto_reply import ingest_social_event
@@ -975,6 +1094,7 @@ async def _poll_bridge(config: dict):
                         except Exception as _social_err:
                             log.warning(f"[social] poller ingest failed bridge={bridge_name} phone={phone}: {_social_err}")
                         log.debug(f"[{bridge_name}] social daemon is single reply engine; poller legacy router/send skipped for {phone}")
+                        await _mark_core_queue_status(bridge_name, msg, "done")
                         continue
                     else:
                         log.error(
@@ -983,10 +1103,15 @@ async def _poll_bridge(config: dict):
                         )
                         # fall through to legacy path below — no 'continue'
 
-                await process_bridge_inbound(
-                    bridge_name, phone, text,
-                    id_role=id_role, id_conf=id_conf, id_name=id_name,
-                )
+                try:
+                    await process_bridge_inbound(
+                        bridge_name, phone, text,
+                        id_role=id_role, id_conf=id_conf, id_name=id_name,
+                    )
+                    await _mark_core_queue_status(bridge_name, msg, "done")
+                except Exception as route_err:
+                    await _mark_core_queue_status(bridge_name, msg, "failed", f"routing_error:{route_err}")
+                    raise
 
             if bridge_name == "bridge1":
                 log.info(
@@ -1169,6 +1294,183 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
         intent=intent,
         source_module="bridge_poller",
     )
+
+
+def _core_message_hash(source: str, source_message_ref: str) -> str:
+    return hashlib.sha256(f"{source}|{source_message_ref}".encode("utf-8")).hexdigest()
+
+
+def _parse_source_timestamp(value) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> Optional[int]:
+    """Persist a raw core-side copy before OCR/routing mutates the message."""
+    msg_id = str(msg.get("id") or msg.get("message_id") or "")
+    if not msg_id:
+        return None
+    media_type = str(msg.get("media_type") or msg.get("type") or "text").strip() or "text"
+    raw_text = (msg.get("content") or "").strip()
+    if not raw_text:
+        raw_text = f"[media:{media_type}]" if media_type != "text" else (text or "")
+    conv_key = f"{phone}:{source}" if phone else None
+    receiver = _source_to_receiver(source)
+    source_ts = _parse_source_timestamp(msg.get("timestamp"))
+    msg_hash = _core_message_hash(source, msg_id)
+    context = {
+        "stage": "raw_received",
+        "source_message_ref": msg_id,
+        "chat_jid": msg.get("chat_jid"),
+        "filename": msg.get("filename"),
+        "media_type": msg.get("media_type"),
+        "has_processed_text": bool(msg.get("processed_text")),
+        "bridge_store_preserved": True,
+    }
+    try:
+        row = await fetch_one(
+            """
+            INSERT INTO wbom_whatsapp_messages
+                (sender_number, original_sender_number, message_body, message_type,
+                 direction, platform, is_processed, contact_identifier,
+                 receiver_number, conversation_key, source_message_ref,
+                 source_timestamp, source_context, message_hash,
+                 canonical_phone, phone_last10, metadata_json)
+            VALUES ($1, $2, $3, $4, 'inbound', $5, false, $1,
+                    $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14::jsonb)
+            ON CONFLICT (message_hash) DO UPDATE SET
+                 source_timestamp = COALESCE(wbom_whatsapp_messages.source_timestamp, EXCLUDED.source_timestamp),
+                 metadata_json = COALESCE(wbom_whatsapp_messages.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json
+            RETURNING message_id
+            """,
+            phone, phone, raw_text, media_type, source,
+            receiver or None, conv_key, msg_id, source_ts,
+            json.dumps(context, ensure_ascii=False), msg_hash,
+            phone if phone and not phone.startswith("unresolved:") else None,
+            re.sub(r"\D", "", phone or "")[-10:] if phone else None,
+            json.dumps(context, ensure_ascii=False),
+        )
+        core_id = int(row["message_id"]) if row and row.get("message_id") is not None else None
+        try:
+            await execute(
+                """
+                INSERT INTO fazle_message_queue
+                    (source, sender_phone, direction, message_type, content_text,
+                     media_url, media_id, idempotency_key, status, processor_id, extra)
+                VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, 'processing',
+                        'bridge_poller', $8::jsonb)
+                ON CONFLICT (idempotency_key) DO NOTHING
+                """,
+                source, phone, media_type, raw_text,
+                msg.get("url") or msg.get("filename"), msg_id,
+                f"bridge_poller:{source}:{msg_id}",
+                json.dumps({**context, "core_message_id": core_id}, ensure_ascii=False),
+            )
+        except Exception as q_err:
+            log.warning("[core_copy] queue insert failed bridge=%s msg_id=%s err=%s", source, msg_id, q_err)
+        return core_id
+    except Exception as e:
+        log.warning("[core_copy] raw save failed bridge=%s msg_id=%s err=%s", source, msg_id, e)
+        return None
+
+
+async def _finalize_core_copy(
+    core_message_id: Optional[int],
+    source: str,
+    msg: dict,
+    phone: str,
+    text: str,
+    *,
+    identity_role: str = "",
+    identity_confidence: int = 0,
+    workflow: str = "",
+    intent_detected: str = "",
+    msg_type: str = "text",
+    extracted_text: str = "",
+    status: str = "done",
+    error: str = "",
+) -> None:
+    """Update the raw core copy after OCR/identity/routing context is known."""
+    msg_id = str(msg.get("id") or msg.get("message_id") or "")
+    metadata = {
+        "stage": "processed",
+        "status": status,
+        "source_message_ref": msg_id,
+        "filename": msg.get("filename"),
+        "media_type": msg.get("media_type"),
+    }
+    if error:
+        metadata["error"] = error[:500]
+    try:
+        if core_message_id:
+            await execute(
+                """
+                UPDATE wbom_whatsapp_messages
+                   SET message_body = $2,
+                       message_type = $3,
+                       is_processed = true,
+                       identity_role = $4,
+                       identity_confidence = $5,
+                       workflow_triggered = $6,
+                       intent_detected = $7,
+                       extracted_text = $8,
+                       metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $9::jsonb
+                 WHERE message_id = $1
+                """,
+                core_message_id, text, msg_type,
+                identity_role or None, identity_confidence or None,
+                workflow or None, intent_detected or None, extracted_text or None,
+                json.dumps(metadata, ensure_ascii=False),
+            )
+        else:
+            await _save_message(
+                source, phone, text, "inbound",
+                identity_role=identity_role, identity_confidence=identity_confidence,
+                workflow=workflow, intent_detected=intent_detected,
+                msg_type=msg_type, extracted_text=extracted_text,
+            )
+        if msg_id:
+            await execute(
+                """
+                UPDATE fazle_message_queue
+                   SET status=$1,
+                       attempts=attempts + 1,
+                       last_error=$2,
+                       processed_at=CASE WHEN $1 IN ('done','failed','skipped') THEN NOW() ELSE processed_at END
+                 WHERE idempotency_key=$3
+                """,
+                status, error[:500] if error else None,
+                f"bridge_poller:{source}:{msg_id}",
+            )
+    except Exception as e:
+        log.warning("[core_copy] finalize failed bridge=%s msg_id=%s err=%s", source, msg_id, e)
+
+
+async def _mark_core_queue_status(source: str, msg: dict, status: str, error: str = "") -> None:
+    msg_id = str(msg.get("id") or msg.get("message_id") or "")
+    if not msg_id:
+        return
+    try:
+        await execute(
+            """
+            UPDATE fazle_message_queue
+               SET status=$1,
+                   last_error=$2,
+                   processed_at=CASE WHEN $1 IN ('done','failed','skipped') THEN NOW() ELSE processed_at END
+             WHERE idempotency_key=$3
+            """,
+            status, error[:500] if error else None,
+            f"bridge_poller:{source}:{msg_id}",
+        )
+    except Exception as e:
+        log.warning("[core_copy] queue status update failed bridge=%s msg_id=%s err=%s", source, msg_id, e)
 
 
 async def _save_message(
@@ -1414,12 +1716,11 @@ async def process_bridge_inbound(
 
             # DRAFT_ALWAYS gate (phone, role, name, prefix)
             draft_gate = _is_draft_always(phone, id_role, id_name)
-            if draft_gate and _is_safe_autosend_intent(msg_intent, id_role):
+            if draft_gate:
                 log.info(
-                    "[SAFE_AUTOSEND] phone=%s intent=%r role=%s → overriding draft-always gate",
-                    phone, msg_intent, id_role,
+                    "[DRAFT_ALWAYS] phone=%s intent=%r role=%s name=%r → no direct auto-reply",
+                    phone, msg_intent, id_role, id_name,
                 )
-                draft_gate = False
 
             # STEP 6: risk level gate
             if not draft_gate:
@@ -1510,5 +1811,13 @@ async def process_bridge_inbound(
             log.warning("SAFE MODE: reply suppressed for %s (%s). Saving draft.", phone, bridge_name)
             await _save_draft(bridge_name, phone, reply, msg_intent)
 
-    if admin_note and _settings.internal_notifications_enabled:
-        await _notify_admin_bridge(admin_note)
+    if admin_note:
+        if admin_note.get("purpose") == "draft-only-contact-review":
+            await _save_draft(
+                bridge_name,
+                phone,
+                admin_note.get("text") or text,
+                msg_intent or "draft_only_contact",
+            )
+        if _settings.internal_notifications_enabled:
+            await _notify_admin_bridge(admin_note)

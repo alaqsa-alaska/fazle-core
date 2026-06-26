@@ -36,6 +36,8 @@ runtime_index: true
 
 The Fazle Payroll Engine (FPE) is the financial processing subsystem of the platform. It ingests WhatsApp messages from the accountant-owner conversation, parses payment records (bKash, Nagad, cash, escort duty payments), matches them to employees, and writes verified transactions to an immutable accounting ledger.
 
+Source-of-truth distinction: employee-origin payment/advance requests never create ledger transactions. They create `fazle_payment_drafts`. Final ledger transactions come from Admin -> Accountant payment instructions, or from explicitly promoted/reviewed rows.
+
 FPE is distinct from the core payroll module (`modules/payroll`). The core payroll module manages the employee salary cycle (draft → reviewed → approved → locked → paid). FPE ingests raw message data to build the underlying transaction record that the salary cycle operates on.
 
 **FPE answers the question:** "What was actually paid to whom, when, and via what method?"
@@ -146,12 +148,14 @@ Bridge webhooks ────────────> POST /api/fpe/ingest
 
 | Message Type | Behavior |
 |---|---|
-| `payment` | Requires `is_from_me=True`. Calls `match_or_create_employee()`. Creates transaction in `fpe_cash_transactions`. |
+| `payment` | Requires admin/accountant final-instruction context or manual promotion. Calls `match_or_create_employee()`. Creates transaction only after final instruction/review is satisfied. |
 | `escort_payment` | Parses multi-employee list (NAME=AMOUNT/ per line). Creates one `fazle_payment_drafts` row per entry. Links to escort program if duty_date matches. |
 | `cash_command` | Employee MUST already exist in `fpe_employees` (no auto-create). If not found: sends WhatsApp error reply to the source chat JID. Creates salary transaction. |
 | `income_command` | Auto-creates employee if not found. Creates income transaction via `create_income_transaction()`. |
 
 **Zero-loss invariant:** If money is detected but cannot be matched to an employee, the detected data (amount, phone, name, method, date, confidence) is stored in `fpe_unmatched_messages`. The ledger is NEVER touched. An admin must promote the unmatched row to a verified transaction.
+
+**No auto-finalize from employee request:** Generic bKash/Nagad SMS, employee requests, voice+number requests, or ambiguous money text stay in staging/review/draft. They do not directly write `fpe_cash_transactions` or `wbom_cash_transactions`.
 
 **Prometheus gauges updated on each tick:**
 - `fpe_pending_review_count` — rows in `fpe_unmatched_messages` with `review_status='pending'`

@@ -22,6 +22,9 @@ Public API (all async):
     get_escort_program_status(vessel=None, date_str=None) -> list[dict]
     get_attendance_summary(employee_name=None, month=None) -> list[dict]
     get_payroll_run_status(month=None, year=None) -> list[dict]
+    get_daily_payments(question) -> dict
+    get_employee_month_payments(question) -> dict
+    get_lighter_assignment(question) -> dict
     get_recruitment_leads(limit=20) -> list[dict]
     get_employee_list(status="active") -> list[dict]
     get_module_bridge_status() -> list[dict]
@@ -34,6 +37,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import date
 from typing import Any, Optional
 
 import asyncpg
@@ -56,6 +60,12 @@ def _get_reader_url() -> str:
     if not url:
         # Last resort: use app superuser but read-only intent
         url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        try:
+            from app.config import get_settings
+            url = get_settings().database_url
+        except Exception:
+            url = ""
     return url
 
 
@@ -240,6 +250,311 @@ async def get_payroll_run_status(
     return await get_payment_summary(month=month, year=year)
 
 
+def _fmt_bdt(amount: float) -> str:
+    return f"৳{amount:,.0f}"
+
+
+def _daily_payments_answer(data: dict[str, Any]) -> str:
+    label = data.get("label") or "selected period"
+    recipient_count = int(data.get("recipient_count") or 0)
+    txn_count = int(data.get("transaction_count") or 0)
+    total = float(data.get("total_amount") or 0)
+    payments = data.get("payments") or []
+
+    if not payments:
+        return f"{label} কোনো পেমেন্ট রেকর্ড নেই।"
+
+    lines = [
+        f"{label} পেমেন্ট দেয়া হয়েছে {recipient_count} জনকে।",
+        f"মোট ট্রানজেকশন: {txn_count}টি, মোট টাকা: {_fmt_bdt(total)}।",
+    ]
+    for i, row in enumerate(payments[:15], 1):
+        name = row.get("employee_name") or "Unknown"
+        mobile = row.get("payment_mobile") or row.get("employee_mobile") or "-"
+        method = (row.get("payment_method") or "cash").title()
+        amount = _fmt_bdt(float(row.get("amount") or 0))
+        lines.append(f"{i}. {name} - {amount} ({method}, {mobile})")
+    if len(payments) > 15:
+        lines.append(f"... আরও {len(payments) - 15}টি রেকর্ড আছে।")
+    return "\n".join(lines)
+
+
+async def get_daily_payments(question: str) -> dict[str, Any]:
+    """
+    Return finalized cash/payment rows for the date range mentioned in question.
+    This is the exact-data path for admin questions like:
+      "আজ কয়জনকে পেমেন্ট দেয়া হয়েছে?"
+      "today payments"
+      "গতকাল টাকা পাঠানো হয়েছে কতজনকে?"
+    """
+    from modules.admin_commands.date_parser import parse_date_range
+
+    rng = parse_date_range(question, default_days=1)
+    assert rng is not None
+    start_dt, end_dt, label = rng
+    start_date = start_dt.date()
+    end_date = end_dt.date()
+
+    rows = await _fetch(
+        """
+        SELECT t.transaction_id, t.transaction_date, t.amount,
+               t.payment_method, t.payment_mobile, t.transaction_type, t.source,
+               COALESCE(e.employee_name, '') AS employee_name,
+               COALESCE(e.employee_mobile, '') AS employee_mobile,
+               t.employee_id
+          FROM wbom_cash_transactions t
+          LEFT JOIN wbom_employees e ON e.employee_id = t.employee_id
+         WHERE t.transaction_date >= $1::date
+           AND t.transaction_date <  $2::date
+           AND NOT COALESCE(t.is_reversed, false)
+           AND NOT COALESCE(t.is_reversal, false)
+         ORDER BY t.transaction_date ASC, t.transaction_id ASC
+        """,
+        start_date, end_date, limit=100,
+    )
+
+    total = sum(float(r.get("amount") or 0) for r in rows)
+    recipients = {
+        r.get("employee_id") or r.get("payment_mobile") or r.get("employee_mobile") or r.get("transaction_id")
+        for r in rows
+    }
+    data: dict[str, Any] = {
+        "label": label,
+        "start_date": start_date.isoformat(),
+        "end_date_exclusive": end_date.isoformat(),
+        "transaction_count": len(rows),
+        "recipient_count": len(recipients),
+        "total_amount": total,
+        "payments": rows,
+    }
+    data["answer"] = _daily_payments_answer(data)
+    return data
+
+
+_MONTH_WORDS: dict[str, int] = {
+    "january": 1, "jan": 1, "জানুয়ারি": 1,
+    "february": 2, "feb": 2, "ফেব্রুয়ারি": 2,
+    "march": 3, "mar": 3, "মার্চ": 3,
+    "april": 4, "apr": 4, "এপ্রিল": 4,
+    "may": 5, "মে": 5,
+    "june": 6, "jun": 6, "জুন": 6,
+    "july": 7, "jul": 7, "জুলাই": 7,
+    "august": 8, "aug": 8, "আগস্ট": 8,
+    "september": 9, "sep": 9, "sept": 9, "সেপ্টেম্বর": 9,
+    "october": 10, "oct": 10, "অক্টোবর": 10,
+    "november": 11, "nov": 11, "নভেম্বর": 11,
+    "december": 12, "dec": 12, "ডিসেম্বর": 12,
+}
+
+
+def _extract_month_year(question: str) -> tuple[int, int] | None:
+    q = question.lower().replace("’", "'").replace("‘", "'")
+    year_match = re.search(r"(20\d{2})", q)
+    year = int(year_match.group(1)) if year_match else date.today().year
+    iso_month = re.search(r"\b(20\d{2})[-/](\d{1,2})\b", q)
+    if iso_month:
+        return int(iso_month.group(2)), int(iso_month.group(1))
+    for word, month in _MONTH_WORDS.items():
+        if word in q:
+            return month, year
+    return None
+
+
+def _extract_person_name(question: str) -> str | None:
+    q = question.strip()
+    quoted = re.search(r"['\"]([^'\"]{2,80})['\"]", q)
+    if quoted:
+        return quoted.group(1).strip()
+    month_pos = len(q)
+    for word in _MONTH_WORDS:
+        pos = q.lower().find(word)
+        if pos >= 0:
+            month_pos = min(month_pos, pos)
+    candidate = q[:month_pos]
+    candidate = re.sub(
+        r"(কোনো|কর্মচারি|কর্মচারী|যেমন|employee|staff|worker|মোট|কত|পেমেন্ট|payment|paid|salary|বেতন)",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(r"\d+", " ", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip(" ,:;।?")
+    if len(candidate) >= 2:
+        return candidate
+    return None
+
+
+def _employee_month_answer(data: dict[str, Any]) -> str:
+    name = data.get("employee_name") or data.get("query_name") or "কর্মী"
+    label = data.get("period_label") or "এই period"
+    rows = data.get("payments") or []
+    total = float(data.get("total_amount") or 0)
+    if not rows:
+        return f"{name} — {label} কোনো পেমেন্ট রেকর্ড পাওয়া যায়নি।"
+    lines = [
+        f"{name} {label} মোট {_fmt_bdt(total)} পেমেন্ট পেয়েছে।",
+        f"রেকর্ড: {len(rows)}টি।",
+    ]
+    for i, row in enumerate(rows[:15], 1):
+        d = row.get("transaction_date")
+        method = (row.get("payment_method") or "cash").title()
+        tx_type = row.get("transaction_type") or "payment"
+        lines.append(f"{i}. {d}: {_fmt_bdt(float(row.get('amount') or 0))} ({method}, {tx_type})")
+    if len(rows) > 15:
+        lines.append(f"... আরও {len(rows) - 15}টি রেকর্ড আছে।")
+    return "\n".join(lines)
+
+
+async def get_employee_month_payments(question: str) -> dict[str, Any]:
+    """Exact read-only answer for one employee's payments in a named month."""
+    period = _extract_month_year(question)
+    name = _extract_person_name(question)
+    if not period or not name:
+        return {
+            "query_name": name,
+            "payments": [],
+            "total_amount": 0.0,
+            "answer": "কর্মীর নাম এবং মাস/বছর পরিষ্কার পাইনি। উদাহরণ: দেবাষীশ মে ২০২৬ মোট কত পেমেন্ট পেয়েছে?",
+        }
+    month, year = period
+    start = date(year, month, 1)
+    end = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
+
+    emp_rows = await _fetch(
+        """
+        SELECT employee_id, employee_name, employee_mobile
+          FROM wbom_employees
+         WHERE employee_name ILIKE $1
+         ORDER BY employee_id DESC
+         LIMIT 5
+        """,
+        f"%{name}%", limit=5,
+    )
+
+    rows: list[dict[str, Any]]
+    employee_name = name
+    employee_mobile = ""
+    if emp_rows:
+        employee_id = emp_rows[0]["employee_id"]
+        employee_name = emp_rows[0].get("employee_name") or name
+        employee_mobile = emp_rows[0].get("employee_mobile") or ""
+        rows = await _fetch(
+            """
+            SELECT t.transaction_id, t.transaction_date::text AS transaction_date,
+                   t.amount, t.payment_method, t.payment_mobile, t.transaction_type,
+                   t.status, t.source
+              FROM wbom_cash_transactions t
+             WHERE t.employee_id = $1
+               AND t.transaction_date >= $2::date
+               AND t.transaction_date <  $3::date
+               AND NOT COALESCE(t.is_reversed, false)
+               AND NOT COALESCE(t.is_reversal, false)
+             ORDER BY t.transaction_date ASC, t.transaction_id ASC
+            """,
+            employee_id, start, end, limit=100,
+        )
+    else:
+        rows = await _fetch(
+            """
+            SELECT t.transaction_id, t.transaction_date::text AS transaction_date,
+                   t.amount, t.payment_method, t.payment_mobile, t.transaction_type,
+                   t.status, t.source,
+                   COALESCE(e.employee_name, '') AS employee_name,
+                   COALESCE(e.employee_mobile, '') AS employee_mobile
+              FROM wbom_cash_transactions t
+              LEFT JOIN wbom_employees e ON e.employee_id = t.employee_id
+             WHERE e.employee_name ILIKE $1
+               AND t.transaction_date >= $2::date
+               AND t.transaction_date <  $3::date
+               AND NOT COALESCE(t.is_reversed, false)
+               AND NOT COALESCE(t.is_reversal, false)
+             ORDER BY t.transaction_date ASC, t.transaction_id ASC
+            """,
+            f"%{name}%", start, end, limit=100,
+        )
+        if rows:
+            employee_name = rows[0].get("employee_name") or name
+            employee_mobile = rows[0].get("employee_mobile") or ""
+
+    data: dict[str, Any] = {
+        "query_name": name,
+        "employee_name": employee_name,
+        "employee_mobile": employee_mobile,
+        "period_month": month,
+        "period_year": year,
+        "period_label": f"{month:02d}/{year}",
+        "payments": rows,
+        "total_amount": sum(float(r.get("amount") or 0) for r in rows),
+    }
+    data["answer"] = _employee_month_answer(data)
+    return data
+
+
+def _extract_lighter_name(question: str) -> str | None:
+    quoted = re.search(r"['\"]([^'\"]{2,100})['\"]", question)
+    if quoted:
+        return quoted.group(1).strip()
+    m = re.search(
+        r"(?:লাইটার|lighter|lighter vessel|ভেসেল|vessel)\s*(?:নাম|name|:|=)?\s*([A-Za-z0-9ঀ-৿ ._-]{2,80})",
+        question,
+        re.IGNORECASE,
+    )
+    if m:
+        raw = m.group(1)
+        raw = re.split(r"(?:এ|তে|কবে|কখন|কার|কে|escort|এস্কর্ট|পাঠানো|হয়েছিল|হয়েছিল|ছিল|\\?)", raw, maxsplit=1)[0]
+        raw = re.sub(r"\s+", " ", raw).strip(" ,:;।?")
+        if len(raw) >= 2:
+            return raw
+    return None
+
+
+def _lighter_assignment_answer(data: dict[str, Any]) -> str:
+    lighter = data.get("query_lighter") or "লাইটার"
+    rows = data.get("programs") or []
+    if not rows:
+        return f"{lighter} নামে কোনো এস্কর্ট প্রোগ্রাম পাওয়া যায়নি।"
+    lines = [f"{lighter} — {len(rows)}টি এস্কর্ট প্রোগ্রাম পাওয়া গেছে:"]
+    for i, row in enumerate(rows[:10], 1):
+        date_txt = row.get("program_date") or "-"
+        shift = row.get("shift") or ""
+        escort = row.get("escort_name") or "এস্কর্ট নাম নেই"
+        mobile = row.get("escort_mobile") or "-"
+        mv = row.get("mother_vessel") or "-"
+        status = row.get("status") or "-"
+        lines.append(
+            f"{i}. তারিখ: {date_txt} {shift} | এস্কর্ট: {escort} ({mobile}) | Mother: {mv} | Status: {status}"
+        )
+    if len(rows) > 10:
+        lines.append(f"... আরও {len(rows) - 10}টি রেকর্ড আছে।")
+    return "\n".join(lines)
+
+
+async def get_lighter_assignment(question: str) -> dict[str, Any]:
+    """Exact read-only answer for lighter-vessel escort assignment questions."""
+    lighter = _extract_lighter_name(question)
+    if not lighter:
+        return {
+            "query_lighter": None,
+            "programs": [],
+            "answer": "লাইটারের নাম পরিষ্কার পাইনি। উদাহরণ: 'MV Labonno' লাইটারে কাকে এস্কর্ট পাঠানো হয়েছিল?",
+        }
+    rows = await _fetch(
+        """
+        SELECT program_id, mother_vessel, lighter_vessel, master_mobile,
+               destination, program_date::text AS program_date, shift, status,
+               escort_name, escort_mobile, completion_time::text AS completion_time
+          FROM wbom_escort_programs
+         WHERE lighter_vessel ILIKE $1
+         ORDER BY program_date DESC NULLS LAST, program_id DESC
+         LIMIT 25
+        """,
+        f"%{lighter}%", limit=25,
+    )
+    data: dict[str, Any] = {"query_lighter": lighter, "programs": rows}
+    data["answer"] = _lighter_assignment_answer(data)
+    return data
+
+
 async def get_recruitment_leads(limit: int = 20) -> list[dict]:
     """Return recent recruitment leads/sessions."""
     limit = min(limit, 50)
@@ -329,6 +644,21 @@ async def fetch_web_page(url: str, timeout: int = 10) -> dict[str, Any]:
 # ── Smart question router ─────────────────────────────────────────────────────
 
 _TOOL_PATTERNS: dict[str, list[str]] = {
+    "get_daily_payments": [
+        "today payments", "today payment", "today paid", "paid today",
+        "payments today", "cash today", "আজ পেমেন্ট", "আজকে পেমেন্ট",
+        "আজকের পেমেন্ট", "আজ কয়জন", "আজ কতজন", "আজকে কয়জন",
+        "আজকে কতজন", "টাকা পাঠানো", "টাকা দেয়া", "টাকা দেওয়া",
+        "টাকা দেওয়া", "পেমেন্ট দেয়া", "পেমেন্ট দেওয়া", "পেমেন্ট দেওয়া",
+    ],
+    "get_employee_month_payments": [
+        "মোট কত পেমেন্ট", "কত পেমেন্ট পেয়েছে", "কত পেমেন্ট পেয়েছে",
+        "total payment", "total paid", "payments in", "paid in",
+    ],
+    "get_lighter_assignment": [
+        "লাইটার", "lighter", "lighter vessel", "কাকে পাঠানো", "কখন পাঠানো",
+        "কত তারিখে", "এস্কর্ট পাঠানো", "escort sent", "assigned escort",
+    ],
     "get_employee_list": [
         "employee", "staff", "worker", "কর্মী", "employee list", "কর্মচারী",
         "গার্ড", "guard",
@@ -362,6 +692,39 @@ _TOOL_PATTERNS: dict[str, list[str]] = {
 }
 
 
+def _looks_like_daily_payment_question(q_lower: str) -> bool:
+    has_payment_word = any(
+        word in q_lower
+        for word in (
+            "payment", "payments", "paid", "cash", "bkash", "nagad",
+            "পেমেন্ট", "টাকা", "ক্যাশ", "বিকাশ", "নগদ",
+        )
+    )
+    has_date_or_count = any(
+        word in q_lower
+        for word in (
+            "today", "yesterday", "আজ", "আজকে", "আজকের", "গতকাল",
+            "কয়জন", "কতজন", "কত জন", "how many",
+        )
+    )
+    return has_payment_word and has_date_or_count
+
+
+def _looks_like_employee_month_payment_question(q_lower: str) -> bool:
+    return (
+        any(w in q_lower for w in ("পেমেন্ট", "payment", "paid", "টাকা", "বেতন"))
+        and any(w in q_lower for w in ("মোট", "total", "কত"))
+        and any(w in q_lower for w in _MONTH_WORDS)
+    )
+
+
+def _looks_like_lighter_assignment_question(q_lower: str) -> bool:
+    return (
+        any(w in q_lower for w in ("লাইটার", "lighter", "vessel", "ভেসেল"))
+        and any(w in q_lower for w in ("এস্কর্ট", "escort", "পাঠানো", "assigned", "কাকে", "কখন", "তারিখ"))
+    )
+
+
 def detect_tools_needed(question: str) -> list[str]:
     """
     Detect which read-only tools are likely needed to answer a question.
@@ -369,7 +732,15 @@ def detect_tools_needed(question: str) -> list[str]:
     """
     q_lower = question.lower()
     tools = []
+    if _looks_like_daily_payment_question(q_lower):
+        tools.append("get_daily_payments")
+    if _looks_like_employee_month_payment_question(q_lower):
+        tools.append("get_employee_month_payments")
+    if _looks_like_lighter_assignment_question(q_lower):
+        tools.append("get_lighter_assignment")
     for tool, keywords in _TOOL_PATTERNS.items():
+        if tool in tools:
+            continue
         if any(kw in q_lower for kw in keywords):
             tools.append(tool)
     return tools
@@ -385,6 +756,33 @@ async def run_tool(tool_name: str, question: str) -> dict[str, Any]:
             active = "inactive" not in question.lower()
             data = await get_employee_list(status="active" if active else "inactive")
             return {"tool": tool_name, "data": data, "count": len(data)}
+
+        elif tool_name == "get_daily_payments":
+            data = await get_daily_payments(question)
+            return {
+                "tool": tool_name,
+                "data": data,
+                "count": int(data.get("transaction_count") or 0),
+                "answer": data.get("answer"),
+            }
+
+        elif tool_name == "get_employee_month_payments":
+            data = await get_employee_month_payments(question)
+            return {
+                "tool": tool_name,
+                "data": data,
+                "count": len(data.get("payments") or []),
+                "answer": data.get("answer"),
+            }
+
+        elif tool_name == "get_lighter_assignment":
+            data = await get_lighter_assignment(question)
+            return {
+                "tool": tool_name,
+                "data": data,
+                "count": len(data.get("programs") or []),
+                "answer": data.get("answer"),
+            }
 
         elif tool_name == "get_contact_summary":
             # Try to extract phone from question

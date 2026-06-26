@@ -13,6 +13,34 @@ runtime_index: true
 - If admin message reaches accountant, payment is considered complete.
 - Ledger/database updates immediately after accountant handoff.
 - Future system-mediated approval may exist, but accountant handoff remains completion trigger.
+- Employee/Escort payment or advance requests are never final transactions. They create drafts only.
+- Accountant company summaries are informational and do not create employee cash transactions.
+- The final employee-level ledger is keyed by employee lookup mobile (`employee_mobile`) and written to existing cash transaction tables only; no DB schema change is required.
+
+## Admin -> Accountant Final Instruction
+
+Required components:
+- employee/payable name
+- payout mobile number with method marker
+- amount
+
+Optional but preferred:
+- `ID:` employee-id mobile before the name
+
+Examples:
+
+```text
+ID: 01795122311 Manik Mea 01789123456(B) 5000/-
+Manik Mea 01789123456(N) 200/-
+```
+
+Rules:
+- `ID:` mobile is the employee lookup key.
+- Without `ID:`, payout mobile becomes the employee lookup key.
+- `(B)` = bKash, `(N)` = Nagad, `(C)` = Cash, `(Bank)` = Bank Transfer.
+- If employee is not found, create a minimal active employee using existing `wbom_employees` columns.
+- Write exactly one final transaction row for a distinct WhatsApp instruction.
+- Same employee/same amount can appear multiple times in one day if the WhatsApp message time/identity is different.
 
 ## Verification Rules
 - Confirm identity.

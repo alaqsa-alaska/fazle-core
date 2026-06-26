@@ -270,6 +270,31 @@ class TestIngestPaymentSms:
         assert result["ok"] is True
         assert result["status"] == "unmatched"
 
+    @pytest.mark.asyncio
+    async def test_admin_accountant_instruction_finalizes_direct_transaction(self, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.payment_ingest import ingest_admin_cash_entry
+
+        result = await ingest_admin_cash_entry(
+            "ID: 01795122311 Manik Mea 01789123456(B) 5000/-",
+            sender_number="8801880446111",
+            message_id=9876,
+        )
+
+        assert result["ok"] is True
+        assert result["status"] == "finalized"
+        assert result["employee_mobile"] == "01795122311"
+        txn = await test_db_pool.fetchrow(
+            "SELECT * FROM wbom_cash_transactions WHERE transaction_id=$1",
+            result["transaction_id"],
+        )
+        assert txn["employee_phone"] == "01795122311"
+        assert txn["payment_mobile"] == "01789123456"
+        assert txn["payment_method"] == "bkash"
+        assert float(txn["amount"]) == 5000.0
+        assert txn["source"] == "admin-accountant-instruction"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. Malformed message handling

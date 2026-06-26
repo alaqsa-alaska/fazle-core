@@ -188,16 +188,36 @@ class Settings(BaseSettings):
         return frozenset(r.strip().lower() for r in self.draft_always_roles.split(",") if r.strip())
 
     @property
+    def draft_always_role_name_tokens(self) -> list:
+        """Non-role values kept in DRAFT_ALWAYS_ROLES for contact-name matching."""
+        known_roles = {
+            "accountant", "client_escort_buyer", "vip_client", "repeat_client",
+            "admin", "family", "vendor", "employee", "supervisor", "candidate",
+            "unknown", "blocked",
+        }
+        return [
+            r.strip().lower()
+            for r in self.draft_always_roles.split(",")
+            if r.strip() and r.strip().lower() not in known_roles
+        ]
+
+    @property
     def draft_always_phone_set(self) -> frozenset:
         return frozenset(p.strip() for p in self.draft_always_phones.split(",") if p.strip())
 
     @property
     def draft_always_name_list(self) -> list:
-        return [n.strip().lower() for n in self.draft_always_names.split(",") if n.strip()]
+        tokens = [n.strip().lower() for n in self.draft_always_names.split(",") if n.strip()]
+        tokens.extend(t for t in self.draft_always_role_name_tokens if t not in tokens)
+        return tokens
 
     @property
     def draft_name_prefix_list(self) -> list:
-        return [p.strip().lower() for p in self.draft_name_prefixes.split(",") if p.strip()]
+        prefixes = [p.strip().lower() for p in self.draft_name_prefixes.split(",") if p.strip()]
+        for token in self.draft_always_role_name_tokens:
+            if token and token not in prefixes:
+                prefixes.append(token)
+        return prefixes
 
     @property
     def contact_risk_map(self) -> dict:
