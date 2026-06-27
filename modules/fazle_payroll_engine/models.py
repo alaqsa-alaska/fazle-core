@@ -48,6 +48,24 @@ class TxnCategory(str, Enum):
     bonus      = "bonus"
     deduction  = "deduction"
     correction = "correction"
+
+
+# ── Validators ────────────────────────────────────────────────────────────────
+
+def validate_accounting_period(period: str) -> bool:
+    """Validate accounting_period format: YYYY-MM"""
+    import re
+    if not isinstance(period, str):
+        return False
+    return bool(re.match(r'^\d{4}-\d{2}$', period))
+
+
+def validate_date_format(date_str: str) -> bool:
+    """Validate date format: YYYY-MM-DD"""
+    import re
+    if not isinstance(date_str, str):
+        return False
+    return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', date_str))
     income     = "income"      # company income received from a client, linked to an employee
 
 

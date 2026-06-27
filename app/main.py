@@ -22,7 +22,9 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response, Depends
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyHeader
 
 from app.config import get_settings
@@ -126,6 +128,37 @@ async def require_api_key(key: str = Depends(API_KEY_HEADER)):
     raise HTTPException(status_code=403, detail="Unauthorized")
 
 
+async def _rbac_actor_from_key(key: str) -> dict[str, Any]:
+    if key == settings.internal_api_key:
+        return {"id": None, "phone": "", "name": "owner", "status": "active"}
+    from modules import rbac
+    admin = await rbac.get_admin_by_api_key(key)
+    return admin or {"id": None, "phone": "", "name": "", "status": "unknown"}
+
+
+def require_command(command: str):
+    async def _dep(key: str = Depends(require_api_key)):
+        if key == settings.internal_api_key:
+            return key
+        from modules import rbac
+        perm = await rbac.check_permission(api_key=key, command=command)
+        if not perm.get("allowed"):
+            actor_admin = perm.get("admin")
+            if actor_admin:
+                await rbac.record_audit(
+                    channel="http",
+                    command=command,
+                    actor_phone=actor_admin.get("phone"),
+                    actor_admin=actor_admin,
+                    allowed=False,
+                    required_role=perm.get("required_role"),
+                    denied_reason=perm.get("reason"),
+                )
+            raise HTTPException(status_code=403, detail=perm.get("reason") or "Forbidden")
+        return key
+    return _dep
+
+
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -154,6 +187,16 @@ async def lifespan(app: FastAPI):
         log.info("[ollama_daemon] started and warmup scheduled")
     except Exception as e:
         log.warning(f"[ollama_daemon] startup failed (non-fatal): {e}")
+    # Validate Groq API key at startup
+    try:
+        from config import get_settings
+        settings = get_settings()
+        if not settings.groq_api_key or not str(settings.groq_api_key).strip():
+            log.error("[groq] Groq API key not configured - Groq services will not work")
+        else:
+            log.info("[groq] Groq API key validated")
+    except Exception as e:
+        log.warning(f"[groq] API key validation failed: {e}")
     # Batch 21 — build RAG index in background (non-fatal)
     try:
         from modules import rag
@@ -287,6 +330,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Fazle Core", version="1.0.0", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 app.include_router(fpe_router)
 app.include_router(escort_roster_router)
 app.include_router(drafts_router)
@@ -1513,18 +1557,47 @@ async def dashboard_spa():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "dashboard.html"))
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Serve company logo as favicon for payroll/dashboard branding."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "assets", "company-logo.png"))
+
+
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+async def apple_touch_icon():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "assets", "company-logo.png"))
+
+
+@app.get("/manifest.json", include_in_schema=False)
+async def payroll_manifest():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "manifest.json"))
+
+
+@app.get("/service-worker.js", include_in_schema=False)
+async def payroll_service_worker():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "service-worker.js"), media_type="application/javascript")
+
+
 @app.get("/payroll", response_class=HTMLResponse)
 async def payroll_spa():
     """FPE Payroll Engine dashboard SPA."""
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "payroll.html"))
 
 
-@app.get("/payroll/{tab}", response_class=HTMLResponse)
-async def payroll_spa_tab(tab: str):
-    """SPA deep-link routes (overview/transactions/search/employees/addemployee/unmatched/sync/manual)."""
-    allowed = {"overview", "transactions", "search", "employees", "addemployee", "unmatched", "review", "sync", "manual", "cash", "income"}
-    if tab not in allowed:
-        raise HTTPException(status_code=404, detail="Unknown payroll tab")
+@app.get("/payroll/overview", response_class=HTMLResponse)
+@app.get("/payroll/transactions", response_class=HTMLResponse)
+@app.get("/payroll/search", response_class=HTMLResponse)
+@app.get("/payroll/employees", response_class=HTMLResponse)
+@app.get("/payroll/addemployee", response_class=HTMLResponse)
+@app.get("/payroll/unmatched", response_class=HTMLResponse)
+@app.get("/payroll/review", response_class=HTMLResponse)
+@app.get("/payroll/sync", response_class=HTMLResponse)
+@app.get("/payroll/manual", response_class=HTMLResponse)
+@app.get("/payroll/cash", response_class=HTMLResponse)
+@app.get("/payroll/income", response_class=HTMLResponse)
+@app.get("/payroll/admin", response_class=HTMLResponse)
+async def payroll_spa_tab():
+    """Explicit SPA deep-link routes to avoid colliding with payroll API endpoints (e.g. /payroll/runs)."""
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "payroll.html"))
 
 
@@ -2268,72 +2341,147 @@ async def delete_reviewed_reply(entry_id: int):
 
 
 # ── Batch 19 — RBAC admin endpoints ────────────────────────────────────────────
-@app.get("/admin/users", dependencies=[Depends(require_api_key)])
+@app.get("/admin/users", dependencies=[Depends(require_command("user_list"))])
 async def b19_list_users():
     from modules import rbac
     rows = await rbac.list_admins()
-    return {"count": len(rows), "users": rows}
+    return JSONResponse(
+        jsonable_encoder({"count": len(rows), "users": rows}),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+    )
 
 
-@app.post("/admin/users", dependencies=[Depends(require_api_key)])
-async def b19_add_user(payload: dict):
+@app.post("/admin/users", dependencies=[Depends(require_command("user_add"))])
+async def b19_add_user(payload: dict, key: str = Depends(require_api_key)):
     from modules import rbac
     phone = (payload or {}).get("phone")
     name  = (payload or {}).get("name")
     role  = (payload or {}).get("role", "viewer")
     granted_by = (payload or {}).get("granted_by", "http")
+    username = (payload or {}).get("username")
+    password = (payload or {}).get("password")
     if not phone or not name:
         raise HTTPException(400, "phone and name required")
     try:
-        return await rbac.add_admin(phone, name, role=role, granted_by=granted_by)
+        result = await rbac.add_admin(
+            phone,
+            name,
+            role=role,
+            granted_by=granted_by,
+            username=username,
+            password=password,
+        )
+        actor = await _rbac_actor_from_key(key)
+        await rbac.record_audit(
+            channel="http",
+            command="user_add",
+            actor_phone=actor.get("phone"),
+            actor_admin=actor,
+            args=json.dumps({"phone": phone, "name": name, "role": role, "username": username}),
+            allowed=True,
+            required_role="superadmin",
+            result_summary=json.dumps(result),
+        )
+        return result
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.post("/admin/users/{phone}/role", dependencies=[Depends(require_api_key)])
-async def b19_set_role(phone: str, payload: dict):
+@app.post("/admin/users/{phone}/role", dependencies=[Depends(require_command("user_role"))])
+async def b19_set_role(phone: str, payload: dict, key: str = Depends(require_api_key)):
     from modules import rbac
     role = (payload or {}).get("role")
     if not role:
         raise HTTPException(400, "role required")
     try:
-        return await rbac.set_role(phone, role, granted_by=(payload or {}).get("granted_by", "http"))
+        result = await rbac.set_role(phone, role, granted_by=(payload or {}).get("granted_by", "http"))
+        actor = await _rbac_actor_from_key(key)
+        await rbac.record_audit(
+            channel="http",
+            command="user_role",
+            actor_phone=actor.get("phone"),
+            actor_admin=actor,
+            args=json.dumps({"phone": phone, "role": role}),
+            allowed=True,
+            required_role="superadmin",
+            result_summary=json.dumps(result),
+        )
+        return result
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.delete("/admin/users/{phone}/role/{role}", dependencies=[Depends(require_api_key)])
-async def b19_revoke_role(phone: str, role: str):
+@app.delete("/admin/users/{phone}/role/{role}", dependencies=[Depends(require_command("user_role"))])
+async def b19_revoke_role(phone: str, role: str, key: str = Depends(require_api_key)):
     from modules import rbac
     try:
-        return await rbac.revoke_role(phone, role)
+        result = await rbac.revoke_role(phone, role)
+        actor = await _rbac_actor_from_key(key)
+        await rbac.record_audit(
+            channel="http",
+            command="user_role",
+            actor_phone=actor.get("phone"),
+            actor_admin=actor,
+            args=json.dumps({"phone": phone, "role": role, "operation": "revoke"}),
+            allowed=True,
+            required_role="superadmin",
+            result_summary=json.dumps(result),
+        )
+        return result
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.post("/admin/users/{phone}/disable", dependencies=[Depends(require_api_key)])
-async def b19_disable_user(phone: str):
+@app.post("/admin/users/{phone}/disable", dependencies=[Depends(require_command("user_remove"))])
+async def b19_disable_user(phone: str, key: str = Depends(require_api_key)):
     from modules import rbac
     try:
-        return await rbac.disable_admin(phone)
+        result = await rbac.disable_admin(phone)
+        actor = await _rbac_actor_from_key(key)
+        await rbac.record_audit(
+            channel="http",
+            command="user_remove",
+            actor_phone=actor.get("phone"),
+            actor_admin=actor,
+            args=json.dumps({"phone": phone, "operation": "disable"}),
+            allowed=True,
+            required_role="superadmin",
+            result_summary=json.dumps(result),
+        )
+        return result
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.post("/admin/users/{phone}/apikey", dependencies=[Depends(require_api_key)])
-async def b19_issue_apikey(phone: str):
+@app.post("/admin/users/{phone}/apikey", dependencies=[Depends(require_command("user_apikey"))])
+async def b19_issue_apikey(phone: str, key: str = Depends(require_api_key)):
     from modules import rbac
     try:
-        return await rbac.issue_api_key(phone)
+        result = await rbac.issue_api_key(phone)
+        actor = await _rbac_actor_from_key(key)
+        await rbac.record_audit(
+            channel="http",
+            command="user_apikey",
+            actor_phone=actor.get("phone"),
+            actor_admin=actor,
+            args=json.dumps({"phone": phone, "operation": "rotate_api_key"}),
+            allowed=True,
+            required_role="superadmin",
+            result_summary=json.dumps({"status": result.get("status"), "admin_id": result.get("admin_id")}),
+        )
+        return result
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.get("/admin/audit", dependencies=[Depends(require_api_key)])
+@app.get("/admin/audit", dependencies=[Depends(require_command("user_list"))])
 async def b19_audit(limit: int = 50, command: Optional[str] = None):
     from modules import rbac
     rows = await rbac.list_audit(limit=limit, command=command)
-    return {"count": len(rows), "audit": rows}
+    return JSONResponse(
+        jsonable_encoder({"count": len(rows), "audit": rows}),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 # ── Batch 20 — Admin Dashboard aggregate endpoint ─────────────────────────────

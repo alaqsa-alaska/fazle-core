@@ -50,6 +50,18 @@ class TestApiKeyHashing:
         assert hash_api_key("key1") != hash_api_key("key2")
 
 
+class TestPasswordHashing:
+    """Passwords use salted PBKDF2 hashes."""
+
+    def test_password_roundtrip(self):
+        from modules.rbac import hash_password, verify_password
+
+        hashed = hash_password("S3cure-Pass!")
+        assert hashed.startswith("pbkdf2_sha256$")
+        assert verify_password("S3cure-Pass!", hashed) is True
+        assert verify_password("wrong-pass", hashed) is False
+
+
 class TestCheckPermission:
     """check_permission() returns True/False based on admin's highest role."""
 
@@ -192,3 +204,62 @@ class TestGetAdminByApiKey:
 
         admin = await get_admin_by_api_key("totally-wrong-key")
         assert admin is None
+
+
+class TestGetAdminByUsername:
+    """get_admin_by_username() resolves active admins by their login name."""
+
+    async def test_valid_username_returns_admin(self, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.rbac import get_admin_by_username, hash_password
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO fazle_admins (phone, name, username, password_hash) VALUES ('8801700000007','UserAdmin','testuser',$1)",
+                hash_password("Password123!"),
+            )
+
+        admin = await get_admin_by_username("testuser")
+        assert admin is not None
+        assert admin["phone"] == "8801700000007"
+        assert admin["username"] == "testuser"
+
+    async def test_unknown_username_returns_none(self, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.rbac import get_admin_by_username
+
+        admin = await get_admin_by_username("does-not-exist")
+        assert admin is None
+
+
+class TestAddAdminCredentialAttach:
+    """add_admin can attach username/password to an existing phone-based admin."""
+
+    async def test_attach_credentials_to_existing_phone_user(self, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.rbac import add_admin, get_admin_by_username
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO fazle_admins (phone, name, status) VALUES ('8801700000099','Legacy User','active')"
+            )
+
+        result = await add_admin(
+            "8801700000099",
+            "Legacy User",
+            role="viewer",
+            granted_by="test",
+            username="legacyuser",
+            password="Legacy#Password1",
+        )
+        assert result["status"] == "updated_credentials"
+
+        user = await get_admin_by_username("legacyuser")
+        assert user is not None
+        assert user["phone"] == "8801700000099"

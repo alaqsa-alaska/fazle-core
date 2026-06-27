@@ -3,15 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FPE Payroll Dashboard — Fazle</title>
+<title>Al-Aqsa HR &amp; Admin</title>
+<meta name="theme-color" content="#FD3101">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" href="/static/assets/company-logo.png">
+<link rel="apple-touch-icon" href="/static/assets/company-logo.png">
 <style>
 :root{
-  --bg:#f0f4f8;--card:#fff;--accent:#1a472a;--accent2:#2d6a4f;--accent3:#40916c;
+  --bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--accent3:#ff5b33;
   --err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;
   --surface:#f8fafc;--text:#1e293b;--text2:#475569;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+body{font-family:"Amasis MT Pro Medium",Georgia,serif;
   background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
 
 /* ─── Login Overlay ─────────────────────────────────────────────────────── */
@@ -40,10 +44,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-s
 /* ─── Layout ─────────────────────────────────────────────────────────────── */
 #app{display:none;min-height:100vh;flex-direction:column}
 
-header{background:var(--accent);color:#fff;padding:0 24px;height:56px;
+header{background:var(--accent);color:#fff;padding:0 24px;height:64px;
   display:flex;align-items:center;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,.2);flex-shrink:0}
-header h1{font-size:17px;font-weight:700;letter-spacing:.2px}
+header .brand{display:flex;align-items:center;gap:12px;min-width:0}
+header .brand-link{display:inline-flex;align-items:center;text-decoration:none}
+header .brand-logo{height:46px;width:auto;display:block;object-fit:contain}
+header h1{font-size:22px;font-weight:700;letter-spacing:.2px}
 header .spacer{flex:1}
+.mobile-hide{display:inline-flex}
+.header-tools{display:flex;align-items:center;gap:8px;margin-left:auto}
+.header-icon,.hamburger-btn{
+  width:38px;height:38px;border:none;border-radius:10px;display:inline-flex;
+  align-items:center;justify-content:center;cursor:pointer;transition:transform .12s ease,background .12s ease,opacity .12s ease;
+  background:rgba(255,255,255,.12);color:#fff;text-decoration:none;flex:0 0 auto
+}
+.header-icon:hover,.hamburger-btn:hover{background:rgba(255,255,255,.2);transform:translateY(-1px)}
+.header-icon:active,.hamburger-btn:active{transform:scale(.98)}
+.header-icon svg,.hamburger-btn svg{width:18px;height:18px;display:block;fill:currentColor}
+.notif-btn{color:#9dd8ff}
+.notif-btn:hover{background:rgba(157,216,255,.2)}
+.social-facebook{color:#1877f2}
+.social-instagram{color:#e1306c}
+.social-email{color:#fff7d6}
+.social-whatsapp{color:#25d366}
 .badge{background:rgba(255,255,255,.15);padding:3px 10px;border-radius:20px;font-size:12px;font-weight:500}
 .badge.ok{background:rgba(22,163,74,.3)}
 .badge.warn{background:rgba(217,119,6,.35)}
@@ -56,6 +79,21 @@ nav button{background:none;border:none;padding:14px 20px;cursor:pointer;font-siz
   transition:color .15s,border-color .15s}
 nav button:hover{color:var(--accent2)}
 nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+
+.sidebar-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.42);opacity:0;pointer-events:none;transition:opacity .2s ease;z-index:899}
+.sidebar-backdrop.open{opacity:1;pointer-events:auto}
+.sidebar-drawer{position:fixed;top:0;bottom:0;left:0;width:min(85vw,320px);background:#fff;z-index:900;transform:translateX(-100%);transition:transform .22s ease;box-shadow:8px 0 28px rgba(15,23,42,.2);display:flex;flex-direction:column;overflow:auto}
+.sidebar-drawer.open{transform:translateX(0)}
+.sidebar-head{padding:16px 16px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;background:linear-gradient(180deg,#fff, #fff9f6)}
+.sidebar-head .title{font-size:18px;font-weight:700;color:var(--text)}
+.sidebar-close{background:var(--surface);border:1px solid var(--border);color:var(--text);width:36px;height:36px;border-radius:10px;cursor:pointer}
+.sidebar-menu{padding:10px}
+.sidebar-menu button{width:100%;display:block;text-align:left;border:1px solid transparent;background:#fff;color:var(--text);padding:13px 14px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer}
+.sidebar-menu button:hover,.sidebar-menu button.active{background:rgba(253,49,1,.08);border-color:rgba(253,49,1,.16);color:var(--accent)}
+.sidebar-divider{height:1px;background:var(--border);margin:10px 0}
+.sidebar-social{padding:0 10px 14px;display:flex;flex-wrap:wrap;gap:8px}
+.sidebar-social a{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;background:#fff;border:1px solid var(--border)}
+.sidebar-social svg{width:18px;height:18px}
 
 main{padding:20px 24px;max-width:1440px;margin:0 auto;width:100%;flex:1}
 
@@ -70,8 +108,8 @@ main{padding:20px 24px;max-width:1440px;margin:0 auto;width:100%;flex:1}
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
 .stat-grid.compact{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:8px}
 .stat-grid.compact .stat{padding:8px 10px}
-.stat-grid.compact .stat .num{font-size:18px}
-.stat-grid.compact .stat .lbl{font-size:10px;margin-top:3px}
+.stat-grid.compact .stat .num,.stat-grid .stat .num{font-size:20px}
+.stat-grid.compact .stat .lbl,.stat-grid .stat .lbl{font-size:11px;margin-top:4px}
 @media (min-width:900px){.stat-grid.compact{grid-template-columns:repeat(4,1fr)}}
 @media (max-width:600px){.stat-grid.compact{grid-template-columns:repeat(2,1fr)}}
 
@@ -100,7 +138,7 @@ main{padding:20px 24px;max-width:1440px;margin:0 auto;width:100%;flex:1}
 .stat{background:var(--surface);border:1px solid var(--border);border-radius:8px;
   padding:14px 16px;text-align:center}
 .stat.clickable{cursor:pointer;transition:transform .12s ease, box-shadow .12s ease,border-color .12s ease}
-.stat.clickable:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(15,23,42,.08);border-color:var(--accent3)}
+.stat.clickable:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(15,23,42,.08);border-color:var(--accent)}
 .stat .num{font-size:28px;font-weight:700;color:var(--accent2);line-height:1}
 .stat .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;
   letter-spacing:.6px;margin-top:6px}
@@ -120,6 +158,15 @@ tr:hover td{background:#f8fffe}
 td.mono{font-family:'SF Mono',Consolas,monospace;font-size:12px}
 td.amount{font-weight:700;color:var(--accent2)}
 td.right,th.right{text-align:right}
+.mobile-only{display:none}
+.desktop-only{display:table-cell}
+
+.mobile-overview-search{display:none}
+.row-action-menu{padding:7px 8px;border:1px solid var(--border);border-radius:6px;background:#fff;min-height:36px;font-size:12px;max-width:120px}
+
+@media(max-width:600px){
+  .col-payout-mobile,.col-method{display:none !important}
+}
 
 /* ─── Pills ──────────────────────────────────────────────────────────────── */
 .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
@@ -195,12 +242,17 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 
 /* ─── Responsive ──────────────────────────────────────────────────────────── */
 @media(max-width:768px){
-  header h1{font-size:15px}
+  header .spacer,.mobile-hide{display:none !important}
+  header .brand{flex:1;justify-content:flex-start}
+  header h1{font-size:24px;text-align:left}
+  header .brand-logo{height:46px}
   main{padding:14px}
+  nav{display:none}
   nav button{padding:12px 14px;font-size:11.5px}
+  .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .stat{padding:12px 14px}
-  .stat .num{font-size:24px}
-  .stat .lbl{font-size:10px}
+  .stat .num{font-size:20px}
+  .stat .lbl{font-size:11px}
   .card{padding:14px 16px}
   .card h2{font-size:13px;margin-bottom:12px}
   table{font-size:12px}
@@ -216,8 +268,11 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 @media(max-width:600px){
   body{font-size:13px}
   header{padding:0 12px;height:52px}
-  header h1{font-size:13px}
-  header span:first-child{font-size:20px}
+  header h1{font-size:20px}
+  header .brand-logo{height:32px}
+  .header-tools{gap:6px}
+  .header-icon,.hamburger-btn{width:34px;height:34px}
+  .header-icon svg,.hamburger-btn svg{width:16px;height:16px}
   .badge{padding:2px 8px;font-size:11px}
   .btn.sm{padding:5px 8px;font-size:11px;min-height:36px;min-width:36px}
   
@@ -228,15 +283,15 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   main{padding:12px 10px;overflow-y:auto;-webkit-overflow-scrolling:touch}
   
   /* Navigation: horizontal scrollable tabs */
-  nav{overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap}
+  nav{display:none}
   nav button{padding:14px 16px;font-size:12px;min-height:50px;flex-shrink:0}
   
-  /* Stats grid on mobile: 2 columns */
-  .stat-grid{grid-template-columns:repeat(2,1fr);gap:10px}
+  /* Stats grid on mobile: 2 cards per row */
+  .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .stat-grid.compact{grid-template-columns:repeat(2,1fr)}
   .stat{padding:12px;text-align:center;border-radius:8px}
   .stat .num{font-size:20px}
-  .stat .lbl{font-size:10px;margin-top:4px}
+  .stat .lbl{font-size:11px;margin-top:4px}
   
   /* Cards */
   .card{padding:12px 14px;margin-bottom:12px;border-radius:8px}
@@ -251,6 +306,10 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   /* Tables: make scrollable */
   table{font-size:12px;white-space:nowrap}
   th,td{padding:8px;font-size:12px}
+  .desktop-only{display:none !important}
+  .mobile-only{display:table-cell}
+  .mobile-overview-search{display:block;margin-bottom:8px}
+  .mobile-overview-search input{width:100%;min-height:40px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px}
   
   /* Detail panel: full screen on mobile */
   #detailPanel{width:100% !important;right:-100% !important;border-radius:12px 12px 0 0;max-height:90vh}
@@ -281,14 +340,16 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 @media(max-width:480px){
   body{font-size:12px;line-height:1.4}
   header{height:48px;padding:0 8px}
-  header h1{font-size:12px}
+  header h1{font-size:18px}
+  header .brand-logo{height:32px}
+  .header-icon,.hamburger-btn{width:34px;height:34px;border-radius:9px}
   nav button{padding:12px 12px;font-size:11px;min-height:48px}
   main{padding:8px}
   
   .btn{padding:11px 14px;font-size:12px;min-height:44px}
-  .stat-grid{gap:8px}
+  .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
   .stat{padding:10px;border-radius:6px}
-  .stat .num{font-size:18px}
+  .stat .num{font-size:19px}
   
   .card{padding:10px 12px;margin-bottom:10px}
   .card h2{font-size:11.5px}
@@ -310,11 +371,10 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 /* Landscape mode adjustments */
 @media(max-width:900px) and (orientation:landscape){
   header{height:48px}
-  header h1{font-size:13px}
-  nav{height:44px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-  nav button{padding:10px 12px;font-size:11px}
+  header h1{font-size:16px}
+  nav{display:none}
   main{padding:10px;max-height:calc(100vh - 104px);overflow-y:auto;-webkit-overflow-scrolling:touch}
-  .stat-grid{grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
+  .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}
   .card{margin-bottom:8px;padding:10px}
 }
 
@@ -325,10 +385,20 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 <!-- ════════════════════ LOGIN ════════════════════ -->
 <div id="loginOverlay">
   <div id="loginBox">
-    <h2>💰 FPE Payroll Dashboard</h2>
-    <p>Enter your internal API key to continue. It will be saved locally in your browser.</p>
-    <input id="keyInput" type="password" placeholder="fk_..." autofocus onkeydown="if(event.key==='Enter')doLogin()">
-    <button class="btn" onclick="doLogin()">Sign In →</button>
+    <h2>Al-Aqsa HR &amp; Admin</h2>
+    <p>Sign in with an internal API key or with a username and password. The resulting credential is saved locally in your browser.</p>
+    <div class="row" style="gap:12px;margin-bottom:12px">
+      <label style="display:flex;align-items:center;gap:6px"><input type="radio" name="loginMode" value="key" checked onchange="syncLoginMode()"> API key</label>
+      <label style="display:flex;align-items:center;gap:6px"><input type="radio" name="loginMode" value="password" onchange="syncLoginMode()"> Username/password</label>
+    </div>
+    <div id="loginKeyFields">
+      <input id="keyInput" type="password" placeholder="fk_..." autofocus onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <div id="loginPasswordFields" style="display:none">
+      <input id="usernameInput" type="text" placeholder="username" autocomplete="username" onkeydown="if(event.key==='Enter')doLogin()" style="margin-bottom:8px">
+      <input id="passwordInput" type="password" placeholder="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <button class="btn" onclick="doLogin()">Sign In</button>
     <p id="loginErr"></p>
   </div>
 </div>
@@ -337,28 +407,87 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 <div id="app" style="display:none;flex-direction:column;min-height:100vh">
 
 <header>
-  <span style="font-size:22px">💸</span>
-  <h1>FPE Payroll Engine</h1>
+  <div class="brand">
+    <a class="brand-link" href="/" aria-label="Home">
+      <img id="companyLogo" class="brand-logo" src="/static/assets/company-logo.png" alt="Company logo" onerror="this.style.display='none'">
+    </a>
+    <h1>Al-Aqsa HR &amp; Admin</h1>
+  </div>
   <span class="spacer"></span>
-  <span id="healthBadge" class="badge">—</span>
-  <span id="syncBadge" class="badge muted" style="font-size:11px">—</span>
-  <button class="btn sm" onclick="refreshCurrent()" style="margin-left:4px">⟳</button>
-  <button class="btn sm secondary" onclick="logout()">Logout</button>
+  <div class="header-tools">
+    <a class="header-icon social-facebook" href="https://www.facebook.com/aslsl2022" target="_blank" rel="noopener" aria-label="Facebook">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 22v-8h2.7l.4-3h-3.1V8.2c0-.9.3-1.5 1.6-1.5H16.7V4c-.3 0-1.4-.1-2.6-.1-2.7 0-4.5 1.6-4.5 4.6V11H7v3h2.6v8h3.9z"/></svg>
+    </a>
+    <a class="header-icon social-instagram" href="https://www.instagram.com/alaqsasecurityservice/" target="_blank" rel="noopener" aria-label="Instagram">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5H7a5 5 0 0 1-5-5V7a5 5 0 0 1 5-5zm0 2a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V7a3 3 0 0 0-3-3H7zm5 3a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm5.5-.9a1.1 1.1 0 1 1 0 2.2 1.1 1.1 0 0 1 0-2.2z"/></svg>
+    </a>
+    <a class="header-icon social-email" href="mailto:admin@al-aqsasecurity.com" aria-label="Email">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm0 2v.3l8 5.2 8-5.2V7H4zm16 10V9.7l-7.4 4.8a1 1 0 0 1-1.2 0L4 9.7V17h16z"/></svg>
+    </a>
+    <a class="header-icon social-whatsapp" href="https://wa.me/8801958122300" target="_blank" rel="noopener" aria-label="WhatsApp">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-8.7 15l-1.1 4.2 4.3-1.1A10 10 0 1 0 12 2zm0 2a8 8 0 0 1 6.8 12.2l-.2.3-.1.3.8 2.9-3-.8-.3.1-.3.1A8 8 0 1 1 12 4zm-3 4c-.2 0-.5.1-.6.3-.2.2-.7.7-.7 1.8 0 1.1.8 2.2 1 2.4s1.8 2.8 4.3 3.8c2 .8 2.5.7 3 .7.5-.1 1.5-.6 1.7-1.2.2-.6.2-1 .1-1.2-.1-.2-.3-.3-.7-.5l-1.4-.7c-.2-.1-.4-.1-.6.1l-.5.6c-.1.2-.3.2-.6.1-.3-.1-1.1-.4-2.1-1.3-.8-.7-1.3-1.6-1.5-1.9-.1-.3 0-.5.1-.6l.4-.5c.1-.1.1-.3.1-.5l-.8-1.7c-.1-.3-.3-.3-.5-.3h-.6z"/></svg>
+    </a>
+    <button class="header-icon notif-btn" id="notifBtn" type="button" aria-label="Notifications" title="Notifications">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.3 2.3 0 0 0 2.2-1.7h-4.4A2.3 2.3 0 0 0 12 22zm7-5H5l1.5-1.7V11a5.5 5.5 0 0 1 4.4-5.4V5a1.1 1.1 0 1 1 2.2 0v.6A5.5 5.5 0 0 1 17.5 11v4.3L19 17z"/></svg>
+    </button>
+    <button class="hamburger-btn" id="hamburgerBtn" type="button" onclick="toggleSidebar()" aria-label="Open menu" title="Menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/></svg>
+    </button>
+  </div>
 </header>
 
 <nav>
-  <button class="active" data-tab="overview" onclick="navigate('overview')">📊 Overview</button>
-  <button data-tab="transactions" onclick="navigate('transactions')">💸 Transactions</button>
-  <button data-tab="search" onclick="navigate('search')">🔍 Search</button>
-  <button data-tab="employees" onclick="navigate('employees')">👥 Employees</button>
-  <button data-tab="addemployee" onclick="navigate('addemployee')">➕ Add Employee</button>
-  <button data-tab="unmatched" onclick="navigate('unmatched')">❓ Unmatched</button>
-  <button data-tab="review" onclick="navigate('review')">🛡️ Review Queue</button>
-  <button data-tab="sync" onclick="navigate('sync')">🔄 Sync</button>
-  <button data-tab="manual" onclick="navigate('manual')">✏️ Manual Entry</button>
-  <button data-tab="cash" onclick="navigate('cash')">💵 Cash</button>
-  <button data-tab="income" onclick="navigate('income')">📥 Income</button>
+  <button class="active" data-tab="overview" onclick="navigate('overview')">Overview</button>
+  <button data-tab="transactions" onclick="navigate('transactions')">Transactions</button>
+  <button data-tab="search" onclick="navigate('search')">Search</button>
+  <button data-tab="employees" onclick="navigate('employees')">Employees</button>
+  <button data-tab="addemployee" onclick="navigate('addemployee')">Add Employee</button>
+  <button data-tab="unmatched" onclick="navigate('unmatched')">Unmatched</button>
+  <button data-tab="review" onclick="navigate('review')">Review Queue</button>
+  <button data-tab="sync" onclick="navigate('sync')">Sync</button>
+  <button data-tab="manual" onclick="navigate('manual')">Manual Entry</button>
+  <button data-tab="cash" onclick="navigate('cash')">Cash</button>
+  <button data-tab="income" onclick="navigate('income')">Income</button>
+  <button data-tab="admin" class="admin-only-nav" onclick="navigate('admin')" hidden>Admin</button>
 </nav>
+
+<div id="sidebarBackdrop" class="sidebar-backdrop" onclick="closeSidebar()"></div>
+<aside id="sidebarDrawer" class="sidebar-drawer" aria-hidden="true">
+  <div class="sidebar-head">
+    <div class="title">Menu</div>
+    <button type="button" class="sidebar-close" onclick="closeSidebar()" aria-label="Close menu">Close</button>
+  </div>
+  <div class="sidebar-menu">
+    <button data-tab="overview" onclick="drawerNavigate('overview')">Overview</button>
+    <button data-tab="transactions" onclick="drawerNavigate('transactions')">Transactions</button>
+    <button data-tab="search" onclick="drawerNavigate('search')">Search</button>
+    <button data-tab="employees" onclick="drawerNavigate('employees')">Employees</button>
+    <button data-tab="addemployee" onclick="drawerNavigate('addemployee')">Add Employee</button>
+    <button data-tab="unmatched" onclick="drawerNavigate('unmatched')">Unmatched</button>
+    <button data-tab="review" onclick="drawerNavigate('review')">Review Queue</button>
+    <button data-tab="sync" onclick="drawerNavigate('sync')">Sync</button>
+    <button data-tab="manual" onclick="drawerNavigate('manual')">Manual Entry</button>
+    <button data-tab="cash" onclick="drawerNavigate('cash')">Cash</button>
+    <button data-tab="income" onclick="drawerNavigate('income')">Income</button>
+    <button data-tab="admin" class="admin-only-nav" onclick="drawerNavigate('admin')" hidden>Admin</button>
+    <div class="sidebar-divider"></div>
+    <button onclick="logout()">Logout</button>
+  </div>
+  <div class="sidebar-social" aria-label="Social links">
+    <a class="social-facebook" href="https://www.facebook.com/aslsl2022" target="_blank" rel="noopener" aria-label="Facebook">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 22v-8h2.7l.4-3h-3.1V8.2c0-.9.3-1.5 1.6-1.5H16.7V4c-.3 0-1.4-.1-2.6-.1-2.7 0-4.5 1.6-4.5 4.6V11H7v3h2.6v8h3.9z"/></svg>
+    </a>
+    <a class="social-instagram" href="https://www.instagram.com/alaqsasecurityservice/" target="_blank" rel="noopener" aria-label="Instagram">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5H7a5 5 0 0 1-5-5V7a5 5 0 0 1 5-5zm0 2a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V7a3 3 0 0 0-3-3H7zm5 3a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm5.5-.9a1.1 1.1 0 1 1 0 2.2 1.1 1.1 0 0 1 0-2.2z"/></svg>
+    </a>
+    <a class="social-email" href="mailto:admin@al-aqsasecurity.com" aria-label="Email">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm0 2v.3l8 5.2 8-5.2V7H4zm16 10V9.7l-7.4 4.8a1 1 0 0 1-1.2 0L4 9.7V17h16z"/></svg>
+    </a>
+    <a class="social-whatsapp" href="https://wa.me/8801958122300" target="_blank" rel="noopener" aria-label="WhatsApp">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-8.7 15l-1.1 4.2 4.3-1.1A10 10 0 1 0 12 2zm0 2a8 8 0 0 1 6.8 12.2l-.2.3-.1.3.8 2.9-3-.8-.3.1-.3.1A8 8 0 1 1 12 4zm-3 4c-.2 0-.5.1-.6.3-.2.2-.7.7-.7 1.8 0 1.1.8 2.2 1 2.4s1.8 2.8 4.3 3.8c2 .8 2.5.7 3 .7.5-.1 1.5-.6 1.7-1.2.2-.6.2-1 .1-1.2-.1-.2-.3-.3-.7-.5l-1.4-.7c-.2-.1-.4-.1-.6.1l-.5.6c-.1.2-.3.2-.6.1-.3-.1-1.1-.4-2.1-1.3-.8-.7-1.3-1.6-1.5-1.9-.1-.3 0-.5.1-.6l.4-.5c.1-.1.1-.3.1-.5l-.8-1.7c-.1-.3-.3-.3-.5-.3h-.6z"/></svg>
+    </a>
+  </div>
+</aside>
 
 <main>
   <div id="banner"></div>
@@ -374,7 +503,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     <div class="stat-grid" id="methodStats"></div>
 
     <div class="card">
-      <h2>📆 This Month's Summary</h2>
+      <h2>This Month's Summary</h2>
       <div id="monthSummary" class="stat-grid">
         <div class="stat"><div class="num">—</div><div class="lbl">Paid This Month</div></div>
         <div class="stat"><div class="num">—</div><div class="lbl">Advances</div></div>
@@ -385,7 +514,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 
     <div class="card">
       <div class="title-search">
-        <h2 style="margin-bottom:0;border-bottom:none;padding-bottom:0">🕐 Recent Transactions</h2>
+        <h2 style="margin-bottom:0;border-bottom:none;padding-bottom:0">Recent Transactions</h2>
         <div class="suggest-wrap" style="width:100%;max-width:360px">
           <div class="search-box">
             <span aria-hidden="true">🔍</span>
@@ -404,17 +533,21 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
         <button class="btn sm secondary" onclick="ovPreset('all')">All time</button>
       </div>
       <div id="ovEmpSearchPicked" class="inline-help"></div>
+      <div class="mobile-overview-search">
+        <label>Search</label>
+        <input id="ovMobileSearch" type="search" placeholder="Filter visible rows" oninput="filterOverviewRows()">
+      </div>
       <div id="ovSummary" class="stat-grid compact"></div>
       <div class="tbl-wrap" id="recentTxns"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
       <div class="pager" style="flex-wrap:wrap;gap:6px">
         <span id="ovPagerInfo"></span>
-        <button class="btn sm secondary" id="ovFirst" onclick="ovGoto(1)">« First</button>
-        <button class="btn sm secondary" id="ovPrev" onclick="ovPage(-1)" disabled>‹ Prev</button>
+        <button class="btn sm secondary" id="ovFirst" onclick="ovGoto(1)">First</button>
+        <button class="btn sm secondary" id="ovPrev" onclick="ovPage(-1)" disabled>Prev</button>
         <span style="font-size:12px;color:var(--muted)">Jump to:</span>
         <input id="ovJumpInput" type="number" min="1" style="width:64px" onkeydown="if(event.key==='Enter')ovJumpFromInput()">
         <button class="btn sm secondary" onclick="ovJumpFromInput()">Go</button>
-        <button class="btn sm secondary" id="ovNext" onclick="ovPage(1)" disabled>Next ›</button>
-        <button class="btn sm secondary" id="ovLast" onclick="ovGotoLast()">Last »</button>
+        <button class="btn sm secondary" id="ovNext" onclick="ovPage(1)" disabled>Next</button>
+        <button class="btn sm secondary" id="ovLast" onclick="ovGotoLast()">Last</button>
       </div>
     </div>
   </section>
@@ -422,9 +555,9 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ TRANSACTIONS ══ -->
   <section id="tab-transactions" class="tab">
     <div class="card">
-      <h2>💸 Transactions</h2>
+      <h2>Transactions</h2>
       <div style="margin-bottom:10px">
-        <button class="btn sm" onclick="openAddPayment()" style="background:var(--accent);color:#fff">➕ Add Payment</button>
+        <button class="btn sm" onclick="openAddPayment()" style="background:var(--accent);color:#fff">Add Payment</button>
       </div>
       <div class="row">
         <div><label>Period (YYYY-MM)</label>
@@ -461,13 +594,13 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       <div class="tbl-wrap" id="txnTable"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
       <div class="pager" style="flex-wrap:wrap;gap:6px">
         <span id="txnPagerInfo"></span>
-        <button class="btn sm secondary" id="txnFirst" onclick="txnGoto(1)">« First</button>
-        <button class="btn sm secondary" id="txnPrev" onclick="txnPage(-1)" disabled>‹ Prev</button>
+        <button class="btn sm secondary" id="txnFirst" onclick="txnGoto(1)">First</button>
+        <button class="btn sm secondary" id="txnPrev" onclick="txnPage(-1)" disabled>Prev</button>
         <span style="font-size:12px;color:var(--muted)">Jump to:</span>
         <input id="txnJumpInput" type="number" min="1" style="width:64px" onkeydown="if(event.key==='Enter')txnJumpFromInput()">
         <button class="btn sm secondary" onclick="txnJumpFromInput()">Go</button>
-        <button class="btn sm secondary" id="txnNext" onclick="txnPage(1)" disabled>Next ›</button>
-        <button class="btn sm secondary" id="txnLast" onclick="txnGotoLast()">Last »</button>
+        <button class="btn sm secondary" id="txnNext" onclick="txnPage(1)" disabled>Next</button>
+        <button class="btn sm secondary" id="txnLast" onclick="txnGotoLast()">Last</button>
         <span style="font-size:12px;color:var(--muted);margin-left:8px">Size:</span>
         <select id="txnPageSize" onchange="txnChangePageSize()">
           <option value="20" selected>20</option>
@@ -482,12 +615,12 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ SEARCH (read-only employee + transaction history) ══ -->
   <section id="tab-search" class="tab">
     <div class="card">
-      <h2>🔍 Employee Search</h2>
+      <h2>Employee Search</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
         Read-only lookup by name, phone, or employee ID. Identity resolution honours canonical employees;
         transaction history is returned exactly as recorded.
       </p>
-      <div class="row" style="align-items:flex-end">
+      <div id="adminUserAddRow" class="row" style="align-items:flex-end">
         <div class="suggest-wrap" style="flex:1;min-width:240px">
           <label>Smart search (name / alias / phone / employee ID)</label>
           <input id="empSearchInput" type="text" autocomplete="off" spellcheck="false"
@@ -513,8 +646,8 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       <div class="tbl-wrap" id="empHistoryTable"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
       <div class="pager">
         <span id="empHistoryPagerInfo"></span>
-        <button class="btn sm secondary" id="empHistoryPrev" onclick="empHistoryPage(-1)" disabled>‹ Prev</button>
-        <button class="btn sm secondary" id="empHistoryNext" onclick="empHistoryPage(1)" disabled>Next ›</button>
+        <button class="btn sm secondary" id="empHistoryPrev" onclick="empHistoryPage(-1)" disabled>Prev</button>
+        <button class="btn sm secondary" id="empHistoryNext" onclick="empHistoryPage(1)" disabled>Next</button>
       </div>
     </div>
   </section>
@@ -522,9 +655,9 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ EMPLOYEES ══ -->
   <section id="tab-employees" class="tab">
     <div class="card">
-      <h2>👥 Employees</h2>
+      <h2>Employees</h2>
       <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
-        <button class="btn sm" onclick="openAddEmployee()" style="background:var(--accent);color:#fff">➕ Add Employee</button>
+        <button class="btn sm" onclick="openAddEmployee()" style="background:var(--accent);color:#fff">Add Employee</button>
       </div>
       <div class="row" style="gap:8px;flex-wrap:wrap">
         <div><label>Status</label>
@@ -553,13 +686,13 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       <div class="tbl-wrap" id="empTable"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
       <div class="pager" style="flex-wrap:wrap;gap:6px">
         <span id="empPagerInfo"></span>
-        <button class="btn sm secondary" id="empFirst" onclick="empGoto(1)">« First</button>
-        <button class="btn sm secondary" id="empPrev" onclick="empPage(-1)" disabled>‹ Prev</button>
+        <button class="btn sm secondary" id="empFirst" onclick="empGoto(1)">First</button>
+        <button class="btn sm secondary" id="empPrev" onclick="empPage(-1)" disabled>Prev</button>
         <span style="font-size:12px;color:var(--muted)">Jump to:</span>
         <input id="empJumpInput" type="number" min="1" style="width:64px" onkeydown="if(event.key==='Enter')empJumpFromInput()">
         <button class="btn sm secondary" onclick="empJumpFromInput()">Go</button>
-        <button class="btn sm secondary" id="empNext" onclick="empPage(1)" disabled>Next ›</button>
-        <button class="btn sm secondary" id="empLast" onclick="empGotoLast()">Last »</button>
+        <button class="btn sm secondary" id="empNext" onclick="empPage(1)" disabled>Next</button>
+        <button class="btn sm secondary" id="empLast" onclick="empGotoLast()">Last</button>
         <span style="font-size:12px;color:var(--muted);margin-left:8px">Size:</span>
         <select id="empPageSize" onchange="empChangePageSize()">
           <option value="20">20</option>
@@ -573,7 +706,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 
   <section id="tab-addemployee" class="tab">
     <div class="card">
-      <h2>➕ Add New Employee</h2>
+      <h2>Add New Employee</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Create the employee first so manual payment entry and review suggestions can resolve the mobile/employee ID immediately.</p>
       <div style="max-width:560px">
         <div class="form-group">
@@ -606,7 +739,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ UNMATCHED ══ -->
   <section id="tab-unmatched" class="tab">
     <div class="card">
-      <h2>❓ Unmatched Messages</h2>
+      <h2>Unmatched Messages</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Messages the parser could not confidently match to a transaction. Review and mark as resolved.</p>
       <div class="row">
         <label style="display:flex;align-items:center;gap:6px">
@@ -632,7 +765,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     </div>
 
     <div class="card">
-      <h2>🛡️ Pending Accounting Candidates</h2>
+      <h2>Pending Accounting Candidates</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
         Money detected by the parser that has <b>not yet</b> been promoted into the immutable ledger.
         Approve, reject, or reassign — every action is audit-logged. The ledger is never edited.
@@ -665,7 +798,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
             <option value="50" selected>50</option>
             <option value="100">100</option>
           </select></div>
-        <button class="btn sm" onclick="loadReview(true)">⟳ Refresh</button>
+        <button class="btn sm" onclick="loadReview(true)">Refresh</button>
       </div>
 
       <div class="row" style="margin-top:6px;gap:6px;flex-wrap:wrap;border-top:1px dashed var(--border);padding-top:8px">
@@ -680,12 +813,12 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       <div class="tbl-wrap" id="rvTable"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
       <div class="pager" style="flex-wrap:wrap;gap:6px">
         <span id="rvPagerInfo"></span>
-        <button class="btn sm secondary" id="rvFirst" onclick="rvGoto(1)">« First</button>
-        <button class="btn sm secondary" id="rvPrev" onclick="rvPage(-1)" disabled>‹ Prev</button>
+        <button class="btn sm secondary" id="rvFirst" onclick="rvGoto(1)">First</button>
+        <button class="btn sm secondary" id="rvPrev" onclick="rvPage(-1)" disabled>Prev</button>
         <span style="font-size:12px;color:var(--muted)">Jump to:</span>
         <input id="rvJumpInput" type="number" min="1" style="width:64px" onkeydown="if(event.key==='Enter')rvJumpFromInput()">
         <button class="btn sm secondary" onclick="rvJumpFromInput()">Go</button>
-        <button class="btn sm secondary" id="rvNext" onclick="rvPage(1)" disabled>Next ›</button>
+        <button class="btn sm secondary" id="rvNext" onclick="rvPage(1)" disabled>Next</button>
       </div>
     </div>
   </section>
@@ -693,15 +826,15 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ SYNC ══ -->
   <section id="tab-sync" class="tab">
     <div class="card">
-      <h2>🔄 Sync & Processing Status</h2>
+      <h2>Sync & Processing Status</h2>
       <div id="syncStatus"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
       <div style="margin-top:16px;display:flex;gap:8px">
-        <button class="btn" onclick="triggerSync()">▶ Trigger Sync Now</button>
-        <button class="btn secondary" onclick="loadSync()">⟳ Refresh</button>
+        <button class="btn" onclick="triggerSync()">Trigger Sync Now</button>
+        <button class="btn secondary" onclick="loadSync()">Refresh</button>
       </div>
     </div>
     <div class="card">
-      <h2>🏥 Module Health</h2>
+      <h2>Module Health</h2>
       <div id="healthDetail"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
     </div>
   </section>
@@ -709,7 +842,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ MANUAL ENTRY ══ -->
   <section id="tab-manual" class="tab">
     <div class="card">
-      <h2>✏️ Create Manual Transaction</h2>
+      <h2>Create Manual Transaction</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Use for cash payments, corrections, or transactions not captured via WhatsApp.</p>
       <div style="max-width:480px">
         <div class="form-group">
@@ -765,7 +898,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     </div>
 
     <div class="card">
-      <h2>↩️ Reverse Transaction</h2>
+      <h2>Reverse Transaction</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Creates a reversal entry for an existing transaction. The original is NOT deleted.</p>
       <div style="max-width:480px">
         <div class="form-group">
@@ -784,10 +917,10 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ CASH ══ -->
   <section id="tab-cash" class="tab">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:8px;flex-wrap:wrap">
-      <h2 style="margin:0;font-size:1.1rem;color:var(--accent)">💵 Cash Transactions</h2>
+      <h2 style="margin:0;font-size:1.1rem;color:var(--accent)">Cash Transactions</h2>
       <div style="display:flex;gap:8px">
-        <button class="btn sm secondary" onclick="loadCash(true)">⟳ Refresh</button>
-        <button class="btn sm secondary" onclick="exportCashCSV()">⬇ CSV</button>
+        <button class="btn sm secondary" onclick="loadCash(true)">Refresh</button>
+        <button class="btn sm secondary" onclick="exportCashCSV()">Export CSV</button>
       </div>
     </div>
     <div class="stat-grid" id="cashStats">
@@ -824,15 +957,15 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       </table>
     </div>
     <div class="pager" id="cashPager" style="display:none">
-      <button onclick="cashPage(-1)" id="cashPrev">‹ Prev</button>
+      <button onclick="cashPage(-1)" id="cashPrev">Prev</button>
       <span id="cashPageInfo"></span>
-      <button onclick="cashPage(1)" id="cashNext">Next ›</button>
+      <button onclick="cashPage(1)" id="cashNext">Next</button>
     </div>
 
     <!-- ── Shorthand / Staging Payments ── -->
     <div style="margin-top:24px;border-top:1px solid var(--border);padding-top:16px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;flex-wrap:wrap">
-        <h3 style="margin:0;font-size:1rem;color:var(--accent2)">📋 WhatsApp Shorthand Staging</h3>
+        <h3 style="margin:0;font-size:1rem;color:var(--accent2)">WhatsApp Shorthand Staging</h3>
         <div style="display:flex;gap:8px;align-items:center">
           <select id="stagingStatusFilter" onchange="loadStagingPayments(true)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--surface2);color:inherit">
             <option value="">All Status</option>
@@ -841,7 +974,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
             <option value="unmatched">Unmatched</option>
           </select>
           <input id="stagingQ" type="search" placeholder="name / phone…" oninput="stagingSearchDebounce()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;width:140px">
-          <button class="btn sm secondary" onclick="loadStagingPayments(true)">⟳ Refresh</button>
+          <button class="btn sm secondary" onclick="loadStagingPayments(true)">Refresh</button>
         </div>
       </div>
       <div class="tbl-wrap">
@@ -853,9 +986,9 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
         </table>
       </div>
       <div class="pager" id="stagingPager" style="display:none">
-        <button onclick="stagingPage(-1)" id="stagingPrev">‹ Prev</button>
+        <button onclick="stagingPage(-1)" id="stagingPrev">Prev</button>
         <span id="stagingPageInfo"></span>
-        <button onclick="stagingPage(1)" id="stagingNext">Next ›</button>
+        <button onclick="stagingPage(1)" id="stagingNext">Next</button>
       </div>
     </div>
   </section>
@@ -863,16 +996,16 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <!-- ══ INCOME ══ -->
   <section id="tab-income" class="tab">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:8px;flex-wrap:wrap">
-      <h2 style="margin:0;font-size:1.1rem;color:var(--accent)">📥 Income Transactions</h2>
+      <h2 style="margin:0;font-size:1.1rem;color:var(--accent)">Income Transactions</h2>
       <div style="display:flex;gap:8px">
-        <button class="btn sm secondary" onclick="loadIncome(true)">⟳ Refresh</button>
-        <button class="btn sm secondary" onclick="exportIncomeCSV()">⬇ CSV</button>
+        <button class="btn sm secondary" onclick="loadIncome(true)">Refresh</button>
+        <button class="btn sm secondary" onclick="exportIncomeCSV()">Export CSV</button>
       </div>
     </div>
 
     <!-- ── Income Entry Form ──────────────────────────────────────────────── -->
     <div class="card" id="incomeEntryCard" style="margin-bottom:16px;border:1px solid var(--accent);border-radius:8px;padding:16px">
-      <h3 style="margin:0 0 12px;font-size:0.95rem;color:var(--accent)">➕ New Income Entry</h3>
+      <h3 style="margin:0 0 12px;font-size:0.95rem;color:var(--accent)">New Income Entry</h3>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
         <div>
           <label class="form-label">Date <span style="color:var(--err)">*</span></label>
@@ -915,7 +1048,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       </div>
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;justify-content:flex-end">
         <button class="btn sm secondary" onclick="cancelIncomeEntry()" style="min-height:44px;flex:1;min-width:100px">Cancel</button>
-        <button class="btn sm" id="incEntrySaveBtn" onclick="saveIncomeEntry()" style="min-height:44px;flex:1;min-width:100px">💾 Save</button>
+        <button class="btn sm" id="incEntrySaveBtn" onclick="saveIncomeEntry()" style="min-height:44px;flex:1;min-width:100px">Save</button>
       </div>
       <div id="incEntryMsg" style="margin-top:8px;font-size:12px;display:none"></div>
     </div>
@@ -960,9 +1093,53 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       </table>
     </div>
     <div class="pager" id="incomePager" style="display:none">
-      <button onclick="incomePage(-1)" id="incomePrev">‹ Prev</button>
+      <button onclick="incomePage(-1)" id="incomePrev">Prev</button>
       <span id="incomePageInfo"></span>
-      <button onclick="incomePage(1)" id="incomeNext">Next ›</button>
+      <button onclick="incomePage(1)" id="incomeNext">Next</button>
+    </div>
+  </section>
+
+  <section id="tab-admin" class="tab admin-only-section" hidden>
+    <div class="card">
+      <h2>Admin Console</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+        Admin users can sign in with an API key or with a username and password. API-key resets still work for the legacy flow.
+      </p>
+      <div class="row" style="align-items:flex-end">
+        <div><label>Phone</label><input id="adminNewPhone" type="text" placeholder="8801..."></div>
+        <div><label>Name</label><input id="adminNewName" type="text" placeholder="Full name"></div>
+        <div><label>Username</label><input id="adminNewUsername" type="text" placeholder="login name"></div>
+        <div><label>Password</label><input id="adminNewPassword" type="password" placeholder="set initial password"></div>
+        <div><label>Role</label>
+          <select id="adminNewRole">
+            <option value="viewer">viewer</option>
+            <option value="operator">operator</option>
+            <option value="accountant">accountant</option>
+            <option value="admin">admin</option>
+            <option value="superadmin">superadmin</option>
+          </select>
+        </div>
+        <button class="btn" onclick="adminAddUser()">Add User</button>
+      </div>
+      <div id="adminUsersBox" class="tbl-wrap"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <div class="title-search">
+        <h2 style="margin-bottom:0;border-bottom:none;padding-bottom:0">Activity Log</h2>
+        <div class="row" style="margin-bottom:0">
+          <div><label>Rows</label>
+            <select id="adminAuditLimit" onchange="loadAdminActivity()">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </div>
+          <button class="btn sm secondary" onclick="loadAdminActivity()">Refresh</button>
+        </div>
+      </div>
+      <div id="adminAuditBox" class="tbl-wrap"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
     </div>
   </section>
 
@@ -973,7 +1150,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 <div id="detailPanel">
   <div class="panel-header">
     <h3 id="panelTitle">Details</h3>
-    <button class="btn sm secondary" onclick="closePanel()" style="background:rgba(255,255,255,.15);border:none;color:#fff">✕</button>
+    <button class="btn sm secondary" onclick="closePanel()" style="background:rgba(255,255,255,.15);border:none;color:#fff">Close</button>
   </div>
   <div class="panel-body" id="panelBody"></div>
 </div>
@@ -984,7 +1161,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <div id="modal">
     <div class="modal-head">
       <h3 id="modalTitle">Confirm</h3>
-      <button onclick="closeModal()" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer">✕</button>
+      <button onclick="closeModal()" style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer">Close</button>
     </div>
     <div class="modal-body" id="modalBody"></div>
     <div class="modal-footer" id="modalFooter"></div>
@@ -999,6 +1176,16 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 // ── State ────────────────────────────────────────────────────────────────────
 let API_KEY = '';
 let currentTab = 'overview';
+let USER_ACCESS = {
+  canEditDelete: false,
+  isOfficeAssistant: false,
+  canManageAdmin: false,
+  permissions: {},
+  normalizedName: '',
+  normalizedRoles: [],
+  user: null,
+};
+let overviewRowsCache = [];
 let txnOffset = 0, txnTotal = 0, txnPages = 1;
 let TXN_LIMIT = 20;
 let txnCategoryFilter = '';
@@ -1028,15 +1215,102 @@ let overviewSuggestItems = [];
 let employeeSuggestItems = [];
 let manualSuggestItems = [];
 
+function normalizeIdentity(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function canAccessAdminMenu() {
+  return !!USER_ACCESS.canManageAdmin;
+}
+
+function hasPermission(flag) {
+  return !!(USER_ACCESS.permissions && USER_ACCESS.permissions[flag]);
+}
+
+function syncAdminUiVisibility() {
+  const showAdmin = canAccessAdminMenu();
+  document.querySelectorAll('.admin-only-nav, .admin-only-section').forEach(el => {
+    el.hidden = !showAdmin;
+  });
+  if (!showAdmin && currentTab === 'admin') navigate('overview', true);
+}
+
+async function resolveUserAccess(apiKey) {
+  USER_ACCESS = {
+    canEditDelete: false,
+    isOfficeAssistant: false,
+    canManageAdmin: false,
+    permissions: {},
+    normalizedName: '',
+    normalizedRoles: [],
+    user: null,
+  };
+  try {
+    const res = await fetch('/api/admin/session', {
+      headers: { 'X-Internal-Key': apiKey },
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error('Session lookup failed');
+    const data = await res.json();
+    const user = data.user || {};
+    USER_ACCESS = {
+      canEditDelete: !!user.can_edit_delete_transactions,
+      isOfficeAssistant: !!user.is_restricted_office_assistant,
+      canManageAdmin: !!user.can_manage_admin,
+      permissions: (user.permissions && typeof user.permissions === 'object') ? user.permissions : {},
+      normalizedName: normalizeIdentity(user.normalized_name || user.name),
+      normalizedRoles: Array.isArray(user.normalized_roles) ? user.normalized_roles.map(normalizeIdentity) : [],
+      user,
+    };
+  } catch (_) {
+    USER_ACCESS.canEditDelete = false;
+  }
+  syncAdminUiVisibility();
+}
+
+function syncLoginMode() {
+  const mode = document.querySelector('input[name="loginMode"]:checked')?.value || 'key';
+  document.getElementById('loginKeyFields').style.display = mode === 'key' ? 'block' : 'none';
+  document.getElementById('loginPasswordFields').style.display = mode === 'password' ? 'block' : 'none';
+}
+
+function canEditDeleteTransactions() {
+  return !!USER_ACCESS.canEditDelete;
+}
+
 // ── Auth ─────────────────────────────────────────────────────────────────────
 async function doLogin() {
-  const key = document.getElementById('keyInput').value.trim();
-  if (!key) { document.getElementById('loginErr').textContent = 'API key required.'; return; }
+  const mode = document.querySelector('input[name="loginMode"]:checked')?.value || 'key';
+  const payload = mode === 'password'
+    ? {
+        mode: 'password',
+        username: document.getElementById('usernameInput').value.trim(),
+        password: document.getElementById('passwordInput').value,
+      }
+    : {
+        mode: 'key',
+        key: document.getElementById('keyInput').value.trim(),
+      };
   try {
-    const r = await fetch('/api/fpe/health', { headers: { 'X-Internal-Key': key } });
-    if (!r.ok) { document.getElementById('loginErr').textContent = 'Invalid key or server error (' + r.status + ')'; return; }
-    API_KEY = key;
-    localStorage.setItem('fpe_api_key', key);
+    const r = await fetch('/api/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(() => '');
+      document.getElementById('loginErr').textContent = msg || ('Login failed (' + r.status + ')');
+      return;
+    }
+    const data = await r.json();
+    const credential = (data.credential && data.credential.value) || data.api_key || data.key || payload.key;
+    if (!credential) {
+      document.getElementById('loginErr').textContent = 'Login succeeded but no credential was returned.';
+      return;
+    }
+    API_KEY = credential;
+    await resolveUserAccess(credential);
+    localStorage.setItem('fpe_api_key', credential);
     document.getElementById('loginOverlay').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     initApp();
@@ -1051,6 +1325,39 @@ function logout() {
   location.reload();
 }
 
+function setSidebarOpen(isOpen) {
+  const drawer = document.getElementById('sidebarDrawer');
+  const backdrop = document.getElementById('sidebarBackdrop');
+  if (!drawer || !backdrop) return;
+  drawer.classList.toggle('open', isOpen);
+  backdrop.classList.toggle('open', isOpen);
+  drawer.setAttribute('aria-hidden', String(!isOpen));
+  document.body.style.overflow = isOpen ? 'hidden' : '';
+}
+
+function openSidebar() {
+  setSidebarOpen(true);
+}
+
+function closeSidebar() {
+  setSidebarOpen(false);
+}
+
+function toggleSidebar() {
+  const drawer = document.getElementById('sidebarDrawer');
+  if (!drawer) return;
+  setSidebarOpen(!drawer.classList.contains('open'));
+}
+
+function drawerNavigate(name) {
+  navigate(name);
+  closeSidebar();
+}
+
+window.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') closeSidebar();
+});
+
 // ── API Helper ───────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
   const headers = { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -1058,6 +1365,27 @@ async function api(path, opts = {}) {
   if (!r.ok) {
     const err = await r.text().catch(() => r.statusText);
     throw new Error(err || r.statusText);
+  }
+  return r.json();
+}
+
+async function adminApi(path, opts = {}) {
+  const headers = { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache', ...(opts.headers || {}) };
+  const requestInit = { cache: 'no-store', ...opts, headers };
+  if (requestInit.body && typeof requestInit.body !== 'string') {
+    requestInit.body = JSON.stringify(requestInit.body);
+  }
+  const base = (path.startsWith('/users') || path.startsWith('/audit')) ? '/admin' : '/api/admin';
+  const r = await fetch(base + path, requestInit);
+  if (!r.ok) {
+    let detail = r.statusText;
+    try {
+      const data = await r.json();
+      detail = data.detail || data.message || JSON.stringify(data);
+    } catch (_) {
+      detail = await r.text().catch(() => r.statusText);
+    }
+    throw new Error(detail || r.statusText);
   }
   return r.json();
 }
@@ -1237,7 +1565,7 @@ function pickManualEmployee(idx) {
 }
 
 // ── Tab Switching / SPA Routing ──────────────────────────────────────────────
-const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','cash','income'];
+const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','cash','income','admin'];
 
 function tabFromPath() {
   const p = location.pathname.replace(/\/+$/, '');
@@ -1252,14 +1580,24 @@ function pathForTab(name) {
 }
 
 function activateTab(name) {
+  if (name === 'admin' && !canAccessAdminMenu()) {
+    name = 'overview';
+    if (location.pathname !== pathForTab('overview')) {
+      history.replaceState({tab: 'overview'}, '', pathForTab('overview'));
+    }
+  }
   if (!VALID_TABS.includes(name)) name = 'overview';
   document.querySelectorAll('.tab').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('nav button[data-tab]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.sidebar-menu button[data-tab]').forEach(b => b.classList.remove('active'));
   const sec = document.getElementById('tab-' + name);
   if (sec) sec.classList.add('active');
   const btn = document.querySelector(`nav button[data-tab="${name}"]`);
   if (btn) btn.classList.add('active');
+  const drawerBtn = document.querySelector(`.sidebar-menu button[data-tab="${name}"]`);
+  if (drawerBtn) drawerBtn.classList.add('active');
   currentTab = name;
+  closeSidebar();
   loadTab(name);
 }
 
@@ -1288,9 +1626,15 @@ function loadTab(name) {
   if (name === 'sync')          loadSync();
   if (name === 'cash')          { cashCurrentPage = 1; stagingCurrentPage = 1; loadCash(true); loadStagingPayments(true); }
   if (name === 'income')        { incomeCurrentPage = 1; incomeEntryResetDate(); loadIncome(true); }
+  if (name === 'admin' && canAccessAdminMenu()) loadAdminTab();
 }
 
 function refreshCurrent() { loadTab(currentTab); loadHeaderStatus(); }
+
+function registerPayrollPwa() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+}
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 function initApp() {
@@ -1310,24 +1654,268 @@ function initApp() {
   const initialTab = tabFromPath();
   history.replaceState({tab: initialTab}, '', pathForTab(initialTab));
   activateTab(initialTab);
+  registerPayrollPwa();
   setInterval(loadHeaderStatus, 15000);
   setInterval(() => { if (currentTab === 'sync') loadSync(); }, 15000);
 }
+
+syncLoginMode();
 
 // ── Header Status ─────────────────────────────────────────────────────────────
 async function loadHeaderStatus() {
   try {
     const h = await api('/health');
     const hb = document.getElementById('healthBadge');
-    hb.textContent = '● ' + h.status.toUpperCase();
-    hb.className = 'badge ' + (h.status === 'ok' ? 'ok' : 'err');
+    if (hb) {
+      hb.textContent = '● ' + h.status.toUpperCase();
+      hb.className = 'badge ' + (h.status === 'ok' ? 'ok' : 'err');
+    }
 
     const sb = document.getElementById('syncBadge');
-    sb.textContent = 'Pending: ' + h.pending_processing;
-    sb.className = 'badge ' + (h.pending_processing > 0 ? 'warn' : 'ok');
+    if (sb) {
+      sb.textContent = 'Pending: ' + h.pending_processing;
+      sb.className = 'badge ' + (h.pending_processing > 0 ? 'warn' : 'ok');
+    }
   } catch(e) {
-    document.getElementById('healthBadge').textContent = '● ERROR';
-    document.getElementById('healthBadge').className = 'badge err';
+    const hb = document.getElementById('healthBadge');
+    if (hb) {
+      hb.textContent = '● ERROR';
+      hb.className = 'badge err';
+    }
+  }
+}
+
+function adminRoleOptions(selected) {
+  const roles = ['viewer', 'operator', 'accountant', 'admin', 'superadmin'];
+  return roles.map(role => `<option value="${role}" ${role === selected ? 'selected' : ''}>${role}</option>`).join('');
+}
+
+function adminCurrentRole(user) {
+  const roles = String(user.roles || '').split(',').map(normalizeIdentity).filter(Boolean);
+  return roles[0] || 'viewer';
+}
+
+async function loadAdminUsers() {
+  if (!canAccessAdminMenu()) return;
+  if (!hasPermission('can_view_admin_users')) {
+    const box = document.getElementById('adminUsersBox');
+    if (box) box.innerHTML = '<div class="empty"><div class="icon">⛔</div>You do not have permission to view users.</div>';
+    return;
+  }
+  const box = document.getElementById('adminUsersBox');
+  if (!box) return;
+  const addRow = document.getElementById('adminUserAddRow');
+  if (addRow) addRow.hidden = !hasPermission('can_add_user');
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const result = await adminApi('/users');
+    const rows = result.users || [];
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty"><div class="icon">👤</div>No admin users found</div>';
+      return;
+    }
+    box.innerHTML = `<table>
+      <thead><tr>
+        <th>Name</th><th>Phone</th><th>Username</th><th>Status</th><th>Role</th><th>Last Seen</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map(user => `
+          <tr>
+            <td>${esc(user.name || '—')}</td>
+            <td class="mono">${esc(user.phone || '—')}</td>
+            <td class="mono">${esc(user.username || '—')}</td>
+            <td><span class="pill ${user.status === 'active' ? 'ok' : 'err'}">${esc(user.status || '—')}</span></td>
+            <td>
+              <select id="admin-role-${user.id}">
+                ${adminRoleOptions(adminCurrentRole(user))}
+              </select>
+            </td>
+            <td>${esc(user.last_seen_at || 'never')}</td>
+            <td>
+              ${hasPermission('can_change_role') ? `<button class="btn sm secondary" onclick='adminSaveRole(${JSON.stringify(encodeURIComponent(user.phone || ""))}, ${JSON.stringify(String(user.id))}, ${JSON.stringify(String(user.roles || ""))})'>Change Role</button>` : ''}
+              ${hasPermission('can_reset_login_key') ? `<button class="btn sm secondary" onclick='adminResetLogin(${JSON.stringify(encodeURIComponent(user.phone || ""))})'>Reset Login</button>` : ''}
+              ${hasPermission('can_deactivate_user') ? `<button class="btn sm danger" onclick='adminDisableUser(${JSON.stringify(encodeURIComponent(user.phone || ""))})'>Deactivate</button>` : ''}
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty"><div class="icon">⚠️</div>${esc(e.message)}</div>`;
+  }
+}
+
+function auditDetailsText(entry) {
+  if (entry.type === 'data') {
+    const detailParts = [];
+    if (entry.reason) detailParts.push(entry.reason);
+    if (entry.before_state) detailParts.push('Before: ' + JSON.stringify(entry.before_state));
+    if (entry.after_state) detailParts.push('After: ' + JSON.stringify(entry.after_state));
+    return detailParts.join(' | ') || '—';
+  }
+  return entry.details || '—';
+}
+
+async function loadAdminActivity() {
+  if (!canAccessAdminMenu()) return;
+  if (!hasPermission('can_view_admin_audit')) {
+    const box = document.getElementById('adminAuditBox');
+    if (box) box.innerHTML = '<div class="empty"><div class="icon">⛔</div>You do not have permission to view activity.</div>';
+    return;
+  }
+  const box = document.getElementById('adminAuditBox');
+  if (!box) return;
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  const limit = parseInt(document.getElementById('adminAuditLimit')?.value || '50', 10);
+  try {
+    const adminAudit = await adminApi(`/audit?limit=${limit}`);
+    const dataAudit = hasPermission('can_view_accounting_audit')
+      ? await adminApi(`/accounting-audit?limit=${limit}`)
+      : { audit: [] };
+    const rows = [
+      ...((adminAudit.audit || []).map(item => ({
+        type: 'admin',
+        created_at: item.created_at,
+        user: item.actor_label || item.actor_phone || 'unknown',
+        action: item.allowed ? item.command : `${item.command} (denied)`,
+        module: 'admin',
+        record_id: item.actor_user_id || '—',
+        details: item.denied_reason || item.result_summary || item.args || '—',
+      }))),
+      ...((dataAudit.audit || []).map(item => ({
+        type: 'data',
+        created_at: item.created_at,
+        user: item.performed_by || 'unknown',
+        action: item.action,
+        module: item.entity_type === 'transaction' ? 'payroll' : (item.entity_type || 'system'),
+        record_id: item.entity_id,
+        details: '',
+        reason: item.reason,
+        before_state: item.before_state,
+        after_state: item.after_state,
+      }))),
+    ].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty"><div class="icon">📄</div>No activity yet</div>';
+      return;
+    }
+    box.innerHTML = `<table>
+      <thead><tr>
+        <th>Date/Time</th><th>User</th><th>Action</th><th>Module</th><th>Record ID</th><th>Details</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map(item => `
+          <tr>
+            <td>${esc(item.created_at || '—')}</td>
+            <td>${esc(item.user || '—')}</td>
+            <td>${esc(item.action || '—')}</td>
+            <td>${esc(item.module || '—')}</td>
+            <td class="mono">${esc(String(item.record_id ?? '—'))}</td>
+            <td style="white-space:normal;min-width:260px">${esc(auditDetailsText(item))}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty"><div class="icon">⚠️</div>${esc(e.message)}</div>`;
+  }
+}
+
+async function loadAdminTab() {
+  await Promise.all([loadAdminUsers(), loadAdminActivity()]);
+}
+
+async function adminAddUser() {
+  if (!hasPermission('can_add_user')) {
+    showToast('Not allowed to add users', 'err');
+    return;
+  }
+  const phone = (document.getElementById('adminNewPhone')?.value || '').trim();
+  const name = (document.getElementById('adminNewName')?.value || '').trim();
+  const role = (document.getElementById('adminNewRole')?.value || 'viewer').trim();
+  const username = (document.getElementById('adminNewUsername')?.value || '').trim();
+  const password = (document.getElementById('adminNewPassword')?.value || '');
+  if (!phone || !name) {
+    showToast('Phone and name are required', 'err');
+    return;
+  }
+  if ((username && !password) || (!username && password)) {
+    showToast('Username and password must be set together', 'err');
+    return;
+  }
+  try {
+    const body = { phone, name, role };
+    if (username) body.username = username;
+    if (password) body.password = password;
+    await adminApi('/users', { method: 'POST', body });
+    document.getElementById('adminNewPhone').value = '';
+    document.getElementById('adminNewName').value = '';
+    document.getElementById('adminNewRole').value = role;
+    if (document.getElementById('adminNewUsername')) document.getElementById('adminNewUsername').value = '';
+    if (document.getElementById('adminNewPassword')) document.getElementById('adminNewPassword').value = '';
+    showToast('Admin user added', 'ok');
+    await loadAdminUsers();
+    await loadAdminActivity();
+  } catch (e) {
+    showToast('Add user failed: ' + e.message, 'err');
+  }
+}
+
+async function adminSaveRole(encodedPhone, userId, existingRolesRaw) {
+  if (!hasPermission('can_change_role')) {
+    showToast('Not allowed to change roles', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone);
+  const selectedRole = document.getElementById('admin-role-' + userId)?.value || 'viewer';
+  const existingRoles = String(existingRolesRaw || '').split(',').map(normalizeIdentity).filter(Boolean);
+  try {
+    for (const role of existingRoles) {
+      if (role && role !== selectedRole) {
+        await adminApi('/users/' + encodeURIComponent(phone) + '/role/' + encodeURIComponent(role), { method: 'DELETE' });
+      }
+    }
+    await adminApi('/users/' + encodeURIComponent(phone) + '/role', {
+      method: 'POST',
+      body: { role: selectedRole },
+    });
+    showToast('Role updated', 'ok');
+    await loadAdminUsers();
+    await loadAdminActivity();
+  } catch (e) {
+    showToast('Role change failed: ' + e.message, 'err');
+  }
+}
+
+async function adminResetLogin(encodedPhone) {
+  if (!hasPermission('can_reset_login_key')) {
+    showToast('Not allowed to reset login key', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone);
+  if (!confirm('Issue a new login key for ' + phone + '?\n\nThe previous key will stop working immediately.')) return;
+  try {
+    const result = await adminApi('/users/' + encodeURIComponent(phone) + '/apikey', { method: 'POST' });
+    prompt('New login key for ' + phone + ' (shown once):', result.api_key || '');
+    showToast('New login key issued', 'ok');
+    await loadAdminActivity();
+  } catch (e) {
+    showToast('Reset login failed: ' + e.message, 'err');
+  }
+}
+
+async function adminDisableUser(encodedPhone) {
+  if (!hasPermission('can_deactivate_user')) {
+    showToast('Not allowed to deactivate users', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone);
+  if (!confirm('Deactivate ' + phone + '?\n\nThis disables the user without deleting audit history.')) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(phone) + '/disable', { method: 'POST' });
+    showToast('User deactivated', 'ok');
+    await loadAdminUsers();
+    await loadAdminActivity();
+  } catch (e) {
+    showToast('Deactivate failed: ' + e.message, 'err');
   }
 }
 
@@ -1368,8 +1956,8 @@ async function loadOverview() {
       `;
       document.getElementById('methodStats').innerHTML =
         Object.entries(byMethod).sort((a,b)=>b[1]-a[1]).map(([m,amt]) =>
-          `<div class="stat clickable" onclick="openOverviewCard('method:${m || 'unknown'}')"><div class="num" style="font-size:20px">৳${fmtAmt(amt)}</div><div class="lbl">${(m||'').toUpperCase()}</div></div>`
-        ).join('') || '<div class="stat"><div class="num" style="font-size:14px;color:var(--muted)">No data</div><div class="lbl">This Month</div></div>';
+          `<div class="stat clickable" onclick="openOverviewCard('method:${m || 'unknown'}')"><div class="num">৳${fmtAmt(amt)}</div><div class="lbl">${(m||'').toUpperCase()}</div></div>`
+        ).join('') || '<div class="stat"><div class="num" style="color:var(--muted)">No data</div><div class="lbl">This Month</div></div>';
     }
 
     await loadOverviewRecent(true);
@@ -1391,13 +1979,14 @@ async function loadOverviewRecent(resetPage = false) {
     const d = await api('/transactions' + q);
     ovTotal = d.total || 0;
     ovPages = d.pages || 1;
-    document.getElementById('recentTxns').innerHTML = renderTxnTable(d.transactions || [], true);
+    overviewRowsCache = d.transactions || [];
+    filterOverviewRows();
     const s = d.summary || {};
     document.getElementById('ovSummary').innerHTML = `
       <div class="stat"><div class="num">${fmtNum(s.total||0)}</div><div class="lbl">Total Transactions</div></div>
       <div class="stat"><div class="num">৳${fmtAmt(s.total_amount||0)}</div><div class="lbl">Total Paid</div></div>
-      <div class="stat"><div class="num" style="font-size:14px">${s.first_txn||'—'}</div><div class="lbl">First Transaction</div></div>
-      <div class="stat"><div class="num" style="font-size:14px">${s.last_txn||'—'}</div><div class="lbl">Last Transaction</div></div>`;
+      <div class="stat"><div class="num">${s.first_txn||'—'}</div><div class="lbl">First Transaction</div></div>
+      <div class="stat"><div class="num">${s.last_txn||'—'}</div><div class="lbl">Last Transaction</div></div>`;
     document.getElementById('ovPagerInfo').textContent = `Page ${d.page||1} / ${ovPages} · ${ovTotal} txns`;
     document.getElementById('ovPrev').disabled  = ovOffset === 0;
     document.getElementById('ovFirst').disabled = ovOffset === 0;
@@ -1408,6 +1997,27 @@ async function loadOverviewRecent(resetPage = false) {
   } catch(e) {
     document.getElementById('recentTxns').innerHTML = `<div class="empty"><div class="icon">⚠️</div>${e.message}</div>`;
   }
+}
+
+function filterOverviewRows() {
+  const q = ((document.getElementById('ovMobileSearch')?.value) || '').trim().toLowerCase();
+  if (!q) {
+    document.getElementById('recentTxns').innerHTML = renderTxnTable(overviewRowsCache || [], true);
+    return;
+  }
+  const rows = (overviewRowsCache || []).filter(r => {
+    const blob = [
+      r.txn_date,
+      r.employee_display_id_phone,
+      r.employee_code,
+      r.employee_display_name,
+      r.employee_name_raw,
+      r.amount,
+      r.payout_method,
+    ].map(v => String(v || '').toLowerCase()).join(' ');
+    return blob.includes(q);
+  });
+  document.getElementById('recentTxns').innerHTML = renderTxnTable(rows, true);
 }
 function ovPage(dir) { ovOffset = Math.max(0, ovOffset + dir * OV_LIMIT); loadOverviewRecent(); }
 function ovGoto(p)   { p = Math.max(1, Math.min(p, ovPages || 1)); ovOffset = (p-1)*OV_LIMIT; loadOverviewRecent(); }
@@ -1531,8 +2141,8 @@ function renderTxnSummary(s) {
   el.innerHTML = `
     <div class="stat"><div class="num">${fmtNum(s.total || 0)}</div><div class="lbl">Total Transactions</div></div>
     <div class="stat"><div class="num">৳${fmtAmt(s.total_amount || 0)}</div><div class="lbl">Total Paid</div></div>
-    <div class="stat"><div class="num" style="font-size:16px">${fmtDate(s.first_txn)}</div><div class="lbl">First Transaction</div></div>
-    <div class="stat"><div class="num" style="font-size:16px">${fmtDate(s.last_txn)}</div><div class="lbl">Last Transaction</div></div>
+    <div class="stat"><div class="num">${fmtDate(s.first_txn)}</div><div class="lbl">First Transaction</div></div>
+    <div class="stat"><div class="num">${fmtDate(s.last_txn)}</div><div class="lbl">Last Transaction</div></div>
   `;
 }
 
@@ -1589,16 +2199,49 @@ function clearTxnFilters() {
 
 function renderTxnTable(rows, compact = false) {
   if (!rows.length) return '<div class="empty"><div class="icon">📋</div>No transactions found</div>';
+  if (compact) {
+    return `<table>
+      <thead><tr>
+        <th>Date</th>
+        <th>Emp ID</th>
+        <th>Name</th>
+        <th>Amount</th>
+        <th class="mobile-only">Actions</th>
+        <th class="desktop-only">Actions</th>
+      </tr></thead>
+      <tbody>
+      ${rows.map(r => {
+        const isExpense = (r.txn_category && r.txn_category !== 'salary') || !r.employee_id;
+        const rawName = r.employee_display_name || r.employee_name_raw || '';
+        const looksLikePhone = /^\+?\d[\d\s\-]{6,}$/.test(rawName.trim());
+        const name = isExpense
+          ? 'Office Expense'
+          : (rawName && !looksLikePhone ? esc(rawName) : '<span class="dim">(unnamed)</span>');
+        const empCode = isExpense
+          ? '<span class="dim">—</span>'
+          : esc(r.employee_display_id_phone || r.employee_code || ('#' + (r.canonical_employee_id || r.employee_id || '?')));
+        return `<tr>
+          <td>${fmtDate(r.txn_date)}</td>
+          <td class="mono">${empCode}</td>
+          <td>${name}</td>
+          <td class="amount">৳${fmtAmt(r.amount)}</td>
+          <td class="mobile-only">${renderTxnActionMenu(r.id)}</td>
+          <td class="desktop-only">${renderTxnActionButtons(r.id)}</td>
+        </tr>`;
+      }).join('')}
+      </tbody></table>`;
+  }
+
   return `<table>
     <thead><tr>
       <th>Date</th>
       <th>Emp ID</th>
       <th>Name</th>
-      <th>Mobile No</th>
+      <th class="col-payout-mobile">Payout Mobile</th>
+      <th class="col-method">Method</th>
       <th>Amount</th>
-      <th>Method / Remarks</th>
-      ${compact ? '' : '<th>Period</th>'}
-      <th></th>
+      <th class="mobile-only">Actions</th>
+      <th class="desktop-only">Actions</th>
     </tr></thead>
     <tbody>
     ${rows.map(r => {
@@ -1621,14 +2264,39 @@ function renderTxnTable(rows, compact = false) {
         <td>${fmtDate(r.txn_date)}</td>
         <td class="mono">${empCode}</td>
         <td>${name}</td>
-        <td class="mono">${phone}</td>
+        <td class="mono col-payout-mobile">${phone}</td>
+        <td class="col-method">${methodPill(r.payout_method)}${remarks}</td>
         <td class="amount">৳${fmtAmt(r.amount)}</td>
-        <td>${methodPill(r.payout_method)}${remarks}</td>
-        ${compact ? '' : `<td class="mono">${r.accounting_period || '—'}</td>`}
-        <td><button class="btn sm secondary" onclick="openTxnDetail(${r.id})">View</button> <button class="btn sm secondary" onclick="openEditTxn(${r.id})">✏️</button> <button class="btn sm secondary" style="color:#dc3545;border-color:#dc3545" onclick="confirmDeleteTxn(${r.id})">🗑</button></td>
+        <td class="mobile-only">${renderTxnActionMenu(r.id)}</td>
+        <td class="desktop-only">${renderTxnActionButtons(r.id)}</td>
       </tr>`;
     }).join('')}
     </tbody></table>`;
+}
+
+function renderTxnActionButtons(id) {
+  if (!canEditDeleteTransactions()) {
+    return `<button class="btn sm secondary" onclick="openTxnDetail(${id})">View</button>`;
+  }
+  return `<button class="btn sm secondary" onclick="openTxnDetail(${id})">View</button> <button class="btn sm secondary" onclick="openEditTxn(${id})">Edit</button> <button class="btn sm secondary" style="color:#dc3545;border-color:#dc3545" onclick="confirmDeleteTxn(${id})">Delete</button>`;
+}
+
+function renderTxnActionMenu(id) {
+  const options = ['<option value="">Actions</option>', '<option value="view">View</option>'];
+  if (canEditDeleteTransactions()) {
+    options.push('<option value="edit">Edit</option>', '<option value="delete">Delete</option>');
+  }
+  return `<select class="row-action-menu" data-txn-id="${id}" onchange="handleTxnActionSelect(this)">${options.join('')}</select>`;
+}
+
+function handleTxnActionSelect(el) {
+  const id = Number(el.dataset.txnId || 0);
+  const action = el.value;
+  el.value = '';
+  if (!action || !id) return;
+  if (action === 'view') openTxnDetail(id);
+  if (action === 'edit' && canEditDeleteTransactions()) openEditTxn(id);
+  if (action === 'delete' && canEditDeleteTransactions()) confirmDeleteTxn(id);
 }
 
 async function openTxnDetail(id) {
@@ -1657,7 +2325,7 @@ async function openTxnDetail(id) {
       ${detailRow('Created', fmtDt(d.created_at))}
       ${d.source_message_text ? detailRow('Source', '<pre style="margin:0;font-size:11px;white-space:pre-wrap;max-height:120px">' + esc(d.source_message_text) + '</pre>') : ''}
       <hr style="margin:16px 0;border:none;border-top:1px solid var(--border)">
-      ${!d.is_reversal ? `<button class="btn danger sm" onclick="confirmReverse(${d.id})">↩ Reverse This Transaction</button>` : '<span class="pill muted">Already a reversal</span>'}
+      ${!d.is_reversal ? `<button class="btn danger sm" onclick="confirmReverse(${d.id})">Reverse This Transaction</button>` : '<span class="pill muted">Already a reversal</span>'}
     `;
   } catch(e) {
     document.getElementById('panelBody').innerHTML = `<div class="empty"><div class="icon">⚠️</div>${e.message}</div>`;
@@ -1816,7 +2484,7 @@ async function openAdminEmpEdit(fpeId, phone) {
     document.getElementById('panelBody').innerHTML = `
       <div class="empty"><div class="icon">⚠️</div>No WBOM profile linked to this FPE employee (phone: ${esc(phone||'—')}).<br>
       <small style="color:var(--muted)">The employee may have been auto-created from WhatsApp with no matching WBOM record.</small></div>
-      <div style="margin-top:14px"><button class="btn sm secondary" onclick="openEmpDetail(${fpeId})">← Back</button></div>`;
+      <div style="margin-top:14px"><button class="btn sm secondary" onclick="openEmpDetail(${fpeId})">Back</button></div>`;
     return;
   }
   document.getElementById('panelTitle').textContent = '⚙️ Edit Ops — ' + esc(wbom.employee_name);
@@ -1853,9 +2521,9 @@ async function openAdminEmpEdit(fpeId, phone) {
         <div><label>Address</label>
           <textarea id="aeditAddr" rows="2" style="width:100%;resize:vertical">${esc(wbom.address||'')}</textarea></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button type="submit" class="btn sm">💾 Save</button>
+          <button type="submit" class="btn sm">Save</button>
           <button type="button" class="btn sm secondary" onclick="closePanel()">Cancel</button>
-          <button type="button" class="btn sm secondary" onclick="openEmpDetail(${fpeId})">↩ Back</button>
+          <button type="button" class="btn sm secondary" onclick="openEmpDetail(${fpeId})">Back</button>
         </div>
       </div>
     </form>`;
@@ -2013,7 +2681,7 @@ async function openAddPayment() {
   `;
   const footer = `
     <button class="btn secondary" onclick="closeModal()">Cancel</button>
-    <button class="btn" onclick="saveNewPayment()">💾 Save Payment</button>
+    <button class="btn" onclick="saveNewPayment()">Save Payment</button>
   `;
   _clearTxnSuggest();
   openModal('➕ Add Payment', body, footer);
@@ -2095,9 +2763,9 @@ async function openEditTxn(id) {
   `;
   const footer = `
     <button class="btn secondary" onclick="closeModal()">Cancel</button>
-    <button class="btn" onclick="saveEditTxn(${id})">💾 Save Changes</button>
+    <button class="btn" onclick="saveEditTxn(${id})">Save Changes</button>
   `;
-  openModal('✏️ Edit Transaction #' + id, body, footer);
+  openModal('Edit Transaction #' + id, body, footer);
 }
 
 async function saveEditTxn(id) {
@@ -2198,10 +2866,10 @@ async function openEmpDetail(id) {
       <h4 style="margin:16px 0 6px;font-size:13px;color:var(--accent2)">📒 Ledger (last 12 months)</h4>
       ${ledgerHtml}
       <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn sm" onclick="openEmpEdit(${e.id})">✏️ Edit (FPE)</button>
-        <button class="btn sm" onclick="openAdminEmpEdit(${e.id},${JSON.stringify(e.employee_id_phone||e.primary_phone||'')})">⚙️ Edit Ops</button>
+        <button class="btn sm" onclick="openEmpEdit(${e.id})">Edit (FPE)</button>
+        <button class="btn sm" onclick="openAdminEmpEdit(${e.id},${JSON.stringify(e.employee_id_phone||e.primary_phone||'')})">Edit Ops</button>
         ${e.status==='active' ? `<button class="btn sm secondary" style="color:var(--err);border-color:var(--err)" onclick="deactivateEmployee(${e.id},${JSON.stringify(e.display_name)})">🚫 Deactivate</button>` : ''}
-        <button class="btn sm secondary" onclick="navigate('transactions');document.getElementById('txnEmpId').value=${e.id};loadTransactions(true);closePanel()">View All Transactions →</button>
+        <button class="btn sm secondary" onclick="navigate('transactions');document.getElementById('txnEmpId').value=${e.id};loadTransactions(true);closePanel()">View All Transactions</button>
       </div>
     `;
   } catch(e) {
@@ -2242,9 +2910,9 @@ async function openEmpEdit(id) {
             (canonical_employee_id) and aliases preserved.
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button type="submit" class="btn sm">💾 Save</button>
+            <button type="submit" class="btn sm">Save</button>
             <button type="button" class="btn sm secondary" onclick="closePanel()">Cancel</button>
-            <button type="button" class="btn sm secondary" onclick="openEmpDetail(${e.id})">↩ Back to View</button>
+            <button type="button" class="btn sm secondary" onclick="openEmpDetail(${e.id})">Back to View</button>
           </div>
         </div>
         <h4 style="margin:14px 0 4px;font-size:12px;color:var(--accent2)">Existing Aliases</h4>
@@ -2319,7 +2987,7 @@ async function loadUnmatched() {
         <td><span class="pill warn">${esc(r.reason_code || r.reason || '—')}</span></td>
         <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${esc(r.raw_text || r.message_text || '—')}</td>
         <td>${r.reviewed ? '<span class="pill ok">Done</span>' : '<span class="pill muted">Pending</span>'}</td>
-        <td>${!r.reviewed ? `<button class="btn sm" onclick="markReviewed(${r.id})">✓ Mark</button>` : ''}</td>
+        <td>${!r.reviewed ? `<button class="btn sm" onclick="markReviewed(${r.id})">Mark</button>` : ''}</td>
       </tr>`).join('')}
       </tbody></table>`;
   } catch(e) {
@@ -2749,8 +3417,9 @@ function catPill(c) {
     API_KEY = saved;
     // Quick verify
     fetch('/api/fpe/health', { headers: { 'X-Internal-Key': saved } })
-      .then(r => {
+      .then(async r => {
         if (r.ok) {
+          await resolveUserAccess(saved);
           document.getElementById('loginOverlay').style.display = 'none';
           document.getElementById('app').style.display = 'flex';
           initApp();
@@ -3299,9 +3968,9 @@ async function loadCash(resetPage = false) {
     // Update summary stats
     const s = data.summary || {};
     const el = document.getElementById('cashTotal');
-    if (el) el.textContent = fmt(cashTotalRecs);
+    if (el) el.textContent = fmtNum(cashTotalRecs);
     const el2 = document.getElementById('cashAmount');
-    if (el2) el2.textContent = fmt(Math.round(s.total_amount || 0));
+    if (el2) el2.textContent = fmtNum(Math.round(s.total_amount || 0));
 
     // Render rows
     if (!rows.length) {
@@ -3311,7 +3980,7 @@ async function loadCash(resetPage = false) {
         <tr style="cursor:pointer" onclick="openCashDetail(${r.id})">
           <td>${r.txn_date || '—'}</td>
           <td>${esc(r.employee_name)}</td>
-          <td style="font-weight:600">৳${fmt(r.amount)}</td>
+          <td style="font-weight:600">৳${fmtNum(r.amount)}</td>
           <td>${esc(r.sender_phone || '—')}</td>
           <td>${esc(r.payout_method || '—')}</td>
           <td style="font-size:11px;color:var(--muted)">${esc(r.txn_ref || '—')}</td>
@@ -3346,7 +4015,7 @@ async function openCashDetail(id) {
       ['Period',      r.accounting_period],
       ['Employee',    r.employee_name],
       ['Emp ID Phone',r.employee_id_phone],
-      ['Amount',      '৳' + fmt(r.amount)],
+      ['Amount',      '৳' + fmtNum(r.amount)],
       ['Sender',      r.sender_phone || r.payout_phone],
       ['Method',      r.payout_method],
       ['Category',    r.txn_category],
@@ -3414,7 +4083,7 @@ async function loadStagingPayments(resetPage = false) {
           <td style="font-size:12px">${esc(dt)}</td>
           <td>${esc(r.employee_name || r.extracted_name || '—')}</td>
           <td style="font-size:12px;color:var(--muted)">${esc(r.extracted_mobile || '—')}</td>
-          <td style="font-weight:600">৳${fmt(r.amount)}</td>
+          <td style="font-weight:600">৳${fmtNum(r.amount)}</td>
           <td>${esc(r.payment_method || '—')}</td>
           <td style="font-size:12px;color:var(--muted)">${esc(r.sender_number || '—')}</td>
           <td style="${stStyle}">${esc(st)}</td>

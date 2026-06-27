@@ -8,7 +8,7 @@
 -- Hash: 0dc6ea9e147395007f39c2a4b926f0d8ef8ea6293f9a57d7e4ce8b1b6f884eec
 INSERT INTO fazle_admins (phone, name, status, api_key_hash, notes)
 VALUES (
-  '01700000001',
+  '8801700000001',
   'OfficeAssistant01',
   'active',
   '0dc6ea9e147395007f39c2a4b926f0d8ef8ea6293f9a57d7e4ce8b1b6f884eec',
@@ -21,7 +21,7 @@ ON CONFLICT (phone) DO NOTHING;
 -- Hash: 7f55978c97a0ae223851a9a27d025e60c965e2385abe1ada948c3bd1e1bb880c
 INSERT INTO fazle_admins (phone, name, status, api_key_hash, notes)
 VALUES (
-  '01700000002',
+  '8801700000002',
   'OfficeAssistant02',
   'active',
   '7f55978c97a0ae223851a9a27d025e60c965e2385abe1ada948c3bd1e1bb880c',
@@ -37,14 +37,14 @@ ON CONFLICT (phone) DO NOTHING;
 INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by)
 SELECT id, 'operator', 'setup_script'
 FROM fazle_admins
-WHERE phone = '01700000001' AND name = 'OfficeAssistant01'
+WHERE phone = '8801700000001' AND name = 'OfficeAssistant01'
 ON CONFLICT (admin_id, role_name) DO NOTHING;
 
 -- Assign 'operator' role to OfficeAssistant02
 INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by)
 SELECT id, 'operator', 'setup_script'
 FROM fazle_admins
-WHERE phone = '01700000002' AND name = 'OfficeAssistant02'
+WHERE phone = '8801700000002' AND name = 'OfficeAssistant02'
 ON CONFLICT (admin_id, role_name) DO NOTHING;
 
 -- Verification query (run manually to confirm):
