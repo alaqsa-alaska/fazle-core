@@ -9,6 +9,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import field_validator
 from typing import Optional
+import re
 
 
 class Settings(BaseSettings):
@@ -242,3 +243,17 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def update_repo_env_value(key: str, value: str) -> None:
+    """Update one key in the repo-local `.env` file and clear cached settings."""
+    env_path = Path(Settings.Config.env_file)
+    text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
+    new_line = f"{key}={value}"
+    if pattern.search(text):
+        text = pattern.sub(new_line, text)
+    else:
+        text = text.rstrip() + ("\n" if text.strip() else "") + new_line + "\n"
+    env_path.write_text(text, encoding="utf-8")
+    get_settings.cache_clear()

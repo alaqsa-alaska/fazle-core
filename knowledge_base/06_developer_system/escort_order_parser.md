@@ -2,107 +2,221 @@
 title: Escort Order Parser Source Of Truth
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-26
+last_verified: 2026-06-27
 runtime_index: true
 source_module: modules/escort
-source_function: parse_escort_message
 ---
 
 # Escort Order Parser Source Of Truth
 
-`modules/escort.parse_escort_message()` is the single canonical parser for escort-buyer client orders. Other modules, KB articles, prompts, and workflows must treat this function as the source of truth.
+`modules/escort` contains the deterministic escort-order parser and message-direction gates. This article is the developer-facing source of truth for how escort intake and confirmation parsing work in production.
 
-## Runtime Flow
+## Parser Philosophy
 
-Escort buyer/client message -> role + context intent detection -> `modules/escort.handle_escort_client_message()` -> `parse_escort_message()` -> one `wbom_escort_programs` draft row per lighter -> admin review draft -> admin fills escort name/mobile -> completed draft is detected from outgoing bridge polling -> the same draft row is updated to `confirmed` -> roster sync. The client does not receive a direct auto-reply for an order.
+Primary signal:
+- Master Mobile Number
 
-Strict order detection is code-based, not AI-based. AI may explain or review, but production extraction and routing must be done by deterministic parser logic.
+Secondary signals:
+- Mother vessel block
+- Lighter vessel block
+- Importer
+- Cargo
+- Destination
+- Capacity
 
-## Priority Rules
+Important rules:
+- Mobile always anchors the lighter block
+- The nearest vessel name to that mobile is the lighter vessel
+- A block with a mobile number cannot be the mother vessel
+- `MV`, `M.V.`, `Mv`, and similar labels are helper signals only
+- `MV` may appear before both mother and lighter vessels
+- Never rely on `MV` label alone
 
-1. If a vessel line has a mobile number, it is a Lighter Vessel.
-2. A mobile number has higher priority than an `MV` label. Example: `02) MV AL MORIUM` followed by `01711273432` is a lighter, not the mother vessel.
-3. If a vessel line has no mobile number and has `MV`, `M.V.`, `Mother Vessel`, `এমভি`, or `At-O/A`, it is a Mother Vessel candidate.
-4. Mother Vessel normally appears on the first or last non-mobile vessel line.
-5. Importer, cargo, destination, capacity, and mobile lines may be grouped across multiple lines into one lighter record.
-6. Same-line mother/importer/cargo is supported for known importer patterns, for example `MV MARIMYR A Nabil Soybean` -> mother `MV MARIMYR A`, importer `Nabil`, cargo `Soybean`.
-7. A client-side order requires buyer context (`Escort`/`TCIS` contact prefix or configured escort-buyer role) plus Mother Vessel, Lighter Vessel, and Lighter/Master Mobile.
-8. If the client message already contains Escort Name + Escort Mobile, it is not a buying order. Treat it as complaint/assignment-like review and draft it to admin.
-9. If the client sends an escort duty/release slip image or OCR text, it is not a buying order. Extract text, look up DB/roster, and draft a verification/release/payment note to admin.
+## Message Direction Gates
 
-## Extracted Fields
+### Draft Intake Gate
 
+Accept only:
+- sender in `ESCORT_CLIENT_PHONES`
+- recipient is bridge `8801880446111` or `8801958122300`
+
+Minimum required fields:
 - `mother_vessel`
-- `importer`
+- `lighter_vessel`
+- `master_mobile`
+
+If minimum fields are missing:
+- ignore message
+- do not create draft
+
+If minimum fields are present:
+- parse best effort
+- create one draft row
+- keep it unconfirmed
+
+### Confirmation Gate
+
+Accept only:
+- sender is bridge `8801880446111` or `8801958122300`
+- recipient in `ESCORT_CLIENT_PHONES`
+
+Required confirmation fields:
+- `mother_vessel`
+- `lighter_vessel`
+- `escort_name`
+- `escort_mobile`
+- `start_date`
+
+If required confirmation fields are missing:
+- ignore message as confirmation
+
+If present:
+- treat message as source of truth
+- update matching draft when found
+- create confirmed row only when no draft exists
+- never create duplicates
+
+## Supported Parsing Modes
+
+- Block-based parsing has priority
+- Line-based parsing remains supported
+
+Typical mother vessel block:
+- mother vessel name
+- importer
+- cargo
+- account / A/C
+- sometimes date
+
+Typical lighter block:
+- lighter vessel
+- master mobile
+- destination
+- capacity
+
+## Field Detection Rules
+
+### Lighter Vessel
+
+Accepted Bangladesh mobile formats:
+- `017...`
+- `018...`
+- `019...`
+- `88017...`
+- `+88017...`
+
+Each mobile belongs to one lighter block.
+
+Serial numbers such as:
+- `8. Haji Salim`
+- `9. Banglar Odhinayok`
+- `1.sheikh enterprise 2-017...`
+
+must be stripped so only the vessel name remains.
+
+### Mother Vessel
+
+Mother vessel is usually the nearby vessel block without a mobile number.
+
+Supporting clues:
+- `MV`
+- `M.V.`
+- `Mother Vessel`
+- `At-O/A`
+- importer / cargo / account fields
+
+Hard rule:
+- if a candidate block contains a mobile, it is not the mother vessel
+
+### Importer
+
+Usually near the mother vessel block.
+
+Supported labels include:
+- `A/C`
+- `A/c`
+- `Account`
+- `Importer`
+
+### Cargo
+
+Cargo belongs to the mother vessel block when possible.
+
+Fallback:
+- search globally
+- longest cargo keyword wins
+
+### Destination
+
+Destination belongs to the lighter block nearest the mobile.
+
+Normalization:
+- `Local` and `CTG` -> `Chattogram`
+- `Rupshi` -> `Narayanganj`
+- `N.Bari` -> `Nagarbari`
+
+### Capacity
+
+Capacity belongs to the lighter block nearest the mobile.
+
+Normalization:
+- `700 m.t`
+- `700 MT`
+- `700mt`
+- all become `700 MT`
+
+## Confirmation Overwrite Rules
+
+When bridge confirmation matches an existing draft, confirmation may overwrite:
+- `mother_vessel`
+- `lighter_vessel`
+- `master_mobile`
+- `destination`
 - `cargo_type`
-- `lighters[].lighter_vessel`
-- `lighters[].master_mobile`
-- `lighters[].destination`
-- `lighters[].capacity`
-- `lighters[].shift`
-- `lighters[].remarks` for additional mobile numbers
-- `date_hint`
+- `importer`
+- `capacity`
+- `escort_name`
+- `escort_mobile`
+- `start_date`
 - `shift`
+- `status`
 
-## Supported Labels
+Destination is normalized before save.
 
-Mother Vessel labels: `MV`, `M.V.`, `Mv.`, `Mother Vessel`, `এমভি`, `At-O/A`.
+If the live schema does not expose `cargo_type` or `importer` as physical columns, those values are preserved in `remarks` instead of forcing a schema change.
 
-Importer labels: `A/c.`, `A/c:`, `A/C`, `A/C:`, `A/C-`, `A/c-`.
+## Duplicate Prevention
 
-Capacity labels: `Cap`, `Capacity`.
+Matching priority:
+1. master mobile
+2. mother vessel
+3. client phone
+4. start date
 
-Destination labels/patterns: `Dest`, `Destination`, `O/A to`, `Alongside`, `At-O/A`.
+Rules:
+- one client request creates at most one draft
+- bridge confirmation updates that row when matched
+- confirmed duplicates must not be created
 
-Mobile labels: `Mob`, `Mobile`, `Master`, `Phone`, `Tel`.
+## Notes For Developers
 
-## Normalization Rules
+- Do not reintroduce text-only heuristic parsing without direction gates.
+- Do not treat client drafts as final truth.
+- Do not let roster search/export use ambiguous joined columns.
+- UI requests should omit empty params and surface real API errors.
 
-Cargo:
-- soybean/soyabean/soya meal variants -> `Soybean Meal`
-- soybean/soyabean ext variants -> `Soybean Extract`
-- soybean/soyabean/soya -> `Soybean`
-- wheat/গম -> `Wheat`
-- corn/ভুট্টা -> `Corn`
-- mustard/mustard oil -> `Mustard`
-- coal/কয়লা -> `Coal`
-- sugar/চিনি -> `Sugar`
-- rice/চাল -> `Rice`
-- salt/লবণ -> `Salt`
-- yellow peas/y.peas/y peas -> `Yellow Peas`
+## Verified Examples
 
-Destination:
-- `N.Bari`, `Nagar Bari`, `N Bari` -> `Nagarbari`
-- `N.Para`, `Noapara`, `Nowapara`, `Nopara`, `N Para`, `Rupsi` -> `Noapara`
-- `N.Gonj`, `N.Ganj`, `Narayanganj`, `Narayan Gonj`, `N Gonj`, `Rupshi`, `Rupahi` -> `Narayanganj`
-- `Barisal` -> `Barishal`
-- `Local`, `CTG` -> `Chittagong`
-
-Capacity:
-- `Cap: 1700 Mt`, `Capacity: 1200`, `700 m.t`, `1,100 M.T.`, `1200 m t` are normalized to `XXXX MT`.
-- Bare lighter-line values in the normal field range, for example `900`, `1000`, `1200`, are normalized to `XXXX MT` only when the line/context is a lighter block. This avoids treating serials, dates, or phone fragments as capacity.
-
-Shift:
-- `(D)`, `(N)`, `Day`, `Night`, `Shift: D`, `Shift: N`, `D shift`, and `N shift` are normalized to `D` or `N`.
-
-Mobile:
-- `+8801711273432`, `01711-273432`, `8801711273432` are normalized to `01711273432`.
-- First mobile number is `master_mobile`.
-- Additional mobile numbers are preserved in `remarks`.
-
-## Admin Draft And Confirmation Rules
-
-The admin draft includes cargo, client phone, mother vessel, importer, lighter vessel, master mobile, destination, capacity, blank escort name/mobile, date with shift placeholder, company footer, and an automated-system warning.
-
-When admin sends the completed assignment, the system matches the existing draft by mother vessel, lighter vessel, master mobile, program date, and stored client phone when those fields are available. A matching draft is always updated; a duplicate confirmed row must not be created.
-
-Mandatory production rules:
-- Draft Row Duplicate Rule: the same order must not create duplicate draft program or duplicate draft roster rows.
-- Admin Confirmation Rule: no program may become `confirmed` unless an admin-origin message/slip contains Escort Name and Escort Mobile.
-- Existing Draft Update Rule: confirmation updates the old draft program and its linked roster row; it does not create a new roster duty.
-
-If no matching draft exists and the admin message clearly contains a full confirmed escort assignment, the system may create one confirmed program directly.
-
-`wbom_employees.employee_id` is numeric. Escort mobile is the operational identity anchor stored as `wbom_employees.employee_mobile`. If an escort mobile is not found, the system auto-creates an active `Escort` employee row and stores the generated numeric `employee_id` on `wbom_escort_programs.escort_employee_id`.
-
-Draft expiry is status-based, not hard delete. If admin confirmation does not arrive within the configured draft TTL, set `wbom_escort_programs.status='expired'` and `escort_roster_entries.roster_status='expired'` so audit trail remains intact.
+Production tests cover:
+- Dubai Eco example
+- TRUONG MINH PROSPERITY example
+- MV label on lighter vessel
+- multiple serial numbers
+- missing cargo
+- missing destination
+- missing importer
+- `Local -> Chattogram`
+- `Rupshi -> Narayanganj`
+- draft updated by confirmation
+- duplicate prevention
+- wrong-direction confirmations ignored

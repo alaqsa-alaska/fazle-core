@@ -35,7 +35,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
+from app.config import get_settings, update_repo_env_value
 from app.database import fetch_all
 
 from .db import (
@@ -120,6 +120,10 @@ class ConveyanceConfigRequest(BaseModel):
     shift_rate: float = 200.0
 
 
+class EscortClientRequest(BaseModel):
+    phone: str
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/summary", dependencies=[Depends(_require_key)])
@@ -201,6 +205,54 @@ async def api_upsert_config(body: ConveyanceConfigRequest):
         conveyance_amount=body.conveyance_amount,
         shift_rate=body.shift_rate,
     )
+
+
+def _normalize_client_phone(raw: str) -> str:
+    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if digits.startswith("880") and len(digits) == 13:
+        return digits
+    if digits.startswith("0") and len(digits) == 11:
+        return "880" + digits[1:]
+    raise HTTPException(status_code=400, detail="Invalid Bangladesh mobile number")
+
+
+def _escort_client_phone_list() -> list[str]:
+    current = get_settings().escort_client_phones or ""
+    phones: list[str] = []
+    for item in current.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            norm = _normalize_client_phone(item)
+        except HTTPException:
+            continue
+        if norm not in phones:
+            phones.append(norm)
+    return phones
+
+
+@router.get("/escort-clients", dependencies=[Depends(_require_key)])
+async def api_get_escort_clients():
+    return {"phones": _escort_client_phone_list(), "count": len(_escort_client_phone_list())}
+
+
+@router.post("/escort-clients", dependencies=[Depends(_require_key)])
+async def api_add_escort_client(body: EscortClientRequest):
+    phone = _normalize_client_phone(body.phone)
+    phones = _escort_client_phone_list()
+    if phone not in phones:
+        phones.append(phone)
+        update_repo_env_value("ESCORT_CLIENT_PHONES", ",".join(phones))
+    return {"ok": True, "phones": phones}
+
+
+@router.delete("/escort-clients/{phone}", dependencies=[Depends(_require_key)])
+async def api_remove_escort_client(phone: str):
+    norm = _normalize_client_phone(phone)
+    phones = [p for p in _escort_client_phone_list() if p != norm]
+    update_repo_env_value("ESCORT_CLIENT_PHONES", ",".join(phones))
+    return {"ok": True, "phones": phones}
 
 
 @router.get("/sync-all", dependencies=[Depends(_require_key)])
@@ -519,4 +571,3 @@ async def api_delete_draft(program_id: int):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
-

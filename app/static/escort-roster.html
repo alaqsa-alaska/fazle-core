@@ -420,6 +420,27 @@ td.actions{white-space:nowrap;text-align:center}
           <button class="btn btn-primary btn-sm" onclick="saveConfig()">Save</button>
         </div>
       </div>
+
+      <div class="card">
+        <h2>📱 Escort Client Management</h2>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Client Phone</th><th class="actions">Actions</th></tr></thead>
+            <tbody id="escortClientBody">
+              <tr class="loading-row"><td colspan="2"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="form-row">
+            <div class="form-field">
+              <label>Add Escort Client</label>
+              <input type="tel" id="escortClientInput" placeholder="8801XXXXXXXXX or 01XXXXXXXXX">
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="addEscortClient()">Add Client</button>
+        </div>
+      </div>
     </div>
   </main>
 </div>
@@ -534,27 +555,34 @@ function apiFetch(path, opts={}) {
   return fetch(BASE + path, {...opts, headers});
 }
 
+async function readApiError(r) {
+  const text = await r.text();
+  if (!text) return `${r.status} ${r.statusText}`.trim();
+  try {
+    const data = JSON.parse(text);
+    if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail.trim();
+    if (Array.isArray(data?.detail) && data.detail.length) {
+      return data.detail.map(item => item?.msg || item?.message || JSON.stringify(item)).join('; ');
+    }
+  } catch (_) {}
+  return text;
+}
+
 async function apiGet(path) {
   const r = await apiFetch(path);
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  if (!r.ok) throw new Error(await readApiError(r));
   return r.json();
 }
 
 async function apiPost(path, body) {
   const r = await apiFetch(path, {method:'POST', body: JSON.stringify(body)});
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(t || `${r.status}`);
-  }
+  if (!r.ok) throw new Error(await readApiError(r));
   return r.json();
 }
 
 async function apiPatch(path, body) {
   const r = await apiFetch(path, {method:'PATCH', body: JSON.stringify(body)});
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(t || `${r.status}`);
-  }
+  if (!r.ok) throw new Error(await readApiError(r));
   return r.json();
 }
 
@@ -588,7 +616,7 @@ function switchTab(name) {
     b.classList.toggle('active', ['roster','kanban','slips','calc','config'][i] === name);
   });
   if (name==='kanban') loadKanban();
-  if (name==='config') loadConfig();
+  if (name==='config') { loadConfig(); loadEscortClients(); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -622,20 +650,26 @@ async function loadRoster(page) {
   const status = document.getElementById('statusFilter').value;
   const startFrom = document.getElementById('startFrom').value;
   const startTo = document.getElementById('startTo').value;
-  const ps = document.getElementById('pageSz').value;
-  let url = `/api/escort-roster?page=${_curPage}&page_size=${ps}&sort_by=${_sortBy}&sort_dir=${_sortDir}`;
-  if (search) url += `&search=${encodeURIComponent(search)}`;
-  if (status) url += `&status=${status}`;
-  if (startFrom) url += `&start_from=${startFrom}`;
-  if (startTo) url += `&start_to=${startTo}`;
+  const ps = Math.max(1, parseInt(document.getElementById('pageSz').value || '50', 10) || 50);
+  const params = new URLSearchParams({
+    page: String(_curPage),
+    page_size: String(ps),
+    sort_by: _sortBy || 'start_date',
+    sort_dir: _sortDir || 'desc',
+  });
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (startFrom) params.set('start_from', startFrom);
+  if (startTo) params.set('start_to', startTo);
+  const url = `/api/escort-roster?${params.toString()}`;
 
   const tbody = document.getElementById('rosterBody');
   tbody.innerHTML = '<tr class="loading-row"><td colspan="14"><span class="spinner"></span> Loading…</td></tr>';
 
   try {
     const d = await apiGet(url);
-    renderRosterRows(d.items);
-    renderPager(d.page, d.pages, d.total);
+    renderRosterRows(Array.isArray(d.items) ? d.items : []);
+    renderPager(d.page || 1, d.pages || 1, d.total || 0);
     loadSummary();
   } catch(e) {
     tbody.innerHTML = `<tr class="loading-row"><td colspan="14" style="color:var(--err)">Error: ${e.message}</td></tr>`;
@@ -725,16 +759,20 @@ function exportCSV() {
   const status = document.getElementById('statusFilter').value;
   const startFrom = document.getElementById('startFrom').value;
   const startTo = document.getElementById('startTo').value;
-  let url = `/api/escort-roster/export?`;
-  if (search) url += `search=${encodeURIComponent(search)}&`;
-  if (status) url += `status=${status}&`;
-  if (startFrom) url += `start_from=${startFrom}&`;
-  if (startTo) url += `start_to=${startTo}&`;
+  const params = new URLSearchParams();
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (startFrom) params.set('start_from', startFrom);
+  if (startTo) params.set('start_to', startTo);
+  const url = `/api/escort-roster/export?${params.toString()}`;
   const a = document.createElement('a');
   a.href = url;
   a.setAttribute('download','escort_roster.csv');
   // Must pass auth — use fetch and blob
-  apiFetch(url).then(r => r.blob()).then(blob => {
+  apiFetch(url).then(async r => {
+    if (!r.ok) throw new Error(await readApiError(r));
+    return r.blob();
+  }).then(blob => {
     a.href = URL.createObjectURL(blob);
     a.click();
     toast('CSV export downloaded');
@@ -1036,6 +1074,43 @@ async function loadConfig() {
       <td style="font-size:11px;color:var(--muted)">${r.updated_at ? r.updated_at.slice(0,16) : '—'}</td>
     </tr>`).join('') || '<tr><td colspan="4" style="color:var(--muted);text-align:center">No config</td></tr>';
   } catch(e) { document.getElementById('configBody').innerHTML = `<tr><td colspan="4" style="color:var(--err)">${e.message}</td></tr>`; }
+}
+
+async function loadEscortClients() {
+  const tbody = document.getElementById('escortClientBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="2"><span class="spinner"></span></td></tr>';
+  try {
+    const data = await apiGet('/api/escort-roster/escort-clients');
+    const items = data.phones || [];
+    tbody.innerHTML = items.map(phone => `<tr>
+      <td>${esc(phone)}</td>
+      <td class="actions"><button class="btn btn-danger btn-sm" onclick="removeEscortClient('${phone}')">Remove</button></td>
+    </tr>`).join('') || '<tr><td colspan="2" style="color:var(--muted);text-align:center">No escort clients configured</td></tr>';
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="2" style="color:var(--err)">${e.message}</td></tr>`;
+  }
+}
+
+async function addEscortClient() {
+  const input = document.getElementById('escortClientInput');
+  const phone = input.value.trim();
+  if (!phone) { toast('Enter a client phone', 'warn'); return; }
+  try {
+    await apiPost('/api/escort-roster/escort-clients', {phone});
+    input.value = '';
+    toast('Escort client added');
+    loadEscortClients();
+  } catch(e) { toast('Add failed: ' + e.message, 'err'); }
+}
+
+async function removeEscortClient(phone) {
+  if (!confirm(`Remove escort client ${phone}?`)) return;
+  try {
+    const res = await apiFetch(`/api/escort-roster/escort-clients/${encodeURIComponent(phone)}`, {method:'DELETE'});
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+    toast('Escort client removed');
+    loadEscortClients();
+  } catch(e) { toast('Remove failed: ' + e.message, 'err'); }
 }
 
 async function saveConfig() {

@@ -128,10 +128,13 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
             "total": float(prog["total_payment"]),
         }
 
-    # Map program status to roster_status
+    # Keep roster_status aligned with the source program lifecycle.
+    # `confirmed` is a first-class roster state so confirmed programs are never
+    # shown as draft after bridge source-of-truth reconciliation.
     prog_status = (prog.get("status") or "draft").strip()
     status_map = {
         "draft": "draft",
+        "confirmed": "confirmed",
         "assigned": "active",
         "running": "active",
         "completed": "completed",
@@ -267,9 +270,79 @@ async def sync_all_programs(actor: str = "system") -> dict:
 
 async def recalculate_entry(program_id: int, actor: str = "system") -> dict:
     """
-    Re-fetch from wbom_escort_programs and recompute all pay fields.
+    Recompute pay fields for an existing roster entry.
+    Source-backed rows resync from wbom_escort_programs; manual roster-only rows
+    fall back to their own stored dates so the UI recalculate action never 404s.
     """
-    return await sync_program_to_roster(program_id, actor=actor)
+    try:
+        return await sync_program_to_roster(program_id, actor=actor)
+    except ValueError:
+        row = await fetch_one(
+            "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
+        )
+        if not row:
+            raise ValueError(f"Program {program_id} not found")
+
+        old_row = dict(row)
+        start_date = row.get("start_date")
+        start_shift = (row.get("start_shift") or "D").upper()[:1] or "D"
+        end_date = row.get("end_date")
+        end_shift = (row.get("end_shift") or "N").upper()[:1] or "N"
+
+        updates: dict[str, Any] = {}
+        if start_date and end_date:
+            conveyance = (
+                Decimal(str(row["conveyance"]))
+                if row.get("conveyance") is not None
+                else await _get_conveyance_for_destination(row.get("destination"))
+            )
+            shift_rate = await _get_shift_rate()
+            updates = calculate_pay(
+                start_date,
+                start_shift,
+                end_date,
+                end_shift,
+                conveyance,
+                shift_rate,
+            )
+
+        if updates:
+            await execute(
+                """
+                UPDATE escort_roster_entries SET
+                    total_shifts = $2,
+                    total_days = $3,
+                    salary = $4,
+                    conveyance = $5,
+                    total = $6,
+                    updated_at = NOW()
+                WHERE program_id = $1
+                """,
+                program_id,
+                updates["total_shifts"],
+                updates["total_days"],
+                updates["salary"],
+                updates["conveyance"],
+                updates["total"],
+            )
+        else:
+            await execute(
+                "UPDATE escort_roster_entries SET updated_at = NOW() WHERE program_id = $1",
+                program_id,
+            )
+
+        fresh = await fetch_one(
+            "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
+        )
+        await log_audit(
+            program_id=program_id,
+            action="recalculate",
+            old_data=old_row,
+            new_data=updates or {"note": "manual_roster_noop"},
+            performed_by=actor,
+            source="manual_recalculate",
+        )
+        return dict(fresh) if fresh else {}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -304,9 +377,9 @@ async def get_roster_list(
 
     if search:
         conditions.append(
-            f"(mother_vessel ILIKE ${idx} OR lighter_vessel ILIKE ${idx} "
-            f"OR escort_name ILIKE ${idx} OR master_mobile ILIKE ${idx} "
-            f"OR escort_mobile ILIKE ${idx} OR destination ILIKE ${idx})"
+            f"(e.mother_vessel ILIKE ${idx} OR e.lighter_vessel ILIKE ${idx} "
+            f"OR e.escort_name ILIKE ${idx} OR e.master_mobile ILIKE ${idx} "
+            f"OR e.escort_mobile ILIKE ${idx} OR e.destination ILIKE ${idx})"
         )
         params.append(f"%{search}%")
         idx += 1
@@ -318,12 +391,12 @@ async def get_roster_list(
         idx += 1
 
     if start_from:
-        conditions.append(f"start_date >= ${idx}")
+        conditions.append(f"COALESCE(e.start_date, p.program_date) >= ${idx}")
         params.append(start_from)
         idx += 1
 
     if start_to:
-        conditions.append(f"start_date <= ${idx}")
+        conditions.append(f"COALESCE(e.start_date, p.program_date) <= ${idx}")
         params.append(start_to)
         idx += 1
 

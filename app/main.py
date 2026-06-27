@@ -1602,6 +1602,7 @@ async def payroll_spa_tab():
 
 
 @app.get("/escort-roster", response_class=HTMLResponse)
+@app.get("/escort-roster.html", response_class=HTMLResponse)
 async def escort_roster_spa():
     """Escort Roster management SPA."""
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "escort-roster.html"))

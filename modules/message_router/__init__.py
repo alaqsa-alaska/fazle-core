@@ -323,7 +323,11 @@ async def process_message(
     # ── 3. ADMIN ───────────────────────────────────────────────────────────────
     if role_str == "admin":
         if is_completed_escort_draft(text):
-            return await handle_admin_escort_completion(text, sender, source)
+            return (
+                "Escort confirmation is finalized only after the bridge sends it to an authorised escort client. "
+                "This admin-side text was not applied directly.",
+                None,
+            )
 
         if is_admin_command(text):
             result = await process_admin_command(text, sender)
