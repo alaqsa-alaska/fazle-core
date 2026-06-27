@@ -17,7 +17,9 @@ Concepts
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import logging
 import os
 import re
@@ -81,6 +83,37 @@ def hash_api_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
+def _normalize_username(username: str) -> str:
+    return (username or "").strip().lower()
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    iterations = 200_000
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    salt_b64 = base64.urlsafe_b64encode(salt).decode("ascii")
+    hash_b64 = base64.urlsafe_b64encode(derived).decode("ascii")
+    return f"pbkdf2_sha256${iterations}${salt_b64}${hash_b64}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        scheme, iterations_s, salt_b64, hash_b64 = (stored_hash or "").split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            return False
+        iterations = int(iterations_s)
+        salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+        expected = base64.urlsafe_b64decode(hash_b64.encode("ascii"))
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+def new_login_token() -> str:
+    return "fk_" + secrets.token_urlsafe(32)
+
+
 def _bootstrap_phones() -> list[str]:
     raw = os.getenv("ADMIN_NUMBERS", "")
     out = []
@@ -97,7 +130,7 @@ async def get_admin_by_phone(phone: str) -> Optional[dict]:
     if not p:
         return None
     row = await fetch_one(
-        "SELECT id, phone, name, status FROM fazle_admins WHERE phone=$1", p,
+        "SELECT id, phone, name, username, status FROM fazle_admins WHERE phone=$1", p,
     )
     return dict(row) if row else None
 
@@ -107,8 +140,19 @@ async def get_admin_by_api_key(key: str) -> Optional[dict]:
         return None
     h = hash_api_key(key)
     row = await fetch_one(
-        "SELECT id, phone, name, status FROM fazle_admins WHERE api_key_hash=$1",
-        h,
+        "SELECT id, phone, name, username, status FROM fazle_admins WHERE api_key_hash=$1 OR login_token_hash=$2",
+        h, h,
+    )
+    return dict(row) if row else None
+
+
+async def get_admin_by_username(username: str) -> Optional[dict]:
+    u = _normalize_username(username)
+    if not u:
+        return None
+    row = await fetch_one(
+        "SELECT id, phone, name, status, username, password_hash FROM fazle_admins WHERE LOWER(username)=$1",
+        u,
     )
     return dict(row) if row else None
 
@@ -259,18 +303,45 @@ async def list_audit(limit: int = 50, command: Optional[str] = None) -> list[dic
 
 # ── admin (user) management ──────────────────────────────────────────────────
 async def add_admin(
-    phone: str, name: str, role: str = "viewer", granted_by: str = "system",
+    phone: str,
+    name: str,
+    role: str = "viewer",
+    granted_by: str = "system",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
 ) -> dict[str, Any]:
     p = _normalize_phone(phone)
     if not p:
         raise ValueError("invalid phone")
+    u = _normalize_username(username) if username else None
+    if bool(u) != bool(password):
+        raise ValueError("username and password must be provided together")
+    if u:
+        existing_username = await fetch_val("SELECT 1 FROM fazle_admins WHERE LOWER(username)=$1", u)
+        if existing_username:
+            raise ValueError(f"username already exists: {u}")
     exists = await get_admin_by_phone(p)
     if exists:
+        if u and password:
+            existing_username = _normalize_username(exists.get("username") or "")
+            if existing_username and existing_username != u:
+                raise ValueError("existing admin has different username")
+            owner_id = await fetch_val("SELECT id FROM fazle_admins WHERE LOWER(username)=$1", u)
+            if owner_id and int(owner_id) != int(exists["id"]):
+                raise ValueError(f"username already exists: {u}")
+            await execute(
+                "UPDATE fazle_admins SET username=$1, password_hash=$2 WHERE id=$3",
+                u,
+                hash_password(password),
+                exists["id"],
+            )
+            return {"status": "updated_credentials", "admin_id": exists["id"]}
         return {"status": "exists", "admin_id": exists["id"]}
+    password_hash = hash_password(password) if password else None
     aid = await fetch_val(
-        "INSERT INTO fazle_admins (phone, name, status) "
-        "VALUES ($1,$2,'active') RETURNING id",
-        p, name,
+        "INSERT INTO fazle_admins (phone, name, username, password_hash, status) "
+        "VALUES ($1,$2,$3,$4,'active') RETURNING id",
+        p, name, u, password_hash,
     )
     await execute(
         "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) "
@@ -331,7 +402,7 @@ async def issue_api_key(phone: str) -> dict[str, Any]:
 
 async def list_admins() -> list[dict]:
     rows = await fetch_all(
-        "SELECT a.id, a.phone, a.name, a.status, a.created_at, a.last_seen_at, "
+        "SELECT a.id, a.phone, a.name, a.username, a.status, a.created_at, a.last_seen_at, "
         "       COALESCE(string_agg(ar.role_name, ',' ORDER BY r.level DESC), '') AS roles "
         "FROM fazle_admins a "
         "LEFT JOIN fazle_admin_roles ar ON ar.admin_id = a.id "

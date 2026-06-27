@@ -67,10 +67,10 @@ async def _require_key(key: str = Depends(_API_KEY_HEADER)):
     try:
         from modules import rbac
         admin = await rbac.get_admin_by_api_key(key or "")
-        if admin and admin.get("status") == "active":
+        if admin is not None and admin.get("status") == "active":
             return key
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Auth error for key {(key or '')[:10]}...: {e}")
     raise HTTPException(status_code=403, detail="Unauthorized")
 
 

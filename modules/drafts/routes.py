@@ -32,10 +32,13 @@ async def _require_api_key(key: str = Depends(_API_KEY_HEADER)) -> None:
         try:
             from modules import rbac
             admin = await rbac.get_admin_by_api_key(key)
-            if admin and admin.get("status") == "active":
+            if admin is not None and admin.get("status") == "active":
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger("fazle.drafts.routes").warning(
+                f"Auth error for key {key[:10]}...: {e}"
+            )
     raise HTTPException(status_code=403, detail="Forbidden")
 
 

@@ -1,9 +1,21 @@
 """API Integration tests — /health, /employees, /escort-programs"""
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 pytestmark = pytest.mark.integration
+
+
+def _assistant_client(app, raw_key: str):
+    from httpx import AsyncClient, ASGITransport
+
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"X-Internal-Key": raw_key},
+    )
 
 
 class TestHealthEndpoint:
@@ -58,6 +70,72 @@ class TestAuthEnforcement:
     async def test_valid_api_key_passes(self, client):
         response = await client.get("/admin/users")
         assert response.status_code == 200
+
+    async def test_session_endpoint_reports_office_assistant_restriction(self, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from app.main import app
+
+        raw_key = "fk_officeassistant01_test"
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+        async with test_db_pool.acquire() as conn:
+            admin_id = await conn.fetchval(
+                "INSERT INTO fazle_admins (phone, name, status, api_key_hash) VALUES ('8801700000099', ' officeassistant01 ', 'active', $1) RETURNING id",
+                key_hash,
+            )
+            await conn.execute(
+                "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1, 'viewer', 'test')",
+                admin_id,
+            )
+
+        async with _assistant_client(app, raw_key) as ac:
+            response = await ac.get("/api/admin/session")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["user"]["is_restricted_office_assistant"] is True
+        assert data["user"]["can_edit_delete_transactions"] is False
+        assert data["user"]["can_manage_admin"] is False
+
+    async def test_office_assistant_cannot_edit_or_delete_transaction(self, client, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from app.main import app
+
+        raw_key = "fk_officeassistant02_test"
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+        async with test_db_pool.acquire() as conn:
+            admin_id = await conn.fetchval(
+                "INSERT INTO fazle_admins (phone, name, status, api_key_hash) VALUES ('8801700000100', 'officeassistant02', 'active', $1) RETURNING id",
+                key_hash,
+            )
+            await conn.execute(
+                "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1, 'viewer', 'test')",
+                admin_id,
+            )
+
+        create_response = await client.post(
+            "/api/admin/transactions",
+            json={
+                "employee_name": "Restriction Test User",
+                "employee_id_phone": "01712345678",
+                "payout_phone": "01712345678",
+                "amount": 5000,
+                "payout_method": "cash",
+                "txn_date": "2026-06-26",
+                "txn_category": "salary",
+            },
+        )
+        assert create_response.status_code == 200
+        txn_id = create_response.json()["transaction_id"]
+
+        async with _assistant_client(app, raw_key) as ac:
+            edit_response = await ac.put(f"/api/admin/transactions/{txn_id}", json={"notes": "blocked"})
+            delete_response = await ac.delete(f"/api/admin/transactions/{txn_id}")
+
+        assert edit_response.status_code == 403
+        assert delete_response.status_code == 403
 
 
 class TestEmployeesEndpoint:

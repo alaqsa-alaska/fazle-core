@@ -57,6 +57,260 @@ async def _require_api_key(key: str = Depends(_API_KEY_HEADER)):
     raise HTTPException(status_code=403, detail="Unauthorized")
 
 
+_OFFICE_ASSISTANT_NAMES = {"officeassistant01", "officeassistant02"}
+
+
+def _normalize_identity(value: Optional[str]) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_restricted_office_assistant_name(name: Optional[str]) -> bool:
+    return _normalize_identity(name) in _OFFICE_ASSISTANT_NAMES
+
+
+async def _get_actor_context(api_key: str) -> dict:
+    settings = get_settings()
+    if api_key and api_key == settings.internal_api_key:
+        return {
+            "name": "owner",
+            "username": "",
+            "phone": "",
+            "roles": ["owner", "superadmin"],
+            "normalized_name": "owner",
+            "normalized_roles": ["owner", "superadmin"],
+            "is_restricted_office_assistant": False,
+            "can_manage_admin": True,
+            "can_edit_delete_transactions": True,
+            "permissions": {
+                "can_view_admin_users": True,
+                "can_add_user": True,
+                "can_change_role": True,
+                "can_deactivate_user": True,
+                "can_reset_login_key": True,
+                "can_view_admin_audit": True,
+                "can_view_accounting_audit": True,
+            },
+        }
+
+    try:
+        from modules import rbac
+        admin = await rbac.get_admin_by_api_key(api_key)
+        if not admin:
+            return {
+                "name": "",
+                "phone": "",
+                "roles": [],
+                "normalized_name": "",
+                "normalized_roles": [],
+                "is_restricted_office_assistant": False,
+                "can_manage_admin": False,
+                "can_edit_delete_transactions": False,
+                "permissions": {
+                    "can_view_admin_users": False,
+                    "can_add_user": False,
+                    "can_change_role": False,
+                    "can_deactivate_user": False,
+                    "can_reset_login_key": False,
+                    "can_view_admin_audit": False,
+                    "can_view_accounting_audit": False,
+                },
+            }
+
+        roles = await rbac.get_roles(int(admin["id"]))
+        normalized_name = _normalize_identity(admin.get("name"))
+        normalized_roles = [_normalize_identity(role) for role in roles]
+        can_manage_admin = any(role in {"admin", "owner", "superadmin"} for role in normalized_roles)
+        can_edit = await rbac.check_permission(api_key=api_key, command="edit")
+        can_view_users = await rbac.check_permission(api_key=api_key, command="user_list")
+        can_add_user = await rbac.check_permission(api_key=api_key, command="user_add")
+        can_change_role = await rbac.check_permission(api_key=api_key, command="user_role")
+        can_deactivate_user = await rbac.check_permission(api_key=api_key, command="user_remove")
+        can_reset_login = await rbac.check_permission(api_key=api_key, command="user_apikey")
+        is_restricted_office_assistant = _is_restricted_office_assistant_name(admin.get("name"))
+        return {
+            "id": admin.get("id"),
+            "name": admin.get("name") or "",
+            "username": admin.get("username") or "",
+            "phone": admin.get("phone") or "",
+            "roles": roles,
+            "normalized_name": normalized_name,
+            "normalized_roles": normalized_roles,
+            "is_restricted_office_assistant": is_restricted_office_assistant,
+            "can_manage_admin": can_manage_admin,
+            "can_edit_delete_transactions": bool(can_edit.get("allowed")) and not is_restricted_office_assistant,
+            "permissions": {
+                "can_view_admin_users": bool(can_view_users.get("allowed")),
+                "can_add_user": bool(can_add_user.get("allowed")),
+                "can_change_role": bool(can_change_role.get("allowed")),
+                "can_deactivate_user": bool(can_deactivate_user.get("allowed")),
+                "can_reset_login_key": bool(can_reset_login.get("allowed")),
+                "can_view_admin_audit": bool(can_view_users.get("allowed")),
+                "can_view_accounting_audit": bool(can_manage_admin),
+            },
+        }
+    except Exception:
+        return {
+            "name": "",
+            "phone": "",
+            "roles": [],
+            "normalized_name": "",
+            "normalized_roles": [],
+            "is_restricted_office_assistant": False,
+            "can_manage_admin": False,
+            "can_edit_delete_transactions": False,
+            "permissions": {
+                "can_view_admin_users": False,
+                "can_add_user": False,
+                "can_change_role": False,
+                "can_deactivate_user": False,
+                "can_reset_login_key": False,
+                "can_view_admin_audit": False,
+                "can_view_accounting_audit": False,
+            },
+        }
+
+
+async def _require_transaction_mutation_access(api_key: str, action: str) -> dict:
+    """Allow transaction mutations only for actors with edit permission and non-restricted identities."""
+    actor = await _get_actor_context(api_key)
+    if not actor.get("can_edit_delete_transactions"):
+        raise HTTPException(status_code=403, detail=f"Not allowed to {action} transactions")
+    return actor
+
+
+async def _require_admin_console_access(api_key: str) -> dict:
+    actor = await _get_actor_context(api_key)
+    if not actor.get("can_manage_admin"):
+        raise HTTPException(status_code=403, detail="Not allowed to access admin console")
+    return actor
+
+
+def _actor_label(actor: dict) -> str:
+    return actor.get("name") or actor.get("phone") or "unknown"
+
+
+def _json_default(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return str(value)
+
+
+def _session_payload(actor: dict) -> dict:
+    return {
+        "ok": True,
+        "user": {
+            "id": actor.get("id"),
+            "name": actor.get("name") or "",
+            "phone": actor.get("phone") or "",
+            "username": actor.get("username") or "",
+            "roles": actor.get("roles") or [],
+            "normalized_name": actor.get("normalized_name") or "",
+            "normalized_roles": actor.get("normalized_roles") or [],
+            "is_restricted_office_assistant": bool(actor.get("is_restricted_office_assistant")),
+            "can_edit_delete_transactions": bool(actor.get("can_edit_delete_transactions")),
+            "can_manage_admin": bool(actor.get("can_manage_admin")),
+            "permissions": actor.get("permissions") or {},
+        },
+    }
+
+
+@router.post("/login")
+async def admin_login(payload: dict):
+    settings = get_settings()
+    mode = str((payload or {}).get("mode") or "key").strip().lower()
+
+    if mode in {"key", "api_key"}:
+        key = str((payload or {}).get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="key required")
+        if key != settings.internal_api_key:
+            try:
+                from modules import rbac
+                admin = await rbac.get_admin_by_api_key(key)
+                if not (admin and admin.get("status") == "active"):
+                    raise HTTPException(status_code=401, detail="Invalid key")
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=401, detail="Invalid key")
+        actor = await _get_actor_context(key)
+        return {
+            **_session_payload(actor),
+            "credential": {"type": "key", "value": key},
+            "auth_mode": "key",
+        }
+
+    if mode not in {"password", "username"}:
+        raise HTTPException(status_code=400, detail="mode must be key or password")
+
+    username = str((payload or {}).get("username") or "").strip()
+    password = str((payload or {}).get("password") or "")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password required")
+
+    from modules import rbac
+    admin = await rbac.get_admin_by_username(username)
+    if not admin or admin.get("status") != "active":
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not rbac.verify_password(password, admin.get("password_hash") or ""):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = rbac.new_login_token()
+    await execute(
+        "UPDATE fazle_admins SET login_token_hash=$1, last_seen_at=NOW() WHERE id=$2",
+        rbac.hash_api_key(token),
+        admin["id"],
+    )
+    actor = await _get_actor_context(token)
+    return {
+        **_session_payload(actor),
+        "credential": {"type": "token", "value": token},
+        "auth_mode": "password",
+    }
+
+
+@router.get("/session", dependencies=[Depends(_require_api_key)])
+async def get_admin_session(key: str = Depends(_require_api_key)):
+    actor = await _get_actor_context(key)
+    return _session_payload(actor)
+
+
+@router.get("/accounting-audit", dependencies=[Depends(_require_api_key)])
+async def get_accounting_audit(
+    limit: int = Query(50, ge=1, le=500),
+    entity_type: Optional[str] = Query(None),
+    action: Optional[str] = Query(None),
+    key: str = Depends(_require_api_key),
+):
+    await _require_admin_console_access(key)
+
+    clauses = []
+    params: list = []
+    if entity_type:
+        clauses.append(f"entity_type = ${len(params) + 1}")
+        params.append(entity_type.strip().lower())
+    if action:
+        clauses.append(f"action = ${len(params) + 1}")
+        params.append(action.strip().lower())
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = await fetch_all(
+        f"""
+        SELECT id, entity_type, entity_id, action, before_state, after_state,
+               performed_by, reason, created_at
+        FROM fpe_accounting_audit_logs
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT ${len(params)}
+        """,
+        *params,
+    )
+    return {"count": len(rows), "audit": [dict(row) for row in rows]}
+
+
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class AdminTxnCreate(BaseModel):
@@ -309,11 +563,12 @@ async def _adjust_ledger(
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/transactions", dependencies=[Depends(_require_api_key)])
-async def add_admin_transaction(body: AdminTxnCreate):
+async def add_admin_transaction(body: AdminTxnCreate, key: str = Depends(_require_api_key)):
     """
     Add a new payment transaction with smart employee matching.
     Creates or resolves the employee based on name + phones.
     """
+    actor = await _require_transaction_mutation_access(key, "create")
     emp = await resolve_or_create_employee(
         body.employee_name,
         body.employee_id_phone,
@@ -355,7 +610,7 @@ async def add_admin_transaction(body: AdminTxnCreate):
             """
             INSERT INTO fpe_accounting_audit_logs
                 (entity_type, entity_id, action, after_state, performed_by, reason)
-            VALUES ('transaction', $1, 'admin_create', $2::jsonb, 'admin_manual', $3)
+            VALUES ('transaction', $1, 'admin_create', $2::jsonb, $3, $4)
             """,
             new_id,
             json.dumps({
@@ -365,8 +620,9 @@ async def add_admin_transaction(body: AdminTxnCreate):
                 "payout_method": body.payout_method,
                 "txn_date": body.txn_date.isoformat(),
                 "txn_category": body.txn_category,
-            }),
-            f"Admin manual entry for {body.employee_name}",
+            }, default=_json_default),
+            _actor_label(actor),
+            f"module=payroll; detail=admin manual entry for {body.employee_name}",
         )
 
     # Update ledger
@@ -385,16 +641,19 @@ async def add_admin_transaction(body: AdminTxnCreate):
     }
 
 
-@router.put("/transactions/{txn_id}", dependencies=[Depends(_require_api_key)])
+@router.put("/transactions/{txn_id}")
 async def edit_admin_transaction(
     txn_id: int = Path(..., ge=1),
     body: AdminTxnUpdate = ...,
     x_if_match_updated_at: Optional[str] = Header(None),
+    key: str = Depends(_require_api_key),
 ):
     """
     Edit an existing transaction. Adjusts ledger when amount or date changes.
     Non-financial edits (name, phone, notes) are applied directly.
     """
+    actor = await _require_transaction_mutation_access(key, "edit")
+
     row = await fetch_one(
         "SELECT id, employee_id, employee_name_raw, amount, payout_phone, "
         "payout_method, txn_date, txn_category, accounting_period, deleted_at, "
@@ -469,19 +728,25 @@ async def edit_admin_transaction(
         """
         INSERT INTO fpe_accounting_audit_logs
             (entity_type, entity_id, action, before_state, after_state, performed_by, reason)
-        VALUES ('transaction', $1, 'admin_edit', $2::jsonb, $3::jsonb, 'admin_manual', 'Admin edit')
+        VALUES ('transaction', $1, 'admin_edit', $2::jsonb, $3::jsonb, $4, $5)
         """,
         txn_id,
         json.dumps({
+            "employee_name_raw": row["employee_name_raw"],
+            "payout_phone": row["payout_phone"],
             "amount": str(old_amount),
             "accounting_period": old_period,
             "txn_category": old_cat,
-        }),
+        }, default=_json_default),
         json.dumps({
+            "employee_name_raw": new_name,
+            "payout_phone": new_phone,
             "amount": str(new_amount),
             "accounting_period": new_period,
             "txn_category": new_cat,
-        }),
+        }, default=_json_default),
+        _actor_label(actor),
+        "module=payroll; detail=admin transaction edit",
     )
 
     # Adjust ledger if amount/period changed and employee is set
@@ -496,15 +761,18 @@ async def edit_admin_transaction(
     return {"ok": True, "transaction_id": txn_id, "updated_at": new_row["updated_at"].isoformat() if new_row and new_row["updated_at"] else None}
 
 
-@router.delete("/transactions/{txn_id}", dependencies=[Depends(_require_api_key)])
+@router.delete("/transactions/{txn_id}")
 async def soft_delete_transaction(
     txn_id: int = Path(..., ge=1),
     deleted_by: str = Query("admin_manual"),
+    key: str = Depends(_require_api_key),
 ):
     """
     Soft-delete a transaction. Sets deleted_at/deleted_by and reverses the ledger.
     The row is NEVER physically removed.
     """
+    actor = await _require_transaction_mutation_access(key, "delete")
+
     row = await fetch_one(
         "SELECT id, employee_id, amount, txn_category, accounting_period, deleted_at "
         "FROM fpe_cash_transactions WHERE id = $1",
@@ -526,14 +794,16 @@ async def soft_delete_transaction(
         """
         INSERT INTO fpe_accounting_audit_logs
             (entity_type, entity_id, action, before_state, performed_by, reason)
-        VALUES ('transaction', $1, 'admin_soft_delete', $2::jsonb, 'admin_manual', 'Admin soft delete')
+        VALUES ('transaction', $1, 'admin_soft_delete', $2::jsonb, $3, $4)
         """,
         txn_id,
         json.dumps({
             "id": txn_id,
             "amount": str(row["amount"]),
             "accounting_period": row["accounting_period"],
-        }),
+        }, default=_json_default),
+        _actor_label(actor),
+        f"module=payroll; deleted_by={deleted_by}",
     )
 
     # Reverse ledger impact

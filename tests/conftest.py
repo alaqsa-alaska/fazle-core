@@ -441,9 +441,12 @@ CREATE TABLE IF NOT EXISTS fazle_admins (
     id            SERIAL PRIMARY KEY,
     phone         TEXT UNIQUE,
     name          TEXT,
+    username      TEXT,
     status        TEXT DEFAULT 'active',
     notes         TEXT,
     api_key_hash  TEXT,
+    password_hash TEXT,
+    login_token_hash TEXT,
     last_seen_at  TIMESTAMPTZ,
     created_at    TIMESTAMPTZ DEFAULT NOW()
 );
@@ -745,8 +748,8 @@ async def seed_admin(test_db_pool) -> dict:
     """Insert a superadmin in fazle_admins."""
     async with test_db_pool.acquire() as conn:
         admin_row = await conn.fetchrow("""
-            INSERT INTO fazle_admins (phone, name, status)
-            VALUES ('8801700000001', 'Test Admin', 'active')
+            INSERT INTO fazle_admins (phone, name, username, status)
+            VALUES ('8801700000001', 'Test Admin', 'testadmin', 'active')
             RETURNING *
         """)
         role = await conn.fetchrow(
