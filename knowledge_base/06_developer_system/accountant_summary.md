@@ -19,8 +19,8 @@ runtime_index: true
 Detects and acknowledges company-level cash-flow summary messages sent by the accountant
 via WhatsApp. These are **informational only** — the module never writes to any DB table.
 
-**Why it cannot write to `wbom_cash_transactions`:**
-That table requires `employee_id NOT NULL`. Accountant summary messages record
+**Why it cannot write to `fpe_cash_transactions`:**
+That table requires `employee_id` for employee-level payments. Accountant summary messages record
 company-level totals (total deposits, rent, outstanding balance) — not per-employee transactions.
 Individual employee advance records must use `nl_advance_record` commands instead.
 
@@ -106,7 +106,7 @@ calls `is_accountant_summary()` before any other intent path.
 
 ## What It Does NOT Do
 
-- Does NOT write to `wbom_cash_transactions` (no employee_id)
+- Does NOT write to `fpe_cash_transactions` (no employee_id)
 - Does NOT create a payment draft
 - Does NOT forward to accountant queue
 - Does NOT parse multi-line accounting reports (one summary line at a time)

@@ -33,7 +33,14 @@ from pydantic import BaseModel, field_validator
 
 from app.config import get_settings
 from app.database import db_conn, execute, fetch_all, fetch_one, fetch_val
+from modules.fazle_payroll_engine.accounting import create_transaction
+from modules.fazle_payroll_engine.models import (
+    PayoutMethod,
+    TransactionCreateRequest,
+    TxnCategory,
+)
 from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
+from modules.fazle_payroll_engine.payment_event import payment_event_from_manual
 
 log = logging.getLogger("fazle.admin_transactions")
 
@@ -567,6 +574,7 @@ async def add_admin_transaction(body: AdminTxnCreate, key: str = Depends(_requir
     """
     Add a new payment transaction with smart employee matching.
     Creates or resolves the employee based on name + phones.
+    Writes the canonical FPE transaction via create_transaction().
     """
     actor = await _require_transaction_mutation_access(key, "create")
     emp = await resolve_or_create_employee(
@@ -577,66 +585,34 @@ async def add_admin_transaction(body: AdminTxnCreate, key: str = Depends(_requir
 
     # Normalise payout_phone using resolved employee phone if not supplied
     payout_phone = normalize_bd_phone(body.payout_phone) if body.payout_phone else emp.get("primary_phone")
-    period = body.txn_date.strftime("%Y-%m")
 
-    # Build a deterministic txn_ref for idempotency
-    txn_ref = "fpe-admin-" + hashlib.sha256(
-        f"{emp['id']}|{body.amount}|{body.txn_date.isoformat()}|{uuid.uuid4().hex[:8]}".encode()
-    ).hexdigest()[:16]
+    method = PayoutMethod(body.payout_method) if body.payout_method in PayoutMethod._value2member_map_ else PayoutMethod.cash
+    category = TxnCategory(body.txn_category) if body.txn_category in TxnCategory._value2member_map_ else TxnCategory.salary
 
-    async with db_conn() as conn:
-        new_id: int = await conn.fetchval(
-            """
-            INSERT INTO fpe_cash_transactions
-                (txn_ref, employee_id, employee_name_raw,
-                 amount, payout_phone, payout_method, txn_date, txn_category,
-                 source_message_text, accounting_period, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'admin_manual')
-            RETURNING id
-            """,
-            txn_ref,
-            emp["id"],
-            body.employee_name,
-            body.amount,
-            payout_phone,
-            body.payout_method,
-            body.txn_date,
-            body.txn_category,
-            body.notes or f"Admin manual entry — {body.employee_name}",
-            period,
-        )
+    event = payment_event_from_manual(
+        employee_id=emp["id"],
+        employee_name_raw=body.employee_name,
+        amount=body.amount,
+        payout_method=method,
+        payout_phone=payout_phone,
+        txn_date=body.txn_date,
+        txn_category=category,
+        source_message_text=body.notes or f"Admin manual entry — {body.employee_name}",
+        created_by=_actor_label(actor),
+        metadata={"admin_api": True, "employee_id_phone": body.employee_id_phone},
+    )
+    req = TransactionCreateRequest(**event.model_dump())
+    txn = await create_transaction(req)
 
-        await conn.execute(
-            """
-            INSERT INTO fpe_accounting_audit_logs
-                (entity_type, entity_id, action, after_state, performed_by, reason)
-            VALUES ('transaction', $1, 'admin_create', $2::jsonb, $3, $4)
-            """,
-            new_id,
-            json.dumps({
-                "txn_ref": txn_ref,
-                "employee_id": emp["id"],
-                "amount": str(body.amount),
-                "payout_method": body.payout_method,
-                "txn_date": body.txn_date.isoformat(),
-                "txn_category": body.txn_category,
-            }, default=_json_default),
-            _actor_label(actor),
-            f"module=payroll; detail=admin manual entry for {body.employee_name}",
-        )
-
-    # Update ledger
-    await _adjust_ledger(emp["id"], period, body.amount, body.txn_category)
-
-    log.info("[admin_txn] created txn id=%d emp=%d ref=%s", new_id, emp["id"], txn_ref[:16])
-    new_row = await fetch_one("SELECT updated_at FROM fpe_cash_transactions WHERE id = $1", new_id)
+    log.info("[admin_txn] created txn id=%d emp=%d ref=%s", txn.id, emp["id"], txn.txn_ref[:16])
+    new_row = await fetch_one("SELECT updated_at FROM fpe_cash_transactions WHERE id = $1", txn.id)
     return {
         "ok": True,
-        "transaction_id": new_id,
+        "transaction_id": txn.id,
         "employee_id": emp["id"],
         "employee_code": emp.get("employee_code"),
         "full_name": emp.get("full_name"),
-        "txn_ref": txn_ref,
+        "txn_ref": txn.txn_ref,
         "updated_at": new_row["updated_at"].isoformat() if new_row and new_row["updated_at"] else None,
     }
 

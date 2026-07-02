@@ -4,7 +4,7 @@ Fazle Core — Accountant Summary Detector & Acknowledger
 Recognises and acknowledges daily Bengali accounting summary messages sent by
 the accountant via WhatsApp.  These messages contain company-level cash-flow
 totals — NOT individual employee records — so they cannot be written to
-wbom_cash_transactions (which requires employee_id NOT NULL).
+fpe_cash_transactions (which requires employee_id NOT NULL).
 
 Recognised formats (examples):
     "7/5/26=জমা =75,000/-"           date + deposit + total

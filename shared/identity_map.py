@@ -52,7 +52,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from modules.number_identity import normalize_phone as _ni_normalize_phone
+from shared.phone import normalize_phone as _sp_normalize_phone, phones_match
 
 log = logging.getLogger("fazle.identity_map")
 
@@ -62,7 +62,7 @@ log = logging.getLogger("fazle.identity_map")
 def normalize_phone(raw: Optional[str]) -> str:
     """
     Canonical Bangladesh phone → 01XXXXXXXXX (11 digits).
-    Delegates to modules.number_identity.normalize_phone — single source of truth.
+    Delegates to shared.phone → fazle_payroll_engine.normalizer (single source of truth).
     Returns empty string for unresolvable input.
 
     Examples
@@ -78,8 +78,7 @@ def normalize_phone(raw: Optional[str]) -> str:
     >>> normalize_phone(None)
     ''
     """
-    variants = _ni_normalize_phone(raw or "")
-    return variants[0] if variants else ""
+    return _sp_normalize_phone(raw)
 
 
 def phone_last10(raw: Optional[str]) -> str:
@@ -88,11 +87,7 @@ def phone_last10(raw: Optional[str]) -> str:
     return n[-10:] if len(n) >= 10 else ""
 
 
-def phones_match(a: Optional[str], b: Optional[str]) -> bool:
-    """True if two phone strings resolve to the same number (last-10 match)."""
-    if not a or not b:
-        return False
-    return bool(phone_last10(a) and phone_last10(a) == phone_last10(b))
+# phones_match is imported from shared.phone (canonical source)
 
 
 # ── Employee Identity dataclass ───────────────────────────────────────────────

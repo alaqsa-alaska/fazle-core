@@ -1,8 +1,8 @@
 """
 Fazle Core — Admin NL: payments handlers (Phase 1.2 / v1.1.0)
 
-Reads canonical payments from `wbom_cash_transactions` joined with
-`wbom_employees` for name resolution. No writes.
+Reads canonical payments from `fpe_cash_transactions` joined with
+`fpe_employees` for name resolution. No writes.
 
 Public:
     intent_payments(text, admin_phone) -> reply str
@@ -176,18 +176,21 @@ async def intent_payments(text: str, admin_phone: str) -> str:
         where_phone = ("AND (t.payment_mobile = $3 OR t.payment_mobile = $4 "
                        "     OR e.employee_mobile = $3 OR e.employee_mobile = $4)")
 
+    # C1B: read from canonical fpe_cash_transactions
     rows = await fetch_all(
         f"""
-        SELECT t.transaction_id, t.transaction_date, t.amount, t.payment_method,
-               t.payment_mobile, t.transaction_type, t.source,
-               COALESCE(e.employee_name, '') AS emp_name,
-               COALESCE(e.employee_mobile, '') AS emp_mobile
-          FROM wbom_cash_transactions t
-          LEFT JOIN wbom_employees e ON e.employee_id = t.employee_id
-         WHERE t.transaction_date >= $1::date
-           AND t.transaction_date <  $2::date
+        SELECT t.id AS transaction_id, t.txn_date AS transaction_date, t.amount,
+               t.payout_method AS payment_method, t.payout_phone AS payment_mobile,
+               t.txn_category AS transaction_type, t.source,
+               COALESCE(e.full_name, '') AS emp_name,
+               COALESCE(e.primary_phone, '') AS emp_mobile
+          FROM fpe_cash_transactions t
+          LEFT JOIN fpe_employees e ON e.id = t.employee_id
+         WHERE t.txn_date >= $1::date
+           AND t.txn_date <  $2::date
+           AND t.transaction_status = 'final'
            {where_phone}
-         ORDER BY t.transaction_date ASC, t.transaction_id ASC
+         ORDER BY t.txn_date ASC, t.id ASC
         """,
         *sql_args,
     )
@@ -289,16 +292,19 @@ async def intent_employee_totals(text: str, admin_phone: str) -> str:
         identifier = name or "?"
         return f"💸 \"{identifier}\" — কোনো কর্মী পাওয়া যায়নি।"
 
+    # C1B: read from canonical fpe_cash_transactions
     rows = await fetch_all(
         f"""
-        SELECT t.transaction_id, t.transaction_date, t.amount, t.payment_method,
-               t.transaction_type, t.remarks,
-               e.employee_name, e.employee_mobile
-          FROM wbom_cash_transactions t
-          JOIN wbom_employees e ON e.employee_id = t.employee_id
-         WHERE NOT COALESCE(t.is_reversed, false)
+        SELECT t.id AS transaction_id, t.txn_date AS transaction_date, t.amount,
+               t.payout_method AS payment_method, t.txn_category AS transaction_type,
+               t.source_message_text AS remarks,
+               e.full_name AS employee_name, e.primary_phone AS employee_mobile
+          FROM fpe_cash_transactions t
+          JOIN fpe_employees e ON e.id = t.employee_id
+         WHERE NOT t.is_reversal
+               AND t.transaction_status = 'final'
                {where_clause}
-         ORDER BY t.transaction_date DESC, t.transaction_id DESC
+         ORDER BY t.txn_date DESC, t.id DESC
          LIMIT 50
         """,
         *sql_args,

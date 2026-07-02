@@ -1,6 +1,6 @@
 Source: knowledge_base/06_developer_system/payroll_module.md
-SHA256: 392ad54d3a52dfd365baac65f32952fd806e16bfdc7beea7d7f4631e61fb41d3
-Version: 392ad54d3a52
+SHA256: b6abbcc22ec3d21c25b5c494e36d0348c0bb1d4c5ba57ee1a4bd5ea39ef6ea49
+Version: b6abbcc22ec3
 
 # Core Payroll Module — Developer Reference
 **KB Article ID:** DEV-06-PAYROLL-MODULE
@@ -9,6 +9,20 @@ Version: 392ad54d3a52
 - `tests/conftest.py` (DDL reference — same schema as production migrations)
 **Visibility:** Developer / Admin (state machine, schemas) | Accountant (state names only)
 **Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## Phone Normalization (2026-07-01 Update)
+
+All phone number normalization in the payroll system now uses a single source of truth:
+
+**`modules.fazle_payroll_engine.normalizer.normalize_bd_phone()`**
+
+- Canonical storage: `01XXXXXXXXX` (11 digits)
+- Cross-domain match key: `phone_key9()` (last 9 digits)
+- WBOM/RBAC conversion: `to_880()` / `from_880()`
+
+See: `phone_normalization_rules.md` for full details.
 
 ---
 

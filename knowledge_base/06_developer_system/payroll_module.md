@@ -2,7 +2,7 @@
 title: Core Payroll Module — Developer Reference
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-07-01
 runtime_index: true
 ---
 
@@ -13,6 +13,20 @@ runtime_index: true
 - `tests/conftest.py` (DDL reference — same schema as production migrations)
 **Visibility:** Developer / Admin (state machine, schemas) | Accountant (state names only)
 **Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+---
+
+## Phone Normalization (2026-07-01 Update)
+
+All phone number normalization in the payroll system now uses a single source of truth:
+
+**`modules.fazle_payroll_engine.normalizer.normalize_bd_phone()`**
+
+- Canonical storage: `01XXXXXXXXX` (11 digits)
+- Cross-domain match key: `phone_key9()` (last 9 digits)
+- WBOM/RBAC conversion: `to_880()` / `from_880()`
+
+See: `phone_normalization_rules.md` for full details.
 
 ---
 

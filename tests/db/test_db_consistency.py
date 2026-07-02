@@ -110,13 +110,12 @@ class TestCashTransactionConstraints:
             rev = await conn.fetchrow("""
                 INSERT INTO wbom_cash_transactions
                     (employee_id, transaction_type, amount,
-                     reversal_of, is_reversal)
-                VALUES ($1, 'advance', -1000, $2, TRUE)
-                RETURNING reversal_of, is_reversal
+                     reversal_of)
+                VALUES ($1, 'advance', -1000, $2)
+                RETURNING reversal_of
             """, seed_employee["employee_id"], original["transaction_id"])
 
         assert rev["reversal_of"] == original["transaction_id"]
-        assert rev["is_reversal"] is True
 
     async def test_transaction_cascade_delete(self, test_db_pool, seed_employee):
         async with test_db_pool.acquire() as conn:
@@ -156,8 +155,9 @@ class TestPayrollRunConstraints:
         async with test_db_pool.acquire() as conn:
             row = await conn.fetchrow("""
                 INSERT INTO wbom_payroll_runs
-                    (employee_id, period_month, basic_salary, gross_salary, net_salary)
-                VALUES ($1, '2026-05', 9000, 9000, 9000)
+                    (employee_id, period_year, period_month,
+                     basic_salary, gross_salary, net_salary)
+                VALUES ($1, 2026, 5, 9000, 9000, 9000)
                 RETURNING status
             """, seed_employee["employee_id"])
         assert row["status"] == "draft"
@@ -201,15 +201,14 @@ class TestDbInvariants:
 
             await conn.execute("""
                 INSERT INTO wbom_cash_transactions
-                    (employee_id, transaction_type, amount, reversal_of, is_reversal)
-                VALUES ($1, 'advance', -1000, $2, TRUE)
+                    (employee_id, transaction_type, amount, reversal_of)
+                VALUES ($1, 'advance', -1000, $2)
             """, seed_employee["employee_id"], original["transaction_id"])
 
             # Query: all reversal rows should have a valid reversal_of
             orphans = await conn.fetchval("""
                 SELECT COUNT(*) FROM wbom_cash_transactions r
-                WHERE r.is_reversal = TRUE
-                AND r.reversal_of IS NOT NULL
+                WHERE r.reversal_of IS NOT NULL
                 AND NOT EXISTS (
                     SELECT 1 FROM wbom_cash_transactions o
                     WHERE o.transaction_id = r.reversal_of

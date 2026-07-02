@@ -39,8 +39,17 @@ def get_pool() -> asyncpg.Pool:
 
 @asynccontextmanager
 async def db_conn():
-    async with get_pool().acquire() as conn:
+    if _pool is not None:
+        async with _pool.acquire() as conn:
+            yield conn
+        return
+
+    settings = get_settings()
+    conn = await asyncpg.connect(settings.database_url)
+    try:
         yield conn
+    finally:
+        await conn.close()
 
 
 async def fetch_one(sql: str, *args, conn: Optional[asyncpg.Connection] = None) -> Optional[dict]:

@@ -11,6 +11,11 @@ Command formats (case-insensitive):
   STATUS                          — show pending drafts count
   DRAFTS                          — list recent pending drafts
 
+Sprint-3B (Canonical Financial Approval):
+  APPROVED <id> <amount> <method> — approve payment draft via canonical create_transaction()
+  DREDIT <id> <amount> <method> [payout=<phone>] — edit a pending payment draft
+  DREJECT <id> [reason]           — reject a payment draft (no transaction)
+
 APPROVE completes the full loop: load draft → mark approved → deliver to recipient
 via the correct bridge → mark sent_at. This fires even in SAFE MODE — admin approval
 IS the decision to send.
@@ -63,6 +68,10 @@ _REJECT_RE        = re.compile(r"^reject\s+([\d,\s]+)$", re.IGNORECASE)
 _EDIT_RE          = re.compile(r"^edit\s+(\d+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _PAID_RE          = re.compile(r"^paid\s+(\d+)\s+(\d[\d,]*)\s*(bkash|nagad|cash)?$", re.IGNORECASE)
 _ADVANCE_RE       = re.compile(r"^advance\s+(\d+)\s+(\d[\d,]*)\s*(bkash|nagad|cash)?$", re.IGNORECASE)
+# Sprint-3B: Canonical Draft Approval commands
+_APPROVED_RE      = re.compile(r"^approved\s+(\d+)\s+(\d[\d,]*)\s*(bkash|nagad|cash)?$", re.IGNORECASE)
+_DREDIT_RE        = re.compile(r"^dredit\s+(\d+)\s+(\d[\d,]*)\s*(bkash|nagad|cash)?(?:\s+payout=(\S+))?\s*$", re.IGNORECASE)
+_DREJECT_RE       = re.compile(r"^dreject\s+(\d+)(?:\s+(.+))?\s*$", re.IGNORECASE)
 _STATUS_RE        = re.compile(r"^(status|drafts|pending)$", re.IGNORECASE)
 _PAYIMPORT_RE     = re.compile(r"^pay-?import\b\s*(.+)$", re.IGNORECASE | re.DOTALL)
 # RELEASE <program_id> <YYYY-MM-DD> <D|N> <release_point...> [days=<float>]
@@ -175,7 +184,9 @@ def is_admin_command(text: str) -> bool:
         _USER_LIST_RE.match(t) or _USER_ADD_RE.match(t) or
         _USER_ROLE_RE.match(t) or _USER_REMOVE_RE.match(t) or
         _USER_APIKEY_RE.match(t) or
-        _REVERSE_RE.match(t) or _ADJUST_RE.match(t)
+        _REVERSE_RE.match(t) or _ADJUST_RE.match(t) or
+        # Sprint-3B
+        _APPROVED_RE.match(t) or _DREDIT_RE.match(t) or _DREJECT_RE.match(t)
     )
 
 
@@ -208,6 +219,10 @@ def _classify_command(t: str) -> Optional[str]:
         (_USER_REMOVE_RE, "user_remove"),
         (_USER_APIKEY_RE, "user_apikey"),
         (_ESCORTCONFIRM_RE, "escortconfirm"),
+        # Sprint-3B — reuse paid/edit/reject RBAC roles
+        (_APPROVED_RE, "paid"),
+        (_DREDIT_RE, "edit"),
+        (_DREJECT_RE, "reject"),
     )
     for rx, name in pairs:
         if rx.match(t):
@@ -300,6 +315,28 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
         amount   = float(m.group(2).replace(",", ""))
         method   = (m.group(3) or "cash").lower()
         return await _cmd_paid(draft_id, amount, method, admin_phone, draft_type="advance")
+
+    # ── Sprint-3B: Canonical Draft Approval ────────────────────────────────
+    m = _APPROVED_RE.match(t)
+    if m:
+        draft_id = int(m.group(1))
+        amount   = float(m.group(2).replace(",", ""))
+        method   = (m.group(3) or "cash").lower()
+        return await _cmd_approved(draft_id, amount, method, admin_phone)
+
+    m = _DREDIT_RE.match(t)
+    if m:
+        draft_id = int(m.group(1))
+        amount   = float(m.group(2).replace(",", ""))
+        method   = (m.group(3) or "cash").lower()
+        payout   = m.group(4)
+        return await _cmd_dredit(draft_id, amount, method, payout, admin_phone)
+
+    m = _DREJECT_RE.match(t)
+    if m:
+        draft_id = int(m.group(1))
+        reason   = m.group(2).strip() if m.group(2) else None
+        return await _cmd_dreject(draft_id, admin_phone, reason)
 
     if _STATUS_RE.match(t):
         return await _cmd_status()
@@ -617,6 +654,104 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         return f"❌ ত্রুটি: {e}"
 
 
+# ── Sprint-3B: Canonical Draft Approval handlers ──────────────────────────────
+
+async def _cmd_approved(
+    draft_id: int, amount: float, method: str, admin_phone: str
+) -> tuple[str, Optional[str]]:
+    """
+    Sprint-3B — APPROVED <id> <amount> <method>
+
+    Routes a pending payment draft through the canonical financial pipeline:
+        draft_approval.approve_draft()
+            → create_transaction()  (canonical, protected)
+            → _upsert_ledger()      (called inside create_transaction)
+            → audit logged
+            → draft status = 'completed'
+
+    Returns (admin_confirm_text, accountant_message_to_forward).
+    """
+    try:
+        from modules.draft_approval import approve_draft
+        result = await approve_draft(draft_id, amount, method, admin_phone)
+        if not result.get("ok"):
+            return (f"❌ {result.get('error', 'unknown error')}", None)
+
+        emp_name = result.get("employee_name") or "?"
+        txn_id = result.get("transaction_id")
+        txn_ref = result.get("txn_ref", "")[:16]
+        accountant_msg = result.get("accountant_msg")
+
+        confirm = (
+            f"✅ Draft #{draft_id} → Canonical Transaction #{txn_id}\n"
+            f"কর্মী: {emp_name} | পরিমাণ: ৳{amount:,.0f} | পদ্ধতি: {method.upper()}\n"
+            f"Txn Ref: {txn_ref}…\n"
+            f"Ledger updated ✓ | Audit logged ✓\n\n"
+            f"একাউন্ট্যান্টকে পেমেন্ট বার্তা পাঠানো হচ্ছে..."
+        )
+        return (confirm, accountant_msg)
+
+    except Exception as e:
+        log.error(f"[admin_cmd] APPROVED error: {e}")
+        return (f"❌ ত্রুটি: {e}", None)
+
+
+async def _cmd_dredit(
+    draft_id: int, amount: float, method: str,
+    payout: Optional[str], admin_phone: str,
+) -> str:
+    """
+    Sprint-3B — DREDIT <id> <amount> <method> [payout=<phone>]
+
+    Edits a pending payment draft (version increment, before/after state saved).
+    Does NOT create a transaction — admin must APPROVED after edit.
+    """
+    try:
+        from modules.draft_approval import edit_draft
+        result = await edit_draft(
+            draft_id, amount, method, payout, admin_phone,
+            reason=f"DREDIT by {admin_phone}",
+        )
+        if not result.get("ok"):
+            return f"❌ {result.get('error', 'unknown error')}"
+
+        version = result.get("version", 1)
+        return (
+            f"✏️ Draft #{draft_id} edited (v{version}).\n"
+            f"Amount: ৳{amount:,.0f} | Method: {method.upper()}\n"
+            f"Now send: APPROVED {draft_id} {int(amount)} {method}"
+        )
+
+    except Exception as e:
+        log.error(f"[admin_cmd] DREDIT error: {e}")
+        return f"❌ ত্রুটি: {e}"
+
+
+async def _cmd_dreject(
+    draft_id: int, admin_phone: str, reason: Optional[str] = None,
+) -> str:
+    """
+    Sprint-3B — DREJECT <id> [reason]
+
+    Rejects a pending payment draft. NO transaction, NO ledger.
+    """
+    try:
+        from modules.draft_approval import reject_draft
+        result = await reject_draft(draft_id, admin_phone, reason)
+        if not result.get("ok"):
+            return f"❌ {result.get('error', 'unknown error')}"
+
+        return (
+            f"🚫 Draft #{draft_id} rejected.\n"
+            f"Reason: {reason or 'admin_reject'}\n"
+            f"No transaction created. No ledger updated."
+        )
+
+    except Exception as e:
+        log.error(f"[admin_cmd] DREJECT error: {e}")
+        return f"❌ ত্রুটি: {e}"
+
+
 async def _cmd_paid(
     draft_id: int, amount: float, method: str, admin_phone: str, draft_type: str
 ) -> tuple[str, Optional[str]]:
@@ -633,7 +768,7 @@ async def _cmd_paid(
 
         emp_name   = row.get("employee_name") or "?"
 
-        # ── Write to wbom_cash_transactions (BUG 1 fix) ──────────────────────
+        # ── C1B: Write to fpe_cash_transactions via payment_workflow.finalize_payment ──
         from modules.payment_workflow import finalize_payment
         result = await finalize_payment(draft_id, amount, method)
         if "error" in result:

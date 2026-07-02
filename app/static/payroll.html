@@ -446,6 +446,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <button data-tab="review" onclick="navigate('review')">Review Queue</button>
   <button data-tab="sync" onclick="navigate('sync')">Sync</button>
   <button data-tab="manual" onclick="navigate('manual')">Manual Entry</button>
+  <button data-tab="operator" onclick="navigate('operator')">Operator</button>
   <button data-tab="cash" onclick="navigate('cash')">Cash</button>
   <button data-tab="income" onclick="navigate('income')">Income</button>
   <button data-tab="admin" class="admin-only-nav" onclick="navigate('admin')" hidden>Admin</button>
@@ -467,6 +468,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     <button data-tab="review" onclick="drawerNavigate('review')">Review Queue</button>
     <button data-tab="sync" onclick="drawerNavigate('sync')">Sync</button>
     <button data-tab="manual" onclick="drawerNavigate('manual')">Manual Entry</button>
+    <button data-tab="operator" onclick="drawerNavigate('operator')">Operator</button>
     <button data-tab="cash" onclick="drawerNavigate('cash')">Cash</button>
     <button data-tab="income" onclick="drawerNavigate('income')">Income</button>
     <button data-tab="admin" class="admin-only-nav" onclick="drawerNavigate('admin')" hidden>Admin</button>
@@ -910,6 +912,70 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
           <input id="rReason" type="text" placeholder="Reason for reversal…" style="width:100%">
         </div>
         <button class="btn danger" onclick="submitReversal()">Reverse Transaction</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ OPERATOR (Sprint-2) ══ -->
+  <section id="tab-operator" class="tab">
+    <div class="card">
+      <h2>Operator Submission</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Submit a transaction for admin approval. Ledger is NOT affected until approved.</p>
+      <div style="max-width:480px">
+        <div class="form-group">
+          <label>Employee *</label>
+          <div class="suggest-wrap">
+            <input id="opEmpLookup" type="text" autocomplete="off" placeholder="Type employee mobile / name" style="width:100%">
+            <div id="opEmpDrop" class="suggest-drop"></div>
+          </div>
+          <input id="opEmpId" type="hidden">
+          <div id="opEmpPicked" class="inline-help">Employee not selected yet.</div>
+        </div>
+        <div class="form-group">
+          <label>Amount (BDT) *</label>
+          <input id="opAmount" type="number" step="1" min="1" placeholder="e.g. 5000" style="width:100%">
+        </div>
+        <div class="form-group">
+          <label>Payout Method *</label>
+          <select id="opMethod" style="width:100%">
+            <option value="bkash">bKash</option>
+            <option value="nagad">Nagad</option>
+            <option value="cash">Cash</option>
+            <option value="bank">Bank Transfer</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Payout Phone</label>
+          <input id="opPhone" type="text" placeholder="01XXXXXXXXX" style="width:100%">
+        </div>
+        <div class="form-group">
+          <label>Date *</label>
+          <input id="opDate" type="date" style="width:100%">
+        </div>
+        <div class="form-group">
+          <label>Category</label>
+          <select id="opCategory" style="width:100%">
+            <option value="salary">Salary</option>
+            <option value="advance">Advance</option>
+            <option value="bonus">Bonus</option>
+            <option value="deduction">Deduction</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Notes</label>
+          <input id="opNotes" type="text" placeholder="Brief note..." style="width:100%">
+        </div>
+        <button class="btn" onclick="submitOperator()">Submit for Approval</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Pending Submissions</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Operator submissions awaiting admin approval.</p>
+      <button class="btn sm secondary" onclick="loadOperatorPending(true)" style="margin-bottom:12px">Refresh</button>
+      <div id="operatorPendingTable" class="tbl-wrap">
+        <div class="empty"><div class="icon">📋</div>No pending submissions. Click Refresh to load.</div>
       </div>
     </div>
   </section>
@@ -1565,7 +1631,7 @@ function pickManualEmployee(idx) {
 }
 
 // ── Tab Switching / SPA Routing ──────────────────────────────────────────────
-const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','cash','income','admin'];
+const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','operator','cash','income','admin'];
 
 function tabFromPath() {
   const p = location.pathname.replace(/\/+$/, '');
@@ -1645,10 +1711,13 @@ function initApp() {
   if (el) el.value = ym;
   const dateEl = document.getElementById('mDate');
   if (dateEl) dateEl.value = today.toISOString().slice(0,10);
+  const opDateEl = document.getElementById('opDate');
+  if (opDateEl) opDateEl.value = today.toISOString().slice(0,10);
 
   wireOverviewEmployeeSearch();
   wireEmployeesSuggest();
   wireManualEmployeeLookup();
+  wireOperatorEmployeeLookup();
   loadHeaderStatus();
   // Activate tab from URL (deep-link / refresh support)
   const initialTab = tabFromPath();
@@ -2211,7 +2280,7 @@ function renderTxnTable(rows, compact = false) {
       </tr></thead>
       <tbody>
       ${rows.map(r => {
-        const isExpense = (r.txn_category && r.txn_category !== 'salary') || !r.employee_id;
+        const isExpense = !r.employee_id;
         const rawName = r.employee_display_name || r.employee_name_raw || '';
         const looksLikePhone = /^\+?\d[\d\s\-]{6,}$/.test(rawName.trim());
         const name = isExpense
@@ -2245,7 +2314,7 @@ function renderTxnTable(rows, compact = false) {
     </tr></thead>
     <tbody>
     ${rows.map(r => {
-      const isExpense = (r.txn_category && r.txn_category !== 'salary') || !r.employee_id;
+      const isExpense = !r.employee_id;
       const rawName = r.employee_display_name || r.employee_name_raw || '';
       const looksLikePhone = /^\+?\d[\d\s\-]{6,}$/.test(rawName.trim());
       const name = isExpense
@@ -2303,7 +2372,7 @@ async function openTxnDetail(id) {
   openPanel('Transaction #' + id, '<div class="empty"><div class="icon">⏳</div>Loading…</div>');
   try {
     const d = await api('/transactions/' + id);
-    const isExpense = (d.txn_category && d.txn_category !== 'salary') || !d.employee_id;
+    const isExpense = !d.employee_id;
     const empLabel = isExpense
       ? 'Office Expense'
       : (d.employee_display_name || d.employee_name_raw || '—')
@@ -2711,6 +2780,10 @@ async function saveNewPayment() {
     txn_category: cat,
     notes: notes || null,
   };
+  // Sprint-1: Include employee_id if selected from suggestion
+  if (_txnSuggestSelected && _txnSuggestSelected.employee_id) {
+    payload.employee_id = _txnSuggestSelected.employee_id;
+  }
 
   try {
     const res = await fetch('/api/admin/transactions', {
@@ -2738,6 +2811,10 @@ async function openEditTxn(id) {
   const txnDate = (row.txn_date || '').slice(0, 10);
   const body = `
     <p style="color:#888;font-size:0.85em;margin-bottom:10px">TXN #${id} · ${row.txn_ref || ''}</p>
+    <label>Employee ID</label>
+    <input id="editTxnEmpId" class="input" value="${row.employee_id || ''}" readonly style="margin-bottom:10px;background:var(--surface)">
+    <label>Employee Code</label>
+    <input id="editTxnEmpCode" class="input" value="${row.employee_code || row.employee_display_id_phone || ''}" readonly style="margin-bottom:10px;background:var(--surface)">
     <label>Employee Name</label>
     <input id="editTxnName" class="input" value="${(row.employee_name_raw || '').replace(/"/g,'&quot;')}" style="margin-bottom:10px">
     <label>Payout Phone</label>
@@ -3094,6 +3171,10 @@ async function submitManual() {
     manualSelectedEmployee = null;
     document.getElementById('mEmpPicked').textContent = 'Employee not selected yet.';
     document.getElementById('mDate').value = new Date().toISOString().slice(0,10);
+    // Sprint-1: Refresh transaction list and overview totals
+    await loadTransactions(true);
+    if (currentTab === 'overview') { loadOverview(); } else { loadOverviewRecent(true); }
+    if (currentTab === 'employees') { loadEmployees(true); }
   } catch(e) {
     showToast('Error: ' + e.message, 'err');
   }
@@ -3105,6 +3186,168 @@ async function submitReversal() {
   if (!txnId || !reason) { showToast('Enter transaction ID and reason.', 'err'); return; }
   confirmReverse(parseInt(txnId));
   document.getElementById('revReason').value = reason;
+}
+
+// ── Sprint-2: Operator Submission Pipeline ──────────────────────────────────
+let _opSelectedEmployee = null;
+let _opSuggestItems = [];
+
+function wireOperatorEmployeeLookup() {
+  const input = document.getElementById('opEmpLookup');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    _opSelectedEmployee = null;
+    document.getElementById('opEmpId').value = '';
+    document.getElementById('opEmpPicked').textContent = 'Looking up employee...';
+    const q = input.value.trim();
+    if (!q) {
+      _opSuggestItems = [];
+      document.getElementById('opEmpPicked').textContent = 'Employee not selected yet.';
+      closeSuggestById('opEmpDrop');
+      return;
+    }
+    clearTimeout(input._timer);
+    input._timer = setTimeout(async () => {
+      try {
+        _opSuggestItems = await fetchEmployeeSuggestions(q, 10);
+        const drop = document.getElementById('opEmpDrop');
+        drop.innerHTML = suggestMarkup(_opSuggestItems, 'pickOperatorEmployee');
+        drop.classList.add('open');
+        if (!_opSuggestItems.length) {
+          document.getElementById('opEmpPicked').textContent = 'Employee not found.';
+        }
+      } catch (_) {}
+    }, 220);
+  });
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      if (_opSuggestItems.length) pickOperatorEmployee(0);
+    }
+  });
+  input.addEventListener('blur', () => setTimeout(() => closeSuggestById('opEmpDrop'), 180));
+}
+
+function pickOperatorEmployee(idx) {
+  const row = _opSuggestItems[idx];
+  if (!row) return;
+  _opSelectedEmployee = row;
+  document.getElementById('opEmpId').value = row.employee_id;
+  document.getElementById('opEmpLookup').value = row.employee_id_phone || row.mobile_number || '';
+  document.getElementById('opEmpPicked').textContent = 'Selected ' + (row.display_name || row.full_name);
+  if (!document.getElementById('opPhone').value) {
+    document.getElementById('opPhone').value = row.mobile_number || row.employee_id_phone || '';
+  }
+  closeSuggestById('opEmpDrop');
+}
+
+async function submitOperator() {
+  const empId = document.getElementById('opEmpId').value;
+  const amount = document.getElementById('opAmount').value;
+  const method = document.getElementById('opMethod').value;
+  const phone = document.getElementById('opPhone').value;
+  const date = document.getElementById('opDate').value;
+  const category = document.getElementById('opCategory').value;
+  const notes = document.getElementById('opNotes').value.trim();
+
+  if (!empId || !amount || !date) {
+    showToast('Fill all required fields (*)', 'err'); return;
+  }
+  if (!_opSelectedEmployee) {
+    showToast('Employee not found. Select from suggestions.', 'err'); return;
+  }
+
+  try {
+    const r = await api('/operator/submit', {
+      method: 'POST',
+      body: JSON.stringify({
+        employee_id: parseInt(empId),
+        employee_name_raw: _opSelectedEmployee.display_name || _opSelectedEmployee.full_name || null,
+        amount: parseFloat(amount),
+        payout_method: method,
+        payout_phone: phone || null,
+        txn_date: date,
+        txn_category: category,
+        notes: notes || null,
+      })
+    });
+    showToast('Submitted for approval — pending #' + (r.pending_id || '?'), 'ok');
+    // Clear form
+    ['opEmpId','opEmpLookup','opAmount','opPhone','opNotes'].forEach(id => document.getElementById(id).value = '');
+    _opSelectedEmployee = null;
+    document.getElementById('opEmpPicked').textContent = 'Employee not selected yet.';
+    document.getElementById('opDate').value = new Date().toISOString().slice(0,10);
+    // Refresh pending list
+    await loadOperatorPending(true);
+  } catch(e) {
+    showToast('Error: ' + e.message, 'err');
+  }
+}
+
+async function loadOperatorPending(resetPage = false) {
+  const el = document.getElementById('operatorPendingTable');
+  if (!el) return;
+  el.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading...</div>';
+  try {
+    const d = await api('/operator/pending?limit=50');
+    if (!d.items || !d.items.length) {
+      el.innerHTML = '<div class="empty"><div class="icon">✅</div>No pending submissions.</div>';
+      return;
+    }
+    el.innerHTML = '<table><thead><tr><th>Date</th><th>Employee</th><th>Amount</th><th>Method</th><th>Category</th><th>Actions</th></tr></thead><tbody>' +
+      d.items.map(r => {
+        const name = esc(r.detected_employee_name || r.resolved_employee_name || '(unknown)');
+        const phone = esc(r.detected_payout_phone || '—');
+        const amt = fmtAmt(r.detected_amount);
+        const method = esc(r.detected_payout_method || '—');
+        const dt = fmtDate(r.detected_txn_date);
+        const empId = r.resolved_employee_id || '';
+        return `<tr>
+          <td>${dt}</td>
+          <td>${name}</td>
+          <td class="amount">৳${amt}</td>
+          <td>${method}</td>
+          <td>${phone}</td>
+          <td>
+            <button class="btn sm" onclick="approveOperator(${r.id}, ${empId || 0})">Approve</button>
+            <button class="btn sm secondary" style="color:#dc3545;border-color:#dc3545" onclick="rejectOperator(${r.id})">Reject</button>
+          </td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+  } catch(e) {
+    el.innerHTML = '<div class="empty"><div class="icon">⚠️</div>' + esc(e.message) + '</div>';
+  }
+}
+
+async function approveOperator(pendingId, empId) {
+  if (!empId) {
+    const input = prompt('Enter Employee ID for this submission:');
+    if (!input) return;
+    empId = parseInt(input);
+  }
+  if (!empId || empId <= 0) { showToast('Valid Employee ID required', 'err'); return; }
+  try {
+    const r = await api('/operator/' + pendingId + '/approve?employee_id=' + empId + '&reviewer=' + encodeURIComponent(USER_ACCESS?.name || 'admin') + '&txn_category=salary', { method: 'POST' });
+    showToast('Approved — Transaction #' + (r.txn_id || '?') + ' created', 'ok');
+    await loadOperatorPending(true);
+    await loadTransactions(true);
+    if (currentTab === 'overview') { loadOverview(); } else { loadOverviewRecent(true); }
+  } catch(e) {
+    showToast('Approve failed: ' + e.message, 'err');
+  }
+}
+
+async function rejectOperator(pendingId) {
+  const reason = prompt('Reason for rejection:');
+  if (!reason) return;
+  try {
+    const r = await api('/operator/' + pendingId + '/reject?reviewer=' + encodeURIComponent(USER_ACCESS?.name || 'admin') + '&reason=' + encodeURIComponent(reason), { method: 'POST' });
+    showToast('Rejected submission #' + pendingId, 'ok');
+    await loadOperatorPending(true);
+  } catch(e) {
+    showToast('Reject failed: ' + e.message, 'err');
+  }
 }
 
 // ── Panel Helpers ─────────────────────────────────────────────────────────────

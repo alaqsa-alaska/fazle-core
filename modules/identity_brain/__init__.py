@@ -210,15 +210,15 @@ async def _lookup_cash_identity(phone: str) -> Optional[dict]:
     if not variants:
         return None
     row = await fetch_one(
-        """SELECT e.employee_id, e.employee_name, e.designation,
+        """SELECT e.employee_id, e.full_name AS employee_name, e.designation,
                   e.basic_salary, e.bkash_number, e.status
-           FROM wbom_cash_transactions t
-           LEFT JOIN wbom_employees e ON e.employee_id = t.employee_id
+           FROM fpe_cash_transactions t
+           LEFT JOIN fpe_employees e ON e.employee_id = t.employee_id
            WHERE t.employee_phone = ANY($1)
-              OR t.payment_mobile = ANY($1)
-              OR t.payment_number = ANY($1)
-              OR e.employee_mobile = ANY($1)
-           ORDER BY t.transaction_id DESC
+              OR t.employee_id_phone = ANY($1)
+              OR t.payout_phone = ANY($1)
+              OR e.primary_phone = ANY($1)
+           ORDER BY t.id DESC
            LIMIT 1""",
         variants,
     )

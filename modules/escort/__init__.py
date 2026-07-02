@@ -1162,6 +1162,10 @@ async def _resolve_escort_employee_id(
 
     wbom_employees.employee_id is a numeric primary key; the escort mobile is
     stored as employee_mobile and used as the stable identity anchor.
+
+    After resolving/creating the WBOM record, this function also ensures an
+    fpe_employees row exists and is linked via wbom_employee_id. This makes
+    the escort visible in /payroll/employees immediately.
     """
     if not escort_mobile:
         return None
@@ -1175,7 +1179,10 @@ async def _resolve_escort_employee_id(
             variants,
         )
         if row:
-            return row["employee_id"]
+            wbom_id = row["employee_id"]
+            # Ensure FPE link exists (non-fatal)
+            await _ensure_fpe_employee_link(wbom_id, escort_mobile, escort_name)
+            return wbom_id
         if not auto_create:
             return None
 
@@ -1193,10 +1200,76 @@ async def _resolve_escort_employee_id(
             mobile_to_store,
         )
         log.info(f"[escort] auto-created/resolved escort employee_id={emp_id} mobile={mobile_to_store}")
+        # Ensure FPE link exists (non-fatal)
+        await _ensure_fpe_employee_link(emp_id, mobile_to_store, escort_name)
         return emp_id
     except Exception as e:
         log.warning(f"[escort] employee_id lookup error: {e}")
     return None
+
+
+async def _ensure_fpe_employee_link(
+    wbom_employee_id: int,
+    mobile: str,
+    name: Optional[str] = None,
+) -> None:
+    """
+    Ensure an fpe_employees row exists for this escort and is linked to WBOM.
+    Non-fatal: any error is logged and swallowed.
+    Called after resolving/creating a wbom_employees row for an escort.
+    Does NOT touch fpe_cash_transactions — only fpe_employees identity table.
+    """
+    try:
+        from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
+        from app.database import execute as _exec, fetch_one as _fo, fetch_val as _fv
+
+        canon = normalize_bd_phone(mobile)
+        if not canon:
+            return
+
+        # 1. FPE record already linked to this WBOM id?
+        already = await _fo(
+            "SELECT id FROM fpe_employees WHERE wbom_employee_id = $1 LIMIT 1",
+            wbom_employee_id,
+        )
+        if already:
+            return  # already properly linked
+
+        # 2. FPE record exists by phone but wbom_employee_id not set → just link it
+        fpe_by_phone = await _fo(
+            "SELECT id FROM fpe_employees WHERE primary_phone = $1 OR employee_id_phone = $1 LIMIT 1",
+            canon,
+        )
+        if fpe_by_phone:
+            await _exec(
+                "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2 AND wbom_employee_id IS NULL",
+                wbom_employee_id, fpe_by_phone["id"],
+            )
+            log.debug("[escort] linked fpe_employee id=%d → wbom_employee_id=%d", fpe_by_phone["id"], wbom_employee_id)
+            return
+
+        # 3. No FPE record at all → create one
+        clean_name = (name or "Unknown Escort").strip()
+        name_norm = clean_name.lower()
+        new_fpe_id = await _fv(
+            """INSERT INTO fpe_employees
+                   (full_name, name_normalized, primary_phone, employee_id_phone,
+                    department, status, created_source, resolution_status, confidence_score,
+                    wbom_employee_id, designation)
+               VALUES ($1, $2, $3, $3, 'Escort', 'active', 'escort_program_confirm',
+                       'resolved', 1.0, $4, 'Escort')
+               ON CONFLICT DO NOTHING
+               RETURNING id""",
+            clean_name, name_norm, canon, wbom_employee_id,
+        )
+        if new_fpe_id:
+            await _exec(
+                "UPDATE fpe_employees SET employee_code = 'EMP-' || LPAD(id::text, 5, '0') WHERE id = $1 AND employee_code IS NULL",
+                new_fpe_id,
+            )
+            log.info("[escort] created fpe_employee id=%d for escort mobile=%s wbom_id=%d", new_fpe_id, canon, wbom_employee_id)
+    except Exception as _err:
+        log.debug("[escort] _ensure_fpe_employee_link failed: %s", _err)
 
 
 async def _sync_roster_after_confirm(program_id: int) -> None:

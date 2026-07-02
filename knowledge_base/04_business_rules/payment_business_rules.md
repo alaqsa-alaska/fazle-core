@@ -38,7 +38,7 @@ Rules:
 - `ID:` mobile is the employee lookup key.
 - Without `ID:`, payout mobile becomes the employee lookup key.
 - `(B)` = bKash, `(N)` = Nagad, `(C)` = Cash, `(Bank)` = Bank Transfer.
-- If employee is not found, create a minimal active employee using existing `wbom_employees` columns.
+- If employee is not found, create a minimal active employee in `fpe_employees` via `match_or_create_employee()`.
 - Write exactly one final transaction row for a distinct WhatsApp instruction.
 - Same employee/same amount can appear multiple times in one day if the WhatsApp message time/identity is different.
 

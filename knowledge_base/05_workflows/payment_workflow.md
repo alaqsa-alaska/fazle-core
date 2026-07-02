@@ -23,7 +23,7 @@ Employee/Escort request and Admin instruction are different workflows:
 | Intent | Wants advance/payment | Confirms payment instruction |
 | Verification | Required | Not required after admin handoff |
 | Intermediate state | `fazle_payment_drafts.pending` | None |
-| Final ledger write | No | Yes, direct `wbom_cash_transactions` |
+| Final ledger write | No | Yes, direct `fpe_cash_transactions` via `create_transaction()` |
 | AI role | Conversation + draft support | No decision; code parser executes |
 | Employee create | No | Yes, if lookup mobile is missing |
 

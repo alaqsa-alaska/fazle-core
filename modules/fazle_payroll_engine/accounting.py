@@ -17,7 +17,7 @@ import json
 import logging
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
 from app.database import execute, fetch_one, fetch_val, db_conn
 from .models import TransactionCreateRequest, TransactionRow, TxnCategory
@@ -32,8 +32,9 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
     Insert one immutable cash transaction and update the employee ledger.
     Returns the created TransactionRow.
 
-    Idempotency is enforced by txn_ref = sha256 of (wa_message_id + employee_id + amount).
-    For manual entries, txn_ref is sha256(source_message_text + employee_id + amount + date).
+    Idempotency is enforced by txn_ref = sha256 of
+    (source_message_id + fpe_wa_message_id + employee_id + amount + period + method + source).
+    For manual entries, source_message_id falls back to source_message_text.
     """
     period = req.accounting_period or _period_from_date(req.txn_date)
     txn_ref = _build_txn_ref(req, period)
@@ -41,7 +42,7 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
     # Idempotency check
     existing = await fetch_one(
         "SELECT id, txn_ref, employee_id, amount, payout_method, txn_date, "
-        "txn_category, accounting_period, is_reversal, created_at "
+        "txn_category, accounting_period, is_reversal, created_at, source, source_message_id "
         "FROM fpe_cash_transactions WHERE txn_ref = $1",
         txn_ref,
     )
@@ -54,15 +55,22 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
             """
             INSERT INTO fpe_cash_transactions
                 (txn_ref, fpe_wa_message_id, employee_id, employee_name_raw,
+                 employee_id_phone, employee_phone,
                  amount, payout_phone, payout_method, txn_date, txn_category,
-                 source_message_text, accounting_period, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                 source_message_text, accounting_period, created_by,
+                 source, source_channel, source_message_id,
+                 program_id, original_payload, metadata,
+                 transaction_status, approval_status, approved_by, approved_at,
+                 review_status, submitted_by, submitted_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
             RETURNING id
             """,
             txn_ref,
             req.fpe_wa_message_id,
             req.employee_id,
             req.employee_name_raw,
+            req.employee_id_phone,
+            req.employee_phone,
             req.amount,
             req.payout_phone,
             req.payout_method.value if req.payout_method else None,
@@ -71,6 +79,19 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
             req.source_message_text,
             period,
             req.created_by,
+            req.source.value,
+            req.source_channel,
+            req.source_message_id,
+            req.program_id,
+            json.dumps(req.original_payload) if req.original_payload else None,
+            json.dumps(req.metadata) if req.metadata else '{}',
+            req.transaction_status.value,
+            req.approval_status.value if req.approval_status else None,
+            req.approved_by,
+            req.approved_at,
+            req.review_status.value if req.review_status else None,
+            req.submitted_by,
+            req.submitted_at,
         )
 
         # Audit log
@@ -86,17 +107,20 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
         )
 
     log.info(
-        "[fpe.acct] created txn id=%d ref=%s emp=%s amount=%s method=%s",
-        new_id, txn_ref[:12], req.employee_id, req.amount, req.payout_method,
+        "[fpe.acct] created txn id=%d ref=%s emp=%s amount=%s method=%s source=%s",
+        new_id, txn_ref[:12], req.employee_id, req.amount, req.payout_method, req.source.value,
     )
 
-    # Update ledger
-    if req.employee_id:
+    # Update ledger only for final (approved) transactions
+    if req.employee_id and req.transaction_status.value == "final":
         await _upsert_ledger(req.employee_id, period, req.amount, req.txn_category)
 
     row = await fetch_one(
-        "SELECT id, txn_ref, employee_id, employee_name_raw, amount, payout_phone, "
-        "payout_method, txn_date, txn_category, accounting_period, is_reversal, created_at "
+        "SELECT id, txn_ref, employee_id, employee_name_raw, employee_id_phone, employee_phone, "
+        "amount, payout_phone, payout_method, txn_date, txn_category, accounting_period, "
+        "is_reversal, source, source_channel, source_message_id, transaction_status, "
+        "approval_status, approved_by, approved_at, review_status, submitted_by, submitted_at, "
+        "program_id, legacy_wbom_transaction_id, original_payload, metadata, created_at "
         "FROM fpe_cash_transactions WHERE id = $1",
         new_id,
     )
@@ -132,16 +156,23 @@ async def reverse_transaction(txn_id: int, reason: str, created_by: str = "admin
             """
             INSERT INTO fpe_cash_transactions
                 (txn_ref, fpe_wa_message_id, employee_id, employee_name_raw,
+                 employee_id_phone, employee_phone,
                  amount, payout_phone, payout_method, txn_date, txn_category,
                  source_message_text, accounting_period, is_reversal,
-                 reversed_txn_id, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TRUE,$12,$13)
+                 reversed_txn_id, created_by,
+                 source, source_channel, source_message_id,
+                 transaction_status, approval_status, approved_by, approved_at,
+                 review_status, submitted_by, submitted_at,
+                 program_id, original_payload, metadata)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,TRUE,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
             RETURNING id
             """,
             reversal_ref,
             orig["fpe_wa_message_id"],
             orig["employee_id"],
             orig["employee_name_raw"],
+            orig["employee_id_phone"],
+            orig["employee_phone"],
             -orig["amount"],
             orig["payout_phone"],
             orig["payout_method"],
@@ -151,6 +182,19 @@ async def reverse_transaction(txn_id: int, reason: str, created_by: str = "admin
             orig["accounting_period"],
             txn_id,
             created_by,
+            orig.get("source", "whatsapp"),
+            orig.get("source_channel"),
+            orig.get("source_message_id"),
+            "reversed",
+            orig.get("approval_status"),
+            orig.get("approved_by"),
+            orig.get("approved_at"),
+            orig.get("review_status"),
+            orig.get("submitted_by"),
+            orig.get("submitted_at"),
+            orig.get("program_id"),
+            json.dumps({"reversal_reason": reason, "original_id": txn_id}),
+            orig.get("metadata", '{}'),
         )
 
         await conn.execute(
@@ -177,8 +221,11 @@ async def reverse_transaction(txn_id: int, reason: str, created_by: str = "admin
 
     log.info("[fpe.acct] reversed txn %d → new reversal id=%d", txn_id, new_id)
     row = await fetch_one(
-        "SELECT id, txn_ref, employee_id, employee_name_raw, amount, payout_phone, "
-        "payout_method, txn_date, txn_category, accounting_period, is_reversal, created_at "
+        "SELECT id, txn_ref, employee_id, employee_name_raw, employee_id_phone, employee_phone, "
+        "amount, payout_phone, payout_method, txn_date, txn_category, accounting_period, "
+        "is_reversal, source, source_channel, source_message_id, transaction_status, "
+        "approval_status, approved_by, approved_at, review_status, submitted_by, submitted_at, "
+        "program_id, legacy_wbom_transaction_id, original_payload, metadata, created_at "
         "FROM fpe_cash_transactions WHERE id = $1",
         new_id,
     )
@@ -235,12 +282,16 @@ def _period_from_date(d: date) -> str:
 
 
 def _build_txn_ref(req: TransactionCreateRequest, period: str) -> str:
+    # Prefer source_message_id for idempotency; fallback to source_message_text for manual entries
+    idempotency_seed = req.source_message_id or req.source_message_text or ""
     parts = [
+        idempotency_seed,
         str(req.fpe_wa_message_id or ""),
         str(req.employee_id or ""),
         str(req.amount),
         period,
         req.payout_method.value if req.payout_method else "",
+        req.source.value,
     ]
     key = "|".join(parts)
     return "fpe-" + hashlib.sha256(key.encode()).hexdigest()[:16]
@@ -250,11 +301,20 @@ def _txn_to_audit_json(req: TransactionCreateRequest, txn_ref: str, period: str)
     return {
         "txn_ref": txn_ref,
         "employee_id": req.employee_id,
+        "employee_id_phone": req.employee_id_phone,
+        "employee_phone": req.employee_phone,
         "amount": str(req.amount),
         "payout_method": req.payout_method.value if req.payout_method else None,
         "txn_date": req.txn_date.isoformat(),
         "accounting_period": period,
         "txn_category": req.txn_category.value,
+        "source": req.source.value,
+        "source_channel": req.source_channel,
+        "source_message_id": req.source_message_id,
+        "transaction_status": req.transaction_status.value,
+        "approval_status": req.approval_status.value if req.approval_status else None,
+        "program_id": req.program_id,
+        "metadata": req.metadata,
     }
 
 

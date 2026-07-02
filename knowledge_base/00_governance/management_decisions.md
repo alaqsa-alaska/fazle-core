@@ -117,7 +117,7 @@ Key columns: `transaction_id` (original), `old_employee_id`, `new_employee_id`, 
 These are NOT two separate tables — only `wbom_staging_payments` is in production.
 
 16 columns: `staging_id`, `message_id`, `sender_number`, `extracted_name`, `extracted_mobile`, `amount`, `payment_method`, `transaction_type`, `matched_employee_id`, `name_match_ratio`, `status` (default 'pending'), `approved_by`, `approved_at`, `created_at`, `final_transaction_id`, `idempotency_key`.
-FK: `final_transaction_id` → `wbom_cash_transactions.transaction_id`.
+FK: `final_transaction_id` → `fpe_cash_transactions.id` (canonical per Owner Directive 2026-06-29; was `wbom_cash_transactions.transaction_id` historically).
 
 **KB action:** Update `database_rules.md` entry for C-02 — table name is `wbom_staging_payments` (not `fpe_staging_payments`). Correct domain assignment stands (CASH/FPE).
 
@@ -218,7 +218,7 @@ FK: `final_transaction_id` → `wbom_cash_transactions.transaction_id`.
 
 **Status:** Fully implemented, zero external callers (audited 2026-06-02)
 **Functions:** `reverse_payment()`, `adjust_payment()`, `list_corrections()`
-**DB tables required:** `fazle_payment_drafts` ✅, `wbom_cash_transactions` ✅, `fazle_payment_correction_log` ✅ (migration `008_payment_correction.sql`)
+**DB tables required:** `fazle_payment_drafts` ✅, `fpe_cash_transactions` ✅ (canonical per Owner Directive 2026-06-29), `fazle_payment_correction_log` ✅ (migration `008_payment_correction.sql`)
 
 **To activate — changes required:**
 1. `modules/admin_commands/__init__.py`: Wire `REVERSE <draft_id> <reason>` → `payment_correction.reverse_payment()`

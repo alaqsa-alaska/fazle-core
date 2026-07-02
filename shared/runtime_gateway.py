@@ -30,7 +30,7 @@ Public API
   # Current process node id
   node_id = get_current_node_id()
 
-  # Diagnostic snapshot (used by /api/runtime/nodes)
+  # Diagnostic snapshot
   nodes = await get_active_nodes()
 
   # Cross-app event bus (re-exports shared.events)
@@ -91,6 +91,8 @@ __all__ = [
     "deregister_node",
     "mark_stale_nodes",
     "get_active_nodes",
+    "get_current_runtime_nodes",
+    "get_historical_runtime_nodes",
     # Background helpers
     "heartbeat_loop",
     "make_node_id",
@@ -386,12 +388,40 @@ async def _release_claimed_queue_items(node_id: str, *, pool) -> None:
         log.debug("[gateway] _release_claimed_queue_items skipped: %s", exc)
 
 
+def _rows_to_nodes(rows: list) -> list[dict]:
+    """Normalize asyncpg rows into JSON-serializable runtime node dicts."""
+    now = time.time()
+    result = []
+    for r in rows:
+        last_seen_dt = r["last_seen"]
+        registered_dt = r["registered_at"]
+        age_s = round(now - last_seen_dt.timestamp(), 1) if last_seen_dt else None
+        result.append({
+            "node_id":         r["node_id"],
+            "app_name":        r["app_name"],
+            "role":            r["role"],
+            "status":          r["status"],
+            "last_seen":       last_seen_dt.isoformat() if last_seen_dt else None,
+            "age_s":           age_s,
+            "registered_at":   registered_dt.isoformat() if registered_dt else None,
+            "version":         r["version"],
+            "active_requests": r["active_requests"],
+            "queue_depth":     r["queue_depth"],
+            "metadata":        (
+                json.loads(r["metadata_json"])
+                if r["metadata_json"] else {}
+            ),
+        })
+    return result
+
+
 async def get_active_nodes(*, pool=None) -> List[dict]:
     """
     Return all rows from fazle_runtime_nodes with a derived ``age_s`` field
     (seconds since last_seen).
 
-    Used by the GET /api/runtime/nodes endpoint.  Returns [] on any error.
+    Legacy compatibility reader used by GET /api/runtime/nodes.
+    Returns all rows, including offline history. Returns [] on any error.
     """
     resolved_pool = _resolve_pool(pool)
     if resolved_pool is None:
@@ -408,33 +438,75 @@ async def get_active_nodes(*, pool=None) -> List[dict]:
                 ORDER BY app_name, node_id
                 """,
             )
-
-        now = time.time()
-        result = []
-        for r in rows:
-            last_seen_dt  = r["last_seen"]
-            registered_dt = r["registered_at"]
-            age_s = round(now - last_seen_dt.timestamp(), 1) if last_seen_dt else None
-            result.append({
-                "node_id":         r["node_id"],
-                "app_name":        r["app_name"],
-                "role":            r["role"],
-                "status":          r["status"],
-                "last_seen":       last_seen_dt.isoformat() if last_seen_dt else None,
-                "age_s":           age_s,
-                "registered_at":   registered_dt.isoformat() if registered_dt else None,
-                "version":         r["version"],
-                "active_requests": r["active_requests"],
-                "queue_depth":     r["queue_depth"],
-                "metadata":        (
-                    json.loads(r["metadata_json"])
-                    if r["metadata_json"] else {}
-                ),
-            })
-        return result
+        return _rows_to_nodes(rows)
 
     except Exception as exc:
         log.warning("[gateway] get_active_nodes failed: %s", exc)
+        return []
+
+
+async def get_current_runtime_nodes(*, pool=None) -> List[dict]:
+    """
+    Return only current active runtime truth for AI and operational use.
+
+    Current means:
+    - status='online'
+    - last_seen within the stale threshold window
+    """
+    resolved_pool = _resolve_pool(pool)
+    if resolved_pool is None:
+        return []
+
+    try:
+        async with resolved_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT node_id, app_name, role, status,
+                       last_seen, registered_at, version,
+                       active_requests, queue_depth, metadata_json
+                FROM fazle_runtime_nodes
+                WHERE status = 'online'
+                  AND last_seen >= NOW() - ($1 || ' seconds')::INTERVAL
+                ORDER BY app_name, node_id
+                """,
+                str(STALE_THRESHOLD_S),
+            )
+        return _rows_to_nodes(rows)
+    except Exception as exc:
+        log.warning("[gateway] get_current_runtime_nodes failed: %s", exc)
+        return []
+
+
+async def get_historical_runtime_nodes(*, pool=None) -> List[dict]:
+    """
+    Return historical runtime rows that should not be treated as current truth.
+
+    History means:
+    - status is not online, OR
+    - status is online but last_seen is stale
+    """
+    resolved_pool = _resolve_pool(pool)
+    if resolved_pool is None:
+        return []
+
+    try:
+        async with resolved_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT node_id, app_name, role, status,
+                       last_seen, registered_at, version,
+                       active_requests, queue_depth, metadata_json
+                FROM fazle_runtime_nodes
+                WHERE status <> 'online'
+                   OR last_seen < NOW() - ($1 || ' seconds')::INTERVAL
+                ORDER BY last_seen DESC, app_name, node_id
+                """,
+                str(STALE_THRESHOLD_S),
+            )
+        return _rows_to_nodes(rows)
+
+    except Exception as exc:
+        log.warning("[gateway] get_historical_runtime_nodes failed: %s", exc)
         return []
 
 

@@ -1,10 +1,6 @@
----
-title: Payment Business Rules
-owner: Fazle Core Admin
-status: active
-last_verified: 2026-06-24
-runtime_index: true
----
+Source: knowledge_base/04_business_rules/payment_business_rules.md
+SHA256: 7cbd69e7d2a66e9c289464e6f738c75870124265f001548a9d649afcb4f7bea9
+Version: 7cbd69e7d2a6
 
 # Payment Business Rules
 
@@ -38,7 +34,7 @@ Rules:
 - `ID:` mobile is the employee lookup key.
 - Without `ID:`, payout mobile becomes the employee lookup key.
 - `(B)` = bKash, `(N)` = Nagad, `(C)` = Cash, `(Bank)` = Bank Transfer.
-- If employee is not found, create a minimal active employee using existing `wbom_employees` columns.
+- If employee is not found, create a minimal active employee in `fpe_employees` via `match_or_create_employee()`.
 - Write exactly one final transaction row for a distinct WhatsApp instruction.
 - Same employee/same amount can appear multiple times in one day if the WhatsApp message time/identity is different.
 

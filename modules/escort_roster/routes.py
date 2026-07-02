@@ -515,6 +515,15 @@ async def api_roster_create(body: CreateRosterEntry):
         row = await create_roster_entry(body.model_dump(exclude_none=True), actor="api")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    # Ensure escort's FPE employee record exists (non-fatal)
+    escort_mobile = body.model_dump(exclude_none=True).get("escort_mobile")
+    escort_name = body.model_dump(exclude_none=True).get("escort_name")
+    if escort_mobile:
+        try:
+            from modules.escort import _resolve_escort_employee_id
+            await _resolve_escort_employee_id(escort_mobile, escort_name, auto_create=True)
+        except Exception as _fpe_err:
+            log.debug("[roster_create] FPE seed non-fatal: %s", _fpe_err)
     return row
 
 

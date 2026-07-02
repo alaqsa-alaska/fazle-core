@@ -81,13 +81,14 @@ class TestCreateEscortPaymentDraft:
         assert float(draft["expected_amount"]) == pytest.approx(1500.0)
 
     async def test_uses_shift_column_and_current_program_month_deductions(
-        self, test_db_pool, seed_employee, seed_escort_program
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_escort_program
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
         from modules.payment_workflow import create_escort_payment_draft
 
         employee_id = seed_employee["employee_id"]
+        fpe_employee_id = seed_fpe_employee["id"]
         program_id = seed_escort_program["program_id"]
         async with test_db_pool.acquire() as conn:
             await conn.execute(
@@ -98,11 +99,11 @@ class TestCreateEscortPaymentDraft:
                 program_id,
             )
             await conn.execute(
-                """INSERT INTO wbom_cash_transactions
-                       (employee_id, program_id, transaction_type, amount, payment_method,
-                        transaction_date, status)
-                   VALUES ($1,$2,'advance',300,'cash',CURRENT_DATE,'Completed')""",
-                employee_id, program_id,
+                """INSERT INTO fpe_cash_transactions
+                       (txn_ref, employee_id, program_id, txn_category, amount,
+                        payout_method, txn_date, transaction_status, source, source_channel)
+                   VALUES ($1, $2, $3, 'advance', 300, 'cash', CURRENT_DATE, 'final', 'test', 'test')""",
+                f"test-adv-{program_id}", fpe_employee_id, program_id,
             )
 
         result = await create_escort_payment_draft(
@@ -115,7 +116,7 @@ class TestCreateEscortPaymentDraft:
         assert result["expected_amount"] == pytest.approx(0.0)
 
     async def test_advances_deducted_from_payment(
-        self, test_db_pool, seed_employee, seed_escort_program
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_escort_program
     ):
         """If an advance was given this month, it reduces net_payable."""
         import app.database as db_module
@@ -124,15 +125,17 @@ class TestCreateEscortPaymentDraft:
         from modules.payment_workflow import create_escort_payment_draft
 
         employee_id = seed_employee["employee_id"]
+        fpe_employee_id = seed_fpe_employee["id"]
         program_id = seed_escort_program["program_id"]
 
-        # Insert an advance transaction
+        # Insert an advance transaction into the canonical FPE table
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO wbom_cash_transactions
-                    (employee_id, transaction_type, amount, transaction_date, status)
-                VALUES ($1, 'advance', 500.00, CURRENT_DATE, 'Completed')
-            """, employee_id)
+                INSERT INTO fpe_cash_transactions
+                    (txn_ref, employee_id, txn_category, amount, payout_method,
+                     txn_date, transaction_status, source, source_channel)
+                VALUES ($1, $2, 'advance', 500.00, 'cash', CURRENT_DATE, 'final', 'test', 'test')
+            """, f"test-adv-{employee_id}", fpe_employee_id)
             await conn.execute("""
                 UPDATE wbom_escort_programs
                 SET end_date='2026-05-05', day_count=5, status='Completed'
@@ -157,10 +160,10 @@ class TestCreateEscortPaymentDraft:
 
 
 class TestFinalizePayment:
-    """Test payment finalization: writes to wbom_cash_transactions."""
+    """Test payment finalization: writes to fpe_cash_transactions."""
 
     async def test_finalize_creates_transaction(
-        self, test_db_pool, seed_employee, seed_payment_draft
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_payment_draft
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
@@ -175,19 +178,21 @@ class TestFinalizePayment:
         )
 
         assert result is not None
+        assert result.get("transaction_id")
 
-        # Check transaction was inserted
+        # Check canonical transaction was inserted
         async with test_db_pool.acquire() as conn:
             txn = await conn.fetchrow(
-                "SELECT * FROM wbom_cash_transactions WHERE employee_id=$1 LIMIT 1",
-                seed_employee["employee_id"],
+                "SELECT * FROM fpe_cash_transactions WHERE employee_id=$1 LIMIT 1",
+                seed_fpe_employee["id"],
             )
         assert txn is not None
         assert float(txn["amount"]) == pytest.approx(1500.00)
-        assert txn["payment_method"] == "bkash"
+        assert txn["payout_method"] == "bkash"
+        assert txn["transaction_status"] == "final"
 
     async def test_finalize_updates_draft_status(
-        self, test_db_pool, seed_employee, seed_payment_draft
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_payment_draft
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
@@ -203,13 +208,15 @@ class TestFinalizePayment:
 
         async with test_db_pool.acquire() as conn:
             draft = await conn.fetchrow(
-                "SELECT status FROM fazle_payment_drafts WHERE id=$1",
+                "SELECT status, transaction_id, txn_ref FROM fazle_payment_drafts WHERE id=$1",
                 draft_id,
             )
         assert draft["status"] == "sent"
+        assert draft["transaction_id"] is not None
+        assert draft["txn_ref"] is not None
 
     async def test_finalize_is_idempotent(
-        self, test_db_pool, seed_employee, seed_payment_draft
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_payment_draft
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
@@ -220,24 +227,25 @@ class TestFinalizePayment:
         second = await finalize_payment(draft_id, 1500, "cash")
         async with test_db_pool.acquire() as conn:
             count = await conn.fetchval(
-                "SELECT COUNT(*) FROM wbom_cash_transactions WHERE idempotency_key=$1",
+                "SELECT COUNT(*) FROM fpe_cash_transactions WHERE source_message_id=$1",
                 f"payment-draft:{draft_id}",
             )
         assert second["already_finalized"] is True
         assert count == 1
 
-    async def test_finalize_nonexistent_draft_raises(self, test_db_pool):
+    async def test_finalize_nonexistent_draft_returns_error(self, test_db_pool):
         import app.database as db_module
         db_module._pool = test_db_pool
 
         from modules.payment_workflow import finalize_payment
 
-        with pytest.raises(Exception):
-            await finalize_payment(
-                draft_id=99999,
-                amount=1000.00,
-                method="bkash",
-            )
+        result = await finalize_payment(
+            draft_id=99999,
+            approved_amount=1000.00,
+            method="bkash",
+        )
+        assert result.get("error")
+        assert "not found" in result["error"].lower()
 
 
 class TestCreateAdvanceRequestDraft:

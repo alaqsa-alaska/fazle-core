@@ -79,6 +79,7 @@ def override_env(tmp_path_factory):
         "ADMIN_NUMBERS": "8801700000001,8801700000002",
         "META_VERIFY_TOKEN": "test_verify_token",
         "META_APP_SECRET": "test_app_secret",
+        "ACCOUNTANT_PHONE": "",
     }
     with patch.dict(os.environ, env_overrides):
         yield
@@ -181,13 +182,11 @@ CREATE TABLE IF NOT EXISTS wbom_cash_transactions (
     remarks       TEXT,
     created_by    VARCHAR(50),
     reversal_of   INT REFERENCES wbom_cash_transactions(transaction_id),
-    is_reversal   BOOLEAN DEFAULT FALSE,
     is_reversed   BOOLEAN DEFAULT FALSE,
     correction_note TEXT,
-    reversal_reason TEXT,
     source        TEXT,
     idempotency_key TEXT,
-    whatsapp_message_id INT
+    whatsapp_message_id VARCHAR(100)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_test_txn_idempotency
     ON wbom_cash_transactions (idempotency_key)
@@ -196,21 +195,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_test_txn_idempotency
 CREATE TABLE IF NOT EXISTS wbom_staging_payments (
     staging_id      SERIAL PRIMARY KEY,
     message_id      INT,
-    sender_number   TEXT,
-    extracted_name  TEXT,
-    extracted_mobile TEXT,
-    amount          DECIMAL(10,2),
-    payment_method  VARCHAR(10),
-    transaction_type VARCHAR(20) DEFAULT 'received',
+    sender_number   VARCHAR(20),
+    extracted_name  VARCHAR(100),
+    extracted_mobile VARCHAR(20),
+    amount          DECIMAL(12,2),
+    payment_method  VARCHAR(20),
+    transaction_type VARCHAR(30),
     matched_employee_id INT REFERENCES wbom_employees(employee_id),
-    name_match_ratio FLOAT,
+    name_match_ratio NUMERIC(4,2),
     status          VARCHAR(20) DEFAULT 'pending',
-    idempotency_key TEXT UNIQUE,
-    final_transaction_id INT,
-    approved_by     TEXT,
-    approved_at     TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
+    approved_by     VARCHAR(100),
+    approved_at     TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT NOW(),
+    final_transaction_id INT REFERENCES wbom_cash_transactions(transaction_id),
+    idempotency_key VARCHAR(64)
 );
+CREATE INDEX IF NOT EXISTS idx_staging_payments_status
+    ON wbom_staging_payments (status);
 
 CREATE TABLE IF NOT EXISTS wbom_payroll_runs (
     run_id        SERIAL PRIMARY KEY,
@@ -353,37 +354,59 @@ CREATE TABLE IF NOT EXISTS fazle_draft_replies (
 
 CREATE TABLE IF NOT EXISTS fazle_payment_drafts (
     id            SERIAL PRIMARY KEY,
-    draft_type    TEXT,
+    draft_type    TEXT NOT NULL DEFAULT 'escort_payment',
     employee_id   INT REFERENCES wbom_employees(employee_id),
     employee_name TEXT,
     employee_mobile TEXT,
     escort_program_id INT REFERENCES wbom_escort_programs(program_id),
-    duty_days     FLOAT,
-    gross_amount  FLOAT DEFAULT 0,
-    food_bill     FLOAT DEFAULT 0,
-    conveyance    FLOAT DEFAULT 0,
-    advance_deduction FLOAT DEFAULT 0,
-    expected_amount FLOAT,
-    approved_amount FLOAT,
+    duty_days     NUMERIC(6,2),
+    gross_amount  NUMERIC(12,2) NOT NULL DEFAULT 0,
+    food_bill     NUMERIC(10,2) NOT NULL DEFAULT 0,
+    conveyance    NUMERIC(10,2) NOT NULL DEFAULT 0,
+    advance_deduction NUMERIC(12,2) NOT NULL DEFAULT 0,
+    expected_amount NUMERIC(12,2),
+    approved_amount NUMERIC(12,2),
     approved_at   TIMESTAMPTZ,
     payment_method TEXT,
-    payment_number TEXT,
+    method        TEXT,
     status        TEXT DEFAULT 'pending',
-    source        TEXT,
+    source        TEXT DEFAULT 'bridge1',
     draft_text    TEXT,
-    admin_reply   TEXT,
     accountant_msg TEXT,
     admin_phone   TEXT,
-    source_bridge TEXT DEFAULT 'bridge2',
     notes         TEXT,
     correction_of INT REFERENCES fazle_payment_drafts(id),
     correction_type TEXT,
     correction_note TEXT,
     corrected_by  TEXT,
     corrected_at  TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
+    expires_at    TIMESTAMPTZ,
+    -- Sprint-3A mandatory fields
+    payout_mobile        TEXT,
+    purpose             TEXT,
+    verification_summary JSONB,
+    source_message      TEXT,
+    conversation_summary JSONB,
+    draft_created_by    TEXT DEFAULT 'ai_conversation',
+    conversation_id      TEXT,
+    -- Sprint-3B columns
+    transaction_id      BIGINT,
+    txn_ref             TEXT,
+    rejected_reason     TEXT,
+    reviewed_by         TEXT,
+    reviewed_at         TIMESTAMPTZ,
+    version             INT DEFAULT 0,
+    before_state        JSONB,
+    after_state         JSONB,
+    editor              TEXT,
+    completed_at        TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_payment_drafts_txn_ref
+    ON fazle_payment_drafts (txn_ref) WHERE txn_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_drafts_transaction_id
+    ON fazle_payment_drafts (transaction_id) WHERE transaction_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_payment_drafts_program_type
     ON fazle_payment_drafts (escort_program_id, draft_type)
     WHERE escort_program_id IS NOT NULL;
@@ -417,13 +440,20 @@ CREATE TABLE IF NOT EXISTS fazle_payment_correction_log (
 );
 
 CREATE TABLE IF NOT EXISTS fazle_knowledge_base (
-    kb_id         SERIAL PRIMARY KEY,
-    category      TEXT,
-    keywords      TEXT[],
-    reply_text    TEXT,
-    language      TEXT DEFAULT 'bn',
-    is_active     BOOLEAN DEFAULT TRUE,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
+    id              SERIAL PRIMARY KEY,
+    category        TEXT NOT NULL,
+    subcategory     TEXT,
+    key             TEXT NOT NULL,
+    value           TEXT NOT NULL DEFAULT '',
+    language        TEXT DEFAULT 'bn-en',
+    confidence      DOUBLE PRECISION DEFAULT 1.0,
+    tags            TEXT[],
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    trigger_keywords TEXT[],
+    reply_text      TEXT,
+    reply_short     TEXT,
+    keywords        TEXT[],
+    is_active       BOOLEAN DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS fazle_recruitment_sessions (
@@ -515,6 +545,165 @@ CREATE TABLE IF NOT EXISTS fazle_db_backups (
     rotated_at    TIMESTAMPTZ
 );
 
+-- Processing locks (used by shared.locks for distributed locking)
+CREATE TABLE IF NOT EXISTS fazle_processing_locks (
+    lock_key   TEXT        PRIMARY KEY,
+    locked_by  TEXT        NOT NULL,
+    locked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '60 seconds'
+);
+CREATE INDEX IF NOT EXISTS idx_locks_expires
+    ON fazle_processing_locks(expires_at);
+
+-- Sprint-3B: Draft Audit Log
+CREATE TABLE IF NOT EXISTS fazle_draft_audit_log (
+    id            BIGSERIAL PRIMARY KEY,
+    draft_id      INT NOT NULL REFERENCES fazle_payment_drafts(id) ON DELETE CASCADE,
+    event         TEXT NOT NULL,
+    before_state  JSONB,
+    after_state   JSONB,
+    performed_by  TEXT,
+    reason        TEXT,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_draft_audit_draft ON fazle_draft_audit_log (draft_id);
+CREATE INDEX IF NOT EXISTS idx_draft_audit_event ON fazle_draft_audit_log (event);
+
+-- FPE (Fazle Payroll Engine) tables — needed by create_transaction() and _upsert_ledger()
+CREATE TABLE IF NOT EXISTS fpe_employees (
+    id                    SERIAL PRIMARY KEY,
+    employee_code         VARCHAR(50) UNIQUE,
+    full_name              TEXT NOT NULL,
+    name_normalized       TEXT,
+    primary_phone         VARCHAR(20),
+    employee_id_phone     VARCHAR(20),
+    status                VARCHAR(20) DEFAULT 'active',
+    canonical_employee_id INT,
+    resolution_status     VARCHAR(30) DEFAULT 'matched',
+    created_source        TEXT DEFAULT 'test',
+    wbom_employee_id      INT,
+    created_at            TIMESTAMPTZ DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ DEFAULT NOW()
+);
+-- Partial unique index for ON CONFLICT (primary_phone) WHERE primary_phone IS NOT NULL
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fpe_emp_phone_unique
+    ON fpe_employees (primary_phone) WHERE primary_phone IS NOT NULL;
+
+
+CREATE TABLE IF NOT EXISTS fpe_employee_aliases (
+    id            SERIAL PRIMARY KEY,
+    employee_id   INT NOT NULL REFERENCES fpe_employees(id) ON DELETE CASCADE,
+    alias_type    VARCHAR(30),
+    alias_value   TEXT,
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (alias_type, alias_value)
+);
+
+CREATE TABLE IF NOT EXISTS fpe_cash_transactions (
+    id                  BIGSERIAL PRIMARY KEY,
+    txn_ref             TEXT UNIQUE NOT NULL,
+    fpe_wa_message_id   BIGINT,
+    employee_id         BIGINT REFERENCES fpe_employees(id),
+    employee_name_raw   TEXT,
+    employee_id_phone   VARCHAR(20),
+    employee_phone      VARCHAR(20),
+    amount              DECIMAL(12,2) NOT NULL,
+    payout_phone        VARCHAR(20),
+    payout_method       TEXT,
+    txn_date            DATE NOT NULL,
+    txn_category        VARCHAR(20) NOT NULL,
+    source_message_text TEXT,
+    is_reversal         BOOLEAN DEFAULT FALSE,
+    reversed_txn_id     BIGINT,
+    accounting_period   TEXT,
+    source              TEXT,
+    source_channel      TEXT,
+    source_message_id   TEXT,
+    transaction_status  TEXT DEFAULT 'final',
+    approval_status     TEXT,
+    approved_by         TEXT,
+    approved_at         TIMESTAMPTZ,
+    review_status       TEXT,
+    submitted_by        TEXT,
+    submitted_at        TIMESTAMPTZ,
+    program_id          BIGINT REFERENCES wbom_escort_programs(program_id),
+    original_payload    JSONB,
+    metadata            JSONB,
+    legacy_wbom_transaction_id BIGINT,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    created_by          TEXT,
+    deleted_at          TIMESTAMPTZ,
+    deleted_by          TEXT,
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_fpe_txn_employee_period
+    ON fpe_cash_transactions (employee_id, accounting_period);
+CREATE INDEX IF NOT EXISTS idx_fpe_txn_ref ON fpe_cash_transactions (txn_ref);
+CREATE INDEX IF NOT EXISTS idx_fpe_txn_not_deleted
+    ON fpe_cash_transactions (id) WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS fpe_employee_ledger (
+    id                BIGSERIAL PRIMARY KEY,
+    employee_id       BIGINT NOT NULL REFERENCES fpe_employees(id) ON DELETE CASCADE,
+    accounting_period TEXT NOT NULL,
+    opening_balance   DECIMAL(12,2) DEFAULT 0,
+    total_earned      DECIMAL(12,2) DEFAULT 0,
+    total_paid        DECIMAL(12,2) DEFAULT 0,
+    total_advance     DECIMAL(12,2) DEFAULT 0,
+    closing_balance   DECIMAL(12,2) DEFAULT 0,
+    txn_count         INT DEFAULT 0,
+    last_updated      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (employee_id, accounting_period)
+);
+
+CREATE TABLE IF NOT EXISTS fpe_accounting_audit_logs (
+    id            BIGSERIAL PRIMARY KEY,
+    entity_type   TEXT NOT NULL,
+    entity_id     BIGINT NOT NULL,
+    action        TEXT NOT NULL,
+    before_state  JSONB,
+    after_state   JSONB,
+    performed_by  TEXT NOT NULL DEFAULT 'fpe_engine',
+    reason        TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_fpe_audit_entity ON fpe_accounting_audit_logs (entity_type, entity_id);
+
+CREATE TABLE IF NOT EXISTS fpe_normalization_audit_logs (
+    id            BIGSERIAL PRIMARY KEY,
+    action_type   TEXT NOT NULL,
+    entity_type   TEXT NOT NULL DEFAULT 'employee',
+    entity_id     BIGINT,
+    before_state  JSONB,
+    after_state   JSONB,
+    reviewer      TEXT,
+    reason        TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_fpe_norm_audit_entity ON fpe_normalization_audit_logs (entity_type, entity_id);
+
+-- fpe_income_transactions (canonical: 11 columns, with CHECK(amount > 0))
+CREATE TABLE IF NOT EXISTS fpe_income_transactions (
+    id                  BIGSERIAL PRIMARY KEY,
+    txn_ref             TEXT UNIQUE NOT NULL,
+    fpe_wa_message_id   BIGINT,
+    employee_id         BIGINT REFERENCES fpe_employees(id),
+    employee_name_raw   TEXT,
+    amount              DECIMAL(12,2) NOT NULL,
+    txn_date            DATE NOT NULL,
+    accounting_period   TEXT NOT NULL,
+    reported_by_phone   TEXT,
+    source_message_text TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fpe_income_transactions_amount_check CHECK (amount > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_fpe_income_emp
+    ON fpe_income_transactions (employee_id, txn_date DESC);
+CREATE INDEX IF NOT EXISTS idx_fpe_income_period
+    ON fpe_income_transactions (accounting_period);
+CREATE INDEX IF NOT EXISTS idx_fpe_income_reporter
+    ON fpe_income_transactions (reported_by_phone);
+
 -- Seed roles
 INSERT INTO fazle_roles (name, level, description) VALUES
   ('viewer',     1, 'Read-only'),
@@ -541,6 +730,7 @@ async def test_db_pool(_setup_test_schema) -> AsyncGenerator[asyncpg.Pool, None]
                     fazle_payment_correction_log,
                     fazle_admin_audit,
                     fazle_reviewed_reply_memory,
+                    fazle_draft_audit_log,
                     fazle_payment_drafts,
                     fazle_draft_replies,
                     fazle_recruitment_sessions,
@@ -557,7 +747,13 @@ async def test_db_pool(_setup_test_schema) -> AsyncGenerator[asyncpg.Pool, None]
                     fazle_admins,
                     fazle_admin_roles,
                     wbom_whatsapp_messages,
-                    fazle_db_backups
+                    fazle_db_backups,
+                    fpe_accounting_audit_logs,
+                    fpe_employee_ledger,
+                    fpe_cash_transactions,
+                    fpe_income_transactions,
+                    fpe_employee_aliases,
+                    fpe_employees
                 RESTART IDENTITY CASCADE
             """)
         except Exception:
@@ -787,7 +983,7 @@ async def seed_payment_draft(test_db_pool, seed_employee, seed_escort_program) -
             INSERT INTO fazle_payment_drafts
                 (draft_type, employee_id, employee_name, employee_mobile,
                  escort_program_id, duty_days, expected_amount,
-                 payment_method, payment_number, status, source,
+                 payment_method, payout_mobile, status, source,
                  draft_text)
             VALUES
                 ('escort_payment', $1, $2, $3,
@@ -798,6 +994,49 @@ async def seed_payment_draft(test_db_pool, seed_employee, seed_escort_program) -
         """, seed_employee["employee_id"], seed_employee["employee_name"],
             seed_employee["employee_mobile"],
             seed_escort_program["program_id"])
+    return dict(row)
+
+
+@pytest_asyncio.fixture
+async def seed_fpe_employee(test_db_pool, seed_employee) -> dict:
+    """Insert an fpe_employees row matching the seeded wbom_employees row."""
+    async with test_db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO fpe_employees
+                (employee_code, full_name, name_normalized, primary_phone,
+                 employee_id_phone, status, canonical_employee_id)
+            VALUES
+                ($1, $2, $3, $4, $5, 'active', $6)
+            RETURNING *
+        """, f"EMP{seed_employee['employee_id']}",
+           seed_employee['employee_name'],
+           seed_employee['employee_name'].lower().strip(),
+           '01811111111',
+           '01811111111',
+           seed_employee['employee_id'])
+    return dict(row)
+
+
+@pytest_asyncio.fixture
+async def seed_sprint3b_draft(test_db_pool, seed_employee) -> dict:
+    """A pending Sprint-3B payment draft (from Sprint-3A employee conversation)."""
+    async with test_db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO fazle_payment_drafts
+                (draft_type, employee_id, employee_name, employee_mobile,
+                 payout_mobile, purpose, expected_amount, payment_method,
+                 status, source, draft_text, source_message,
+                 draft_created_by, conversation_id, expires_at)
+            VALUES
+                ('advance', $1, $2, $3,
+                 $3, 'advance', 2000.00, 'bkash',
+                 'pending', 'bridge1', 'Test advance draft',
+                 'ভাই অগ্রিম টাকা দরকার ২০০০ টাকা',
+                 'ai_conversation', 'conv-test-001',
+                 NOW() + INTERVAL '24 hours')
+            RETURNING *
+        """, seed_employee['employee_id'], seed_employee['employee_name'],
+           seed_employee['employee_mobile'])
     return dict(row)
 
 

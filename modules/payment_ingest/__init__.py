@@ -10,8 +10,13 @@ Pipeline:
   Admin → Accountant final instruction
     → parse_admin_cash_shorthand()
     → match/create employee by ID: mobile if present, otherwise payout mobile
-    → INSERT wbom_cash_transactions directly (no draft)
-       on (mobile exact OR name_ratio>=0.92) AND amount > 0
+    → CREATE canonical FPE transaction via create_fpe_transaction_from_ingest()
+
+Owner Directive (2026-06-29):
+  - fpe_cash_transactions is the ONLY canonical cash transaction table.
+  - No new rows are written to wbom_cash_transactions.
+  - WBOM employee lookup rules remain unchanged.
+  - Parser behaviour is unchanged.
 
 Idempotency:
   idempotency_key = sha256(method|trxid|amount|mobile|date)  — unique per real payment
@@ -24,13 +29,15 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional, Tuple
 
 from rapidfuzz import fuzz, process as rf_process
 
 from app.database import fetch_one, fetch_all, execute, fetch_val
-from modules.payment_workflow import finalize_payment
+from modules.fazle_payroll_engine.models import TxnCategory
+from modules.payment_ingest.fpe_bridge import create_fpe_transaction_from_ingest
 
 log = logging.getLogger("fazle.pay_ingest")
 
@@ -314,7 +321,7 @@ async def _ingest_parsed(
         "match_type": mtype, **parsed,
     }
 
-    if initial_status == "auto_approved":
+    if initial_status == "auto_approved" and eid is not None:
         try:
             fin = await _bridge_to_finalize(staging_id, eid, parsed)
             result["finalized"] = fin
@@ -327,8 +334,8 @@ async def _ingest_parsed(
 
 async def _bridge_to_finalize(staging_id: int, employee_id: int, parsed: dict) -> dict:
     """
-    Create a fazle_payment_drafts row (so finalize_payment has a draft to update),
-    call finalize_payment, then link draft + transaction back to staging row.
+    Create a fazle_payment_drafts row for audit/traceability, then create the
+    canonical FPE transaction. WBOM cash transactions are no longer written.
     """
     emp = await fetch_one(
         "SELECT employee_id, employee_name, employee_mobile FROM wbom_employees WHERE employee_id=$1",
@@ -352,25 +359,45 @@ async def _bridge_to_finalize(staging_id: int, employee_id: int, parsed: dict) -
         draft_text, parsed["amount"], parsed["method"],
     )
 
-    fin = await finalize_payment(int(draft_id), float(parsed["amount"]), parsed["method"])
-
-    # Link transaction back into staging
-    txn_id = await fetch_val(
-        """SELECT transaction_id FROM wbom_cash_transactions
-           WHERE employee_id=$1 AND amount=$2 AND payment_method=$3
-           ORDER BY transaction_id DESC LIMIT 1""",
-        employee_id, parsed["amount"], parsed["method"],
+    # Canonical FPE transaction (replaces finalize_payment + wbom_cash_transactions)
+    txn_date = _parse_date_from_parsed(parsed) or date.today()
+    fin = await create_fpe_transaction_from_ingest(
+        wbom_employee_id=employee_id,
+        wbom_employee_name=emp["employee_name"],
+        wbom_employee_mobile=emp["employee_mobile"],
+        amount=Decimal(str(parsed["amount"])),
+        payout_method=parsed["method"],
+        payout_phone=parsed.get("mobile"),
+        txn_date=txn_date,
+        source_message_text=draft_text,
+        source_message_id=parsed.get("trxid"),
+        metadata={"trxid": parsed.get("trxid"), "staging_id": staging_id, "draft_id": draft_id},
     )
-    if txn_id:
-        await execute(
-            "UPDATE wbom_staging_payments SET final_transaction_id=$1, "
-            "approved_by='auto-ingest', approved_at=NOW() WHERE staging_id=$2",
-            int(txn_id), staging_id,
-        )
 
-    log.info(f"[pay-ingest] auto-finalized staging_id={staging_id} draft_id={draft_id} txn_id={txn_id}")
-    return {"draft_id": int(draft_id), "transaction_id": int(txn_id) if txn_id else None,
-            "accountant_msg": fin.get("accountant_msg")}
+    # Link FPE transaction back into staging
+    await execute(
+        "UPDATE wbom_staging_payments SET final_transaction_id=$1, "
+        "approved_by='auto-ingest', approved_at=NOW() WHERE staging_id=$2",
+        int(fin["transaction_id"]), staging_id,
+    )
+
+    log.info(f"[pay-ingest] auto-finalized staging_id={staging_id} draft_id={draft_id} fpe_txn_id={fin['transaction_id']}")
+    return {"draft_id": int(draft_id), "transaction_id": int(fin["transaction_id"]),
+            "fpe_employee_id": fin["fpe_employee_id"], "txn_ref": fin["txn_ref"],
+            "accountant_msg": draft_text}
+
+
+def _parse_date_from_parsed(parsed: dict) -> Optional[date]:
+    """Best-effort date extraction from parsed SMS data."""
+    for key in ("date", "txn_date"):
+        val = parsed.get(key)
+        if not val:
+            continue
+        try:
+            return datetime.strptime(str(val), "%Y-%m-%d").date()
+        except Exception:
+            pass
+    return None
 
 
 # ── Detection helper for inbound message routing ───────────────────────────────
@@ -454,7 +481,8 @@ async def _match_or_create_instruction_employee(parsed: dict) -> tuple[int, str,
             "SELECT employee_id, employee_name, employee_mobile FROM wbom_employees WHERE employee_id=$1",
             eid,
         )
-        return int(row["employee_id"]), row["employee_name"], row["employee_mobile"]
+        if row:
+            return int(row["employee_id"]), row["employee_name"], row["employee_mobile"]
 
     # Final admin instruction is authoritative: create minimal employee when
     # no lookup key exists. employee_mobile remains the employee-id-mobile key.
@@ -481,75 +509,60 @@ async def ingest_admin_cash_entry(
     message_id: Optional[int] = None,
 ) -> dict:
     """
-    Parse a final Admin → Accountant instruction and write the ledger directly.
-    This path intentionally does not create `fazle_payment_drafts`.
+    Parse a final Admin → Accountant instruction and create a canonical FPE
+    transaction. This path intentionally does not create `fazle_payment_drafts`.
+    No new rows are written to wbom_cash_transactions.
     """
     parsed = parse_admin_cash_shorthand(text)
     if not parsed:
         return {"ok": False, "status": "unparsed", "reason": "Could not parse cash shorthand"}
 
     employee_id, employee_name, employee_mobile = await _match_or_create_instruction_employee(parsed)
-    idem = f"admin-accountant-message:{message_id}" if message_id is not None else None
-    if idem:
+
+    # Idempotency: use FPE source_message_id based on the original message id
+    source_message_id = f"admin-accountant-message:{message_id}" if message_id is not None else None
+    if source_message_id:
         existing = await fetch_one(
-            "SELECT transaction_id FROM wbom_cash_transactions WHERE idempotency_key=$1",
-            idem,
+            "SELECT id FROM fpe_cash_transactions WHERE source_message_id=$1 AND source='whatsapp'",
+            source_message_id,
         )
         if existing:
             return {
                 "ok": True,
                 "status": "duplicate",
-                "transaction_id": existing["transaction_id"],
-                "duplicate_of": existing["transaction_id"],
+                "transaction_id": existing["id"],
+                "duplicate_of": existing["id"],
                 "employee_id": employee_id,
                 "employee_name": employee_name,
                 **parsed,
             }
 
-    row = await fetch_one(
-        """INSERT INTO wbom_cash_transactions
-              (employee_id, amount, transaction_type, payment_method,
-               payment_mobile, payment_number, employee_phone,
-               transaction_date, remarks, created_by, source,
-               idempotency_key, whatsapp_message_id)
-           VALUES ($1, $2, 'advance', $3, $4::text, $4::text, $5,
-                   CURRENT_DATE, $6, $7, 'admin-accountant-instruction',
-                   $8, $9)
-           ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
-           RETURNING transaction_id""",
-        employee_id,
-        parsed["amount"],
-        parsed["method"],
-        parsed.get("payout_mobile") or parsed.get("mobile"),
-        parsed.get("employee_id_mobile") or employee_mobile,
-        f"Admin→Accountant instruction: {text.strip()[:500]}",
-        sender_number,
-        idem,
-        message_id,
+    fin = await create_fpe_transaction_from_ingest(
+        wbom_employee_id=employee_id,
+        wbom_employee_name=employee_name,
+        wbom_employee_mobile=employee_mobile,
+        amount=Decimal(str(parsed["amount"])),
+        payout_method=parsed["method"],
+        payout_phone=parsed.get("payout_mobile"),
+        employee_id_phone=parsed.get("employee_id_mobile"),
+        txn_date=date.today(),
+        txn_category=TxnCategory.salary,
+        source_message_text=text.strip()[:500],
+        source_message_id=source_message_id,
+        source_channel="admin-accountant-instruction",
+        metadata={"admin_instruction": True, "message_id": message_id},
     )
-    if not row and idem:
-        existing = await fetch_one(
-            "SELECT transaction_id FROM wbom_cash_transactions WHERE idempotency_key=$1",
-            idem,
-        )
-        return {
-            "ok": True,
-            "status": "duplicate",
-            "transaction_id": existing["transaction_id"] if existing else None,
-            "employee_id": employee_id,
-            "employee_name": employee_name,
-            **parsed,
-        }
 
-    txn_id = row["transaction_id"] if row else None
     log.info(
-        "[pay-ingest] final admin-accountant txn=%s employee_id=%s amount=%s method=%s",
-        txn_id, employee_id, parsed["amount"], parsed["method"],
+        "[pay-ingest] final admin-accountant fpe_txn=%s employee_id=%s amount=%s method=%s",
+        fin["transaction_id"], employee_id, parsed["amount"], parsed["method"],
     )
     return {
         "ok": True,
         "status": "finalized",
-        "transaction_id": txn_id,
+        "transaction_id": fin["transaction_id"],
+        "fpe_employee_id": fin["fpe_employee_id"],
+        "txn_ref": fin["txn_ref"],
         "employee_id": employee_id,
         "employee_name": employee_name,
         "employee_mobile": employee_mobile,

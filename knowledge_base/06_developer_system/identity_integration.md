@@ -35,7 +35,7 @@ Each row is a sender type. Each column is one of the six identity dimensions.
 | **Admin** | `_check_admin_settings()` — phone in env admin list | `app.config.settings` (ADMIN_NUMBERS, bridge admin phones) | 100 (1.00) |
 | **Admin (alt)** | Seed rule with `role='admin'` in `fazle_contact_roles` | `_lookup_seed()` | from DB column |
 | **Employee** | Primary phone match in `wbom_employees` | `_lookup_employee()` | 88 (0.88) |
-| **Employee (secondary)** | Cash payment records → `wbom_cash_transactions` | `_lookup_cash_identity()` | 86 (0.86) |
+| **Employee (secondary)** | Cash payment records → `fpe_cash_transactions` | `_lookup_cash_identity()` | 86 (0.86) |
 | **Employee (secondary)** | Attendance record → `wbom_attendance` | `_lookup_attendance_identity()` | 86 (0.86) |
 | **Employee (secondary)** | Escort duty → `wbom_escort_programs` (escort_mobile match) | `_lookup_escort_roster()` | 85 (0.85) |
 | **Supervisor** | Seed rule with `role='supervisor'` in `fazle_contact_roles` | `_lookup_seed()` | from DB column |

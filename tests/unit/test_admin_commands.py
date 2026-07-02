@@ -128,7 +128,7 @@ class TestProcessPaidCommand:
     """PAID <draft_id> <amount> <method> command."""
 
     async def test_paid_command_finalizes_payment(
-        self, test_db_pool, seed_employee, seed_payment_draft
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_payment_draft
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
@@ -146,13 +146,16 @@ class TestProcessPaidCommand:
 
         async with test_db_pool.acquire() as conn:
             txn = await conn.fetchrow(
-                "SELECT * FROM wbom_cash_transactions WHERE employee_id=$1 LIMIT 1",
-                seed_employee["employee_id"],
+                "SELECT * FROM fpe_cash_transactions WHERE employee_id=$1 LIMIT 1",
+                seed_fpe_employee["id"],
             )
         assert txn is not None
+        assert float(txn["amount"]) == pytest.approx(1500.0)
+        assert txn["payout_method"] == "bkash"
+        assert txn["transaction_status"] == "final"
 
     async def test_paid_command_rbac_denied(
-        self, test_db_pool, seed_payment_draft
+        self, test_db_pool, seed_fpe_employee, seed_payment_draft
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
@@ -168,9 +171,9 @@ class TestProcessPaidCommand:
                 admin_phone="8801999999999",
             )
 
-        # Transaction should NOT be created
+        # Canonical transaction should NOT be created
         async with test_db_pool.acquire() as conn:
             count = await conn.fetchval(
-                "SELECT COUNT(*) FROM wbom_cash_transactions"
+                "SELECT COUNT(*) FROM fpe_cash_transactions"
             )
         assert count == 0

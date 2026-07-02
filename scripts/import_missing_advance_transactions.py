@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
+DEPRECATED — One-time historical import script.
+
 Import missing advance transactions from WhatsApp bridge2 SQLite DB
 into wbom_cash_transactions.
+
+This script was used for a one-time backfill of missing data from Jan/Apr 2026.
+It writes to wbom_cash_transactions (legacy table). Per Owner Directive
+(2026-06-29), fpe_cash_transactions is the ONLY canonical table. This script
+should NOT be run again — use wbom_fpe_sync.py to migrate any remaining
+wbom_cash_transactions rows into fpe_cash_transactions.
 
 Missing periods:
   - Jan 22–31 2026  (10 days, ~166,888 BDT never loaded)
@@ -9,12 +17,6 @@ Missing periods:
 
 Source: Bridge-2 WhatsApp DB (Admin 8801880446111 ↔ Accountant 8801844836824)
         /home/azim/bridges/bridge2/store/messages.db
-
-Run:
-    cd /home/azim/core
-    /home/azim/.venv/bin/python scripts/import_missing_advance_transactions.py
-    /home/azim/.venv/bin/python scripts/import_missing_advance_transactions.py --dry-run
-    /home/azim/.venv/bin/python scripts/import_missing_advance_transactions.py --date 2026-01-22
 """
 
 import asyncio
@@ -33,6 +35,8 @@ os.environ.setdefault(
     "DATABASE_URL", "postgresql://postgres:postgres@172.20.0.4:5432/postgres"
 )
 
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone as _norm_phone
+
 BRIDGE2_DB = "/home/azim/bridges/bridge2/store/messages.db"
 ACCOUNTANT_JID_FRAGMENT = "8801844836824"
 
@@ -48,17 +52,6 @@ MISSING_RANGES = [
 _PHONE_RE = re.compile(
     r"(?:\+?880)?0?1[3-9][\d\s\-]{8,11}",
 )
-# Normalise a raw phone string to 11-digit 01XXXXXXXXX
-def _norm_phone(raw: str) -> Optional[str]:
-    digits = re.sub(r"[^\d]", "", raw)
-    if digits.startswith("880") and len(digits) >= 13:
-        digits = "0" + digits[3:]
-    if digits.startswith("0") and len(digits) == 11:
-        return digits
-    # try prepending 0
-    if len(digits) == 10 and digits.startswith("1"):
-        return "0" + digits
-    return None
 
 # Amount: handles "20*140=2800/-" → 2800, or "(B) 1000/-" → 1000
 # Strategy: look for amount AFTER the payment method indicator to avoid

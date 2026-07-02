@@ -286,14 +286,15 @@ class TestIngestPaymentSms:
         assert result["status"] == "finalized"
         assert result["employee_mobile"] == "01795122311"
         txn = await test_db_pool.fetchrow(
-            "SELECT * FROM wbom_cash_transactions WHERE transaction_id=$1",
+            "SELECT * FROM fpe_cash_transactions WHERE id=$1",
             result["transaction_id"],
         )
+        assert txn is not None
         assert txn["employee_phone"] == "01795122311"
-        assert txn["payment_mobile"] == "01789123456"
-        assert txn["payment_method"] == "bkash"
+        assert txn["payout_phone"] == "01789123456"
+        assert txn["payout_method"] == "bkash"
         assert float(txn["amount"]) == 5000.0
-        assert txn["source"] == "admin-accountant-instruction"
+        assert txn["source_channel"] == "admin-accountant-instruction"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -383,17 +384,13 @@ class TestAccountantMessageRouterRouting:
             patch("modules.message_router.get_recent_history", new=AsyncMock(return_value=[])),
             patch("modules.message_router.kb_get_reply", new=AsyncMock(return_value=None)),
             patch("modules.message_router.ai") as mock_ai,
-            patch("modules.context_memory.push", new=AsyncMock()),
-            patch("modules.context_memory.is_repeated", new=MagicMock(return_value=False)),
-            patch("modules.context_memory.is_frustrated", new=MagicMock(return_value=False)),
-            patch("modules.context_memory.get_last_intent", new=MagicMock(return_value=None)),
         ):
             mock_ai.generate_reply = AsyncMock(return_value="AI fallback reply")
             mock_ai.classify_intent_llm = AsyncMock(return_value="unknown")
             yield mock_ai
 
     @pytest.mark.asyncio
-    async def test_advance_record_routes_to_handler(self):
+    async def test_advance_record_routes_to_handler(self, _patch_heavy_deps):
         """Accountant NL advance record → intent_advance_record() called, NOT AI."""
         with patch(
             "modules.admin_commands.nl_advance_record.intent_advance_record",
@@ -409,7 +406,7 @@ class TestAccountantMessageRouterRouting:
         assert "রেকর্ড" in reply
 
     @pytest.mark.asyncio
-    async def test_payment_sms_routes_to_ingest(self):
+    async def test_payment_sms_routes_to_ingest(self, _patch_heavy_deps):
         """Accountant forwards bKash SMS → ingest_payment_sms() called, NOT AI."""
         with patch(
             "modules.payment_ingest.ingest_payment_sms",
@@ -433,7 +430,7 @@ class TestAccountantMessageRouterRouting:
         assert "AI fallback reply" not in reply
 
     @pytest.mark.asyncio
-    async def test_summary_message_routes_to_ack(self):
+    async def test_summary_message_routes_to_ack(self, _patch_heavy_deps):
         """Bengali summary → acknowledged, NOT routed to AI."""
         from modules.message_router import process_message
         reply, _ = await process_message(
@@ -467,33 +464,27 @@ class TestPayrollConsistencyAfterAdvance:
     """
 
     @pytest.mark.asyncio
-    async def test_advance_reduces_net_salary(self, test_db_pool):
+    async def test_advance_reduces_net_salary(self, test_db_pool, seed_employee, seed_fpe_employee):
         import app.database as db_module
         db_module._pool = test_db_pool
 
-        # Create employee with known salary
-        eid = await test_db_pool.fetchval(
-            """INSERT INTO wbom_employees
-                   (employee_mobile, employee_name, designation, basic_salary)
-               VALUES ('8801700000099', 'Test Worker', 'Guard', 12000)
-               RETURNING employee_id"""
-        )
-
-        # Record an advance of 3000
+        # Record an advance of 3000 in canonical fpe_cash_transactions
         await test_db_pool.execute(
-            """INSERT INTO wbom_cash_transactions
-                   (employee_id, amount, transaction_type, payment_method,
-                    transaction_date, source)
-               VALUES ($1, 3000, 'advance', 'cash', CURRENT_DATE, 'admin_nl')""",
-            eid,
+            """INSERT INTO fpe_cash_transactions
+                   (txn_ref, employee_id, amount, txn_category, payout_method,
+                    txn_date, source, transaction_status)
+               VALUES ('test-adv-1', $1, 3000, 'advance', 'cash',
+                    CURRENT_DATE, 'admin_nl', 'final')""",
+            seed_fpe_employee["id"],
         )
 
         # Payroll: total advances for this employee should be 3000
         total_advances = await test_db_pool.fetchval(
             """SELECT COALESCE(SUM(amount), 0)
-               FROM wbom_cash_transactions
-               WHERE employee_id = $1 AND transaction_type = 'advance'""",
-            eid,
+               FROM fpe_cash_transactions
+               WHERE employee_id = $1 AND txn_category = 'advance'
+                 AND transaction_status = 'final'""",
+            seed_fpe_employee["id"],
         )
         assert float(total_advances) == 3000.0
 
@@ -502,61 +493,47 @@ class TestPayrollConsistencyAfterAdvance:
         assert net == 9000.0
 
     @pytest.mark.asyncio
-    async def test_multiple_advances_cumulative(self, test_db_pool):
+    async def test_multiple_advances_cumulative(self, test_db_pool, seed_employee, seed_fpe_employee):
         import app.database as db_module
         db_module._pool = test_db_pool
 
-        eid = await test_db_pool.fetchval(
-            """INSERT INTO wbom_employees
-                   (employee_mobile, employee_name, designation, basic_salary)
-               VALUES ('8801700000098', 'Multi Advance Worker', 'Guard', 15000)
-               RETURNING employee_id"""
-        )
-
-        for amount in [2000, 1500, 500]:
+        for i, amount in enumerate([2000, 1500, 500]):
             await test_db_pool.execute(
-                """INSERT INTO wbom_cash_transactions
-                       (employee_id, amount, transaction_type, payment_method,
-                        transaction_date, source)
-                   VALUES ($1, $2, 'advance', 'bkash', CURRENT_DATE, 'admin_nl')""",
-                eid, amount,
+                """INSERT INTO fpe_cash_transactions
+                       (txn_ref, employee_id, amount, txn_category, payout_method,
+                        txn_date, source, transaction_status)
+                   VALUES ($1, $2, $3, 'advance', 'bkash', CURRENT_DATE, 'admin_nl', 'final')""",
+                f'test-adv-cum-{i}', seed_fpe_employee["id"], amount,
             )
 
         total = await test_db_pool.fetchval(
-            "SELECT SUM(amount) FROM wbom_cash_transactions WHERE employee_id=$1",
-            eid,
+            "SELECT SUM(amount) FROM fpe_cash_transactions WHERE employee_id=$1 AND transaction_status='final'",
+            seed_fpe_employee["id"],
         )
         assert float(total) == 4000.0
 
     @pytest.mark.asyncio
     async def test_wbom_cash_transactions_updated_by_intent_advance_record(
-        self, test_db_pool
+        self, test_db_pool, seed_employee, seed_fpe_employee
     ):
-        """End-to-end: intent_advance_record() writes to wbom_cash_transactions."""
+        """End-to-end: intent_advance_record() writes to fpe_cash_transactions."""
         import app.database as db_module
         db_module._pool = test_db_pool
 
-        eid = await test_db_pool.fetchval(
-            """INSERT INTO wbom_employees
-                   (employee_mobile, employee_name, designation, basic_salary)
-               VALUES ('8801700000097', 'Direct Adv Test', 'Guard', 10000)
-               RETURNING employee_id"""
-        )
-
         from modules.admin_commands.nl_advance_record import intent_advance_record
         reply = await intent_advance_record(
-            f"advance দিলাম ID {eid} 4500 bkash",
+            f"advance দিলাম ID {seed_employee['employee_id']} 4500 bkash",
             admin_phone="8801844836824",
         )
         assert "রেকর্ড হয়েছে" in reply
 
         row = await test_db_pool.fetchrow(
-            "SELECT amount, transaction_type, payment_method, source "
-            "FROM wbom_cash_transactions WHERE employee_id=$1",
-            eid,
+            "SELECT amount, txn_category, payout_method, source "
+            "FROM fpe_cash_transactions WHERE employee_id=$1",
+            seed_fpe_employee["id"],
         )
         assert row is not None
         assert float(row["amount"]) == 4500.0
-        assert row["transaction_type"] == "advance"
-        assert row["payment_method"] == "bkash"
-        assert row["source"] == "admin_nl"
+        assert row["txn_category"] == "advance"
+        assert row["payout_method"] == "bkash"
+        assert row["source"] == "nl_advance"

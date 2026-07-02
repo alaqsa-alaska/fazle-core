@@ -1,42 +1,39 @@
 """
-Fazle Core — WBOM → FPE Sync Adapter  (Phase 2 / Phase 8)
-===========================================================
+Fazle Core — WBOM → FPE Historical Migration Adapter  (Phase 7)
+================================================================
 
-Bridges WBOM cash transactions into the FPE canonical pipeline so that:
-  - The payroll dashboard reads from a single source (fpe_cash_transactions)
-  - WBOM tables are NEVER mutated or deleted
-  - Duplicate rows are never created (idempotent via existing txn_ref check)
+Owner Directive (2026-06-29):
+  - fpe_cash_transactions is the ONLY canonical cash transaction table.
+  - wbom_cash_transactions becomes legacy archive / source reference only.
+  - No WBOM data is ever mutated or deleted.
+  - Migration is idempotent via create_transaction() txn_ref.
 
-USAGE
------
-    from modules.payment_ingest.wbom_fpe_sync import sync_wbom_transaction
-
-    # Called after a WBOM cash transaction is finalized:
-    await sync_wbom_transaction(wbom_txn_id=1234)
-
-    # Or backfill a date range:
-    from modules.payment_ingest.wbom_fpe_sync import backfill_wbom_to_fpe
-    synced, skipped = await backfill_wbom_to_fpe(since_days=30)
-
-This module is ADDITIVE — it never touches wbom_* tables.
-
-Source: 11-phase architectural plan 2026-05
+This module backfills historical WBOM cash transactions into fpe_cash_transactions
+using the canonical PaymentEvent → create_transaction() path.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Optional, Tuple
 
 from app.database import fetch_one, fetch_all, execute, fetch_val
 from modules.fazle_payroll_engine.employee import match_or_create_employee
 from modules.fazle_payroll_engine.accounting import create_transaction
+from modules.fazle_payroll_engine.models import (
+    PayoutMethod,
+    PaymentSource,
+    TransactionStatus,
+    TxnCategory,
+)
+from modules.fazle_payroll_engine.payment_event import (
+    payment_event_from_whatsapp,
+    payment_event_to_request,
+)
 from shared.phone import normalize_bd_phone
 
 log = logging.getLogger("fazle.wbom_fpe_sync")
-
-# Canonical source label stored in fpe_wa_messages / fpe_cash_transactions
-_SOURCE_WBOM = "wbom"
 
 # Method normalization: WBOM uses mixed-case strings; FPE expects lowercase enum
 _METHOD_MAP: dict[str, str] = {
@@ -56,6 +53,20 @@ def _norm_method(raw: Optional[str]) -> str:
     if not raw:
         return "cash"
     return _METHOD_MAP.get(raw.strip(), raw.strip().lower())
+
+
+def _wbom_type_to_category(txn_type: Optional[str]) -> TxnCategory:
+    """Map WBOM transaction_type to FPE TxnCategory."""
+    t = (txn_type or "").lower()
+    if "advance" in t:
+        return TxnCategory.advance
+    if "deduction" in t or "food" in t or "conveyance" in t:
+        return TxnCategory.deduction
+    if "bonus" in t:
+        return TxnCategory.bonus
+    if "correction" in t or "reverse" in t:
+        return TxnCategory.correction
+    return TxnCategory.salary
 
 
 async def sync_wbom_transaction(wbom_txn_id: int) -> Optional[dict]:
@@ -104,42 +115,79 @@ async def sync_wbom_transaction(wbom_txn_id: int) -> Optional[dict]:
             )
             return None
 
-        method = _norm_method(wbom.get("payment_method"))
-        amount = float(wbom.get("amount") or 0)
+        method_str = _norm_method(wbom.get("payment_method"))
+        try:
+            payout_method = PayoutMethod(method_str)
+        except ValueError:
+            payout_method = PayoutMethod.unknown
+
+        amount = Decimal(str(wbom.get("amount") or 0))
         txn_date_raw = wbom.get("transaction_date") or wbom.get("created_at")
-        txn_date = (
-            txn_date_raw.date()
-            if txn_date_raw and hasattr(txn_date_raw, "date")
-            else txn_date_raw
-        )
+        if isinstance(txn_date_raw, datetime):
+            txn_date = txn_date_raw.date()
+        elif isinstance(txn_date_raw, date):
+            txn_date = txn_date_raw
+        else:
+            txn_date = date.today()
 
-        # Build a stable synthetic wa_message_id so accounting.create_transaction
-        # can produce its own txn_ref dedup key.
+        txn_category = _wbom_type_to_category(wbom.get("transaction_type"))
+
+        # Build a stable synthetic source_message_id for idempotency.
         # Format: wbom:<transaction_id> — never collides with real WA message IDs.
-        synthetic_wa_id = f"wbom:{wbom['transaction_id']}"
+        source_message_id = f"wbom:{wbom['transaction_id']}"
 
-        fpe_txn = await create_transaction(
-            employee_id=emp.employee_id,
-            amount=amount,
-            payout_method=method,
-            wa_message_id=synthetic_wa_id,
-            source=_SOURCE_WBOM,
-            txn_date=txn_date,
-            notes=(
-                f"Synced from WBOM txn #{wbom['transaction_id']} "
-                f"type={wbom.get('transaction_type')} "
-                f"ref={wbom.get('reference_number') or ''}"
-            ),
+        notes = wbom.get("remarks") or ""
+        source_msg = (
+            f"Migrated from WBOM txn #{wbom['transaction_id']} "
+            f"type={wbom.get('transaction_type') or ''} "
+            f"ref={wbom.get('reference_number') or ''} "
+            f"remarks={notes}"
         )
+
+        event = payment_event_from_whatsapp(
+            employee_id=emp.employee_id,
+            employee_name_raw=wbom.get("employee_name"),
+            employee_id_phone=phone,
+            employee_phone=phone,
+            payout_phone=phone,
+            payout_method=payout_method,
+            amount=amount,
+            txn_date=txn_date,
+            txn_category=txn_category,
+            wa_message_id=source_message_id,
+            source_channel="migration",
+            source_message_text=source_msg,
+            created_by="wbom_migration",
+            metadata={
+                "legacy_wbom_transaction_id": wbom["transaction_id"],
+                "legacy_wbom_employee_id": wbom["employee_id"],
+                "legacy_reference_number": wbom.get("reference_number"),
+                "legacy_remarks": notes,
+                "legacy_transaction_type": wbom.get("transaction_type"),
+            },
+        )
+        # Override source to migration so reports can distinguish historical rows.
+        event.source = PaymentSource.migration
+        event.legacy_wbom_transaction_id = wbom["transaction_id"]
+        event.transaction_status = TransactionStatus.final
+
+        req = payment_event_to_request(event)
+        txn_row = await create_transaction(req)
 
         log.info(
-            "[wbom_fpe_sync] wbom_txn=%d → fpe_txn=%s emp=%s amount=%.0f",
+            "[wbom_fpe_sync] wbom_txn=%d → fpe_txn=%d ref=%s emp=%s amount=%s",
             wbom_txn_id,
-            fpe_txn.get("id") if fpe_txn else "DEDUP",
+            txn_row.id,
+            txn_row.txn_ref[:16],
             emp.employee_code,
             amount,
         )
-        return fpe_txn
+        return {
+            "id": txn_row.id,
+            "txn_ref": txn_row.txn_ref,
+            "employee_id": txn_row.employee_id,
+            "amount": float(txn_row.amount),
+        }
 
     except Exception as exc:
         log.error("[wbom_fpe_sync] sync_wbom_transaction(%d) error: %s", wbom_txn_id, exc)

@@ -67,7 +67,7 @@ The production identity engine resolves each contact to a single role using an 1
 | 3 | accountant | `fazle_contact_roles` where role='accountant' | `fazle_contact_roles` |
 | 4 | vip_client | `fazle_contact_roles` where role='vip_client' | `fazle_contact_roles` |
 | 5 | client_escort_buyer | `fazle_contact_roles` where role='client_escort_buyer' | `fazle_contact_roles` |
-| 6 | repeat_client | Repeat payment history | `wbom_cash_transactions` |
+| 6 | repeat_client | Repeat payment history | `fpe_cash_transactions` |
 | 7 | vendor | `fazle_contact_roles` where role='vendor' | `fazle_contact_roles` |
 | 8 | employee | Phone match (primary + 4 secondary sources) | See below |
 | 9 | supervisor | `fazle_contact_roles` where role='supervisor' | `fazle_contact_roles` |
@@ -79,7 +79,7 @@ The production identity engine resolves each contact to a single role using an 1
 Primary: `wbom_employees` — phone match on 3 variants (01X, 880X, +880X)
 
 If primary fails, try secondary sources in order:
-- Secondary A: `wbom_cash_transactions` — any payment record with this phone
+- Secondary A: `fpe_cash_transactions` — any payment record with this phone
 - Secondary B: `wbom_attendance` — any attendance record with this phone
 - Secondary C: `escort_roster_entries` — any roster entry with this phone
 - Secondary D: `wbom_contacts` — contact book match

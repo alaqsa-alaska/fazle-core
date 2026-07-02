@@ -58,6 +58,13 @@ from modules.employee_verification import (
     start_slip_verification,
     check_identity_mismatch,
 )
+# Sprint-3A: AI Conversation Workflow for employee payment requests.
+# Produces ONLY a draft — no transaction, no ledger, no balance change.
+from modules.employee_conversation import (
+    handle_employee_payment_request as ec_handle_payment_request,
+    detect_payment_request_trigger as ec_detect_trigger,
+    get_conversation_session as ec_get_session,
+)
 
 log = logging.getLogger("fazle.router")
 
@@ -473,6 +480,21 @@ async def process_message(
             if mismatch:
                 return mismatch, None
 
+        # ── Sprint-3A: Employee Conversation Workflow ──────────────────────────
+        # Check for an active Sprint-3A conversation session FIRST.
+        # This takes priority over the legacy verification flow so that an
+        # ongoing AI conversation (reason → amount → payout → confirm) is
+        # not interrupted by the older selfie/slip verification path.
+        ec_session = await ec_get_session(sender)
+        if ec_session:
+            reply, admin_note = await ec_handle_payment_request(
+                sender, text, source, emp_id
+            )
+            if reply:
+                return reply, admin_note
+
+        # Legacy verification session (selfie/slip flow) — still active for
+        # release-slip submissions that pre-date Sprint-3A.
         session = await get_verification_session(sender)
         if session:
             return await advance_verification(sender, text, source, emp_id)
@@ -520,8 +542,21 @@ async def process_message(
             log.warning("[COMPLAINT_DRAFT] intent=%s sender=%s emp_id=%s", intent, sender, emp_id)
             return "আপনার বার্তা পেয়েছি। দায়িত্বশীল ব্যক্তি শীঘ্রই যোগাযোগ করবেন।", None
 
-        if is_advance_request(text):
-            return await start_advance_verification(sender, source, emp_id)
+        # Sprint-3A: Route payment requests through the AI conversation workflow.
+        # This replaces the legacy start_advance_verification with a full
+        # multi-step conversation that collects reason, amount, payout, and
+        # produces a validated draft (NO transaction).
+        ec_trigger = ec_detect_trigger(text)
+        if ec_trigger:
+            reply, admin_note = await ec_handle_payment_request(
+                sender, text, source, emp_id
+            )
+            if reply:
+                return reply, admin_note
+            # Fallback: if Sprint-3A didn't start (e.g. unknown trigger edge),
+            # fall through to legacy advance verification.
+            if is_advance_request(text):
+                return await start_advance_verification(sender, source, emp_id)
 
         if intent in ("salary_query", "payment_due") and emp_id:
             payroll = await get_payroll_summary(emp_id)
@@ -530,7 +565,26 @@ async def process_message(
             return reply, None
 
     # ── 11. ADVANCE/PAYMENT REQUEST (any role not already handled) ───────────
-    # Catches employees, supervisors, unknown senders who ask for money
+    # Catches employees, supervisors, unknown senders who ask for money.
+    # Sprint-3A: Try the AI conversation workflow first (broader trigger
+    # detection: advance/salary/food_bill/conveyance/emergency).
+    ec_session_catchall = await ec_get_session(sender)
+    if ec_session_catchall:
+        reply, admin_note = await ec_handle_payment_request(
+            sender, text, source, identity.get("employee_id")
+        )
+        if reply:
+            return reply, admin_note
+
+    ec_trigger_catchall = ec_detect_trigger(text)
+    if ec_trigger_catchall and role_str != "admin":
+        reply, admin_note = await ec_handle_payment_request(
+            sender, text, source, identity.get("employee_id")
+        )
+        if reply:
+            return reply, admin_note
+
+    # Legacy fallback: advance request via old verification flow
     existing_session = await get_verification_session(sender)
     if not existing_session and is_advance_request(text) and role_str != "admin":
         return await start_advance_verification(sender, source, identity.get("employee_id"))
@@ -646,7 +700,7 @@ def _looks_like_escort_order(text: str) -> bool:
 def _resolve_forward_target(command_text: str, settings) -> Optional[str]:
     """Determine who to forward the secondary message to based on command type."""
     t = command_text.strip().lower()
-    if t.startswith(("paid", "advance")):
+    if t.startswith(("paid", "advance", "approved")):
         return settings.accountant_phone or None
     if t.startswith("escortconfirm"):
         # Buyer phone is embedded in the result from _cmd_escort_confirm

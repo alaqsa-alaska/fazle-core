@@ -40,7 +40,7 @@ class TestPayrollCompute:
         assert result.get("gross_salary") == pytest.approx(11000.0, rel=0.01)
 
     async def test_advances_deducted_from_net(
-        self, test_db_pool, seed_employee, seed_escort_program
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_escort_program
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
@@ -48,6 +48,7 @@ class TestPayrollCompute:
         from modules.payroll import compute_run
 
         employee_id = seed_employee["employee_id"]
+        fpe_employee_id = seed_fpe_employee["id"]
         program_id = seed_escort_program["program_id"]
 
         async with test_db_pool.acquire() as conn:
@@ -57,13 +58,15 @@ class TestPayrollCompute:
                     program_date='2026-05-01', end_date='2026-05-03'
                 WHERE program_id=$1
             """, program_id)
-            # Insert 2 advances
+            # Insert 2 advances into canonical FPE table
             await conn.execute("""
-                INSERT INTO wbom_cash_transactions
-                    (employee_id, transaction_type, amount, transaction_date, status)
-                VALUES ($1, 'advance', 1000.00, '2026-05-02', 'Completed'),
-                       ($1, 'advance', 500.00, '2026-05-04', 'Completed')
-            """, employee_id)
+                INSERT INTO fpe_cash_transactions
+                    (txn_ref, employee_id, txn_category, amount, payout_method,
+                     txn_date, transaction_status, source, source_channel)
+                VALUES
+                    ($1, $2, 'advance', 1000.00, 'cash', '2026-05-02', 'final', 'test', 'test'),
+                    ($3, $2, 'advance', 500.00, 'cash', '2026-05-04', 'final', 'test', 'test')
+            """, f"test-adv-1-{employee_id}", fpe_employee_id, f"test-adv-2-{employee_id}")
 
         result = await compute_run(
             employee_id=employee_id,
@@ -76,7 +79,7 @@ class TestPayrollCompute:
         assert result["net_salary"] == pytest.approx(8700.0, rel=0.01)
 
     async def test_net_salary_never_negative(
-        self, test_db_pool, seed_employee, seed_escort_program
+        self, test_db_pool, seed_employee, seed_fpe_employee, seed_escort_program
     ):
         import app.database as db_module
         db_module._pool = test_db_pool
@@ -84,14 +87,16 @@ class TestPayrollCompute:
         from modules.payroll import compute_run
 
         employee_id = seed_employee["employee_id"]
+        fpe_employee_id = seed_fpe_employee["id"]
 
         async with test_db_pool.acquire() as conn:
             # Large advance exceeding salary
             await conn.execute("""
-                INSERT INTO wbom_cash_transactions
-                    (employee_id, transaction_type, amount, transaction_date, status)
-                VALUES ($1, 'advance', 50000.00, '2026-05-01', 'Completed')
-            """, employee_id)
+                INSERT INTO fpe_cash_transactions
+                    (txn_ref, employee_id, txn_category, amount, payout_method,
+                     txn_date, transaction_status, source, source_channel)
+                VALUES ($1, $2, 'advance', 50000.00, 'cash', '2026-05-01', 'final', 'test', 'test')
+            """, f"test-adv-big-{employee_id}", fpe_employee_id)
 
         result = await compute_run(
             employee_id=employee_id,

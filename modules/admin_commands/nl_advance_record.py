@@ -2,7 +2,7 @@
 Fazle Core — Admin NL: direct advance recording (v1.0)
 
 Lets admin record an advance payment in free-form Bangla/English/Banglish.
-No draft required — writes directly to wbom_cash_transactions.
+No draft required — writes directly to fpe_cash_transactions.
 
 Supported patterns (examples):
   "Karim advance দিলাম 5000 bkash"
@@ -22,9 +22,15 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date
+from decimal import Decimal
 from typing import Optional
 
 from app.database import execute, fetch_one, fetch_val
+from modules.fazle_payroll_engine.employee import match_or_create_employee
+from modules.fazle_payroll_engine.accounting import create_transaction
+from modules.fazle_payroll_engine.models import PayoutMethod, TxnCategory, PaymentSource
+from modules.fazle_payroll_engine.payment_event import payment_event_from_whatsapp, payment_event_to_request
 
 log = logging.getLogger("fazle.admin_nl_advrec")
 
@@ -145,9 +151,10 @@ async def _lookup_employee(emp_id: Optional[int], phone: Optional[str]) -> Optio
 
 
 async def _cumulative_advance(employee_id: int) -> float:
+    # C1B: read advances from the canonical FPE table
     total = await fetch_val(
-        "SELECT COALESCE(SUM(amount), 0) FROM wbom_cash_transactions "
-        "WHERE employee_id = $1 AND transaction_type = 'advance'",
+        "SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions "
+        "WHERE employee_id = $1 AND txn_category = 'advance' AND transaction_status = 'final'",
         employee_id,
     )
     return float(total or 0)
@@ -181,22 +188,55 @@ async def intent_advance_record(text: str, admin_phone: str, whatsapp_message_id
     method_map = {"bkash": "bKash", "nagad": "Nagad", "rocket": "Rocket", "cash": "Cash"}
     method_display = method_map.get(method, "Cash")
 
+    # C1B: resolve FPE employee and create canonical transaction
     try:
-        await execute(
-            """INSERT INTO wbom_cash_transactions
-                   (employee_id, amount, transaction_type, payment_method,
-                    transaction_date, remarks, employee_phone, source, whatsapp_message_id)
-               VALUES ($1, $2, 'advance', $3, CURRENT_DATE, $4, $5, 'admin_nl', $6)""",
-            emp["employee_id"], amount, method,
-            f"Admin NL: {remarks}",
-            emp.get("employee_mobile"),
-            whatsapp_message_id,
+        raw_phone = emp.get("employee_mobile")
+        local_phone = raw_phone[2:] if raw_phone and raw_phone.startswith("88") else raw_phone
+        fpe_emp = await match_or_create_employee(
+            name_raw=emp.get("employee_name"),
+            payout_phone=local_phone,
+            employee_id_phone=local_phone,
         )
-    except Exception as e:
-        log.error(f"[adv_record] DB insert error: {e}")
-        return f"DB সংরক্ষণে সমস্যা: {e}"
+        if not fpe_emp:
+            return "কর্মীর FPE প্রোফাইল পাওয়া যায়নি।"
 
-    cumulative = await _cumulative_advance(emp["employee_id"])
+        try:
+            payout_method = PayoutMethod(method)
+        except ValueError:
+            payout_method = PayoutMethod.cash
+
+        event = payment_event_from_whatsapp(
+            employee_id=fpe_emp.employee_id,
+            employee_name_raw=emp.get("employee_name"),
+            employee_id_phone=local_phone,
+            employee_phone=local_phone,
+            payout_phone=local_phone,
+            payout_method=payout_method,
+            amount=Decimal(str(amount)),
+            txn_date=date.today(),
+            txn_category=TxnCategory.advance,
+            wa_message_id=f"admin_nl:{whatsapp_message_id or 'no_wa_id'}",
+            source_channel="admin_nl",
+            source_message_text=f"Admin NL advance: {remarks}",
+            created_by=f"admin_nl:{admin_phone}",
+            metadata={
+                "legacy_wbom_employee_id": emp["employee_id"],
+                "admin_phone": admin_phone,
+                "whatsapp_message_id": whatsapp_message_id,
+                "remarks": remarks,
+            },
+        )
+        # Override source to nl_advance for reporting
+        event.source = PaymentSource.nl_advance
+        event.legacy_wbom_transaction_id = None
+
+        req = payment_event_to_request(event)
+        txn_row = await create_transaction(req)
+    except Exception as e:
+        log.error(f"[adv_record] canonical transaction error: {e}")
+        return f"Transaction সংরক্ষণে সমস্যা: {e}"
+
+    cumulative = await _cumulative_advance(fpe_emp.employee_id)
 
     log.info(
         f"[adv_record] admin={admin_phone} recorded advance: "

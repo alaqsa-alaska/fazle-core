@@ -2,7 +2,7 @@
 Fazle Core — Payroll & Payment Logic (Phase 4G)
 
 Answers employee questions about salary, payments, duty count.
-Uses: wbom_cash_transactions, wbom_employees, wbom_escort_programs, wbom_salary_records
+Uses: fpe_cash_transactions, wbom_employees, wbom_escort_programs, wbom_salary_records
 
 NEVER fabricates amounts. If data is missing → returns under_review=True.
 """
@@ -61,13 +61,14 @@ async def get_payroll_summary(employee_id: int) -> PayrollSummary:
     if not emp:
         return _empty_summary(employee_id)
 
-    # Payments this month
+    # C1B: Payments this month from canonical fpe_cash_transactions
     month_txns = await fetch_all(
-        """SELECT amount, payment_method, transaction_date, status
-           FROM wbom_cash_transactions
+        """SELECT amount, payout_method, txn_date, transaction_status
+           FROM fpe_cash_transactions
            WHERE employee_id = $1
-             AND transaction_date >= $2
-           ORDER BY transaction_date DESC""",
+             AND txn_date >= $2
+             AND transaction_status = 'final'
+           ORDER BY txn_date DESC""",
         employee_id, month_start,
     )
     paid_this_month = sum(
@@ -76,17 +77,19 @@ async def get_payroll_summary(employee_id: int) -> PayrollSummary:
 
     # Last payment (all time)
     last_txn = await fetch_one(
-        """SELECT amount, payment_method, transaction_date
-           FROM wbom_cash_transactions
+        """SELECT amount, payout_method, txn_date
+           FROM fpe_cash_transactions
            WHERE employee_id = $1
-           ORDER BY transaction_date DESC
+             AND transaction_status = 'final'
+           ORDER BY txn_date DESC
            LIMIT 1""",
         employee_id,
     )
 
     # Total ever paid
     total_paid = await fetch_val(
-        "SELECT COALESCE(SUM(amount), 0) FROM wbom_cash_transactions WHERE employee_id = $1",
+        "SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions "
+        "WHERE employee_id = $1 AND transaction_status = 'final'",
         employee_id,
     )
 

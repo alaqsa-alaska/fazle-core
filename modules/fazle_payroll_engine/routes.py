@@ -45,7 +45,11 @@ from .models import (
     ReversalRequest,
     TxnCategory,
     TransactionCreateRequest,
+    TransactionStatus,
+    ApprovalStatus,
+    ReviewStatus,
 )
+from .payment_event import payment_event_from_operator, payment_event_to_request
 
 log = logging.getLogger("fazle.fpe.routes")
 
@@ -2533,3 +2537,381 @@ async def create_income_transaction(req: IncomeCreateRequest):
 
     row = await fetch_one("SELECT * FROM fpe_income_transactions WHERE id = $1", new_id)
     return dict(row)
+
+# ── Sprint-2: Operator Submission Pipeline ─────────────────────────────────────
+# Reuses fpe_unmatched_messages with review_status='operator_pending'
+# No new table, no DB migration, no protected function modification
+# Flow: Operator → Submit → Pending → Admin Approve/Reject → Transaction → Ledger
+
+from pydantic import BaseModel as _BM, Field as _Field
+
+
+class OperatorSubmitRequest(_BM):
+    """Operator submits a pending transaction for admin approval."""
+    employee_id: int
+    employee_name_raw: Optional[str] = None
+    amount: Decimal
+    payout_method: str = "cash"
+    payout_phone: Optional[str] = None
+    txn_date: str  # YYYY-MM-DD
+    txn_category: str = "salary"
+    notes: Optional[str] = None
+
+
+@router.post("/operator/submit", dependencies=[Depends(_require_api_key)])
+async def operator_submit(req: OperatorSubmitRequest):
+    """
+    Operator submits a pending transaction entry.
+    Creates a row in fpe_unmatched_messages with review_status='operator_pending'
+    AND a pending fpe_cash_transactions row (transaction_status='pending').
+    Ledger is NOT touched until admin approval.
+    """
+    # Validate employee exists
+    emp = await fetch_one(
+        "SELECT id, full_name, status FROM fpe_employees WHERE id = $1",
+        req.employee_id,
+    )
+    if not emp:
+        raise HTTPException(400, "Employee not found")
+    if emp["status"] != "active":
+        raise HTTPException(400, "Employee is not active")
+
+    # Validate amount
+    if req.amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+
+    # Validate date
+    try:
+        txn_date = date.fromisoformat(req.txn_date)
+    except ValueError:
+        raise HTTPException(400, "txn_date must be YYYY-MM-DD")
+
+    # Validate method
+    method = req.payout_method.lower().strip()
+    if method not in {"bkash", "nagad", "cash", "bank", "unknown"}:
+        raise HTTPException(400, f"Invalid payout_method: {method}")
+
+    # Validate category
+    cat = req.txn_category.lower().strip()
+    if cat not in {"salary", "advance", "bonus", "deduction", "other"}:
+        raise HTTPException(400, f"Invalid txn_category: {cat}")
+
+    # Insert a fpe_wa_messages row first (FK constraint requires valid message ID)
+    import uuid as _uuid
+    synthetic_wa_id = f"operator_{_uuid.uuid4().hex[:16]}"
+    raw_content = req.notes or f"Operator submission: {emp['full_name']} {req.amount} {method}"
+    fpe_msg_id = await fetch_val(
+        """
+        INSERT INTO fpe_wa_messages
+            (wa_message_id, source, source_number, chat_jid, sender_phone,
+             is_from_me, raw_content, media_type, timestamp_wa, ingested_at)
+        VALUES ($1, 'operator_ui', $2, 'operator', $3, false, $4, 'text', NOW(), NOW())
+        RETURNING id
+        """,
+        synthetic_wa_id,
+        normalize_bd_phone(req.payout_phone) if req.payout_phone else "operator",
+        normalize_bd_phone(req.payout_phone) if req.payout_phone else "operator",
+        raw_content,
+    )
+
+    # Insert into fpe_unmatched_messages as operator_pending
+    new_id = await fetch_val(
+        """
+        INSERT INTO fpe_unmatched_messages
+            (fpe_wa_message_id, reason, raw_content,
+             detected_amount, detected_payout_phone, detected_employee_name,
+             detected_payout_method, detected_txn_date, parser_confidence,
+             review_status)
+        VALUES ($1, 'operator_submission', $2, $3, $4, $5, $6, $7, 1.0, 'operator_pending')
+        RETURNING id
+        """,
+        fpe_msg_id,
+        raw_content,
+        req.amount,
+        normalize_bd_phone(req.payout_phone) if req.payout_phone else None,
+        req.employee_name_raw or emp["full_name"],
+        method,
+        txn_date,
+    )
+
+    # C1B: create a pending canonical cash transaction (ledger deferred)
+    try:
+        from .models import PayoutMethod as _PM
+        method_enum = _PM(method) if method in _PM._value2member_map_ else _PM.unknown
+    except (ValueError, KeyError):
+        method_enum = _PM.unknown
+    try:
+        category_enum = TxnCategory(cat)
+    except (ValueError, KeyError):
+        category_enum = TxnCategory.salary
+
+    event = payment_event_from_operator(
+        employee_id=req.employee_id,
+        amount=req.amount,
+        payout_method=method_enum,
+        payout_phone=req.payout_phone,
+        txn_date=txn_date,
+        pending_id=new_id,
+        submitted_by="operator_ui",
+        txn_category=category_enum,
+        source_channel="web",
+        metadata={"operator_notes": req.notes, "employee_name_raw": req.employee_name_raw},
+    )
+    txn_req = payment_event_to_request(event)
+    txn_req.fpe_wa_message_id = fpe_msg_id
+    txn_req.source_message_text = raw_content
+    pending_txn = await create_transaction(txn_req)
+
+    # Link the pending row to the pending transaction
+    await execute(
+        """
+        UPDATE fpe_unmatched_messages
+        SET promoted_txn_id = $2,
+            resolved_employee_id = $3,
+            updated_at = NOW()
+        WHERE id = $1
+        """,
+        new_id, pending_txn.id, req.employee_id,
+    )
+
+    log.info(
+        "[fpe.operator] submitted id=%d emp=%d amount=%s method=%s cat=%s pending_txn=%d",
+        new_id, req.employee_id, req.amount, method, cat, pending_txn.id,
+    )
+
+    return {
+        "status": "submitted",
+        "pending_id": new_id,
+        "pending_txn_id": pending_txn.id,
+        "employee_id": req.employee_id,
+        "employee_name": emp["full_name"],
+        "amount": float(req.amount),
+        "message": "Submission pending admin approval. Ledger not affected until approved.",
+    }
+
+
+@router.get("/operator/pending", dependencies=[Depends(_require_api_key)])
+async def operator_pending_list(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """
+    List all pending operator submissions awaiting admin approval.
+    Returns rows from fpe_unmatched_messages where review_status='operator_pending'.
+    """
+    rows = await fetch_all(
+        """
+        SELECT u.id, u.detected_amount, u.detected_payout_phone,
+               u.detected_employee_name, u.detected_payout_method,
+               u.detected_txn_date, u.raw_content, u.created_at,
+               u.review_status, u.resolved_employee_id,
+               e.full_name AS resolved_employee_name,
+               e.employee_id_phone AS resolved_employee_phone
+        FROM fpe_unmatched_messages u
+        LEFT JOIN fpe_employees e ON e.id = u.resolved_employee_id
+        WHERE u.review_status = 'operator_pending'
+        ORDER BY u.created_at DESC
+        LIMIT $1 OFFSET $2
+        """,
+        limit, offset,
+    )
+    total = await fetch_val(
+        "SELECT COUNT(*) FROM fpe_unmatched_messages WHERE review_status = 'operator_pending'"
+    )
+    return {
+        "total": total,
+        "items": [dict(r) for r in rows],
+    }
+
+
+@router.post("/operator/{pending_id}/approve", dependencies=[Depends(_require_api_key)])
+async def operator_approve(
+    pending_id: int,
+    employee_id: int = Query(..., gt=0),
+    reviewer: str = Query(..., min_length=1, max_length=128),
+    payout_method: Optional[str] = Query(None),
+    txn_category: str = Query("salary"),
+    amount_override: Optional[Decimal] = Query(None),
+    note: Optional[str] = Query(None, max_length=512),
+):
+    """
+    Admin approves an operator submission.
+    Creates a real transaction via create_transaction() and updates the pending row.
+    Ledger is updated by create_transaction().
+    """
+    row = await fetch_one(
+        """
+        SELECT id, review_status, detected_amount, detected_payout_phone,
+               detected_employee_name, detected_payout_method, detected_txn_date,
+               raw_content
+        FROM fpe_unmatched_messages WHERE id = $1
+        """,
+        pending_id,
+    )
+    if not row:
+        raise HTTPException(404, "Pending submission not found")
+    if row["review_status"] != "operator_pending":
+        raise HTTPException(409, f"Submission is not pending (status={row['review_status']})")
+
+    # Validate employee
+    emp = await fetch_one("SELECT id, status FROM fpe_employees WHERE id = $1", employee_id)
+    if not emp:
+        raise HTTPException(400, "Employee not found")
+    if emp["status"] != "active":
+        raise HTTPException(400, "Employee is not active")
+
+    amount = amount_override if amount_override is not None else row["detected_amount"]
+    if amount is None or Decimal(amount) <= 0:
+        raise HTTPException(400, "No amount available (provide amount_override)")
+
+    method_str = payout_method or row["detected_payout_method"] or "cash"
+    try:
+        from .models import PayoutMethod as _PM
+        method = _PM(method_str) if method_str in _PM._value2member_map_ else _PM.unknown
+    except (ValueError, KeyError):
+        method = _PM.unknown
+
+    txn_date = row["detected_txn_date"] or date.today()
+
+    try:
+        category = TxnCategory(txn_category)
+    except (ValueError, KeyError):
+        raise HTTPException(400, f"Invalid txn_category: {txn_category}")
+
+    # C1B: promote the existing pending transaction to final instead of creating a duplicate.
+    pending_txn_id = row.get("promoted_txn_id")
+    if not pending_txn_id:
+        raise HTTPException(409, "Pending submission has no linked pending transaction")
+
+    pending_txn = await fetch_one(
+        "SELECT id, txn_ref, transaction_status, employee_id, amount, payout_method, "
+        "txn_date, txn_category, accounting_period, source_message_id "
+        "FROM fpe_cash_transactions WHERE id = $1",
+        pending_txn_id,
+    )
+    if not pending_txn:
+        raise HTTPException(409, "Linked pending transaction not found")
+    if pending_txn["transaction_status"] != "pending":
+        raise HTTPException(409, f"Linked transaction is not pending (status={pending_txn['transaction_status']})")
+
+    # Validate amount override matches pending transaction amount (no silent change)
+    if amount_override is not None and Decimal(amount_override) != Decimal(pending_txn["amount"]):
+        raise HTTPException(400, "Amount override not allowed for operator approvals; reject and resubmit")
+
+    # Promote to final: update status and stamp approval
+    await execute(
+        """
+        UPDATE fpe_cash_transactions
+        SET transaction_status = 'final',
+            approval_status = 'approved',
+            approved_by = $2,
+            approved_at = NOW(),
+            review_status = 'reviewed',
+            updated_at = NOW()
+        WHERE id = $1
+        """,
+        pending_txn_id, reviewer,
+    )
+
+    # Update ledger now that the transaction is final
+    from .accounting import _upsert_ledger
+    await _upsert_ledger(
+        employee_id,
+        pending_txn["accounting_period"],
+        Decimal(pending_txn["amount"]),
+        TxnCategory(pending_txn["txn_category"]),
+    )
+
+    # Audit log for approval
+    await execute(
+        """
+        INSERT INTO fpe_accounting_audit_logs
+            (entity_type, entity_id, action, after_state, performed_by, reason)
+        VALUES ('transaction', $1, $2, $3, $4, $5)
+        """,
+        pending_txn_id,
+        "approve",
+        {
+            "txn_ref": pending_txn["txn_ref"],
+            "employee_id": employee_id,
+            "amount": str(pending_txn["amount"]),
+            "transaction_status": "final",
+            "approval_status": "approved",
+            "approved_by": reviewer,
+            "source": "operator",
+            "source_message_id": pending_txn["source_message_id"],
+        },
+        reviewer,
+        note,
+    )
+
+    # Update pending row
+    await execute(
+        """
+        UPDATE fpe_unmatched_messages
+        SET review_status = 'promoted',
+            resolved_employee_id = $2,
+            promoted_txn_id = $3,
+            reviewer = $4,
+            review_note = COALESCE($5, review_note),
+            reviewed = TRUE,
+            reviewed_at = NOW()
+        WHERE id = $1
+        """,
+        pending_id, employee_id, pending_txn_id, reviewer, note,
+    )
+
+    log.info(
+        "[fpe.operator] approved pending=%d -> txn_id=%d ref=%s reviewer=%s",
+        pending_id, pending_txn_id, pending_txn["txn_ref"][:12], reviewer,
+    )
+
+    return {
+        "status": "approved",
+        "pending_id": pending_id,
+        "txn_id": pending_txn_id,
+        "txn_ref": pending_txn["txn_ref"],
+        "employee_id": employee_id,
+        "amount": float(pending_txn["amount"]),
+    }
+
+
+@router.post("/operator/{pending_id}/reject", dependencies=[Depends(_require_api_key)])
+async def operator_reject(
+    pending_id: int,
+    reviewer: str = Query(..., min_length=1, max_length=128),
+    reason: str = Query(..., min_length=1, max_length=512),
+):
+    """
+    Admin rejects an operator submission.
+    No transaction is created, no ledger is touched.
+    """
+    row = await fetch_one(
+        "SELECT id, review_status FROM fpe_unmatched_messages WHERE id = $1",
+        pending_id,
+    )
+    if not row:
+        raise HTTPException(404, "Pending submission not found")
+    if row["review_status"] != "operator_pending":
+        raise HTTPException(409, f"Submission is not pending (status={row['review_status']})")
+
+    await execute(
+        """
+        UPDATE fpe_unmatched_messages
+        SET review_status = 'rejected',
+            reviewer = $2,
+            review_note = $3,
+            reviewed = TRUE,
+            reviewed_at = NOW()
+        WHERE id = $1
+        """,
+        pending_id, reviewer, reason,
+    )
+
+    log.info("[fpe.operator] rejected pending=%d reviewer=%s reason=%s", pending_id, reviewer, reason)
+
+    return {
+        "status": "rejected",
+        "pending_id": pending_id,
+        "reviewer": reviewer,
+    }

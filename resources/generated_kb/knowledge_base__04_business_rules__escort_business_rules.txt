@@ -1,131 +1,178 @@
 Source: knowledge_base/04_business_rules/escort_business_rules.md
-SHA256: b046fd22d5181e49f26a40d64f2d94063d862eb5facadbd0046edb7eec82fa73
-Version: b046fd22d518
+SHA256: 97584ff9804e7253a3f475036823f9e5fb4a183e529d475ef706898704faa02e
+Version: 97584ff9804e
 
 # Escort Business Rules
 
-## Source Of Truth
-- Escort training is 45 days and paid ৳10,000-৳15,000/month.
-- After training, escort payment is duty-based, normally ৳12,000-৳18,000 range.
-- Escort duty day is 24 hours, day plus night.
-- Escort final calculation requires release slip.
+## Message Direction Rules
 
-## Order Rules
-- Client order creates AI draft, not final confirmation.
-- Admin must review escort name, mobile, start date, and shift before client confirmation.
-- Roster update occurs only after final client confirmation.
+Production escort-order parsing is direction-gated first. Parsing does not begin until the sender and recipient match one of the approved flows below.
 
-## Release Rules
-- Release slip must include release date/time and supervisor/ghat signature.
-- Missing/unclear slip routes to manual review.
+### Client -> Bridge
+
+Allowed bridge numbers:
+- `8801880446111`
+- `8801958122300`
+
+Allowed client numbers:
+- `ESCORT_CLIENT_PHONES` from `.env`
+
+Meaning:
+- The client is requesting escort service.
+- This message may create a draft only.
+- It is never the source of truth.
+
+Minimum required fields:
+- Mother Vessel
+- Lighter Vessel
+- Master Mobile
+
+If any minimum field cannot be identified with reasonable confidence:
+- Ignore the message
+- Create no draft
+- Create no roster side effect
+
+If the minimum fields are present:
+- Parse with best effort
+- Create one draft order only
+- Keep status unconfirmed / waiting confirmation
+- Never auto-confirm from the client message
+
+### Bridge -> Escort Client
+
+Allowed bridge numbers:
+- `8801880446111`
+- `8801958122300`
+
+Allowed recipients:
+- `ESCORT_CLIENT_PHONES` from `.env`
+
+Meaning:
+- Official escort confirmation
+- This is the only source of truth for final escort assignment data
+
+Required confirmation fields:
+- Mother Vessel
+- Lighter Vessel
+- Escort Name
+- Escort Mobile
+- Start Date
+
+If any required confirmation field is missing:
+- Ignore the message as escort confirmation
+- Do not update a draft
+- Do not create a confirmed row
+
+If all required confirmation fields are present:
+- Match an existing draft by client phone, master mobile, mother vessel, and start date
+- Update the existing row when matched
+- Overwrite incorrect draft values with confirmation values
+- Create one confirmed row only when no draft exists
+- Never create duplicate rows
+
+## Source Of Truth Policy
+
+Not source of truth:
+- Client order text
+- AI parser guess
+- Draft row
+
+Source of truth:
+- Bridge -> Escort Client confirmation message
+
+Conflict rule:
+- If draft data conflicts with confirmation data, confirmation always wins
+
+## Parsing Rules
+
+Primary signal:
+- Master Mobile Number
+
+Secondary signals:
+- Mother vessel block
+- Lighter vessel block
+- Importer
+- Cargo
+- Destination
+- Capacity
+
+Rules:
+- Every valid Bangladesh mobile belongs to one lighter block
+- The vessel nearest that mobile is the lighter vessel
+- Destination and capacity nearest that mobile belong to that lighter
+- A block containing a mobile number cannot be the mother vessel
+- `MV`, `M.V.`, `Mv`, and similar labels are helper signals only
+- Those labels may appear before both mother vessels and lighter vessels
+- Never classify mother vessel from `MV` label alone
+
+Supported parsing modes:
+- Block-based parsing has higher priority
+- Line-based parsing remains supported as fallback
+
+## Normalization Rules
+
+Destination:
+- `Local` and `CTG` -> `Chattogram`
+- `Rupshi` -> `Narayanganj`
+- `N.Bari` -> `Nagarbari`
+
+Capacity:
+- `700 m.t`
+- `700 MT`
+- `700mt`
+- all normalize to `700 MT`
+
+## Validation And Duplicate Prevention
+
+Before saving any escort order row, the parser must have:
+- Mother Vessel
+- Lighter Vessel
+- Master Mobile
+
+If any of the three are missing:
+- Discard the message
+- Do not save draft data
+
+Duplicate-prevention match priority:
+1. Master Mobile
+2. Mother Vessel
+3. Client Phone
+4. Start Date
+
+## Roster Synchronization Rule
+
+`wbom_escort_programs` is the operational parent.
+
+`escort_roster_entries` is the roster projection.
+
+When a program becomes confirmed by source-of-truth confirmation:
+- Program status becomes `confirmed`
+- Roster status must not remain `draft`
+- Roster status is synced to `confirmed`
+- UI must show a clean final state without program/roster conflict
+
+## Escort Client Configuration Rule
+
+`ESCORT_CLIENT_PHONES` is the whitelist for escort-order directions.
+
+Rules:
+- Numbers are configured in `.env`
+- Add and remove operations must normalize Bangladesh mobile format
+- Invalid numbers are rejected
+- Duplicate numbers are not re-added
+- Updating the list clears the cached settings object immediately
+- No service restart is required for whitelist changes
+
+## Browser And Admin Output Rules
+
+- Generated admin notification must include only one Automated Reply footer
+- Search and export endpoints must qualify joined SQL columns with table aliases
+- The roster UI must not send empty or malformed query parameters
+- Optional missing fields should render as `—`, not throw runtime errors
 
 ## Cross References
-- ../05_workflows/escort_workflow.md
-- ../05_workflows/release_slip_workflow.md
 
----
-
-## Transport Allowance Rules
-
-### Purpose
-Define the hardcoded transport allowance rates applied to every escort release payment calculation.
-
-### Transport Rate Table (Production Authoritative)
-
-| Destination | Rate (BDT) |
-|---|---|
-| Dhaka / Narayanganj | ৳600 |
-| Faridpur | ৳700 |
-| Mongla | ৳800 |
-| Barishal / Coastal | ৳900 |
-| Khulna / Jessore | ৳1,000 |
-| Default (any other) | ৳600 |
-
-**Business Rule:** Transport allowance is paid to the Master/Sukani, not the escort. It is calculated per program based on the release point destination.
-
-**Validation:** The release point field in the release slip is matched to the destination table. Unrecognized destinations receive the default ৳600 rate.
-
-**Exception:** Transport rates are hardcoded in `escort_lifecycle._TRANSPORT_RATES`. They are NOT synchronized to the `escort_calculation_config` database table. The release slip draft shows an estimate. Changes to rates require a developer code update.
-
-**Management Authority:** Mongla rate of ৳800 approved by management (CON-03, PKVC Decision HK-19).
-
-**Source Module:** `modules/escort_lifecycle`
-**Source Function:** `_TRANSPORT_RATES`
-**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-19)
-
----
-
-## Food Cost Rules
-
-### Purpose
-Define how food costs are calculated and recorded for escort programs.
-
-### Calculation Rules
-
-**Base rate:** ৳150 BDT per duty day
-
-**Payment recipient:** Master/Sukani (not the escort)
-
-**Time exceptions (when a duty day's food is excluded):**
-
-| Condition | Food Excluded |
-|---|---|
-| Release slip arrives before 10:00 AM | Release-day food is NOT counted |
-| Escort boards (starts duty) after 3:00 PM | Boarding-day food is NOT counted |
-
-**Accounting rule:** Food amount paid is recorded as an escort advance and deducted from the escort's payroll.
-
-**Business Rule:** Food cost is always an estimate in the release draft. It uses the hardcoded ৳150/day rate. The release draft is a DRAFT ONLY until admin approves.
-
-**Example:**
-- Escort on duty 5 days, boards at 9:00 AM, released at 11:00 AM
-- Release-day food included (arrived after 10 AM)
-- Food = 5 × ৳150 = ৳750
-
-**Management Authority:** CON-04 approved in PKVC Management Decisions (food=150/day, time exceptions apply).
-
-**Source Module:** `modules/escort_lifecycle`
-**Source Function:** `_calc_duty_days()`, `_FOOD_RATE`
-**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-20)
-
----
-
-## Duty Day Validation
-
-### Suspicious Duty Day Rule
-
-**Business Rule:** If calculated duty days exceed 90, the release slip draft includes a SUSPICIOUS warning for admin review.
-
-**Purpose:** Guards against data entry errors where a program appears to have lasted more than 3 months.
-
-**Validation:** Admin must explicitly review and approve releases with duty_days > 90.
-
-**Source Module:** `modules/escort_lifecycle`
-**Source Function:** `build_release_draft()`
-**PKCA Report:** 09_state_machine_coverage_report.md (HK-23)
-
-### Release Date Validation
-
-**Business Rule:** Release dates are rejected if:
-- The date is in the future (future release not allowed)
-- The date is more than 1 year in the past (stale data protection)
-
-**Source Module:** `modules/escort_lifecycle`
-**Source Function:** `_validate_release_date()`
-**PKCA Report:** 09_state_machine_coverage_report.md (HK-22)
-
----
-
-## Payment Formula
-
-**Management Decision (CON-01, CON-02):**
-
-**Authoritative daily rate formula:** `12000 / 30 * duty_days`
-
-- This gives an effective daily rate of ৳400/day
-- The formula is used in both the payment workflow and payroll module
-- The formula is derived from the ৳12,000 fixed monthly base salary, not a separate fixed daily slab
-
-**Source Module:** `modules/payment_workflow`, `modules/payroll`
-**PKCA Report:** 04_business_rule_coverage_report.md
-**Management Authority:** CON-01 and CON-02 approved in PKVC Management Decisions
+- `../05_workflows/escort_workflow.md`
+- `../05_workflows/escort_source_of_truth_workflow.md`
+- `../06_developer_system/escort_order_parser.md`
+- `../06_developer_system/escort_roster_system.md`

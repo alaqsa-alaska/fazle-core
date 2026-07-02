@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen3:8b"
+    ollama_model: str = "phi4-mini:latest"
 
     # GitHub Models (OpenAI-compatible — https://models.github.ai/inference)
     github_token: str = ""
@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     debug: bool = False
     internal_api_key: str = ""
+    ai_console_chat_enabled: bool = False
 
     @field_validator("debug", mode="before")
     @classmethod
