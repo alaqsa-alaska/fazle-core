@@ -1,6 +1,6 @@
 Source: knowledge_base/04_business_rules/attendance_business_rules.md
-SHA256: 98ff02c01d1d9d3c770e7fd3b3d49df989ed159736ebccfdf1d3c96244dcac28
-Version: 98ff02c01d1d
+SHA256: 86824e580293c707330423efc3574c11600f161416edb2f5c09c73b3bda27beb
+Version: 86824e580293
 
 # Attendance Business Rules
 
@@ -20,6 +20,21 @@ Version: 98ff02c01d1d
 - Approved attendance feeds salary, bonus, late, leave, and deduction calculations.
 - Unauthorized absence may cause up to 2 days deduction per 1 absent day.
 - 3 consecutive late arrivals may cause 1 day salary deduction.
+
+## অ্যাটেন্ডেন্স কীওয়ার্ড তালিকা
+
+### উপস্থিত কীওয়ার্ড (Trigger: PRESENT)
+হাজির, উপস্থিত, present, হাজির আছি, ডিউটিতে আছি, আছি, on duty, duty start, ডিউটি শুরু, চেক ইন, check in, checked in
+
+### অনুপস্থিত কীওয়ার্ড (Trigger: ABSENT)
+অনুপস্থিত, absent, আসতে পারব না, আসতে পারছি না, অসুস্থ, sick, ছুটি, leave
+
+### কীওয়ার্ড ম্যাচিং নিয়ম
+- কেস-ইনসেনসিটিভ (case-insensitive)
+- বাংলা এবং ইংরেজি উভয় সাপোর্টেড
+- আংশিক ম্যাচ: হ্যাঁ — সাবস্ট্রিং ম্যাচ ব্যবহার করা হয়
+- অনুপস্থিত কীওয়ার্ড আগে চেক হয়; না পেলে উপস্থিত ধরে নেওয়া হয়
+- লোকেশন এক্সট্র্যাকশন: location, loc, পোস্ট, পোষ্ট, সাইট, site, লোকেশন কীওয়ার্ড দিয়ে
 
 ## Cross References
 - ../05_workflows/attendance_workflow.md

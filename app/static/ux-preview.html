@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UX Redesign Preview — Payroll</title>
+<style>
+:root{
+  --bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--accent3:#ff5b33;
+  --err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;
+  --surface:#f8fafc;--text:#1e293b;--text2:#475569;
+  --new-border:#e5e7eb;--new-accent:#6366f1;--new-blue:#3b82f6;--new-red:#ef4444;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Amasis MT Pro Medium",Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+
+/* ─── Preview Page Layout ─── */
+.preview-header{background:var(--accent);color:#fff;padding:20px 24px;text-align:center}
+.preview-header h1{font-size:22px;margin-bottom:4px}
+.preview-header p{font-size:13px;opacity:0.9}
+.preview-controls{display:flex;gap:8px;justify-content:center;padding:16px;background:var(--surface);border-bottom:1px solid var(--border);flex-wrap:wrap}
+.preview-controls button{padding:8px 16px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:13px;transition:all .15s}
+.preview-controls button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.preview-controls button:hover{border-color:var(--accent)}
+
+.section-title{font-size:18px;font-weight:700;color:var(--accent2);padding:20px 24px 8px;border-bottom:2px solid var(--border);background:#fff;position:sticky;top:0;z-index:50}
+.section-subtitle{font-size:13px;color:var(--muted);padding:4px 24px 12px;background:#fff}
+
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid var(--border)}
+@media(max-width:768px){.compare{grid-template-columns:1fr}}
+.compare-side{padding:16px;border-right:1px solid var(--border);min-height:400px}
+@media(max-width:768px){.compare-side{border-right:none;border-bottom:1px solid var(--border)}}
+.compare-label{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;padding:6px 12px;border-radius:6px;display:inline-block}
+.compare-label.bad{background:#fef2f2;color:var(--err)}
+.compare-label.good{background:#f0fdf4;color:var(--ok)}
+
+/* ─── BEFORE: Broken Modal (replicates current bug) ─── */
+.before-viewport{height:400px;overflow:hidden;border:2px dashed var(--err);border-radius:8px;position:relative;background:var(--bg)}
+.before-viewport::after{content:"Viewport: 870×594px";position:absolute;bottom:4px;right:8px;font-size:10px;color:var(--err);font-family:monospace}
+.before-modal{background:#fff;border-radius:12px;width:320px;margin:20px auto;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden}
+.before-modal-head{background:var(--accent);color:#fff;padding:12px 16px;font-size:14px;font-weight:600}
+.before-modal-body{padding:16px}
+.before-modal-body label{font-size:11px;color:var(--muted);display:block;margin-bottom:3px}
+.before-modal-body input,.before-modal-body select{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:10px;font-size:12px}
+.before-modal-footer{padding:10px 16px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+.before-cut{position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(to bottom,transparent,#fef2f2);pointer-events:none;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px}
+.before-cut span{font-size:10px;color:var(--err);font-weight:600}
+
+/* ─── AFTER: Fixed Modal (new design) ─── */
+.after-viewport{height:400px;overflow:hidden;border:2px solid var(--ok);border-radius:8px;position:relative;background:var(--bg)}
+.after-viewport::after{content:"Viewport: 870×594px";position:absolute;bottom:4px;right:8px;font-size:10px;color:var(--ok);font-family:monospace}
+.after-overlay{position:absolute;inset:0;background:rgba(15,23,42,.5);display:flex;align-items:center;justify-content:center;padding:16px}
+.after-modal{background:#fff;border-radius:12px;width:340px;max-width:95vw;max-height:calc(100% - 32px);overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3);animation:modalIn .3s ease}
+@keyframes modalIn{from{opacity:0;transform:scale(.95) translateY(-10px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.after-modal-head{padding:14px 18px 12px;border-bottom:1px solid var(--new-border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;background:#fff}
+.after-modal-head h3{font-size:15px;font-weight:700}
+.after-modal-head .close-btn{background:none;border:none;font-size:18px;cursor:pointer;color:var(--muted);padding:4px}
+.after-modal-body{padding:16px 18px;overflow-y:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch}
+.after-modal-body .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+.after-modal-body .form-grid .full-width{grid-column:1/-1}
+.after-modal-body .form-group{display:flex;flex-direction:column;gap:3px}
+.after-modal-body .form-group label{font-size:11px;font-weight:600;color:#374151}
+.after-modal-body .form-group label .req{color:var(--new-red);margin-left:2px}
+.after-modal-body .form-group input,.after-modal-body .form-group select,.after-modal-body .form-group textarea{
+  padding:8px 10px;border:1.5px solid var(--new-border);border-radius:7px;font-size:12px;transition:border-color .15s,box-shadow .15s;background:#fff;width:100%
+}
+.after-modal-body .form-group input:focus,.after-modal-body .form-group select:focus{
+  outline:none;border-color:var(--new-accent);box-shadow:0 0 0 3px rgba(99,102,241,.15)
+}
+.after-modal-body .form-group.has-error input{border-color:var(--new-red);box-shadow:0 0 0 3px rgba(239,68,68,.1)}
+.after-modal-body .form-group .error-msg{font-size:10px;color:var(--new-red);display:none}
+.after-modal-body .form-group.has-error .error-msg{display:block}
+.after-modal-footer{padding:12px 18px;border-top:1px solid var(--new-border);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;background:#fff;border-radius:0 0 12px 12px}
+.btn{padding:8px 16px;border:none;border-radius:8px;font-size:12px;cursor:pointer;transition:all .15s;font-weight:600}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent2)}
+.btn-secondary{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{background:#f1f5f9}
+.btn-primary:disabled{opacity:.6;cursor:not-allowed}
+.btn-primary .spin{animation:spin .8s linear infinite;display:inline-block;vertical-align:middle;margin-right:4px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ─── Table Row Actions Comparison ─── */
+.table-demo{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+.table-demo th{background:var(--surface);padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);border-bottom:1px solid var(--border)}
+.table-demo td{padding:8px 10px;border-bottom:1px solid var(--border)}
+.table-demo tr:hover td{background:#f8fffe}
+
+/* BEFORE: text buttons */
+.before-actions{display:flex;gap:4px}
+.before-actions button{padding:5px 10px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer}
+
+/* AFTER: icon buttons */
+.row-actions{display:flex;gap:4px;align-items:center;justify-content:flex-end}
+.btn-icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--new-border);border-radius:6px;background:#fff;color:#6b7280;cursor:pointer;transition:all .15s;flex-shrink:0;padding:0}
+.btn-icon:hover{background:#f3f4f6;color:#111827;border-color:#d1d5db}
+.btn-icon.edit:hover{background:#eff6ff;color:var(--new-blue);border-color:#bfdbfe}
+.btn-icon.danger:hover{background:#fef2f2;color:var(--new-red);border-color:#fecaca}
+.btn-icon svg{width:14px;height:14px}
+
+/* ─── Detail Panel Comparison ─── */
+.panel-demo{position:relative;height:350px;overflow:hidden;border:1px solid var(--border);border-radius:8px;background:var(--bg)}
+.before-panel{position:absolute;top:0;right:0;width:280px;height:100%;background:#fff;box-shadow:-4px 0 20px rgba(0,0,0,.1);overflow-y:auto}
+.before-panel-head{background:var(--accent);color:#fff;padding:12px 16px;font-size:13px;font-weight:600;position:sticky;top:0}
+.before-panel-body{padding:16px;font-size:12px}
+.before-panel-body .row{display:flex;gap:6px;margin-bottom:6px}
+.before-panel-body .row .lbl{color:var(--muted);min-width:80px;font-weight:500}
+.before-panel-body .row .val{color:var(--text);word-break:break-all}
+
+.after-panel{position:absolute;top:0;right:0;width:300px;max-width:95%;height:100%;background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.12);display:flex;flex-direction:column;transition:right .3s cubic-bezier(.4,0,.2,1)}
+.after-panel-head{padding:14px 18px 12px;border-bottom:1px solid var(--new-border);flex-shrink:0;display:flex;align-items:center;justify-content:space-between;background:#fff}
+.after-panel-head h3{font-size:14px;font-weight:700}
+.after-panel-head .close-btn{background:none;border:none;font-size:18px;cursor:pointer;color:var(--muted);padding:4px}
+.after-panel-body{flex:1;overflow-y:auto;padding:16px 18px;-webkit-overflow-scrolling:touch;font-size:12px}
+.after-panel-body .row{display:flex;gap:6px;margin-bottom:6px}
+.after-panel-body .row .lbl{color:var(--muted);min-width:80px;font-weight:500}
+.after-panel-body .row .val{color:var(--text);word-break:break-all}
+.after-panel-actions{padding:12px 18px;border-top:1px solid var(--new-border);display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;background:#fff}
+
+/* ─── Mobile Modal Demo ─── */
+.mobile-frame{width:375px;height:500px;border:8px solid #333;border-radius:32px;margin:20px auto;overflow:hidden;position:relative;background:var(--bg)}
+.mobile-frame::before{content:"";position:absolute;top:0;left:50%;transform:translateX(-50%);width:120px;height:24px;background:#333;border-radius:0 0 16px 16px;z-index:10}
+.mobile-content{padding-top:36px;height:100%;overflow:hidden;position:relative}
+.mobile-overlay{position:absolute;inset:0;background:rgba(15,23,42,.5);display:flex;align-items:flex-end;padding:0}
+.mobile-modal{background:#fff;border-radius:20px 20px 0 0;width:100%;max-height:92%;display:flex;flex-direction:column;animation:slideUp .4s ease}
+@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.mobile-modal-head{padding:14px 18px 12px;border-bottom:1px solid var(--new-border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.mobile-modal-head h3{font-size:15px;font-weight:700}
+.mobile-modal-head .close-btn{background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted)}
+.mobile-modal-body{padding:14px 18px;overflow-y:auto;flex:1;min-height:0;max-height:300px}
+.mobile-modal-body .form-group{display:flex;flex-direction:column;gap:3px;margin-bottom:10px}
+.mobile-modal-body .form-group label{font-size:12px;font-weight:600;color:#374151}
+.mobile-modal-body .form-group input,.mobile-modal-body .form-group select{
+  padding:10px 12px;border:1.5px solid var(--new-border);border-radius:8px;font-size:16px;width:100%
+}
+.mobile-modal-body .form-group input:focus{outline:none;border-color:var(--new-accent);box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+.mobile-modal-footer{padding:12px 18px;border-top:1px solid var(--new-border);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;background:#fff;border-radius:0}
+
+/* ─── Form Validation Demo ─── */
+.validation-demo{max-width:400px;margin:16px auto;background:#fff;border:1px solid var(--border);border-radius:12px;padding:20px}
+.validation-demo .form-group{display:flex;flex-direction:column;gap:4px;margin-bottom:14px}
+.validation-demo .form-group label{font-size:13px;font-weight:600;color:#374151}
+.validation-demo .form-group label .req{color:var(--new-red)}
+.validation-demo .form-group input{padding:10px 12px;border:1.5px solid var(--new-border);border-radius:8px;font-size:14px;transition:all .15s}
+.validation-demo .form-group input:focus{outline:none;border-color:var(--new-accent);box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+.validation-demo .form-group.has-error input{border-color:var(--new-red);box-shadow:0 0 0 3px rgba(239,68,68,.1)}
+.validation-demo .form-group .error-msg{font-size:12px;color:var(--new-red);display:none}
+.validation-demo .form-group.has-error .error-msg{display:block}
+.validation-demo .form-group.ok input{border-color:var(--ok)}
+.validation-demo .form-group.ok .ok-msg{font-size:12px;color:var(--ok);display:block}
+.validation-demo .form-group .ok-msg{display:none}
+
+/* ─── Loading Button Demo ─── */
+.loading-demo{display:flex;gap:12px;align-items:center;justify-content:center;padding:20px}
+.btn-loading{padding:10px 20px;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600;background:var(--accent);color:#fff;display:flex;align-items:center;gap:6px}
+.btn-loading:disabled{opacity:.6;cursor:not-allowed}
+.btn-loading .spin{animation:spin .8s linear infinite;display:inline-block}
+
+/* ─── Feature List ─── */
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;padding:16px 24px}
+.feature-card{background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px}
+.feature-card h4{font-size:14px;font-weight:700;margin-bottom:8px;color:var(--accent2)}
+.feature-card .fix-tag{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;margin-bottom:8px}
+.feature-card .fix-tag.critical{background:#fef2f2;color:var(--err)}
+.feature-card .fix-tag.high{background:#fffbeb;color:var(--warn)}
+.feature-card .fix-tag.medium{background:#f0fdf4;color:var(--ok)}
+.feature-card ul{list-style:none;padding:0}
+.feature-card li{font-size:12px;color:var(--text2);padding:4px 0;padding-left:20px;position:relative}
+.feature-card li::before{content:"✓";position:absolute;left:0;color:var(--ok);font-weight:700}
+.feature-card li.bad::before{content:"✗";color:var(--err)}
+
+/* ─── Table Wrapper Demo ─── */
+.table-wrapper-demo{overflow-x:auto;border:1px solid var(--new-border);border-radius:8px;margin-top:8px}
+.table-wrapper-demo table{width:100%;min-width:500px;border-collapse:collapse;font-size:12px}
+.table-wrapper-demo th{background:var(--surface);padding:10px 12px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+.table-wrapper-demo td{padding:10px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
+.table-wrapper-demo tr:hover td{background:#f8fffe}
+
+/* ─── Sidebar Demo ─── */
+.sidebar-demo{display:flex;height:300px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.sidebar-demo .sidebar{width:200px;background:#1e1b4b;color:#fff;padding:12px;flex-shrink:0}
+.sidebar-demo .sidebar button{display:block;width:100%;text-align:left;padding:10px 12px;border:none;background:none;color:#fff;font-size:12px;cursor:pointer;border-radius:6px;margin-bottom:2px}
+.sidebar-demo .sidebar button:hover,.sidebar-demo .sidebar button.active{background:rgba(255,255,255,.15)}
+.sidebar-demo .content{flex:1;padding:16px;background:var(--bg);overflow-y:auto}
+.sidebar-demo .hamburger{display:none}
+@media(max-width:600px){
+  .sidebar-demo .sidebar{position:absolute;transform:translateX(-100%);z-index:10;transition:transform .3s}
+  .sidebar-demo .sidebar.open{transform:translateX(0)}
+  .sidebar-demo .hamburger{display:flex;flex-direction:column;gap:4px;padding:8px;cursor:pointer;background:none;border:none}
+  .sidebar-demo .hamburger span{width:20px;height:2px;background:var(--text);border-radius:2px}
+}
+
+.divider{height:1px;background:var(--border);margin:24px 0}
+.note{padding:12px 24px;font-size:12px;color:var(--muted);background:#fffbeb;border-left:3px solid var(--warn)}
+</style>
+</head>
+<body>
+
+<div class="preview-header">
+  <h1>UX Redesign Preview — Payroll Application</h1>
+  <p>See exactly how the fixed UI will look before implementation. Compare Before ❌ vs After ✅</p>
+</div>
+
+<div class="preview-controls">
+  <button class="active" onclick="showSection('modal')">Modal Fix (A)</button>
+  <button onclick="showSection('table')">Table Actions (C)</button>
+  <button onclick="showSection('panel')">Detail Panel (E)</button>
+  <button onclick="showSection('mobile')">Mobile View (D)</button>
+  <button onclick="showSection('validation')">Validation (G)</button>
+  <button onclick="showSection('loading')">Loading States (G)</button>
+  <button onclick="showSection('table-scroll')">Table Scroll (H)</button>
+  <button onclick="showSection('sidebar')">Sidebar (F)</button>
+  <button onclick="showSection('features')">All Features</button>
+</div>
+
+<!-- ═══════ Section 1: Modal Fix ═══════ -->
+<div id="sec-modal" class="section">
+  <div class="section-title">Fix A — Modal Height + Scrollable Body + Pinned Footer</div>
+  <div class="section-subtitle">The #1 problem: Cancel/Save buttons are off-screen. Fix: flex column layout with max-height cap and scrollable body.</div>
+  <div class="compare">
+    <div class="compare-side">
+      <span class="compare-label bad">❌ Before — Current Bug</span>
+      <div class="before-viewport">
+        <div class="before-modal">
+          <div class="before-modal-head">➕ Add Payment</div>
+          <div class="before-modal-body">
+            <label>Employee Name</label><input type="text" placeholder="Type to search…">
+            <label>Employee ID Phone</label><input type="text" placeholder="01712345678">
+            <label>Payout Phone</label><input type="text" placeholder="01812345678">
+            <label>Amount (৳)</label><input type="number" placeholder="5000">
+            <label>Payment Method</label><select><option>Cash</option><option>bKash</option></select>
+            <label>Category</label><select><option>Salary</option><option>Advance</option></select>
+            <label>Transaction Date</label><input type="date">
+            <label>Notes</label><input type="text" placeholder="e.g. Advance for Eid…">
+          </div>
+          <div class="before-modal-footer">
+            <button class="btn btn-secondary">Cancel</button>
+            <button class="btn btn-primary">Save Payment</button>
+          </div>
+        </div>
+        <div class="before-cut"><span>↓ Cancel & Save are HERE — off-screen! ↓</span></div>
+      </div>
+      <p style="font-size:11px;color:var(--err);margin-top:8px">Modal = 685px in 594px viewport. Footer pushed 45px below screen. <code>overflow:hidden</code> clips it. No <code>max-height</code>, no scroll.</p>
+    </div>
+    <div class="compare-side">
+      <span class="compare-label good">✅ After — Fixed Design</span>
+      <div class="after-viewport">
+        <div class="after-overlay">
+          <div class="after-modal">
+            <div class="after-modal-head">
+              <h3>➕ Add Payment</h3>
+              <button class="close-btn">✕</button>
+            </div>
+            <div class="after-modal-body">
+              <div class="form-grid">
+                <div class="form-group full-width">
+                  <label>Employee Name <span class="req">*</span></label>
+                  <input type="text" placeholder="Type to search or enter new…">
+                </div>
+                <div class="form-group">
+                  <label>ID Phone</label>
+                  <input type="text" placeholder="01712345678">
+                </div>
+                <div class="form-group">
+                  <label>Payout Phone</label>
+                  <input type="text" placeholder="01812345678">
+                </div>
+                <div class="form-group">
+                  <label>Amount (৳) <span class="req">*</span></label>
+                  <input type="number" placeholder="5000">
+                </div>
+                <div class="form-group">
+                  <label>Method</label>
+                  <select><option>Cash</option><option>bKash</option><option>Nagad</option></select>
+                </div>
+                <div class="form-group">
+                  <label>Category</label>
+                  <select><option>Salary</option><option>Advance</option><option>Bonus</option></select>
+                </div>
+                <div class="form-group">
+                  <label>Date <span class="req">*</span></label>
+                  <input type="date" value="2026-07-02">
+                </div>
+                <div class="form-group full-width">
+                  <label>Notes</label>
+                  <input type="text" placeholder="e.g. Advance for Eid…">
+                </div>
+              </div>
+            </div>
+            <div class="after-modal-footer">
+              <button class="btn btn-secondary">Cancel</button>
+              <button class="btn btn-primary">Save Payment</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--ok);margin-top:8px">Modal = <code>max-height:90vh</code>. Header pinned, body scrolls, footer <strong>always visible</strong>. Two-column form grid saves space.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ Section 2: Table Actions ═══════ -->
+<div id="sec-table" class="section" style="display:none">
+  <div class="section-title">Fix C — Compact Icon Buttons Replace Text Buttons</div>
+  <div class="section-subtitle">Each row currently has 3 full text buttons (View + Edit + Delete). Replaced with compact SVG icon buttons.</div>
+  <div class="compare">
+    <div class="compare-side">
+      <span class="compare-label bad">❌ Before — Text Buttons</span>
+      <table class="table-demo">
+        <thead><tr><th>Date</th><th>Name</th><th>Amount</th><th>Actions</th></tr></thead>
+        <tbody>
+          <tr><td>Jul 02</td><td>A. Aziz</td><td>৳1</td><td><div class="before-actions"><button>View</button><button>Edit</button><button style="color:#dc3545">Delete</button></div></td></tr>
+          <tr><td>Jul 02</td><td>MD. Rubel</td><td>৳700</td><td><div class="before-actions"><button>View</button><button>Edit</button><button style="color:#dc3545">Delete</button></div></td></tr>
+          <tr><td>Jul 02</td><td>Golam Mustafa</td><td>৳400</td><td><div class="before-actions"><button>View</button><button>Edit</button><button style="color:#dc3545">Delete</button></div></td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:11px;color:var(--err);margin-top:8px">3 text buttons per row = ~180px width just for actions. Table overflows on tablet.</p>
+    </div>
+    <div class="compare-side">
+      <span class="compare-label good">✅ After — Icon Buttons</span>
+      <table class="table-demo">
+        <thead><tr><th>Date</th><th>Name</th><th>Amount</th><th>Actions</th></tr></thead>
+        <tbody>
+          <tr><td>Jul 02</td><td>A. Aziz</td><td>৳1</td><td><div class="row-actions">
+            <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-icon danger" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          </div></td></tr>
+          <tr><td>Jul 02</td><td>MD. Rubel</td><td>৳700</td><td><div class="row-actions">
+            <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-icon danger" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          </div></td></tr>
+          <tr><td>Jul 02</td><td>Golam Mustafa</td><td>৳400</td><td><div class="row-actions">
+            <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-icon danger" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          </div></td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:11px;color:var(--ok);margin-top:8px">3 icon buttons = ~100px. Hover shows color (blue=edit, red=delete). Tooltip on hover. Touch-friendly 32px targets.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ Section 3: Detail Panel ═══════ -->
+<div id="sec-panel" class="section" style="display:none">
+  <div class="section-title">Fix E — Detail Panel with Pinned Header/Footer</div>
+  <div class="section-subtitle">Side panel now uses flex column: header pinned, body scrolls, action buttons always visible at bottom.</div>
+  <div class="compare">
+    <div class="compare-side">
+      <span class="compare-label bad">❌ Before — No Footer Pinning</span>
+      <div class="panel-demo">
+        <div class="before-panel">
+          <div class="before-panel-head">Transaction #2555</div>
+          <div class="before-panel-body">
+            <div class="row"><span class="lbl">ID:</span><span class="val">#2555</span></div>
+            <div class="row"><span class="lbl">Reference:</span><span class="val">fpe-2fb8a8a81c5c0e25</span></div>
+            <div class="row"><span class="lbl">Employee:</span><span class="val">A. Aziz (01829157470)</span></div>
+            <div class="row"><span class="lbl">Amount:</span><span class="val">৳1</span></div>
+            <div class="row"><span class="lbl">Method:</span><span class="val">cash</span></div>
+            <div class="row"><span class="lbl">Phone:</span><span class="val">01829157470</span></div>
+            <div class="row"><span class="lbl">Category:</span><span class="val">salary</span></div>
+            <div class="row"><span class="lbl">Date:</span><span class="val">Jul 02, 2026</span></div>
+            <div class="row"><span class="lbl">Period:</span><span class="val">2026-07</span></div>
+            <div class="row"><span class="lbl">Reversal:</span><span class="val">No</span></div>
+            <div class="row"><span class="lbl">Created:</span><span class="val">Jul 02, 01:11 PM</span></div>
+            <div class="row"><span class="lbl">Source:</span><span class="val">REGTEST_20260702…</span></div>
+            <hr style="margin:12px 0;border:none;border-top:1px solid var(--border)">
+            <button class="btn btn-primary" style="font-size:11px">Reverse This Transaction</button>
+            <button class="btn btn-secondary" style="font-size:11px;margin-left:4px">Edit</button>
+            <button class="btn btn-secondary" style="font-size:11px;margin-left:4px;color:#dc3545">Delete</button>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--err);margin-top:8px">Buttons scroll with content — can be pushed off-screen on long detail views.</p>
+    </div>
+    <div class="compare-side">
+      <span class="compare-label good">✅ After — Pinned Actions</span>
+      <div class="panel-demo">
+        <div class="after-panel">
+          <div class="after-panel-head">
+            <h3>Transaction #2555</h3>
+            <button class="close-btn">✕</button>
+          </div>
+          <div class="after-panel-body">
+            <div class="row"><span class="lbl">ID:</span><span class="val">#2555</span></div>
+            <div class="row"><span class="lbl">Reference:</span><span class="val">fpe-2fb8a8a81c5c0e25</span></div>
+            <div class="row"><span class="lbl">Employee:</span><span class="val">A. Aziz (01829157470)</span></div>
+            <div class="row"><span class="lbl">Amount:</span><span class="val">৳1</span></div>
+            <div class="row"><span class="lbl">Method:</span><span class="val">cash</span></div>
+            <div class="row"><span class="lbl">Phone:</span><span class="val">01829157470</span></div>
+            <div class="row"><span class="lbl">Category:</span><span class="val">salary</span></div>
+            <div class="row"><span class="lbl">Date:</span><span class="val">Jul 02, 2026</span></div>
+            <div class="row"><span class="lbl">Period:</span><span class="val">2026-07</span></div>
+            <div class="row"><span class="lbl">Reversal:</span><span class="val">No</span></div>
+            <div class="row"><span class="lbl">Created:</span><span class="val">Jul 02, 01:11 PM</span></div>
+            <div class="row"><span class="lbl">Source:</span><span class="val">REGTEST_20260702…</span></div>
+          </div>
+          <div class="after-panel-actions">
+            <button class="btn btn-primary" style="font-size:11px">Reverse</button>
+            <button class="btn btn-secondary" style="font-size:11px">Edit</button>
+            <button class="btn btn-secondary" style="font-size:11px;color:var(--new-red)">Delete</button>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--ok);margin-top:8px">Header pinned, body scrolls, action buttons <strong>always visible</strong> at bottom in a dedicated footer area.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ Section 4: Mobile View ═══════ -->
+<div id="sec-mobile" class="section" style="display:none">
+  <div class="section-title">Fix D — Mobile Modal Slides Up from Bottom</div>
+  <div class="section-subtitle">On mobile (≤600px), modal slides up from bottom like a bottom sheet. Body scrolls. Footer always reachable.</div>
+  <div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap;padding:20px">
+    <div>
+      <div class="mobile-frame">
+        <div class="mobile-content">
+          <div style="padding:12px 16px;color:var(--muted);font-size:11px">Transactions page behind overlay…</div>
+          <div class="mobile-overlay">
+            <div class="mobile-modal">
+              <div class="mobile-modal-head">
+                <h3>➕ Add Payment</h3>
+                <button class="close-btn">✕</button>
+              </div>
+              <div class="mobile-modal-body">
+                <div class="form-group">
+                  <label>Employee Name <span style="color:var(--new-red)">*</span></label>
+                  <input type="text" placeholder="Type to search…">
+                </div>
+                <div class="form-group">
+                  <label>Amount (৳) <span style="color:var(--new-red)">*</span></label>
+                  <input type="number" placeholder="5000">
+                </div>
+                <div class="form-group">
+                  <label>Payment Method</label>
+                  <select><option>Cash</option><option>bKash</option><option>Nagad</option></select>
+                </div>
+                <div class="form-group">
+                  <label>Category</label>
+                  <select><option>Salary</option><option>Advance</option></select>
+                </div>
+                <div class="form-group">
+                  <label>Date <span style="color:var(--new-red)">*</span></label>
+                  <input type="date" value="2026-07-02">
+                </div>
+              </div>
+              <div class="mobile-modal-footer">
+                <button class="btn btn-secondary">Cancel</button>
+                <button class="btn btn-primary">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p style="text-align:center;font-size:11px;color:var(--ok);margin-top:8px">✅ Bottom sheet style — Cancel/Save always visible</p>
+    </div>
+  </div>
+  <div class="note">Animation: <code>slideUp 0.3s ease</code> — modal enters from bottom. <code>border-radius:20px 20px 0 0</code> — rounded top corners only. Font size 16px on inputs to prevent iOS zoom.</div>
+</div>
+
+<!-- ═══════ Section 5: Form Validation ═══════ -->
+<div id="sec-validation" class="section" style="display:none">
+  <div class="section-title">Fix G — Inline Form Validation</div>
+  <div class="section-subtitle">Required fields show red border + error message. Valid fields show green border. No more guessing which field is wrong.</div>
+  <div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap">
+    <div class="validation-demo">
+      <h4 style="margin-bottom:12px">❌ Before — No feedback</h4>
+      <div class="form-group">
+        <label>Employee Name</label>
+        <input type="text" placeholder="Type to search…" style="border-color:var(--border)">
+      </div>
+      <div class="form-group">
+        <label>Amount (৳)</label>
+        <input type="number" placeholder="5000" style="border-color:var(--border)">
+      </div>
+      <p style="font-size:11px;color:var(--err)">User submits → generic toast error. Which field was wrong? No idea.</p>
+    </div>
+    <div class="validation-demo">
+      <h4 style="margin-bottom:12px">✅ After — Inline errors</h4>
+      <div class="form-group has-error">
+        <label>Employee Name <span class="req">*</span></label>
+        <input type="text" placeholder="Type to search…" value="">
+        <span class="error-msg">⚠ This field is required</span>
+      </div>
+      <div class="form-group ok">
+        <label>Amount (৳) <span class="req">*</span></label>
+        <input type="number" value="5000">
+        <span class="ok-msg">✓ Valid</span>
+      </div>
+      <p style="font-size:11px;color:var(--ok)">Red border + message on error. Green border on valid. Clear and immediate.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ Section 6: Loading States ═══════ -->
+<div id="sec-loading" class="section" style="display:none">
+  <div class="section-title">Fix G — Button Loading States</div>
+  <div class="section-subtitle">Submit buttons show spinner + disable during API calls. Prevents double-submit and gives visual feedback.</div>
+  <div class="loading-demo">
+    <div>
+      <h4 style="margin-bottom:12px">❌ Before</h4>
+      <button class="btn-loading">Save Payment</button>
+      <p style="font-size:11px;color:var(--err);margin-top:8px">No feedback. User clicks again → duplicate submission.</p>
+    </div>
+    <div>
+      <h4 style="margin-bottom:12px">✅ After</h4>
+      <button class="btn-loading" disabled>
+        <svg class="spin" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+        Saving...
+      </button>
+      <p style="font-size:11px;color:var(--ok);margin-top:8px">Spinner + disabled. User knows it's working. No double-submit.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ Section 7: Table Scroll ═══════ -->
+<div id="sec-table-scroll" class="section" style="display:none">
+  <div class="section-title">Fix H — Horizontal Scroll for Wide Tables</div>
+  <div class="section-subtitle">Tables wrapped in scroll container. First column sticks on mobile for context.</div>
+  <div style="padding:16px 24px">
+    <h4 style="margin-bottom:8px">✅ After — Scrollable table wrapper</h4>
+    <div class="table-wrapper-demo">
+      <table>
+        <thead><tr><th>Date</th><th>Emp ID</th><th>Name</th><th>Payout Mobile</th><th>Method</th><th>Amount</th><th>Actions</th></tr></thead>
+        <tbody>
+          <tr><td>Jul 02</td><td>01829157470</td><td>A. Aziz</td><td>01829157470</td><td>cash</td><td>৳1</td><td><div class="row-actions"><button class="btn-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button><button class="btn-icon edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button><button class="btn-icon danger"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></div></td></tr>
+          <tr><td>Jul 02</td><td>01889425834</td><td>MD. Rubel</td><td>01889425834</td><td>bkash</td><td>৳700</td><td><div class="row-actions"><button class="btn-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button><button class="btn-icon edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button><button class="btn-icon danger"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:11px;color:var(--ok);margin-top:8px">Table scrolls horizontally inside wrapper. First column can stick on mobile. No page-level overflow.</p>
+  </div>
+</div>
+
+<!-- ═══════ Section 8: Sidebar ═══════ -->
+<div id="sec-sidebar" class="section" style="display:none">
+  <div class="section-title">Fix F — Mobile Sidebar with Hamburger Toggle</div>
+  <div class="section-subtitle">Desktop: sidebar always visible. Mobile: hidden by default, slides in with overlay backdrop.</div>
+  <div style="padding:16px 24px">
+    <h4 style="margin-bottom:8px">Desktop (≥769px) — Sidebar always visible</h4>
+    <div class="sidebar-demo">
+      <div class="sidebar">
+        <button class="active">📊 Overview</button>
+        <button>📋 Transactions</button>
+        <button>👥 Employees</button>
+        <button>➕ Add Employee</button>
+        <button>💵 Income</button>
+        <button>⚙️ Admin</button>
+      </div>
+      <div class="content">
+        <h3>Transactions</h3>
+        <p style="color:var(--muted);font-size:12px;margin-top:8px">Main content area. Sidebar stays visible on desktop.</p>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <h4 style="margin-bottom:8px">Mobile (≤768px) — Hamburger toggle (resize browser to see)</h4>
+    <div class="sidebar-demo" style="position:relative">
+      <button class="hamburger" onclick="this.parentElement.querySelector('.sidebar').classList.toggle('open')">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="sidebar">
+        <button class="active">📊 Overview</button>
+        <button>📋 Transactions</button>
+        <button>👥 Employees</button>
+        <button>➕ Add Employee</button>
+        <button>💵 Income</button>
+        <button>⚙️ Admin</button>
+      </div>
+      <div class="content">
+        <h3>Transactions</h3>
+        <p style="color:var(--muted);font-size:12px;margin-top:8px">Tap hamburger ☰ to open sidebar. Overlay backdrop closes it.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ Section 9: All Features Summary ═══════ -->
+<div id="sec-features" class="section" style="display:none">
+  <div class="section-title">All Fixes Summary</div>
+  <div class="features">
+    <div class="feature-card">
+      <span class="fix-tag critical">FIX A — CRITICAL</span>
+      <h4>Modal Height + Scroll</h4>
+      <ul>
+        <li class="bad">Cancel/Save buttons off-screen</li>
+        <li>max-height:90vh caps modal height</li>
+        <li>Flex column: header pinned, body scrolls, footer pinned</li>
+        <li>Animation: modalIn 0.2s scale+fade</li>
+      </ul>
+    </div>
+    <div class="feature-card">
+      <span class="fix-tag critical">FIX B — CRITICAL</span>
+      <h4>Remove Broken Landscape Query</h4>
+      <ul>
+        <li class="bad">main max-height:490px at 870px width</li>
+        <li>Remove @media(max-width:900px) landscape rule</li>
+        <li>main: overflow-y:auto, no max-height</li>
+        <li>Natural page scroll on all viewports</li>
+      </ul>
+    </div>
+    <div class="feature-card">
+      <span class="fix-tag high">FIX C — HIGH</span>
+      <h4>Icon Buttons for Table Rows</h4>
+      <ul>
+        <li class="bad">3 text buttons = 180px per row</li>
+        <li>3 SVG icon buttons = 100px per row</li>
+        <li>Hover colors: blue=edit, red=delete</li>
+        <li>Tooltip + aria-label for accessibility</li>
+      </ul>
+    </div>
+    <div class="feature-card">
+      <span class="fix-tag high">FIX D — HIGH</span>
+      <h4>Responsive Modal Sizing</h4>
+      <ul>
+        <li>Desktop: centered, 520px wide</li>
+        <li>Tablet: 92vw, max 88vh</li>
+        <li>Mobile: bottom sheet, slides up</li>
+        <li>16px font on inputs (iOS zoom prevention)</li>
+      </ul>
+    </div>
+    <div class="feature-card">
+      <span class="fix-tag high">FIX E — HIGH</span>
+      <h4>Detail Panel Pinned Actions</h4>
+      <ul>
+        <li class="bad">Action buttons scroll with content</li>
+        <li>Flex column: header + scroll body + footer</li>
+        <li>Action buttons always visible at bottom</li>
+        <li>Mobile: full-width panel</li>
+      </ul>
+    </div>
+    <div class="feature-card">
+      <span class="fix-tag medium">FIX F — MEDIUM</span>
+      <h4>Mobile Sidebar Toggle</h4>
+      <ul>
+        <li class="bad">No hamburger on mobile currently</li>
+        <li>Hamburger button in header</li>
+        <li>Sidebar slides in with overlay backdrop</li>
+        <li>Body scroll locked when sidebar open</li>
+      </ul>
+    </div>
+    <div class="feature-card">
+      <span class="fix-tag medium">FIX G — MEDIUM</span>
+      <h4>Validation + Loading States</h4>
+      <ul>
+        <li class="bad">No inline validation feedback</li>
+        <li>Red border + error message on invalid fields</li>
+        <li>Green border on valid fields</li>
+        <li>Spinner + disabled on submit buttons</li>
+      </ul>
+    </div>
+    <div class="feature-card">
+      <span class="fix-tag medium">FIX H — MEDIUM</span>
+      <h4>Table Scroll Wrapper</h4>
+      <ul>
+        <li class="bad">Wide tables cause page-level overflow</li>
+        <li>Tables wrapped in scroll container</li>
+        <li>min-width:600px forces horizontal scroll</li>
+        <li>First column sticky on mobile</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+function showSection(id) {
+  document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
+  const el = document.getElementById('sec-' + id);
+  if (el) el.style.display = 'block';
+  document.querySelectorAll('.preview-controls button').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

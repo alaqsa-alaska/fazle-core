@@ -289,9 +289,9 @@ td.actions{white-space:nowrap;text-align:center}
             <option value="">All Status</option>
             <option value="draft">Pending (Draft)</option>
             <option value="confirmed">Confirmed</option>
-            <option value="Running">Running</option>
-            <option value="Assigned">Assigned</option>
-            <option value="Completed">Completed</option>
+            <option value="assigned">Assigned</option>
+            <option value="running">Running</option>
+            <option value="completed">Completed</option>
             <option value="cancelled">Cancelled</option>
           </select>
           <input type="date" id="startFrom" onchange="loadRoster()" title="Start date from">
@@ -319,6 +319,7 @@ td.actions{white-space:nowrap;text-align:center}
                 <th>R. Point</th>
                 <th onclick="setSort('total')">Conv.<span class="sort-icon"></span></th>
                 <th onclick="setSort('total')">Total<span class="sort-icon"></span></th>
+                <th>Net</th>
                 <th>Status</th>
                 <th class="actions">Actions</th>
               </tr>
@@ -344,7 +345,12 @@ td.actions{white-space:nowrap;text-align:center}
     <div id="tab-slips" style="display:none">
       <div class="card">
         <h2>📄 Pending Slip Reviews</h2>
-        <div id="slipQueue"><p style="color:var(--muted);padding:16px">Load slip matches by querying the API…</p></div>
+        <div id="slipQueue"><p style="color:var(--muted);padding:16px">Loading…</p></div>
+        <div id="slipQueuePager" style="margin-top:12px;display:none">
+          <button onclick="slipQueuePrev()" id="slipPrevBtn">← Prev</button>
+          <span id="slipPageInfo" style="margin:0 8px"></span>
+          <button onclick="slipQueueNext()" id="slipNextBtn">Next →</button>
+        </div>
       </div>
     </div>
 
@@ -616,6 +622,7 @@ function switchTab(name) {
     b.classList.toggle('active', ['roster','kanban','slips','calc','config'][i] === name);
   });
   if (name==='kanban') loadKanban();
+  if (name==='slips') loadSlipQueue();
   if (name==='config') { loadConfig(); loadEscortClients(); }
 }
 
@@ -707,6 +714,7 @@ function renderRosterRows(items) {
       <td style="font-size:12px">${esc(r.release_point||'—')}</td>
       <td class="num">${r.conveyance != null ? '৳'+fmt(r.conveyance) : '—'}</td>
       <td class="num" style="font-weight:700;color:var(--accent)">${r.total != null ? '৳'+fmt(r.total) : '—'}</td>
+      <td class="num" style="font-size:12px;color:${(r.roster_status==='completed'&&r.net_payable>0)?'#27ae60':'var(--muted)'}">${(r.roster_status==='completed'&&r.net_payable>0) ? '৳'+fmt(r.net_payable) : '—'}</td>
       <td><span class="status-badge ${sc}">${_statusLabel}</span></td>
       <td class="actions">
         <button class="btn-icon" title="View details" onclick="openDetail(${r.program_id})">🔍</button>
@@ -1178,6 +1186,87 @@ setInterval(() => {
     loadSummary();
   }
 }, 60000);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slip Queue (Task 5d)
+// ─────────────────────────────────────────────────────────────────────────
+let slipQueuePage = 1;
+let slipQueuePages = 1;
+
+async function loadSlipQueue() {
+  const container = document.getElementById('slipQueue');
+  const pager = document.getElementById('slipQueuePager');
+  try {
+    const d = await apiGet(`/api/escort-roster/slip-queue?page=${slipQueuePage}&page_size=25`);
+    slipQueuePages = d.pages || 1;
+    if (!d.items || d.items.length === 0) {
+      container.innerHTML = '<p style="color:var(--muted);padding:16px">✅ No pending slip reviews</p>';
+      pager.style.display = 'none';
+      return;
+    }
+    pager.style.display = '';
+    document.getElementById('slipPageInfo').textContent = `Page ${d.page} of ${d.pages} (${d.total} total)`;
+    document.getElementById('slipPrevBtn').disabled = d.page <= 1;
+    document.getElementById('slipNextBtn').disabled = d.page >= d.pages;
+
+    container.innerHTML = d.items.map(item => {
+      const conf = item.confidence != null ? (item.confidence * 100).toFixed(0) + '%' : '—';
+      const matchConf = item.match_confidence != null ? (item.match_confidence * 100).toFixed(0) + '%' : '—';
+      const docType = item.document_type || 'unknown';
+      const badgeColor = docType === 'printed_template_slip' ? '#27ae60' : docType === 'handwritten_blank_slip' ? '#e67e22' : '#95a5a6';
+      const rawText = item.raw_text ? item.raw_text.substring(0, 300).replace(/</g,'&lt;') : '';
+      const hasMatch = item.match_id != null;
+      const matchInfo = hasMatch ? `
+        <div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:6px">
+          <strong>Matched Program #${item.program_id}</strong> (${matchConf} confidence)<br>
+          MV: ${item.prog_mv || '—'} | LV: ${item.prog_lv || '—'} | Escort: ${item.prog_escort_name || '—'} | Status: ${item.prog_status || '—'}<br>
+          <button onclick="confirmSlip(${item.match_id})" style="margin-top:4px;background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">✅ Confirm</button>
+          <button onclick="rejectSlip(${item.match_id})" style="margin-top:4px;background:#e74c3c;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">❌ Reject</button>
+        </div>` : '<p style="color:var(--muted);margin-top:8px">No program match found — manual review needed</p>';
+      return `
+        <div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="background:${badgeColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${docType}</span>
+            <span style="color:var(--muted);font-size:12px">${item.created_at || ''} · OCR conf: ${conf}</span>
+          </div>
+          <div style="margin-top:8px">
+            <strong>MV:</strong> ${item.mother_vessel || '—'} |
+            <strong>LV:</strong> ${item.lighter_vessel || '—'} |
+            <strong>Escort:</strong> ${item.escort_name || '—'} ${item.escort_mobile || ''}<br>
+            <strong>Master:</strong> ${item.master_mobile || '—'} |
+            <strong>Start:</strong> ${item.start_date || '—'} |
+            <strong>Release:</strong> ${item.completion_date || '—'} @ ${item.release_place || '—'}
+          </div>
+          ${rawText ? `<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted)">Raw OCR text</summary><pre style="font-size:11px;white-space:pre-wrap;background:#f9f9f9;padding:8px;border-radius:4px">${rawText}…</pre></details>` : ''}
+          ${matchInfo}
+        </div>`;
+    }).join('');
+  } catch(e) {
+    container.innerHTML = `<p style="color:#e74c3c;padding:16px">Error loading slip queue: ${e.message}</p>`;
+    pager.style.display = 'none';
+  }
+}
+
+async function confirmSlip(matchId) {
+  try {
+    await apiPost(`/api/escort-roster/slip-queue/${matchId}/confirm`, {});
+    toast('ok', 'Slip match confirmed');
+    loadSlipQueue();
+    loadSummary();
+  } catch(e) { toast('err', 'Confirm failed: ' + e.message); }
+}
+
+async function rejectSlip(matchId) {
+  try {
+    await apiPost(`/api/escort-roster/slip-queue/${matchId}/reject`, {});
+    toast('ok', 'Slip match rejected');
+    loadSlipQueue();
+    loadSummary();
+  } catch(e) { toast('err', 'Reject failed: ' + e.message); }
+}
+
+function slipQueuePrev() { if (slipQueuePage > 1) { slipQueuePage--; loadSlipQueue(); } }
+function slipQueueNext() { if (slipQueuePage < slipQueuePages) { slipQueuePage++; loadSlipQueue(); } }
 </script>
 </body>
 </html>

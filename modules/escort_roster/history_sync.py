@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.database import execute, fetch_all, fetch_one, fetch_val
+from modules.escort import DEST_ALIASES, normalize_destination
 
 log = logging.getLogger("fazle.escort_roster.history_sync")
 
@@ -53,12 +54,8 @@ _MSG_RE = re.compile(
 _MOBILE_RAW = re.compile(r"\b(01[3-9][\d\s\-]{8,12})\b")
 _MOBILE_CLEAN = re.compile(r"\D")
 
-# Date + optional shift
-_DATE_SHIFT_RE = re.compile(
-    r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\s*"
-    r"[\(\s]*([DNdn](?:ay|ight)?)\s*[\)]*"
-)
-_DATE_ONLY_RE = re.compile(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})")
+# Date + optional shift — Task 10: import from calculations (single source of truth)
+from .calculations import DATE_SHIFT_FULL_RE as _DATE_SHIFT_RE, DATE_ONLY_RE as _DATE_ONLY_RE
 
 # Mother-vessel prefix
 _MV_PREFIX_RE = re.compile(
@@ -82,17 +79,8 @@ NOISE_LINES = {"al aqsa surveillance force", "al-aqsa security service",
                "al aqsa", "al-aqsa", "al aqsa security", "al-aqsa surveillance",
                "al aqsa security service"}
 
-DESTINATIONS = {
-    "narayanganj": "Narayanganj", "n.ganj": "Narayanganj",
-    "noapara": "Noapara", "n.para": "Noapara",
-    "nagarbari": "Nagarbari", "aricha": "Aricha",
-    "bhairab": "Bhairab", "ashuganj": "Ashuganj",
-    "chandpur": "Chandpur", "barishal": "Barishal",
-    "barisal": "Barishal", "mongla": "Mongla",
-    "rupshi": "Rupshi", "rupsi": "Rupshi",
-    "kachpur": "Kachpur", "k/dia": "Kachpur",
-    "chittagong": "Chittagong", "ctg": "Chittagong",
-}
+# Destination keywords — use canonical DEST_ALIASES from modules.escort (Task 9)
+DESTINATIONS = {v.lower(): v for _, v in DEST_ALIASES}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes

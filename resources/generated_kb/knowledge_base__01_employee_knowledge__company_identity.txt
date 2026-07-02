@@ -1,6 +1,6 @@
 Source: knowledge_base/01_employee_knowledge/company_identity.md
-SHA256: 584902cd0ef0432fdd3672f0aeb5d3c6d3f5e12b660ab4c209bc1f18fd20d8e7
-Version: 584902cd0ef0
+SHA256: 10d2b53c3843122315caaadf6ff012d62ac7886c1a1632598b99b5c2612f4cf6
+Version: 10d2b53c3843
 
 # Company Identity
 
@@ -21,6 +21,17 @@ This article is visible to employees, candidates, clients, and public-facing AI 
 - WhatsApp: 01958-122322
 - Office hours: সকাল ৯টা - বিকাল ৫টা
 - Weekly holiday: Friday
+
+## হেল্পলাইন নম্বর
+
+| নম্বর | ব্যবহার |
+|-------|---------|
+| 01958-122322 | প্রধান হেল্পলাইন (WhatsApp) |
+| 01958-122311 | সহায়তা লাইন ১ |
+| 01958-122301 | সহায়তা লাইন ২ |
+| 01958-122302 | সহায়তা লাইন ৩ |
+
+> অনুমোদিত: C-08 সিদ্ধান্ত, ২০২৬-০৬-১৯
 
 ## Services
 Al-Aqsa Security provides security guard, escort, survey scout, logistics support, and cargo guarding services in the Chittagong port area.

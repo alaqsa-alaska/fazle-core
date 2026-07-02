@@ -25,6 +25,8 @@ import re
 from datetime import date
 from typing import Any, Optional
 
+from modules.escort import DEST_ALIASES, normalize_destination
+
 log = logging.getLogger("fazle.escort_roster.extractor")
 
 
@@ -35,31 +37,15 @@ log = logging.getLogger("fazle.escort_roster.extractor")
 # BD mobile numbers (01XXXXXXXXX — 11 digits starting with 01)
 _MOBILE_RE = re.compile(r"\b(01[3-9]\d{8})\b")
 
-# Date with optional shift: 13.05.2026(D) | 13.05.2026(N) | 13.05.26(D)
-_DATE_SHIFT_RE = re.compile(
-    r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\s*\(\s*([DNdn])\s*\)"
-)
-# Date only
-_DATE_ONLY_RE = re.compile(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})")
+# Task 10: import date-shift regex from calculations (single source of truth)
+from .calculations import DATE_SHIFT_RE as _DATE_SHIFT_RE, DATE_ONLY_RE as _DATE_ONLY_RE
 
 # Serial number prefix: "07." or "7." at line start
 _SERIAL_LINE_RE = re.compile(r"^\s*(\d{1,3})\.\s*(.+)$", re.MULTILINE)
 
-# Destination keywords (expandable)
-DESTINATIONS = {
-    "narayanganj": "Narayanganj",
-    "noapara":     "Noapara",
-    "nagarbari":   "Nagarbari",
-    "aricha":      "Aricha",
-    "bhairab":     "Bhairab",
-    "ashuganj":    "Ashuganj",
-    "chandpur":    "Chandpur",
-    "barishal":    "Barishal",
-    "barisal":     "Barishal",
-    "mongla":      "Mongla",
-    "chittagong":  "Chittagong",
-    "ctg":         "Chittagong",
-}
+# Destination keywords — use canonical DEST_ALIASES from modules.escort (Task 9)
+# Build a simple lookup dict from the canonical destination names
+DESTINATIONS = {v.lower(): v for _, v in DEST_ALIASES}
 
 # English letter pattern (for mother vessel detection)
 _LATIN_RE = re.compile(r"[A-Za-z]")

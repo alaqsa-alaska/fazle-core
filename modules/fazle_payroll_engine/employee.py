@@ -385,8 +385,8 @@ async def create_employee_manual(
                 """
                 INSERT INTO fpe_employees
                     (full_name, name_normalized, primary_phone, employee_id_phone,
-                     department, status, created_source, resolution_status)
-                VALUES ($1, $2, $3, $4, $5, $6, 'admin_manual_create', 'resolved')
+                     department, status, created_source, resolution_status, basic_salary)
+                VALUES ($1, $2, $3, $4, $5, $6, 'admin_manual_create', 'resolved', 10000)
                 RETURNING id
                 """,
                 clean_name,
@@ -495,9 +495,9 @@ async def _auto_create_employee(
                 """
                 INSERT INTO fpe_employees
                     (full_name, name_normalized, primary_phone, employee_id_phone,
-                     status, created_source, resolution_status)
+                     status, created_source, resolution_status, basic_salary)
                 VALUES ($1, $2, $3, $4, 'active', 'whatsapp_auto_create',
-                        'unresolved')
+                        'unresolved', 10000)
                 RETURNING id
                 """,
                 full_name,

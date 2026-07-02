@@ -22,6 +22,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import json
 from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -554,7 +555,8 @@ async def list_employees(
         f"""
         WITH canon AS (
           SELECT e.id, e.employee_code, e.full_name, e.primary_phone,
-                 e.employee_id_phone, e.department, e.status,
+               e.employee_id_phone, e.department, e.status,
+               e.basic_salary, e.designation, e.joining_date,
                  e.created_source, e.created_at
           FROM fpe_employees e
           WHERE {where_sql}
@@ -577,6 +579,13 @@ async def list_employees(
                  ON t.employee_id = mb.member_id AND t.is_reversal = FALSE
           GROUP BY mb.canon_id
         ),
+         ledger_agg AS (
+           SELECT mb.canon_id,
+               COALESCE(SUM(l.total_advance), 0) AS total_advance
+           FROM members mb
+           LEFT JOIN fpe_employee_ledger l ON l.employee_id = mb.member_id
+           GROUP BY mb.canon_id
+         ),
         aliases AS (
           SELECT mb.canon_id,
                  array_agg(DISTINCT a.alias_value)
@@ -588,10 +597,12 @@ async def list_employees(
         SELECT c.*,
                COALESCE(ag.total_transactions, 0) AS total_transactions,
                COALESCE(ag.total_paid, 0)         AS total_paid,
+             COALESCE(la.total_advance, 0)      AS total_advance,
                ag.last_payment_date,
                al.name_aliases
         FROM canon c
         LEFT JOIN agg     ag ON ag.canon_id = c.id
+         LEFT JOIN ledger_agg la ON la.canon_id = c.id
         LEFT JOIN aliases al ON al.canon_id = c.id
         ORDER BY {outer_order}
         """,
@@ -615,6 +626,11 @@ async def list_employees(
         d["name_aliases"] = name_aliases
         d["total_transactions"] = int(d["total_transactions"] or 0)
         d["total_paid"] = float(d["total_paid"] or 0)
+        d["total_advance"] = float(d.get("total_advance") or 0)
+        d["net_balance"] = d["total_paid"] - d["total_advance"]
+        d["basic_salary"] = float(d.get("basic_salary") or 0)
+        d["designation"] = d.get("designation")
+        d["joining_date"] = d["joining_date"].isoformat() if d.get("joining_date") else None
         d["last_payment_date"] = (
             d["last_payment_date"].isoformat() if d.get("last_payment_date") else None
         )
@@ -2124,6 +2140,70 @@ async def admin_review_summary():
     }
 
 
+@router.get("/admin/salary/summary", dependencies=[Depends(_require_api_key)])
+async def admin_salary_summary():
+    """Return salary baseline summary for payroll admin controls."""
+    row = await fetch_one(
+        """
+        SELECT
+            COUNT(*)::bigint AS total_employees,
+            COUNT(*) FILTER (WHERE basic_salary = 10000)::bigint AS salary_10000_count,
+            COUNT(*) FILTER (WHERE basic_salary <> 10000)::bigint AS non_10000_count,
+            COALESCE(MIN(basic_salary), 0)::numeric AS min_salary,
+            COALESCE(MAX(basic_salary), 0)::numeric AS max_salary
+        FROM fpe_employees
+        """
+    )
+    return {
+        "total_employees": int(row["total_employees"] if row else 0),
+        "salary_10000_count": int(row["salary_10000_count"] if row else 0),
+        "non_10000_count": int(row["non_10000_count"] if row else 0),
+        "min_salary": float(row["min_salary"] if row else 0),
+        "max_salary": float(row["max_salary"] if row else 0),
+    }
+
+
+@router.post("/admin/salary/apply-uniform", dependencies=[Depends(_require_api_key)])
+async def admin_apply_uniform_salary(payload: dict):
+    """Set one salary value for all employees and record an audit event."""
+    amount = Decimal(str(payload.get("amount", "10000")))
+    if amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+
+    actor = (payload.get("applied_by") or "admin_ui").strip() or "admin_ui"
+    changed = await fetch_val(
+        "WITH updated AS ("
+        "  UPDATE fpe_employees "
+        "  SET basic_salary = $1, updated_at = NOW() "
+        "  WHERE basic_salary IS DISTINCT FROM $1 "
+        "  RETURNING 1"
+        ") SELECT COUNT(*) FROM updated",
+        amount,
+    )
+    if changed is None:
+        changed = 0
+
+    total = await fetch_val("SELECT COUNT(*) FROM fpe_employees") or 0
+    await execute(
+        """
+        INSERT INTO fpe_accounting_audit_logs
+            (entity_type, entity_id, action, before_state, after_state, performed_by, reason)
+        VALUES ('employee_salary', 0, 'bulk_set_uniform_salary', $1, $2, $3, $4)
+        """,
+        json.dumps({"target_amount": str(amount)}),
+        json.dumps({"total_employees": int(total), "target_amount": str(amount)}),
+        actor,
+        "phase_2_uniform_salary_apply",
+    )
+
+    return {
+        "status": "ok",
+        "applied_amount": float(amount),
+        "total_employees": int(total),
+        "changed_rows": int(changed),
+    }
+
+
 @router.get("/admin/audit", dependencies=[Depends(_require_api_key)])
 async def admin_audit_list(
     review_item_id: Optional[int] = Query(None),
@@ -2366,7 +2446,7 @@ async def list_income_transactions(
     ps = page_size
     offset = (page - 1) * ps
 
-    conditions = ["1=1"]
+    conditions = ["t.deleted_at IS NULL"]
     params: list = []
     i = 1
 
@@ -2469,7 +2549,8 @@ async def get_income_transaction(income_id: int):
                (t.employee_id IS NOT NULL AND e.created_source = 'income_command') AS auto_created_employee
         FROM fpe_income_transactions t
         LEFT JOIN fpe_employees e ON e.id = t.employee_id
-        WHERE t.id = $1
+                WHERE t.id = $1
+                    AND t.deleted_at IS NULL
         """,
         income_id,
     )
@@ -2500,6 +2581,97 @@ async def create_income_transaction(req: IncomeCreateRequest):
     mobile = normalize_bd_phone(req.mobile_number or "") if req.mobile_number else None
     period = txn_date.strftime("%Y-%m")
 
+    employee_id: Optional[int] = None
+    if mobile:
+        # Canonical-aware phone evidence: primary/ID phone + phone aliases.
+        phone_rows = await fetch_all(
+            """
+            SELECT e.id, e.canonical_employee_id
+            FROM fpe_employees e
+            LEFT JOIN fpe_employee_aliases ap
+              ON ap.employee_id = e.id AND ap.alias_type = 'phone'
+            WHERE e.status = 'active'
+              AND (
+                e.employee_id_phone = $1
+                OR e.primary_phone = $1
+                OR ap.alias_value = $1
+              )
+            LIMIT 5
+            """,
+            mobile,
+        )
+        canon_ids: set[int] = set()
+        for row in phone_rows:
+            canon = await _resolve_canonical(dict(row))
+            canon_ids.add(int(canon["id"]))
+        if len(canon_ids) == 1:
+            employee_id = next(iter(canon_ids))
+
+        if employee_id is None:
+            emp = await fetch_one(
+                "SELECT e.id, e.canonical_employee_id "
+                "FROM fpe_cash_transactions t "
+                "JOIN fpe_employees e ON e.id = t.employee_id "
+                "WHERE t.payout_phone = $1 AND t.employee_id IS NOT NULL "
+                "ORDER BY t.txn_date DESC, t.id DESC LIMIT 1",
+                mobile,
+            )
+            if emp:
+                canon = await _resolve_canonical(dict(emp))
+                employee_id = int(canon["id"])
+
+    if employee_id is None:
+        name_norm = normalize_name(clean_name)
+        if name_norm:
+            if mobile:
+                # Strongest signal: exact normalized name + matching phone evidence.
+                name_phone_rows = await fetch_all(
+                    """
+                    SELECT e.id, e.canonical_employee_id
+                    FROM fpe_employees e
+                    LEFT JOIN fpe_employee_aliases an
+                      ON an.employee_id = e.id AND an.alias_type = 'name'
+                    LEFT JOIN fpe_employee_aliases ap
+                      ON ap.employee_id = e.id AND ap.alias_type = 'phone'
+                    WHERE e.status = 'active'
+                      AND (e.name_normalized = $1 OR an.alias_value = $1)
+                      AND (
+                        e.employee_id_phone = $2
+                        OR e.primary_phone = $2
+                        OR ap.alias_value = $2
+                      )
+                    LIMIT 5
+                    """,
+                    name_norm,
+                    mobile,
+                )
+                canon_ids: set[int] = set()
+                for row in name_phone_rows:
+                    canon = await _resolve_canonical(dict(row))
+                    canon_ids.add(int(canon["id"]))
+                if len(canon_ids) == 1:
+                    employee_id = next(iter(canon_ids))
+
+            if employee_id is None:
+                name_rows = await fetch_all(
+                    """
+                    SELECT e.id, e.canonical_employee_id
+                    FROM fpe_employees e
+                    LEFT JOIN fpe_employee_aliases an
+                      ON an.employee_id = e.id AND an.alias_type = 'name'
+                    WHERE e.status = 'active'
+                      AND (e.name_normalized = $1 OR an.alias_value = $1)
+                    LIMIT 5
+                    """,
+                    name_norm,
+                )
+                canon_ids: set[int] = set()
+                for row in name_rows:
+                    canon = await _resolve_canonical(dict(row))
+                    canon_ids.add(int(canon["id"]))
+                if len(canon_ids) == 1:
+                    employee_id = next(iter(canon_ids))
+
     # Pack income_head and money_received_by into source_message_text
     source_text = f"[{req.income_head.strip()}] Received by: {req.money_received_by.strip()}"
 
@@ -2521,12 +2693,13 @@ async def create_income_transaction(req: IncomeCreateRequest):
         new_id = await conn.fetchval(
             """
             INSERT INTO fpe_income_transactions
-                (txn_ref, employee_name_raw, amount, txn_date, accounting_period,
+                (txn_ref, employee_id, employee_name_raw, amount, txn_date, accounting_period,
                  reported_by_phone, source_message_text)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             """,
             txn_ref,
+            employee_id,
             clean_name,
             Decimal(str(req.amount)),
             txn_date,
@@ -2667,8 +2840,7 @@ async def operator_submit(req: OperatorSubmitRequest):
         """
         UPDATE fpe_unmatched_messages
         SET promoted_txn_id = $2,
-            resolved_employee_id = $3,
-            updated_at = NOW()
+            resolved_employee_id = $3
         WHERE id = $1
         """,
         new_id, pending_txn.id, req.employee_id,

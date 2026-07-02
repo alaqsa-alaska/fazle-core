@@ -794,3 +794,58 @@ async def soft_delete_transaction(
 
     log.info("[admin_txn] soft-deleted txn id=%d by=%s", txn_id, deleted_by)
     return {"ok": True, "transaction_id": txn_id, "deleted_at": now.isoformat()}
+
+
+@router.delete("/income/{income_id}")
+async def soft_delete_income(
+    income_id: int = Path(..., ge=1),
+    deleted_by: str = Query("admin_manual"),
+    key: str = Depends(_require_api_key),
+):
+    """
+    Soft-delete an income transaction.
+    Sets deleted_at/deleted_by and preserves row history.
+    """
+    actor = await _require_transaction_mutation_access(key, "delete income")
+
+    row = await fetch_one(
+        "SELECT id, txn_ref, amount, txn_date, accounting_period, deleted_at "
+        "FROM fpe_income_transactions WHERE id = $1",
+        income_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Income transaction {income_id} not found")
+    if row["deleted_at"] is not None:
+        raise HTTPException(status_code=409, detail="Income transaction already deleted")
+
+    now = datetime.utcnow()
+    await execute(
+        "UPDATE fpe_income_transactions SET deleted_at = $1, deleted_by = $2 WHERE id = $3",
+        now,
+        deleted_by,
+        income_id,
+    )
+
+    await execute(
+        """
+        INSERT INTO fpe_accounting_audit_logs
+            (entity_type, entity_id, action, before_state, performed_by, reason)
+        VALUES ('income_transaction', $1, 'admin_soft_delete', $2::jsonb, $3, $4)
+        """,
+        income_id,
+        json.dumps(
+            {
+                "id": income_id,
+                "txn_ref": row["txn_ref"],
+                "amount": str(row["amount"]),
+                "txn_date": row["txn_date"],
+                "accounting_period": row["accounting_period"],
+            },
+            default=_json_default,
+        ),
+        _actor_label(actor),
+        f"module=payroll; deleted_by={deleted_by}",
+    )
+
+    log.info("[admin_txn] soft-deleted income id=%d by=%s", income_id, deleted_by)
+    return {"ok": True, "income_id": income_id, "deleted_at": now.isoformat()}

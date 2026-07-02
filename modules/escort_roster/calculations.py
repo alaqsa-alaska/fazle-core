@@ -121,6 +121,15 @@ _DATE_SHIFT_RE = re.compile(
 # Matches: 13.05.2026 | 13/05/2026 | 13-05-2026
 _DATE_ONLY_RE = re.compile(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})")
 
+# Task 10: Public exports for cross-module reuse
+DATE_SHIFT_RE = _DATE_SHIFT_RE
+DATE_ONLY_RE = _DATE_ONLY_RE
+# Extended variant that also matches bare "Day"/"Night" suffix (used by history_sync)
+DATE_SHIFT_FULL_RE = re.compile(
+    r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\s*"
+    r"[\(\s]*([DNdn](?:ay|ight)?)\s*[\)]*"
+)
+
 
 def parse_date_shift(text: str) -> tuple[Optional[date], Optional[str]]:
     """

@@ -80,6 +80,38 @@ async def _get_shift_rate() -> Decimal:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Shift log helper
+# ────────────────────────────────────────────────────────────────────────────
+
+async def _write_shift_log(
+    program_id: int,
+    shift_date: date,
+    shift: str,
+    log_type: str,
+    notes: Optional[str] = None,
+    recorded_by: str = "system",
+) -> None:
+    """Insert a shift log entry. ON CONFLICT DO NOTHING keeps it idempotent."""
+    try:
+        await execute(
+            """
+            INSERT INTO escort_shift_logs
+                (program_id, shift_date, shift, log_type, notes, recorded_by)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT DO NOTHING
+            """,
+            program_id,
+            shift_date,
+            (shift or "D").upper()[:1],
+            log_type,
+            notes,
+            recorded_by,
+        )
+    except Exception as e:
+        log.debug(f"[escort_roster] _write_shift_log skipped: {e}")
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Core sync
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -148,6 +180,11 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
         program_id,
     )
 
+    # food_bill + net_payable from source program (migration 018 columns)
+    food_bill_val = float(prog.get("food_bill") or 0)
+    roster_total = float(pay.get("total") or 0)
+    net_payable_val = max(roster_total - food_bill_val, 0.0)
+
     if existing:
         old_version = existing["calc_version"]
         await execute(
@@ -172,6 +209,8 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
                 roster_status       = $18,
                 calc_version        = $19,
                 escort_employee_id  = $20,
+                food_bill           = $21,
+                net_payable         = $22,
                 last_synced_at      = NOW(),
                 updated_at          = NOW()
             WHERE program_id = $1
@@ -196,6 +235,8 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
             roster_status,
             old_version + 1,
             prog.get("escort_employee_id"),
+            food_bill_val,
+            net_payable_val,
         )
         action = "sync_update"
     else:
@@ -207,9 +248,9 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
                 start_date, start_shift, end_date, end_shift,
                 total_shifts, total_days, salary, conveyance, total,
                 release_point, roster_status, escort_employee_id,
-                calc_version, last_synced_at
+                food_bill, net_payable, calc_version, last_synced_at
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,1,NOW()
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1,NOW()
             )
             """,
             program_id,
@@ -231,8 +272,18 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
             prog.get("release_point") or prog.get("release_location"),
             roster_status,
             prog.get("escort_employee_id"),
+            food_bill_val,
+            net_payable_val,
         )
         action = "sync_insert"
+
+    # Write shift log entries so the detail timeline has real data
+    if roster_status == "active" and start_date:
+        await _write_shift_log(program_id, start_date, start_shift, "start",
+                               f"Duty started on {prog.get('mother_vessel','')}", actor)
+    elif roster_status == "completed" and end_date:
+        await _write_shift_log(program_id, end_date, end_shift, "release",
+                               f"Released at {prog.get('release_point','')}", actor)
 
     await log_audit(
         program_id=program_id,
@@ -385,9 +436,9 @@ async def get_roster_list(
         idx += 1
 
     if status:
-        # Filter on the operational program status, not the payroll roster_status
-        conditions.append(f"p.status = ${idx}")
-        params.append(status)  # preserve case (Running, Assigned, Completed, etc.)
+        # Case-insensitive match — wbom_escort_programs uses mixed case (Running, Assigned, Completed)
+        conditions.append(f"LOWER(p.status) = LOWER(${idx})")
+        params.append(status)
         idx += 1
 
     if start_from:
@@ -584,6 +635,7 @@ async def update_roster_entry(
                 UPDATE escort_roster_entries SET
                     total_shifts = $2, total_days = $3,
                     salary = $4, conveyance = $5, total = $6,
+                    net_payable = GREATEST($6 - food_bill, 0),
                     updated_at = NOW()
                 WHERE program_id = $1
                 """,
@@ -702,7 +754,8 @@ async def get_roster_summary() -> dict:
     rows = await fetch_all(
         """
         SELECT roster_status, COUNT(*) AS cnt,
-               COALESCE(SUM(total), 0) AS total_amount
+               COALESCE(SUM(total), 0) AS total_amount,
+               COALESCE(SUM(net_payable), 0) AS net_payable_amount
         FROM escort_roster_entries
         GROUP BY roster_status
         """
@@ -710,33 +763,140 @@ async def get_roster_summary() -> dict:
     by_status: dict = {}
     grand_total = 0.0
     grand_count = 0
+    net_payable_total = 0.0
     for r in rows:
         by_status[r["roster_status"]] = {
             "count": int(r["cnt"]),
             "total_amount": float(r["total_amount"] or 0),
+            "net_payable_amount": float(r["net_payable_amount"] or 0),
         }
         grand_count += int(r["cnt"])
         grand_total += float(r["total_amount"] or 0)
+        net_payable_total += float(r["net_payable_amount"] or 0)
 
     active_programs = await fetch_val(
-        "SELECT COUNT(*) FROM wbom_escort_programs WHERE status IN ('Assigned','Running')"
+        "SELECT COUNT(*) FROM wbom_escort_programs WHERE LOWER(status) IN ('assigned','running')"
     )
-    unmatched_slips = await fetch_val(
-        "SELECT COUNT(*) FROM escort_release_matches WHERE admin_action IS NULL"
+    # Pending slip reviews: extractions with no confirmed match
+    pending_slips = await fetch_val(
+        """SELECT COUNT(DISTINCT se.id) FROM escort_slip_extractions se
+           LEFT JOIN escort_release_matches rm ON rm.extraction_id = se.id
+               AND rm.admin_action IN ('keep', 'reject')
+           WHERE rm.id IS NULL"""
     )
-    # True draft count = programs not yet confirmed/assigned (operational sense)
     true_draft_count = await fetch_val(
-        "SELECT COUNT(*) FROM wbom_escort_programs WHERE status = 'draft'"
+        "SELECT COUNT(*) FROM wbom_escort_programs WHERE LOWER(status) = 'draft'"
     )
 
     return {
         "by_status": by_status,
         "grand_total": grand_count,
         "grand_total_amount": round(grand_total, 2),
+        "net_payable_total": round(net_payable_total, 2),
         "active_programs": int(active_programs or 0),
-        "pending_slip_reviews": int(unmatched_slips or 0),
+        "pending_slip_reviews": int(pending_slips or 0),
         "true_draft_count": int(true_draft_count or 0),
     }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Slip Queue (Task 5)
+# ────────────────────────────────────────────────────────────────────────────
+
+async def get_slip_queue(page: int = 1, page_size: int = 50) -> dict:
+    """Return pending OCR extractions with their best program match candidate."""
+    offset = (page - 1) * page_size
+    rows = await fetch_all(
+        """
+        SELECT
+            se.id          AS extraction_id,
+            se.source_file,
+            se.created_at,
+            se.document_type,
+            se.mother_vessel,
+            se.lighter_vessel,
+            se.master_mobile,
+            se.escort_name,
+            se.escort_mobile,
+            se.start_date,
+            se.completion_date,
+            se.release_place,
+            se.confidence,
+            se.raw_text,
+            rm.id          AS match_id,
+            rm.program_id,
+            rm.match_confidence,
+            rm.match_reason,
+            rm.admin_action,
+            ep.mother_vessel  AS prog_mv,
+            ep.lighter_vessel AS prog_lv,
+            ep.escort_name    AS prog_escort_name,
+            ep.status         AS prog_status
+        FROM escort_slip_extractions se
+        LEFT JOIN LATERAL (
+            SELECT * FROM escort_release_matches
+            WHERE extraction_id = se.id
+            ORDER BY match_confidence DESC NULLS LAST
+            LIMIT 1
+        ) rm ON TRUE
+        LEFT JOIN wbom_escort_programs ep ON ep.program_id = rm.program_id
+        WHERE (rm.admin_action IS NULL OR rm.admin_action = 'pending')
+        ORDER BY se.created_at DESC
+        LIMIT $1 OFFSET $2
+        """,
+        page_size,
+        offset,
+    )
+    total = await fetch_val(
+        """
+        SELECT COUNT(DISTINCT se.id) FROM escort_slip_extractions se
+        LEFT JOIN escort_release_matches rm ON rm.extraction_id = se.id
+            AND rm.admin_action IN ('keep','reject')
+        WHERE rm.id IS NULL
+        """
+    ) or 0
+    items = []
+    for r in rows:
+        item = dict(r)
+        for k, v in item.items():
+            if hasattr(v, "isoformat"):
+                item[k] = v.isoformat()
+        items.append(item)
+    return {
+        "items": items,
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, -(-int(total) // page_size)),
+    }
+
+
+async def confirm_slip_match(match_id: int, admin_phone: str = "system") -> bool:
+    """Set admin_action='keep' on an escort_release_matches row."""
+    result = await execute(
+        """
+        UPDATE escort_release_matches
+        SET admin_action = 'keep', admin_phone = $2, acted_at = NOW()
+        WHERE id = $1 AND (admin_action IS NULL OR admin_action = 'pending')
+        """,
+        match_id,
+        admin_phone,
+    )
+    return "UPDATE 1" in (result or "")
+
+
+async def reject_slip_match(match_id: int, admin_phone: str = "system") -> bool:
+    """Set admin_action='reject' on an escort_release_matches row."""
+    result = await execute(
+        """
+        UPDATE escort_release_matches
+        SET admin_action = 'reject', admin_phone = $2, acted_at = NOW()
+        WHERE id = $1 AND (admin_action IS NULL OR admin_action = 'pending')
+        """,
+        match_id,
+        admin_phone,
+    )
+    return "UPDATE 1" in (result or "")
 
 
 # ────────────────────────────────────────────────────────────────────────────

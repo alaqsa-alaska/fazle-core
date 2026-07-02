@@ -37,14 +37,18 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings, update_repo_env_value
 from app.database import fetch_all
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
 
 from .db import (
+    confirm_slip_match,
     create_roster_entry,
     get_conveyance_config,
     get_roster_detail,
     get_roster_list,
     get_roster_summary,
+    get_slip_queue,
     recalculate_entry,
+    reject_slip_match,
     sync_all_programs,
     sync_program_to_roster,
     update_roster_entry,
@@ -511,13 +515,22 @@ async def api_backfill_files(
 @router.post("", dependencies=[Depends(_require_key)])
 async def api_roster_create(body: CreateRosterEntry):
     """Manually create a new roster entry."""
+    # Task 7: validate and normalise phone numbers
+    data = body.model_dump(exclude_none=True)
+    for field in ("master_mobile", "escort_mobile"):
+        raw = data.get(field)
+        if raw:
+            norm = normalize_bd_phone(raw)
+            if not norm:
+                raise HTTPException(400, detail=f"Invalid Bangladesh mobile number for '{field}': {raw!r}")
+            data[field] = norm
     try:
-        row = await create_roster_entry(body.model_dump(exclude_none=True), actor="api")
+        row = await create_roster_entry(data, actor="api")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     # Ensure escort's FPE employee record exists (non-fatal)
-    escort_mobile = body.model_dump(exclude_none=True).get("escort_mobile")
-    escort_name = body.model_dump(exclude_none=True).get("escort_name")
+    escort_mobile = data.get("escort_mobile")
+    escort_name = data.get("escort_name")
     if escort_mobile:
         try:
             from modules.escort import _resolve_escort_employee_id
@@ -525,6 +538,35 @@ async def api_roster_create(body: CreateRosterEntry):
         except Exception as _fpe_err:
             log.debug("[roster_create] FPE seed non-fatal: %s", _fpe_err)
     return row
+
+
+# ── Slip Queue (Task 5) — must be BEFORE /{program_id} to avoid int parse ──
+
+@router.get("/slip-queue", dependencies=[Depends(_require_key)])
+async def api_slip_queue(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+):
+    """Return pending OCR slip extractions with their best program match candidate."""
+    return await get_slip_queue(page=page, page_size=page_size)
+
+
+@router.post("/slip-queue/{match_id}/confirm", dependencies=[Depends(_require_key)])
+async def api_confirm_slip_match(match_id: int):
+    """Admin confirms an OCR slip match (sets admin_action='keep')."""
+    ok = await confirm_slip_match(match_id, admin_phone="api")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Match {match_id} not found or already actioned")
+    return {"ok": True, "match_id": match_id, "action": "keep"}
+
+
+@router.post("/slip-queue/{match_id}/reject", dependencies=[Depends(_require_key)])
+async def api_reject_slip_match(match_id: int):
+    """Admin rejects an OCR slip match (sets admin_action='reject')."""
+    ok = await reject_slip_match(match_id, admin_phone="api")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Match {match_id} not found or already actioned")
+    return {"ok": True, "match_id": match_id, "action": "reject"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -543,6 +585,14 @@ async def api_roster_patch(program_id: int, body: PatchRosterEntry):
     updates = body.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    # Task 7: validate phone numbers in patch
+    for field in ("master_mobile", "escort_mobile"):
+        raw = updates.get(field)
+        if raw:
+            norm = normalize_bd_phone(raw)
+            if not norm:
+                raise HTTPException(400, detail=f"Invalid Bangladesh mobile number for '{field}': {raw!r}")
+            updates[field] = norm
     try:
         row = await update_roster_entry(program_id, updates, actor="api")
     except ValueError as e:

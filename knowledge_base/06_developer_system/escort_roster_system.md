@@ -2,7 +2,7 @@
 title: Escort Roster System
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-27
+last_verified: 2026-07-03
 runtime_index: true
 ---
 
@@ -19,6 +19,26 @@ Projection table:
 - `escort_roster_entries`
 
 The roster page, payroll view, and reports read the projection, but the authoritative assignment truth comes from the source program after bridge confirmation reconciliation.
+
+## Salary Calculation — Roster vs Payment Draft (C-01 Resolution)
+
+Roster `total` and payment draft `gross_amount` serve different purposes and may
+differ. Both are correct for their respective context:
+
+- **Roster `total`** = `shift_rate × total_shifts + conveyance`
+  - `shift_rate` comes from `escort_calculation_config` (default 200 BDT/shift)
+  - This is the **operational display** — what was worked
+
+- **Payment draft `gross_amount`** = `basic_salary / 30 × duty_days`
+  - `basic_salary` comes from the employee's HR profile (`wbom_employees.basic_salary`)
+  - This is the **settlement amount** — based on HR pay grade
+
+When `basic_salary = shift_rate × 2 × 30` (e.g. 200 × 2 × 30 = 12,000), both
+calculations produce the same daily rate (400 BDT/day). They diverge when an
+escort's contract salary differs from the standard rate.
+
+**Net payable** = `total - food_bill - advance_deduction` (stored in
+`escort_roster_entries.net_payable`, populated on sync when status is completed).
 
 ## Source Of Truth And Projection Rules
 

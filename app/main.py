@@ -38,6 +38,7 @@ from modules.bridge_poller import start_pollers
 from modules.escort_slip_extractor import extract_escort_slip, test_report as escort_test_report
 from modules.payment_workflow import create_escort_payment_draft, finalize_payment, create_advance_request_draft
 from modules.message_router import process_message, get_primary_admin
+from modules.health_monitor import check_system_health as c1b_health_check
 from modules import outbound as outbound_queue
 from modules import scheduler as fazle_scheduler
 from shared.queue import record_heartbeat
@@ -279,6 +280,20 @@ async def lifespan(app: FastAPI):
             log.info(f"[escort_cleanup] startup purged {_junk_result['deleted']} junk draft programs")
     except Exception as e:
         log.warning(f"[escort_cleanup] startup cleanup failed (non-fatal): {e}")
+    # Escort stale draft expiry background worker (Task 6)
+    async def _stale_draft_expiry_loop():
+        import asyncio as _aio
+        while True:
+            try:
+                from modules.escort_roster.db import expire_stale_drafts
+                result = await expire_stale_drafts(hours=48)
+                if result.get("expired", 0):
+                    log.info(f"[escort_roster] stale draft expiry: {result['expired']} expired")
+            except Exception as _e:
+                log.warning(f"[escort_roster] stale draft expiry error: {_e}")
+            await _aio.sleep(6 * 3600)  # every 6 hours
+
+    asyncio.create_task(_stale_draft_expiry_loop())
     log.info("Fazle Core started")
     yield
     fazle_scheduler.stop_scheduler()
@@ -713,6 +728,20 @@ async def health_deep():
     if out["status"] == "critical":
         return JSONResponse(status_code=503, content=out)
     return out
+
+
+@app.get("/health/c1b", dependencies=[Depends(require_api_key)])
+async def health_c1b():
+    """C1B Gate-4 health check: fpe_table integrity, WBOM freeze, RAG KB count."""
+    try:
+        result = await c1b_health_check()
+        status_code = 200 if result.get("status") == "ok" else 503
+        return JSONResponse(status_code=status_code, content=result)
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "error": str(e)[:200]},
+        )
 
 
 # ── Phase 13A — Runtime node registry ───────────────────────────────────────

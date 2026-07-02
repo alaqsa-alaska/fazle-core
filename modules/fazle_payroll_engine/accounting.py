@@ -244,35 +244,70 @@ async def _upsert_ledger(
     Atomically increment the appropriate ledger bucket and recompute closing_balance.
     Uses INSERT ... ON CONFLICT DO UPDATE for atomicity.
     """
-    # Determine which column to increment
+    # Placeholder earnings model (until duty-day schema exists):
+    # total_earned mirrors total_paid for non-advance transactions.
     if category == TxnCategory.advance:
-        col = "total_advance"
-    elif category in (TxnCategory.deduction, TxnCategory.correction):
-        col = "total_paid"  # corrections also count as payments out
+        earned_delta = Decimal("0")
+        paid_delta = Decimal("0")
+        advance_delta = amount
     else:
-        col = "total_paid"  # salary, bonus
+        earned_delta = amount
+        paid_delta = amount
+        advance_delta = Decimal("0")
+
+    opening_balance = await fetch_val(
+        """
+        SELECT closing_balance
+        FROM fpe_employee_ledger
+        WHERE employee_id = $1
+          AND accounting_period < $2
+        ORDER BY accounting_period DESC
+        LIMIT 1
+        """,
+        employee_id,
+        period,
+    )
+    opening_balance = Decimal(str(opening_balance or 0))
 
     await execute(
-        f"""
+        """
         INSERT INTO fpe_employee_ledger
-            (employee_id, accounting_period, {col}, txn_count, last_updated)
-        VALUES ($1, $2, $3, 1, NOW())
+            (employee_id, accounting_period, opening_balance,
+             total_earned, total_paid, total_advance,
+             closing_balance, txn_count, last_updated)
+        VALUES (
+            $1, $2, $3, $4, $5, $6,
+            ($3::numeric + $4::numeric - $5::numeric - $6::numeric),
+            1,
+            NOW()
+        )
         ON CONFLICT (employee_id, accounting_period) DO UPDATE
-        SET {col}      = fpe_employee_ledger.{col} + EXCLUDED.{col},
-            txn_count  = fpe_employee_ledger.txn_count + 1,
+        SET total_earned = fpe_employee_ledger.total_earned + EXCLUDED.total_earned,
+            total_paid = fpe_employee_ledger.total_paid + EXCLUDED.total_paid,
+            total_advance = fpe_employee_ledger.total_advance + EXCLUDED.total_advance,
+            txn_count = fpe_employee_ledger.txn_count + 1,
             closing_balance = fpe_employee_ledger.opening_balance
-                            + fpe_employee_ledger.total_earned
-                            - fpe_employee_ledger.total_paid
-                            - fpe_employee_ledger.total_advance
-                            - EXCLUDED.{col},
+                            + (fpe_employee_ledger.total_earned + EXCLUDED.total_earned)
+                            - (fpe_employee_ledger.total_paid + EXCLUDED.total_paid)
+                            - (fpe_employee_ledger.total_advance + EXCLUDED.total_advance),
             last_updated = NOW()
         """,
         employee_id,
         period,
-        amount,
+        opening_balance,
+        earned_delta,
+        paid_delta,
+        advance_delta,
     )
 
-    log.debug("[fpe.acct] ledger upserted emp=%d period=%s col=%s amount=%s", employee_id, period, col, amount)
+    log.debug(
+        "[fpe.acct] ledger upserted emp=%d period=%s earned=%s paid=%s advance=%s",
+        employee_id,
+        period,
+        earned_delta,
+        paid_delta,
+        advance_delta,
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

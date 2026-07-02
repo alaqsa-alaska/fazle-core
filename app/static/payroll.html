@@ -95,7 +95,8 @@ nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-wei
 .sidebar-social a{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;background:#fff;border:1px solid var(--border)}
 .sidebar-social svg{width:18px;height:18px}
 
-main{padding:20px 24px;max-width:1440px;margin:0 auto;width:100%;flex:1}
+main{padding:20px 24px;max-width:1440px;margin:0 auto;width:100%;flex:1;
+  overflow-y:auto;-webkit-overflow-scrolling:touch}
 
 /* ─── Cards ──────────────────────────────────────────────────────────────── */
 .card{background:var(--card);border-radius:10px;padding:18px 20px;
@@ -218,27 +219,70 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 
 /* ─── Detail Panel ───────────────────────────────────────────────────────── */
 #detailPanel{position:fixed;top:0;right:-520px;width:500px;height:100vh;
-  background:#fff;box-shadow:-4px 0 30px rgba(0,0,0,.15);overflow-y:auto;
-  z-index:500;transition:right .25s ease;border-left:1px solid var(--border);padding:0}
+  background:#fff;box-shadow:-4px 0 30px rgba(0,0,0,.15);
+  z-index:500;transition:right .25s ease;border-left:1px solid var(--border);padding:0;
+  display:flex;flex-direction:column}
 #detailPanel.open{right:0}
 .panel-header{background:var(--accent);color:#fff;padding:16px 20px;
-  display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:10}
+  display:flex;align-items:center;gap:12px;flex-shrink:0;z-index:10}
 .panel-header h3{flex:1;font-size:16px;font-weight:600}
-.panel-body{padding:20px}
+.panel-body{padding:20px;flex:1;overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch}
+.panel-footer{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;
+  flex-wrap:wrap;flex-shrink:0;background:#fff}
 .detail-row{display:flex;gap:8px;margin-bottom:8px;font-size:13px}
 .detail-row .lbl{color:var(--muted);min-width:140px;font-weight:500}
 .detail-row .val{color:var(--text);word-break:break-all}
 
 /* ─── Modal ──────────────────────────────────────────────────────────────── */
 #modalOverlay{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:800;
-  display:none;align-items:center;justify-content:center;backdrop-filter:blur(2px)}
+  display:none;align-items:center;justify-content:center;backdrop-filter:blur(2px);padding:16px}
 #modalOverlay.open{display:flex}
-#modal{background:#fff;border-radius:12px;width:500px;max-width:95vw;
-  box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden}
-.modal-head{background:var(--accent);color:#fff;padding:16px 20px;display:flex;align-items:center;gap:12px}
+#modal{background:#fff;border-radius:12px;width:520px;max-width:95vw;max-height:90vh;
+  box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden;
+  display:flex;flex-direction:column;animation:modalIn .2s ease}
+@keyframes modalIn{from{opacity:0;transform:scale(.95) translateY(-10px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.modal-head{background:var(--accent);color:#fff;padding:16px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}
 .modal-head h3{flex:1;font-size:16px;font-weight:600}
-.modal-body{padding:20px}
-.modal-footer{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+.modal-body{padding:20px;overflow-y:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch}
+.modal-footer{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;background:#fff;border-radius:0 0 12px 12px}
+
+/* ─── Form Grid (two-column inside modals) ──────────────────────────────── */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+.form-grid .span2{grid-column:1/-1}
+@media(max-width:520px){.form-grid{grid-template-columns:1fr}.form-grid .span2{grid-column:1}}
+
+/* ─── Icon Buttons for table rows ───────────────────────────────────────── */
+.row-actions{display:flex;gap:4px;align-items:center;justify-content:flex-end}
+.btn-icon{display:inline-flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border:1px solid var(--border);border-radius:6px;
+  background:#fff;color:var(--muted);cursor:pointer;transition:all .15s;flex-shrink:0;padding:0;font-family:inherit}
+.btn-icon:hover{background:var(--surface);color:var(--text);border-color:#d1d5db}
+.btn-icon.edit:hover{background:#eff6ff;color:#3b82f6;border-color:#bfdbfe}
+.btn-icon.del:hover{background:#fef2f2;color:var(--err);border-color:#fca5a5}
+.btn-icon.approve:hover{background:#f0fdf4;color:var(--ok);border-color:#86efac}
+.btn-icon svg{width:14px;height:14px}
+@media(max-width:480px){.btn-icon{width:36px;height:36px}}
+
+/* ─── Table scroll wrapper ──────────────────────────────────────────────── */
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:8px}
+
+/* ─── Form validation ───────────────────────────────────────────────────── */
+.fg-field{display:flex;flex-direction:column;gap:3px}
+.fg-field.has-error input,.fg-field.has-error select{border-color:var(--err);box-shadow:0 0 0 3px rgba(220,38,38,.1)}
+.fg-field .error-msg{font-size:11px;color:var(--err);display:none;margin-top:2px}
+.fg-field.has-error .error-msg{display:block}
+
+/* ─── Loading spinner ───────────────────────────────────────────────────── */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;
+  border-radius:50%;animation:spin .7s linear infinite;display:inline-block;vertical-align:middle;margin-right:4px}
+.btn.loading{opacity:.7;cursor:not-allowed;pointer-events:none}
+
+/* ─── Mobile FAB ────────────────────────────────────────────────────────── */
+.m-fab{position:fixed;bottom:20px;right:20px;width:48px;height:48px;border-radius:50%;
+  background:var(--accent);color:#fff;border:none;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 16px rgba(253,49,1,.4);font-size:22px;cursor:pointer;z-index:200}
+@media(min-width:769px){.m-fab{display:none}}
 
 /* ─── Responsive ──────────────────────────────────────────────────────────── */
 @media(max-width:768px){
@@ -261,8 +305,9 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   .btn.sm{padding:6px 10px}
   .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   #detailPanel{width:100%;right:-100% !important}
-  #modalOverlay{justify-content:flex-end;align-items:flex-end}
-  #modal{width:100%;border-radius:16px 16px 0 0;max-height:90vh}
+  #modalOverlay{justify-content:flex-end;align-items:flex-end;padding:0}
+  #modal{width:100%;border-radius:16px 16px 0 0;max-height:92vh;animation:slideUp .3s ease}
+  @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
 }
 
 @media(max-width:600px){
@@ -368,15 +413,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px rgba(26,71,42,.1)}
 }
 
-/* Landscape mode adjustments */
-@media(max-width:900px) and (orientation:landscape){
-  header{height:48px}
-  header h1{font-size:16px}
-  nav{display:none}
-  main{padding:10px;max-height:calc(100vh - 104px);overflow-y:auto;-webkit-overflow-scrolling:touch}
-  .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}
-  .card{margin-bottom:8px;padding:10px}
-}
+/* Landscape mode adjustments — removed broken query that constrained main to 490px */
 
 </style>
 </head>
@@ -1191,6 +1228,22 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     </div>
 
     <div class="card">
+      <h2>Payroll Salary Baseline</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+        Phase 2 control: keep all employee salaries at one uniform value.
+      </p>
+      <div class="row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <div>
+          <label>Uniform Salary (৳)</label>
+          <input id="adminUniformSalaryAmount" type="number" min="0" step="0.01" value="10000" style="width:180px">
+        </div>
+        <button class="btn" onclick="adminApplyUniformSalary()">Apply For All Employees</button>
+        <button class="btn sm secondary" onclick="loadAdminSalarySummary()">Refresh Summary</button>
+      </div>
+      <div id="adminSalarySummary" style="margin-top:10px;font-size:12px;color:var(--muted)">Loading salary summary…</div>
+    </div>
+
+    <div class="card">
       <div class="title-search">
         <h2 style="margin-bottom:0;border-bottom:none;padding-bottom:0">Activity Log</h2>
         <div class="row" style="margin-bottom:0">
@@ -1219,6 +1272,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     <button class="btn sm secondary" onclick="closePanel()" style="background:rgba(255,255,255,.15);border:none;color:#fff">Close</button>
   </div>
   <div class="panel-body" id="panelBody"></div>
+  <div class="panel-footer" id="panelFooter"></div>
 </div>
 <div id="panelBg" onclick="closePanel()" style="display:none;position:fixed;inset:0;z-index:499;background:rgba(0,0,0,.2)"></div>
 
@@ -1889,7 +1943,44 @@ async function loadAdminActivity() {
 }
 
 async function loadAdminTab() {
-  await Promise.all([loadAdminUsers(), loadAdminActivity()]);
+  await Promise.all([loadAdminUsers(), loadAdminActivity(), loadAdminSalarySummary()]);
+}
+
+async function loadAdminSalarySummary() {
+  if (!canAccessAdminMenu()) return;
+  const box = document.getElementById('adminSalarySummary');
+  if (!box) return;
+  box.textContent = 'Loading salary summary…';
+  try {
+    const s = await api('/admin/salary/summary');
+    box.innerHTML = `Total employees: <b>${fmtNum(s.total_employees || 0)}</b> · ` +
+      `Salary 10,000: <b>${fmtNum(s.salary_10000_count || 0)}</b> · ` +
+      `Other salaries: <b>${fmtNum(s.non_10000_count || 0)}</b> · ` +
+      `Range: <b>৳${fmtNum(s.min_salary || 0)}</b> to <b>৳${fmtNum(s.max_salary || 0)}</b>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
+}
+
+async function adminApplyUniformSalary() {
+  if (!canAccessAdminMenu()) return;
+  const amount = parseFloat(document.getElementById('adminUniformSalaryAmount')?.value || '10000');
+  if (!(amount > 0)) {
+    showToast('Enter a positive salary amount', 'err');
+    return;
+  }
+  if (!confirm(`Apply ৳${fmtNum(amount)} salary to ALL employees?`)) return;
+  try {
+    const actor = (USER_ACCESS?.username || USER_ACCESS?.name || 'admin_ui').trim();
+    const res = await api('/admin/salary/apply-uniform', {
+      method: 'POST',
+      body: JSON.stringify({ amount, applied_by: actor }),
+    });
+    showToast(`Applied ৳${fmtNum(res.applied_amount || amount)} to ${fmtNum(res.total_employees || 0)} employees`, 'ok');
+    await Promise.all([loadAdminSalarySummary(), loadEmployees(true)]);
+  } catch (e) {
+    showToast('Apply salary failed: ' + e.message, 'err');
+  }
 }
 
 async function adminAddUser() {
@@ -2344,10 +2435,17 @@ function renderTxnTable(rows, compact = false) {
 }
 
 function renderTxnActionButtons(id) {
+  const viewSvg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const editSvg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const delSvg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
   if (!canEditDeleteTransactions()) {
-    return `<button class="btn sm secondary" onclick="openTxnDetail(${id})">View</button>`;
+    return `<div class="row-actions"><button class="btn-icon" title="View" onclick="openTxnDetail(${id})">${viewSvg}</button></div>`;
   }
-  return `<button class="btn sm secondary" onclick="openTxnDetail(${id})">View</button> <button class="btn sm secondary" onclick="openEditTxn(${id})">Edit</button> <button class="btn sm secondary" style="color:#dc3545;border-color:#dc3545" onclick="confirmDeleteTxn(${id})">Delete</button>`;
+  return `<div class="row-actions">
+    <button class="btn-icon" title="View" onclick="openTxnDetail(${id})">${viewSvg}</button>
+    <button class="btn-icon edit" title="Edit" onclick="openEditTxn(${id})">${editSvg}</button>
+    <button class="btn-icon del" title="Delete" onclick="confirmDeleteTxn(${id})">${delSvg}</button>
+  </div>`;
 }
 
 function renderTxnActionMenu(id) {
@@ -2393,8 +2491,13 @@ async function openTxnDetail(id) {
       ${detailRow('Reversal?', d.is_reversal ? '⚠️ Yes' : 'No')}
       ${detailRow('Created', fmtDt(d.created_at))}
       ${d.source_message_text ? detailRow('Source', '<pre style="margin:0;font-size:11px;white-space:pre-wrap;max-height:120px">' + esc(d.source_message_text) + '</pre>') : ''}
-      <hr style="margin:16px 0;border:none;border-top:1px solid var(--border)">
-      ${!d.is_reversal ? `<button class="btn danger sm" onclick="confirmReverse(${d.id})">Reverse This Transaction</button>` : '<span class="pill muted">Already a reversal</span>'}
+    `;
+    // Action buttons go in pinned footer
+    document.getElementById('panelFooter').innerHTML = `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;width:100%;align-items:center">
+        ${!d.is_reversal ? `<button class="btn danger sm" onclick="confirmReverse(${d.id})">Reverse This Transaction</button>` : '<span class="pill muted">Already a reversal</span>'}
+        ${canEditDeleteTransactions() ? `<div style="margin-left:auto;display:flex;gap:6px"><button class="btn sm secondary" onclick="openEditTxn(${d.id})">Edit</button><button class="btn sm secondary" style="color:#dc3545;border-color:#dc3545" onclick="confirmDeleteTxn(${d.id})">Delete</button></div>` : ''}
+      </div>
     `;
   } catch(e) {
     document.getElementById('panelBody').innerHTML = `<div class="empty"><div class="icon">⚠️</div>${e.message}</div>`;
@@ -2450,7 +2553,9 @@ async function loadEmployees(resetPage = false) {
       document.getElementById('empTable').innerHTML = `<table>
         <thead><tr>
           <th>Employee ID</th><th>Name</th><th>Mobile</th>
+          <th class="right">Salary</th><th class="right">Net Balance</th>
           <th class="right">Total Tx</th><th class="right">Total Paid</th>
+          <th>Designation</th><th>Joining Date</th>
           <th>Last Paid</th><th>Status</th><th>Actions</th>
         </tr></thead>
         <tbody>
@@ -2461,8 +2566,12 @@ async function loadEmployees(resetPage = false) {
               ? `<div style="font-size:11px;color:var(--muted)">+${e.name_aliases.length-1} alias</div>` : ''
           }</td>
           <td class="mono">${esc(e.mobile_number || '—')}</td>
+          <td class="right amount">৳${fmtAmt(e.basic_salary || 0)}</td>
+          <td class="right">৳${fmtAmt(e.net_balance || 0)}</td>
           <td class="right">${fmtNum(e.total_transactions)}</td>
           <td class="right amount">৳${fmtAmt(e.total_paid)}</td>
+          <td>${esc(e.designation || '—')}</td>
+          <td class="mono">${e.joining_date || '—'}</td>
           <td class="mono">${e.last_payment_date || '—'}</td>
           <td><span class="pill ${e.status==='active'?'ok':'muted'}">${esc(e.status)}</span></td>
           <td>
@@ -2770,6 +2879,9 @@ async function saveNewPayment() {
   if (!amount || amount <= 0) { showToast('Valid amount is required', 'err'); return; }
   if (!date) { showToast('Transaction date is required', 'err'); return; }
 
+  const saveBtn = event?.target || document.querySelector('.modal-footer .btn:not(.secondary)');
+  if (saveBtn) setButtonLoading(saveBtn, true, 'Saving...');
+
   const payload = {
     employee_name: name,
     employee_id_phone: idPhone || null,
@@ -2799,6 +2911,7 @@ async function saveNewPayment() {
     // Phase 20: keep overview totals in sync
     if (currentTab === 'overview') { loadOverview(); } else { loadOverviewRecent(true); }
   } catch(e) { showToast('Save failed: ' + e.message, 'err'); }
+  finally { if (saveBtn) setButtonLoading(saveBtn, false); }
 }
 
 async function openEditTxn(id) {
@@ -2863,6 +2976,9 @@ async function saveEditTxn(id) {
   if (date) payload.txn_date = date;
   if (notes !== undefined) payload.notes = notes || null;
 
+  const saveBtn = event?.target || document.querySelector('.modal-footer .btn:not(.secondary)');
+  if (saveBtn) setButtonLoading(saveBtn, true, 'Saving...');
+
   try {
     const res = await fetch('/api/admin/transactions/' + id, {
       method: 'PUT',
@@ -2877,6 +2993,7 @@ async function saveEditTxn(id) {
     // Phase 20: keep overview totals in sync
     if (currentTab === 'overview') { loadOverview(); } else { loadOverviewRecent(true); }
   } catch(e) { showToast('Edit failed: ' + e.message, 'err'); }
+  finally { if (saveBtn) setButtonLoading(saveBtn, false); }
 }
 
 async function confirmDeleteTxn(id) {
@@ -2895,6 +3012,7 @@ async function confirmDeleteTxn(id) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || res.statusText);
     showToast('Transaction #' + id + ' deleted', 'ok');
+    closePanel();
     await loadTransactions(true);
     // Phase 20: keep overview totals in sync
     if (currentTab === 'overview') { loadOverview(); } else { loadOverviewRecent(true); }
@@ -2942,11 +3060,13 @@ async function openEmpDetail(id) {
       ${aliases.length ? detailRow('Aliases', aliases.map(a=>`<span class="pill info">${esc(a.alias_type)}: ${esc(a.alias_value)}</span>`).join(' ')) : ''}
       <h4 style="margin:16px 0 6px;font-size:13px;color:var(--accent2)">📒 Ledger (last 12 months)</h4>
       ${ledgerHtml}
-      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+    `;
+    document.getElementById('panelFooter').innerHTML = `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;width:100%;align-items:center">
         <button class="btn sm" onclick="openEmpEdit(${e.id})">Edit (FPE)</button>
         <button class="btn sm" onclick="openAdminEmpEdit(${e.id},${JSON.stringify(e.employee_id_phone||e.primary_phone||'')})">Edit Ops</button>
         ${e.status==='active' ? `<button class="btn sm secondary" style="color:var(--err);border-color:var(--err)" onclick="deactivateEmployee(${e.id},${JSON.stringify(e.display_name)})">🚫 Deactivate</button>` : ''}
-        <button class="btn sm secondary" onclick="navigate('transactions');document.getElementById('txnEmpId').value=${e.id};loadTransactions(true);closePanel()">View All Transactions</button>
+        <button class="btn sm secondary" style="margin-left:auto" onclick="navigate('transactions');document.getElementById('txnEmpId').value=${e.id};loadTransactions(true);closePanel()">View All Transactions</button>
       </div>
     `;
   } catch(e) {
@@ -3354,12 +3474,14 @@ async function rejectOperator(pendingId) {
 function openPanel(title, body) {
   document.getElementById('panelTitle').textContent = title;
   document.getElementById('panelBody').innerHTML = body;
+  document.getElementById('panelFooter').innerHTML = '';
   document.getElementById('detailPanel').classList.add('open');
   document.getElementById('panelBg').style.display = 'block';
 }
 function closePanel() {
   document.getElementById('detailPanel').classList.remove('open');
   document.getElementById('panelBg').style.display = 'none';
+  document.getElementById('panelFooter').innerHTML = '';
 }
 function openModal(title, body, footer) {
   document.getElementById('modalTitle').textContent = title;
@@ -3370,6 +3492,34 @@ function openModal(title, body, footer) {
 function closeModal() { document.getElementById('modalOverlay').classList.remove('open'); }
 function detailRow(lbl, val) {
   return `<div class="detail-row"><span class="lbl">${lbl}</span><span class="val">${val}</span></div>`;
+}
+
+// ── Loading + Validation utilities (Fix G) ──────────────────────────────────
+function setButtonLoading(btn, loading, text) {
+  if (loading) {
+    btn.disabled = true;
+    btn.dataset.originalText = btn.textContent;
+    btn.classList.add('loading');
+    btn.innerHTML = '<span class="spinner"></span>' + (text || 'Processing...');
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    btn.textContent = btn.dataset.originalText || btn.textContent;
+  }
+}
+function validateField(input) {
+  const group = input.closest('.fg-field') || input.closest('.form-group');
+  if (!group) return true;
+  const errMsg = group.querySelector('.error-msg');
+  if (input.required && !input.value.trim()) {
+    group.classList.add('has-error');
+    if (errMsg) errMsg.textContent = 'This field is required';
+    input.classList.add('error');
+    return false;
+  }
+  group.classList.remove('has-error');
+  input.classList.remove('error');
+  return true;
 }
 
 // ── Employee Search Tab (READ-ONLY type-ahead) ───────────────────────────────
@@ -4270,11 +4420,12 @@ async function openCashDetail(id) {
       <dl style="margin:0">
         ${lines.map(([k,v]) => v ? `<dt style="font-size:11px;color:var(--muted);margin-top:8px">${esc(k)}</dt><dd style="margin:0;font-size:13px">${esc(String(v))}</dd>` : '').join('')}
       </dl>
-      <div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.15)">
-        <button class="btn sm secondary" onclick="closePanel()" style="background:rgba(255,255,255,.15);border:none;color:#fff">Close</button>
-      </div>
+    `;
+    document.getElementById('panelFooter').innerHTML = `
+      <button class="btn sm secondary" onclick="closePanel()" style="margin-left:auto">Close</button>
     `;
     document.getElementById('detailPanel').classList.add('open');
+    document.getElementById('panelBg').style.display = 'block';
   } catch(e) {
     showToast('Could not load cash detail: ' + e.message, 'err');
   }
@@ -4483,13 +4634,41 @@ async function openIncomeDetail(id) {
       <dl style="margin:0">
         ${lines.map(([k,v]) => v ? `<dt style="font-size:11px;color:var(--muted);margin-top:8px">${esc(k)}</dt><dd style="margin:0;font-size:13px">${esc(String(v))}</dd>` : '').join('')}
       </dl>
-      <div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.15)">
-        <button class="btn sm secondary" onclick="closePanel()" style="background:rgba(255,255,255,.15);border:none;color:#fff">Close</button>
-      </div>
+    `;
+    document.getElementById('panelFooter').innerHTML = `
+      ${canEditDeleteTransactions() ? `<button class="btn sm secondary" onclick="deleteIncomeTxn(${id})" style="background:rgba(220,53,69,.2);border-color:#dc3545;color:#fff">Delete</button>` : ''}
+      <button class="btn sm secondary" onclick="closePanel()" style="margin-left:auto">Close</button>
     `;
     document.getElementById('detailPanel').classList.add('open');
+    document.getElementById('panelBg').style.display = 'block';
   } catch(e) {
     showToast('Could not load income detail: ' + e.message, 'err');
+  }
+}
+
+async function deleteIncomeTxn(id) {
+  if (!canEditDeleteTransactions()) {
+    showToast('You are not allowed to delete income transactions.', 'err');
+    return;
+  }
+  const confirmed = confirm(
+    'Soft-delete income transaction #' + id + '?\n\n' +
+    'The record will be hidden from income list/report exports and kept in audit logs.'
+  );
+  if (!confirmed) return;
+
+  try {
+    const res = await fetch('/api/admin/income/' + id + '?deleted_by=admin_manual', {
+      method: 'DELETE',
+      headers: {'X-Internal-Key': API_KEY},
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    closePanel();
+    showToast('Income transaction #' + id + ' deleted', 'ok');
+    await loadIncome(true);
+  } catch (e) {
+    showToast('Income delete failed: ' + e.message, 'err');
   }
 }
 

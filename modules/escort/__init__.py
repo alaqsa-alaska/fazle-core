@@ -1807,3 +1807,9 @@ async def handle_escort_order(
     """
     reply, _ = await handle_escort_client_message(text, sender_phone, source)
     return reply, False
+
+
+# ── Public exports for cross-module reuse ─────────────────────────────────────
+# Task 9: single source of truth for destination normalization
+DEST_ALIASES = _DEST_ALIASES
+normalize_destination = _normalize_destination

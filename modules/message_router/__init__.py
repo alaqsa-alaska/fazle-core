@@ -19,7 +19,9 @@ Routing priority:
   9. unknown        → intent engine → KB → AI
 """
 
+import asyncio
 import logging
+import os
 import re
 from typing import Optional
 
@@ -73,6 +75,11 @@ _ESCORT_ROLES = frozenset({"escort_client", "client_escort_buyer", "vip_client",
 
 # Legacy fallback only; runtime source of truth is app.config draft-always settings.
 _SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office")
+# Compiled regex for silent-skip token matching — O(n) single pass vs O(n*k) loop
+_SILENT_SKIP_PATTERN: re.Pattern = re.compile(
+    r"(?:al-aqsa|escort|client|operation|tcis|gms|dalal|office)",
+    re.IGNORECASE,
+)
 
 # Phase 4.5 / 6E: Intents cleared for auto-send (recruitment + employee info + office location).
 # Financial complaints are protected by the complaint-phrase guard in bridge_poller.
@@ -188,9 +195,15 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
         if contact:
             name_lower = (contact.get("display_name") or "").lower()
             name_tokens = settings.draft_always_name_list or list(_SILENT_SKIP_NAME_TOKENS)
-            for token in name_tokens:
-                if token in name_lower:
-                    return True, f"display_name contains '{token}' ({contact['display_name']!r})"
+            if name_tokens is list(_SILENT_SKIP_NAME_TOKENS) or not settings.draft_always_name_list:
+                # Use compiled regex for the static default token list (faster)
+                if _SILENT_SKIP_PATTERN.search(name_lower):
+                    m = _SILENT_SKIP_PATTERN.search(name_lower)
+                    return True, f"display_name contains '{m.group()}' ({contact['display_name']!r})"
+            else:
+                for token in name_tokens:
+                    if token in name_lower:
+                        return True, f"display_name contains '{token}' ({contact['display_name']!r})"
             for prefix in settings.draft_name_prefix_list:
                 if prefix and name_lower.startswith(prefix):
                     return True, f"display_name starts with '{prefix}' ({contact['display_name']!r})"
@@ -787,3 +800,64 @@ async def _cmd_admin_list() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"❌ ড্রাফট লোড ব্যর্থ: {e}"
+
+
+# ── Message normalization ──────────────────────────────────────────────────────
+_BANGLA_TO_EN = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+_EMOJI_ONLY_RE = re.compile(
+    r"^[\U0001F000-\U0001FFFF\U00002600-\U000027BF\U0000FE00-\U0000FEFF\s]+$"
+)
+_MESSAGE_MAX_LEN = int(os.getenv("MESSAGE_MAX_LEN", "4096"))
+
+
+def normalize_incoming_message(body: str) -> dict:
+    """Normalize a raw WhatsApp message body before routing.
+
+    Returns:
+      {"body": str, "type": "normal"|"empty"|"emoji_only"|"truncated", "truncated": bool}
+    """
+    if not body or not body.strip():
+        return {"body": "", "type": "empty", "truncated": False}
+
+    body = body.strip()
+    truncated = False
+
+    if len(body) > _MESSAGE_MAX_LEN:
+        body = body[:_MESSAGE_MAX_LEN]
+        truncated = True
+
+    # Normalize Bangla digits → English for consistent downstream processing
+    body = body.translate(_BANGLA_TO_EN)
+
+    if _EMOJI_ONLY_RE.match(body):
+        return {"body": body, "type": "emoji_only", "truncated": truncated}
+
+    return {"body": body, "type": "truncated" if truncated else "normal", "truncated": truncated}
+
+
+# ── Timeout wrapper ────────────────────────────────────────────────────────────
+_ROUTE_TIMEOUT_S: float = float(os.getenv("MESSAGE_ROUTE_TIMEOUT", "30"))
+
+
+async def route_message_with_timeout(
+    sender: str,
+    text: str,
+    source: str,
+    timeout: float = _ROUTE_TIMEOUT_S,
+) -> "tuple[str, Optional[dict]]":
+    """Call process_message with a configurable timeout.
+
+    Returns (reply, admin_notification). On timeout returns a Bangla retry
+    message instead of hanging. Timeout configurable via MESSAGE_ROUTE_TIMEOUT.
+    """
+    try:
+        return await asyncio.wait_for(
+            process_message(sender, text, source),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "[router] timeout sender=%s source=%s timeout=%.1fs",
+            sender, source, timeout,
+        )
+        return "অনুগ্রহ করে আবার চেষ্টা করুন।", None

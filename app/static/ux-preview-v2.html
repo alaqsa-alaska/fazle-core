@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UX Preview — Adapted to Real Payroll Design</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   ADAPTED DESIGN TOKENS — matches payroll.html exactly
+   ═══════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--accent3:#ff5b33;
+  --err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;
+  --surface:#f8fafc;--text:#1e293b;--text2:#475569;
+  /* NEW tokens for fixes — harmonized with existing palette */
+  --focus-ring:rgba(253,49,1,.15);
+  --danger-bg:#fef2f2;--ok-bg:#f0fdf4;--warn-bg:#fffbeb;--info-bg:#f0f9ff;
+  --gray-100:#f3f4f6;--gray-200:#e5e7eb;--gray-300:#d1d5db;--gray-400:#9ca3af;
+  --gray-500:#6b7280;--gray-600:#4b5563;--gray-700:#374151;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:"Amasis MT Pro Medium",Georgia,serif;
+  background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PREVIEW PAGE NAV
+   ═══════════════════════════════════════════════════════════════ */
+.preview-nav{
+  position:fixed;top:0;left:0;right:0;height:52px;
+  background:var(--accent);color:#fff;
+  display:flex;align-items:center;gap:6px;padding:0 16px;z-index:9999;
+  overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;
+}
+.preview-nav::-webkit-scrollbar{display:none}
+.preview-nav .logo{font-weight:700;font-size:15px;white-space:nowrap;margin-right:10px}
+.preview-nav button{
+  white-space:nowrap;padding:6px 14px;border-radius:20px;
+  border:1.5px solid rgba(255,255,255,.3);background:rgba(255,255,255,.1);
+  font-size:13px;font-weight:500;color:#fff;cursor:pointer;
+  transition:background .15s;flex-shrink:0;font-family:inherit;
+}
+.preview-nav button:hover{background:rgba(255,255,255,.25)}
+.preview-nav button.active{background:#fff;color:var(--accent);border-color:#fff}
+
+.section{display:none;padding-top:68px;min-height:100vh;animation:fadeIn .25s ease}
+.section.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+
+.section-header{max-width:1200px;margin:0 auto 20px;padding:0 20px}
+.section-header h1{font-size:20px;font-weight:700;color:var(--accent2);margin-bottom:4px}
+.section-header p{font-size:13px;color:var(--muted)}
+
+.badge-tag{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600;
+}
+.badge-tag.critical{background:#fee2e2;color:#b91c1c}
+.badge-tag.high{background:#fef3c7;color:#92400e}
+.badge-tag.medium{background:#dbeafe;color:#1e40af}
+.badge-tag.fixed{background:#d1fae5;color:#065f46}
+
+/* compare grid */
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:1200px;margin:0 auto;padding:0 20px 32px}
+@media(max-width:800px){.compare{grid-template-columns:1fr}}
+.compare-card{background:var(--card);border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07);border:1px solid var(--border)}
+.compare-card .cc-label{padding:10px 16px;font-size:13px;font-weight:700;display:flex;align-items:center;gap:8px}
+.compare-card.before .cc-label{background:#fee2e2;color:#991b1b}
+.compare-card.after .cc-label{background:#d1fae5;color:#065f46}
+.compare-card .cc-body{padding:20px}
+
+/* ═══════════════════════════════════════════════════════════════
+   REAL APP BUTTONS (from payroll.html)
+   ═══════════════════════════════════════════════════════════════ */
+.btn{background:var(--accent);color:#fff;border:none;padding:8px 16px;border-radius:7px;
+  cursor:pointer;font-size:13px;font-weight:500;transition:background .15s;font-family:inherit;
+  display:inline-flex;align-items:center;gap:6px}
+.btn:hover{background:var(--accent2)}
+.btn.sm{padding:5px 10px;font-size:12px}
+.btn.danger{background:var(--err)}
+.btn.danger:hover{background:#b91c1c}
+.btn.secondary{background:#fff;color:var(--accent);border:1.5px solid var(--accent)}
+.btn.secondary:hover{background:var(--surface)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.success{background:var(--ok);color:#fff}
+.btn.success:hover{background:#15803d}
+
+/* ═══════════════════════════════════════════════════════════════
+   FIX A — MODAL: Before vs After (using real #modal CSS)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* BEFORE: replicates current broken modal CSS */
+.before-viewport{height:400px;overflow:hidden;border:2px dashed var(--err);border-radius:8px;position:relative;background:var(--bg)}
+.before-viewport::after{content:"Viewport: 870×594px";position:absolute;bottom:4px;right:8px;font-size:10px;color:var(--err);font-family:'SF Mono',Consolas,monospace}
+.before-modal{background:#fff;border-radius:12px;width:320px;margin:20px auto;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden}
+.before-modal-head{background:var(--accent);color:#fff;padding:12px 16px;font-size:14px;font-weight:600;display:flex;align-items:center;gap:12px}
+.before-modal-head h3{flex:1;font-size:14px;font-weight:600}
+.before-modal-body{padding:16px}
+.before-modal-body label{font-size:11px;color:var(--muted);display:block;margin-bottom:3px;font-weight:500}
+.before-modal-body input,.before-modal-body select{width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;margin-bottom:10px;font-size:13px;font-family:inherit;outline:none;transition:border-color .2s;background:#fff}
+.before-modal-footer{padding:10px 16px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+.before-cut{position:absolute;bottom:0;left:0;right:0;height:50px;background:linear-gradient(to bottom,transparent,#fef2f2);pointer-events:none;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px}
+.before-cut span{font-size:10px;color:var(--err);font-weight:600}
+
+/* AFTER: fixed modal using real app tokens */
+.after-viewport{height:400px;overflow:hidden;border:2px solid var(--ok);border-radius:8px;position:relative;background:var(--bg)}
+.after-viewport::after{content:"Viewport: 870×594px";position:absolute;bottom:4px;right:8px;font-size:10px;color:var(--ok);font-family:'SF Mono',Consolas,monospace}
+.after-overlay{position:absolute;inset:0;background:rgba(15,23,42,.5);display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(2px)}
+.after-modal{background:#fff;border-radius:12px;width:340px;max-width:95vw;max-height:calc(100% - 32px);overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3);animation:modalIn .2s ease}
+@keyframes modalIn{from{opacity:0;transform:scale(.95) translateY(-10px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.after-modal-head{background:var(--accent);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.after-modal-head h3{flex:1;font-size:15px;font-weight:600}
+.after-modal-head .close-btn{background:rgba(255,255,255,.12);border:none;color:#fff;width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center}
+.after-modal-body{padding:16px 18px;overflow-y:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch}
+.after-modal-footer{padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;background:#fff;border-radius:0 0 12px 12px}
+
+/* form grid inside modal */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+.form-grid .span2{grid-column:1/-1}
+.fg-field{display:flex;flex-direction:column;gap:3px}
+.fg-field label{font-size:11px;color:var(--muted);font-weight:500;display:block;margin-bottom:3px}
+.fg-field label .req{color:var(--err)}
+.fg-field input,.fg-field select,.fg-field textarea{
+  width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;
+  font-size:13px;font-family:inherit;outline:none;transition:border-color .2s,box-shadow .15s;background:#fff
+}
+.fg-field input:focus,.fg-field select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring)}
+.fg-field.has-error input{border-color:var(--err);box-shadow:0 0 0 3px rgba(220,38,38,.1)}
+.fg-field .error-msg{font-size:11px;color:var(--err);display:none;margin-top:2px}
+.fg-field.has-error .error-msg{display:block}
+
+.pinned-tag{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600;background:#d1fae5;color:#065f46}
+.scroll-tag{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600;background:var(--surface);color:var(--muted)}
+
+/* ═══════════════════════════════════════════════════════════════
+   FIX C — TABLE ICON BUTTONS (adapted to real app)
+   ═══════════════════════════════════════════════════════════════ */
+.table-demo{width:100%;border-collapse:collapse;font-size:13px}
+.table-demo th{background:var(--surface);padding:8px 12px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+.table-demo td{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--text)}
+.table-demo tr:hover td{background:#f8fffe}
+td.amount{font-weight:700;color:var(--accent2)}
+
+/* old text buttons (current) */
+.old-actions{display:flex;gap:4px}
+.old-actions button{padding:5px 10px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer;font-family:inherit}
+.old-actions .view{color:var(--text2)}
+.old-actions .edit{color:var(--text2)}
+.old-actions .del{color:var(--err);border-color:var(--err)}
+
+/* new icon buttons — using real app colors */
+.row-actions{display:flex;gap:4px;align-items:center;justify-content:flex-end}
+.btn-icon{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border:1px solid var(--border);border-radius:6px;
+  background:#fff;color:var(--muted);cursor:pointer;transition:all .15s;flex-shrink:0;padding:0;font-family:inherit
+}
+.btn-icon:hover{background:var(--surface);color:var(--text);border-color:var(--gray-300)}
+.btn-icon.edit:hover{background:var(--info-bg);color:#3b82f6;border-color:#bfdbfe}
+.btn-icon.del:hover{background:var(--danger-bg);color:var(--err);border-color:#fca5a5}
+.btn-icon.approve:hover{background:var(--ok-bg);color:var(--ok);border-color:#86efac}
+.btn-icon svg{width:14px;height:14px}
+
+/* table wrapper */
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:8px}
+
+/* ═══════════════════════════════════════════════════════════════
+   FIX E — DETAIL PANEL (adapted to real #detailPanel)
+   ═══════════════════════════════════════════════════════════════ */
+.panel-demo{position:relative;height:380px;overflow:hidden;border:1px solid var(--border);border-radius:8px;background:var(--bg)}
+
+/* before: current panel */
+.before-panel{position:absolute;top:0;right:0;width:280px;height:100%;background:#fff;box-shadow:-4px 0 20px rgba(0,0,0,.1);overflow-y:auto}
+.before-panel-head{background:var(--accent);color:#fff;padding:12px 16px;font-size:13px;font-weight:600;position:sticky;top:0;display:flex;align-items:center;gap:12px}
+.before-panel-head h3{flex:1;font-size:14px;font-weight:600}
+.before-panel-body{padding:16px;font-size:12px}
+.before-panel-body .detail-row{display:flex;gap:8px;margin-bottom:8px;font-size:12px}
+.before-panel-body .detail-row .lbl{color:var(--muted);min-width:80px;font-weight:500}
+.before-panel-body .detail-row .val{color:var(--text);word-break:break-all}
+
+/* after: fixed panel with flex column */
+.after-panel{position:absolute;top:0;right:0;width:300px;max-width:95%;height:100%;background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.12);display:flex;flex-direction:column;transition:right .25s ease}
+.after-panel-head{background:var(--accent);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0;position:sticky;top:0}
+.after-panel-head h3{flex:1;font-size:14px;font-weight:600}
+.after-panel-head .close-btn{background:rgba(255,255,255,.12);border:none;color:#fff;width:28px;height:28px;border-radius:8px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center}
+.after-panel-body{flex:1;overflow-y:auto;padding:16px 18px;-webkit-overflow-scrolling:touch;font-size:12px;min-height:0}
+.after-panel-body .detail-row{display:flex;gap:8px;margin-bottom:8px;font-size:12px}
+.after-panel-body .detail-row .lbl{color:var(--muted);min-width:80px;font-weight:500}
+.after-panel-body .detail-row .val{color:var(--text);word-break:break-all}
+.after-panel-foot{padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;background:#fff}
+
+/* ═══════════════════════════════════════════════════════════════
+   FIX D — MOBILE (using real app mobile CSS patterns)
+   ═══════════════════════════════════════════════════════════════ */
+.phone-frame{width:340px;border:8px solid #333;border-radius:36px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.22);background:#333;margin:0 auto;position:relative}
+.phone-notch{height:24px;background:#333;display:flex;align-items:center;justify-content:center}
+.phone-notch::after{content:'';width:80px;height:10px;background:#1a1a1a;border-radius:10px}
+.phone-screen{background:var(--bg);overflow:hidden;position:relative;height:560px}
+
+/* mobile header — matches real app header */
+.m-header{background:var(--accent);color:#fff;padding:0 16px;height:52px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,.2)}
+.m-header h2{font-size:18px;font-weight:700;flex:1}
+.m-header .m-hamburger{background:rgba(255,255,255,.12);border:none;color:#fff;width:34px;height:34px;border-radius:9px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center}
+
+/* mobile content */
+.m-content{overflow-y:auto;height:calc(100% - 52px);-webkit-overflow-scrolling:touch}
+
+/* mobile bottom sheet — matches real app @media(max-width:600px) modal */
+.m-sheet-overlay{position:absolute;inset:0;background:rgba(15,23,42,.5);display:flex;align-items:flex-end;z-index:20;backdrop-filter:blur(2px)}
+.m-sheet{width:100%;background:#fff;border-radius:16px 16px 0 0;display:flex;flex-direction:column;max-height:90vh;animation:slideUp .3s ease}
+@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.m-sheet-head{background:var(--accent);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.m-sheet-head h3{flex:1;font-size:14px;font-weight:600}
+.m-sheet-head .close-btn{background:rgba(255,255,255,.12);border:none;color:#fff;width:28px;height:28px;border-radius:8px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center}
+.m-sheet-body{padding:16px;overflow-y:auto;flex:1;min-height:0;max-height:70vh;-webkit-overflow-scrolling:touch}
+.m-sheet-foot{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;background:#fff}
+
+/* mobile form fields — 16px font to prevent iOS zoom */
+.m-field{margin-bottom:12px}
+.m-field label{font-size:11px;color:var(--muted);font-weight:500;display:block;margin-bottom:3px}
+.m-field input,.m-field select{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:7px;font-size:16px;font-family:inherit;outline:none;transition:border-color .2s;background:#fff}
+.m-field input:focus{border-color:var(--accent)}
+
+/* mobile FAB */
+.m-fab{position:absolute;bottom:20px;right:16px;width:48px;height:48px;border-radius:50%;background:var(--accent);color:#fff;border:none;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(253,49,1,.4);font-size:22px;cursor:pointer;z-index:5}
+
+/* mobile list rows */
+.m-row{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);background:#fff}
+.m-row:last-child{border:none}
+.m-txn-name{font-size:14px;font-weight:600;color:var(--text)}
+.m-txn-amount{font-size:14px;font-weight:700;color:var(--accent2)}
+.m-txn-sub{font-size:11px;color:var(--muted)}
+
+/* ═══════════════════════════════════════════════════════════════
+   FIX G — VALIDATION + LOADING (using real app tokens)
+   ═══════════════════════════════════════════════════════════════ */
+.val-demo{max-width:380px;margin:16px auto;background:#fff;border:1px solid var(--border);border-radius:10px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.val-field{margin-bottom:14px}
+.val-field label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bottom:4px}
+.val-field label .req{color:var(--err)}
+.val-field input{width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:13px;font-family:inherit;outline:none;transition:border-color .2s,box-shadow .15s;background:#fff}
+.val-field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring)}
+.val-field.valid input{border-color:var(--ok)}
+.val-field.invalid input{border-color:var(--err);box-shadow:0 0 0 3px rgba(220,38,38,.1)}
+.val-field .error-msg{font-size:11px;color:var(--err);margin-top:3px;display:none}
+.val-field.invalid .error-msg{display:block}
+.val-field .ok-msg{font-size:11px;color:var(--ok);margin-top:3px;display:none}
+.val-field.valid .ok-msg{display:block}
+
+/* loading spinner */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
+.btn.loading{opacity:.7;cursor:not-allowed;pointer-events:none}
+
+/* ═══════════════════════════════════════════════════════════════
+   FIX F — SIDEBAR (adapted to real app sidebar-drawer)
+   ═══════════════════════════════════════════════════════════════ */
+.app-shell{display:flex;height:460px;border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.sb-demo{width:220px;flex-shrink:0;background:#fff;border-right:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.sb-demo-head{padding:14px 16px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;background:linear-gradient(180deg,#fff,#fff9f6)}
+.sb-demo-head .title{font-size:16px;font-weight:700;color:var(--text)}
+.sb-demo-head .close{background:var(--surface);border:1px solid var(--border);color:var(--text);width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:12px}
+.sb-demo-menu{padding:8px}
+.sb-demo-item{width:100%;display:block;text-align:left;border:1px solid transparent;background:#fff;color:var(--text);padding:11px 12px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;margin-bottom:2px;transition:all .15s;font-family:inherit}
+.sb-demo-item:hover,.sb-demo-item.active{background:rgba(253,49,1,.08);border-color:rgba(253,49,1,.16);color:var(--accent)}
+.sb-demo-divider{height:1px;background:var(--border);margin:8px 0}
+.sb-demo-social{padding:0 8px 12px;display:flex;flex-wrap:wrap;gap:6px}
+.sb-demo-social a{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;background:#fff;border:1px solid var(--border);text-decoration:none;font-size:14px}
+.main-demo{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.main-demo-top{height:52px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;background:#fff;flex-shrink:0}
+.main-demo-top .title{font-size:15px;font-weight:700;color:var(--text)}
+.main-demo-body{flex:1;overflow-y:auto;padding:16px;background:var(--bg)}
+
+/* stats row */
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+@media(max-width:700px){.stats-row{grid-template-columns:1fr 1fr}}
+.stat-card{background:#fff;border-radius:8px;padding:12px 14px;border:1px solid var(--border);box-shadow:0 1px 3px rgba(0,0,0,.07)}
+.stat-card .num{font-size:20px;font-weight:700;color:var(--accent2);line-height:1}
+.stat-card .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-top:4px}
+
+/* ═══════════════════════════════════════════════════════════════
+   PILLS (from real app)
+   ═══════════════════════════════════════════════════════════════ */
+.pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+.pill.ok{background:#dcfce7;color:#15803d}
+.pill.warn{background:#fef3c7;color:#b45309}
+.pill.info{background:#dbeafe;color:#1d4ed8}
+.pill.muted{background:#f1f5f9;color:#64748b}
+
+/* ═══════════════════════════════════════════════════════════════
+   FEATURES SUMMARY
+   ═══════════════════════════════════════════════════════════════ */
+.features-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;max-width:1200px;margin:0 auto;padding:0 20px 40px}
+.feature-card{background:#fff;border-radius:10px;padding:18px;border:1px solid var(--border);box-shadow:0 1px 3px rgba(0,0,0,.07);transition:transform .15s,box-shadow .15s}
+.feature-card:hover{box-shadow:0 4px 12px rgba(0,0,0,.12);transform:translateY(-2px)}
+.fc-icon{width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;margin-bottom:10px;font-size:18px}
+.fc-title{font-size:14px;font-weight:700;color:var(--accent2);margin-bottom:4px}
+.fc-desc{font-size:12px;color:var(--text2);line-height:1.5}
+.fc-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.fc-desc code{background:var(--surface);padding:1px 5px;border-radius:4px;font-size:11px;font-family:'SF Mono',Consolas,monospace}
+
+.note-box{padding:12px 20px;font-size:12px;color:var(--muted);background:var(--warn-bg);border-left:3px solid var(--warn);margin:0 20px 20px;max-width:1160px;margin-left:auto;margin-right:auto}
+</style>
+</head>
+<body>
+
+<!-- ═══════ NAV ═══════ -->
+<nav class="preview-nav">
+  <span class="logo">🎨 UX Preview</span>
+  <button class="active" onclick="showSection('modal',this)">🪟 Modal Fix (A+B)</button>
+  <button onclick="showSection('table',this)">📋 Table Actions (C+H)</button>
+  <button onclick="showSection('panel',this)">📐 Detail Panel (E)</button>
+  <button onclick="showSection('mobile',this)">📱 Mobile (D)</button>
+  <button onclick="showSection('validation',this)">✅ Validation (G)</button>
+  <button onclick="showSection('sidebar',this)">🗂 Sidebar (F)</button>
+  <button onclick="showSection('all',this)">🌟 All Fixes</button>
+</nav>
+
+<!-- ═══════ SECTION 1: MODAL FIX ═══════ -->
+<section class="section active" id="s-modal">
+  <div class="section-header">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+      <h1>Fix A+B — Modal Height + Scroll + Pinned Footer</h1>
+      <span class="badge-tag critical">🔴 Critical</span>
+    </div>
+    <p>Adapted to real app: <code>#modal</code> uses <code>var(--accent)</code> header, <code>var(--border)</code> borders, <code>.btn</code> classes. Fix: add <code>max-height:90vh</code>, <code>display:flex;flex-direction:column</code>, <code>overflow-y:auto</code> on body.</p>
+  </div>
+
+  <div class="compare">
+    <!-- BEFORE -->
+    <div class="compare-card before">
+      <div class="cc-label">❌ BEFORE — Current CSS (line 236)</div>
+      <div class="cc-body">
+        <div class="before-viewport">
+          <div class="before-modal">
+            <div class="before-modal-head"><h3>➕ Add Payment</h3><button style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer">Close</button></div>
+            <div class="before-modal-body">
+              <label>Employee Name</label><input type="text" placeholder="Type to search…">
+              <label>Employee ID Phone</label><input type="text" placeholder="01712345678">
+              <label>Payout Phone</label><input type="text" placeholder="01812345678">
+              <label>Amount (৳)</label><input type="number" placeholder="5000">
+              <label>Payment Method</label><select><option>Cash</option><option>bKash</option></select>
+              <label>Category</label><select><option>Salary</option><option>Advance</option></select>
+              <label>Transaction Date</label><input type="date">
+              <label>Notes (optional)</label><input type="text" placeholder="e.g. Advance for Eid…">
+            </div>
+            <div class="before-modal-footer">
+              <button class="btn secondary sm">Cancel</button>
+              <button class="btn sm">Save Payment</button>
+            </div>
+          </div>
+          <div class="before-cut"><span>↓ Cancel & Save are HERE — off-screen! ↓</span></div>
+        </div>
+        <div style="margin-top:10px;padding:8px 12px;background:#fee2e2;border-radius:6px;font-size:11px;color:#991b1b">
+          <strong>Measured:</strong> Modal=685px, Viewport=594px, Footer at 639px → <strong>45px below screen</strong>. CSS: <code>overflow:hidden; max-height:none</code>.
+        </div>
+      </div>
+    </div>
+
+    <!-- AFTER -->
+    <div class="compare-card after">
+      <div class="cc-label">✅ AFTER — Fixed CSS (adapted to real app)</div>
+      <div class="cc-body">
+        <div class="after-viewport">
+          <div class="after-overlay">
+            <div class="after-modal">
+              <div class="after-modal-head">
+                <h3>➕ Add Payment</h3>
+                <button class="close-btn">✕</button>
+              </div>
+              <div class="after-modal-body">
+                <span class="scroll-tag" style="margin-bottom:10px;display:inline-block">↕ Scrollable body</span>
+                <div class="form-grid">
+                  <div class="fg-field span2">
+                    <label>Employee Name <span class="req">*</span></label>
+                    <input type="text" placeholder="Type to search or enter new…">
+                  </div>
+                  <div class="fg-field">
+                    <label>ID Phone</label>
+                    <input type="text" placeholder="01712345678">
+                  </div>
+                  <div class="fg-field">
+                    <label>Payout Phone</label>
+                    <input type="text" placeholder="01812345678">
+                  </div>
+                  <div class="fg-field">
+                    <label>Amount (৳) <span class="req">*</span></label>
+                    <input type="number" placeholder="5000">
+                  </div>
+                  <div class="fg-field">
+                    <label>Payment Method</label>
+                    <select><option>Cash</option><option>bKash</option><option>Nagad</option></select>
+                  </div>
+                  <div class="fg-field">
+                    <label>Category</label>
+                    <select><option>Salary</option><option>Advance</option><option>Bonus</option></select>
+                  </div>
+                  <div class="fg-field">
+                    <label>Date <span class="req">*</span></label>
+                    <input type="date" value="2026-07-02">
+                  </div>
+                  <div class="fg-field span2">
+                    <label>Notes (optional)</label>
+                    <input type="text" placeholder="e.g. Advance for Eid…">
+                  </div>
+                </div>
+              </div>
+              <div class="after-modal-footer">
+                <span class="pinned-tag">Footer pinned ✓</span>
+                <div style="display:flex;gap:8px;margin-left:auto">
+                  <button class="btn secondary sm">Cancel</button>
+                  <button class="btn sm">Save Payment</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:10px;padding:8px 12px;background:#d1fae5;border-radius:6px;font-size:11px;color:#065f46">
+          <strong>Fix:</strong> <code>max-height:90vh</code> + <code>display:flex;flex-direction:column</code> + body <code>overflow-y:auto;flex:1;min-height:0</code> + footer <code>flex-shrink:0</code>. Two-column <code>.form-grid</code> saves vertical space.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note-box">
+    <strong>Adaptation note:</strong> The provided design used <code>--brand:#4f46e5</code> (indigo) and <code>-apple-system</code> font. The real app uses <code>--accent:#FD3101</code> (Al-Aqsa red) and <code>"Amasis MT Pro Medium",Georgia,serif</code>. This preview uses the real app's tokens. The modal header keeps the real <code>background:var(--accent)</code> red bar. Button classes <code>.btn</code>, <code>.btn.secondary</code>, <code>.btn.danger</code> are preserved as-is.
+  </div>
+</section>
+
+<!-- ═══════ SECTION 2: TABLE ACTIONS ═══════ -->
+<section class="section" id="s-table">
+  <div class="section-header">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+      <h1>Fix C+H — Icon Buttons + Table Scroll</h1>
+      <span class="badge-tag high">🟡 High</span>
+    </div>
+    <p>Replace 3 text buttons (180px) with SVG icon buttons (96px). Wrap tables in <code>.table-wrap</code> for horizontal scroll. Uses real app's <code>var(--border)</code>, <code>var(--surface)</code>, <code>var(--muted)</code>.</p>
+  </div>
+
+  <div class="compare">
+    <div class="compare-card before">
+      <div class="cc-label">❌ BEFORE — Text buttons (renderTxnActionButtons)</div>
+      <div class="cc-body">
+        <div style="overflow:hidden;border:1px solid var(--border);border-radius:6px">
+          <table class="table-demo" style="min-width:600px">
+            <thead><tr><th>Date</th><th>Emp ID</th><th>Name</th><th>Amount</th><th>Actions</th></tr></thead>
+            <tbody>
+              <tr><td>Jul 02</td><td class="mono">01829157470</td><td>A. Aziz</td><td class="amount">৳1</td><td><div class="old-actions"><button class="view">View</button><button class="edit">Edit</button><button class="del">Delete</button></div></td></tr>
+              <tr><td>Jul 02</td><td class="mono">01889425834</td><td>MD. Rubel</td><td class="amount">৳700</td><td><div class="old-actions"><button class="view">View</button><button class="edit">Edit</button><button class="del">Delete</button></div></td></tr>
+              <tr><td>Jul 02</td><td class="mono">01632818262</td><td>Golam Mustafa</td><td class="amount">৳400</td><td><div class="old-actions"><button class="view">View</button><button class="edit">Edit</button><button class="del">Delete</button></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:#991b1b;padding:8px;background:#fee2e2;border-radius:6px">
+          3 text buttons = ~180px per row. Table overflows on tablet. <code>renderTxnActionButtons()</code> at line 2403.
+        </div>
+      </div>
+    </div>
+
+    <div class="compare-card after">
+      <div class="cc-label">✅ AFTER — Icon buttons + scroll wrapper</div>
+      <div class="cc-body">
+        <div class="table-wrap">
+          <table class="table-demo" style="min-width:480px">
+            <thead><tr><th>Date</th><th>Emp ID</th><th>Name</th><th>Amount</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody>
+              <tr><td>Jul 02</td><td class="mono" style="font-size:11px;color:var(--muted)">01829157470</td><td><div style="font-weight:600">A. Aziz</div></td><td class="amount">৳1</td><td><div class="row-actions">
+                <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+                <button class="btn-icon del" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+              </div></td></tr>
+              <tr><td>Jul 02</td><td class="mono" style="font-size:11px;color:var(--muted)">01889425834</td><td><div style="font-weight:600">MD. Rubel</div></td><td class="amount">৳700</td><td><div class="row-actions">
+                <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+                <button class="btn-icon del" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+              </div></td></tr>
+              <tr><td>Jul 02</td><td class="mono" style="font-size:11px;color:var(--muted)">01632818262</td><td><div style="font-weight:600">Golam Mustafa</div></td><td class="amount">৳400</td><td><div class="row-actions">
+                <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+                <button class="btn-icon del" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+              </div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:#065f46;padding:8px;background:#d1fae5;border-radius:6px">
+          3 icon buttons = ~96px (saved 84px). Hover: blue=edit, red=delete. <code>.btn-icon</code> uses <code>var(--border)</code>, <code>var(--muted)</code>. <code>.table-wrap</code> adds <code>overflow-x:auto</code>.
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note-box">
+    <strong>Adaptation note:</strong> The provided design used <code>.icon-btn</code> with <code>--brand</code> hover colors. Adapted to <code>.btn-icon</code> using the real app's <code>var(--surface)</code> hover and <code>var(--err)</code> for delete. The existing <code>renderTxnActionButtons()</code> and <code>renderTxnActionMenu()</code> JS functions will be updated to output icon HTML. The existing <code>.row-action-menu</code> select dropdown for mobile is preserved.
+  </div>
+</section>
+
+<!-- ═══════ SECTION 3: DETAIL PANEL ═══════ -->
+<section class="section" id="s-panel">
+  <div class="section-header">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+      <h1>Fix E — Detail Panel: Pinned Actions</h1>
+      <span class="badge-tag high">🟡 High</span>
+    </div>
+    <p>Real app <code>#detailPanel</code> already uses <code>height:100vh;overflow-y:auto</code>. Fix: change to <code>display:flex;flex-direction:column</code> with <code>#panelBody</code> as scroll area and action footer pinned.</p>
+  </div>
+
+  <div class="compare">
+    <div class="compare-card before">
+      <div class="cc-label">❌ BEFORE — Buttons scroll with content</div>
+      <div class="cc-body">
+        <div class="panel-demo">
+          <div class="before-panel">
+            <div class="before-panel-head"><h3>Transaction #2555</h3><button style="background:rgba(255,255,255,.12);border:none;color:#fff;width:28px;height:28px;border-radius:8px;cursor:pointer">✕</button></div>
+            <div class="before-panel-body">
+              <div class="detail-row"><span class="lbl">ID:</span><span class="val">#2555</span></div>
+              <div class="detail-row"><span class="lbl">Reference:</span><span class="val">fpe-2fb8a8a81c5c0e25</span></div>
+              <div class="detail-row"><span class="lbl">Employee:</span><span class="val">A. Aziz (01829157470)</span></div>
+              <div class="detail-row"><span class="lbl">Amount:</span><span class="val" style="font-weight:700;color:var(--accent2)">৳1</span></div>
+              <div class="detail-row"><span class="lbl">Method:</span><span class="val">cash</span></div>
+              <div class="detail-row"><span class="lbl">Phone:</span><span class="val">01829157470</span></div>
+              <div class="detail-row"><span class="lbl">Category:</span><span class="val">salary</span></div>
+              <div class="detail-row"><span class="lbl">Date:</span><span class="val">Jul 02, 2026</span></div>
+              <div class="detail-row"><span class="lbl">Period:</span><span class="val">2026-07</span></div>
+              <div class="detail-row"><span class="lbl">Reversal:</span><span class="val">No</span></div>
+              <div class="detail-row"><span class="lbl">Created:</span><span class="val">Jul 02, 01:11 PM</span></div>
+              <div class="detail-row"><span class="lbl">Source:</span><span class="val">REGTEST_20260702…</span></div>
+              <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)">
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn danger sm">Reverse</button>
+                <button class="btn secondary sm">Edit</button>
+                <button class="btn danger sm">Delete</button>
+              </div>
+              <div style="margin-top:6px;font-size:10px;color:var(--err)">↑ Buttons scroll away!</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="compare-card after">
+      <div class="cc-label">✅ AFTER — Flex column, pinned footer</div>
+      <div class="cc-body">
+        <div class="panel-demo">
+          <div class="after-panel">
+            <div class="after-panel-head">
+              <h3>Transaction #2555</h3>
+              <button class="close-btn">✕</button>
+            </div>
+            <div class="after-panel-body">
+              <div class="detail-row"><span class="lbl">ID:</span><span class="val">#2555</span></div>
+              <div class="detail-row"><span class="lbl">Reference:</span><span class="val">fpe-2fb8a8a81c5c0e25</span></div>
+              <div class="detail-row"><span class="lbl">Employee:</span><span class="val">A. Aziz (01829157470)</span></div>
+              <div class="detail-row"><span class="lbl">Amount:</span><span class="val" style="font-weight:700;color:var(--accent2)">৳1</span></div>
+              <div class="detail-row"><span class="lbl">Method:</span><span class="val">cash</span></div>
+              <div class="detail-row"><span class="lbl">Phone:</span><span class="val">01829157470</span></div>
+              <div class="detail-row"><span class="lbl">Category:</span><span class="val">salary</span></div>
+              <div class="detail-row"><span class="lbl">Date:</span><span class="val">Jul 02, 2026</span></div>
+              <div class="detail-row"><span class="lbl">Period:</span><span class="val">2026-07</span></div>
+              <div class="detail-row"><span class="lbl">Reversal:</span><span class="val">No</span></div>
+              <div class="detail-row"><span class="lbl">Created:</span><span class="val">Jul 02, 01:11 PM</span></div>
+              <div class="detail-row"><span class="lbl">Source:</span><span class="val">REGTEST_20260702…</span></div>
+            </div>
+            <div class="after-panel-foot">
+              <button class="btn danger sm">Reverse</button>
+              <div style="margin-left:auto;display:flex;gap:6px">
+                <button class="btn secondary sm">Edit</button>
+                <button class="btn danger sm">Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:#065f46;padding:8px;background:#d1fae5;border-radius:6px">
+          <code>#detailPanel</code> gets <code>display:flex;flex-direction:column</code>. <code>#panelBody</code> gets <code>flex:1;overflow-y:auto;min-height:0</code>. New <code>#panelFoot</code> gets <code>flex-shrink:0</code>.
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note-box">
+    <strong>Adaptation note:</strong> The real app's <code>openTxnDetail()</code> function builds HTML inline with <code>detailRow()</code> helper and appends action buttons at the end of <code>panelBody.innerHTML</code>. Fix: move action buttons to a separate <code>#panelFoot</code> div after <code>#panelBody</code> in the HTML structure. The <code>.panel-header</code> CSS already has <code>position:sticky;top:0</code> — we keep that and add <code>flex-shrink:0</code>.
+  </div>
+</section>
+
+<!-- ═══════ SECTION 4: MOBILE ═══════ -->
+<section class="section" id="s-mobile">
+  <div class="section-header">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+      <h1>Fix D — Mobile Bottom Sheet</h1>
+      <span class="badge-tag high">🟡 High</span>
+    </div>
+    <p>Real app already has <code>@media(max-width:600px)</code> with <code>border-radius:16px 16px 0 0</code> and <code>max-height:90vh</code>. Fix: extend this to <code>@media(max-width:768px)</code> so tablets also get bottom sheet. Add <code>slideUp</code> animation.</p>
+  </div>
+
+  <div style="display:flex;gap:24px;justify-content:center;flex-wrap:wrap;padding:0 20px 32px">
+    <!-- Phone 1: List -->
+    <div>
+      <div style="text-align:center;margin-bottom:10px;font-size:12px;font-weight:600;color:var(--muted)">📱 Transaction List + FAB</div>
+      <div class="phone-frame">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div class="m-header">
+            <button class="m-hamburger">☰</button>
+            <h2>Transactions</h2>
+            <button class="btn sm" style="background:rgba(255,255,255,.2);color:#fff;border:none;font-size:11px">Filter</button>
+          </div>
+          <div class="m-content">
+            <div style="padding:10px 12px;background:#fff;border-bottom:1px solid var(--border)">
+              <input style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:15px" placeholder="🔍 Search…">
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 12px">
+              <div class="stat-card"><div class="lbl">Total</div><div class="num">৳1.2L</div></div>
+              <div class="stat-card"><div class="lbl">Pending</div><div class="num" style="color:var(--warn)">৳45K</div></div>
+            </div>
+            <div class="m-row">
+              <div><div class="m-txn-name">A. Aziz</div><div class="m-txn-sub">cash · Salary · Jul 02</div></div>
+              <div style="text-align:right"><div class="m-txn-amount">৳1</div><span class="pill warn" style="font-size:10px">Pending</span></div>
+            </div>
+            <div class="m-row">
+              <div><div class="m-txn-name">MD. Rubel</div><div class="m-txn-sub">bkash · Salary · Jul 02</div></div>
+              <div style="text-align:right"><div class="m-txn-amount">৳700</div><span class="pill ok" style="font-size:10px">Paid</span></div>
+            </div>
+            <div class="m-row">
+              <div><div class="m-txn-name">Golam Mustafa</div><div class="m-txn-sub">bkash · Salary · Jul 02</div></div>
+              <div style="text-align:right"><div class="m-txn-amount">৳400</div><span class="pill ok" style="font-size:10px">Paid</span></div>
+            </div>
+          </div>
+          <button class="m-fab" title="Add Payment">＋</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Phone 2: Bottom sheet -->
+    <div>
+      <div style="text-align:center;margin-bottom:10px;font-size:12px;font-weight:600;color:var(--muted)">📱 Add Payment (Bottom Sheet)</div>
+      <div class="phone-frame">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div class="m-header">
+            <button class="m-hamburger">☰</button>
+            <h2>Transactions</h2>
+          </div>
+          <div class="m-sheet-overlay">
+            <div class="m-sheet">
+              <div class="m-sheet-head">
+                <h3>➕ Add Payment</h3>
+                <button class="close-btn">✕</button>
+              </div>
+              <div class="m-sheet-body">
+                <div class="m-field">
+                  <label>Employee Name <span style="color:var(--err)">*</span></label>
+                  <input type="text" placeholder="Type to search…">
+                </div>
+                <div class="m-field">
+                  <label>Amount (৳) <span style="color:var(--err)">*</span></label>
+                  <input type="number" placeholder="5000">
+                </div>
+                <div class="m-field">
+                  <label>Payment Method</label>
+                  <select><option>Cash</option><option>bKash</option><option>Nagad</option></select>
+                </div>
+                <div class="m-field">
+                  <label>Category</label>
+                  <select><option>Salary</option><option>Advance</option></select>
+                </div>
+                <div class="m-field">
+                  <label>Date <span style="color:var(--err)">*</span></label>
+                  <input type="date" value="2026-07-02">
+                </div>
+              </div>
+              <div class="m-sheet-foot">
+                <button class="btn secondary sm">Cancel</button>
+                <button class="btn sm">Save Payment</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note-box">
+    <strong>Adaptation note:</strong> The real app's mobile CSS at line 264-265 already does <code>#modalOverlay{justify-content:flex-end;align-items:flex-end}</code> and <code>#modal{width:100%;border-radius:16px 16px 0 0;max-height:90vh}</code>. The fix extends this pattern to <code>@media(max-width:768px)</code> (tablet) and adds the <code>slideUp</code> animation. The <code>.m-fab</code> (floating action button) is new — would be added to each tab's HTML. Input <code>font-size:16px</code> is already in the real app's <code>@media(max-width:600px)</code> CSS (line 289).
+  </div>
+</section>
+
+<!-- ═══════ SECTION 5: VALIDATION ═══════ -->
+<section class="section" id="s-validation">
+  <div class="section-header">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+      <h1>Fix G — Inline Validation + Loading States</h1>
+      <span class="badge-tag medium">🔵 Medium</span>
+    </div>
+    <p>Uses real app's <code>var(--err)</code>, <code>var(--ok)</code>, <code>var(--accent)</code> for focus ring. <code>.btn.loading</code> class disables + shows spinner. <code>#toast</code> already exists with <code>.ok</code> and <code>.err</code> classes.</p>
+  </div>
+
+  <div class="compare">
+    <div class="compare-card before">
+      <div class="cc-label">❌ BEFORE — No feedback</div>
+      <div class="cc-body">
+        <div class="val-demo" style="margin:0">
+          <div class="val-field">
+            <label>Employee Name</label>
+            <input type="text" placeholder="Type name…" style="border-color:var(--border)">
+          </div>
+          <div class="val-field">
+            <label>Amount (৳)</label>
+            <input type="text" value="abc" style="border-color:var(--border)">
+          </div>
+          <div class="val-field">
+            <label>Phone</label>
+            <input type="text" placeholder="Leave empty…" style="border-color:var(--border)">
+          </div>
+          <button class="btn">Save Payment</button>
+          <div style="margin-top:8px;font-size:11px;color:var(--err)">No feedback — user doesn't know what's wrong</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="compare-card after">
+      <div class="cc-label">✅ AFTER — Inline errors + loading</div>
+      <div class="cc-body">
+        <div class="val-demo" style="margin:0">
+          <div class="val-field valid">
+            <label>Employee Name <span class="req">*</span></label>
+            <input type="text" value="A. Aziz" style="border-color:var(--ok)">
+            <div class="ok-msg">✓ Valid</div>
+          </div>
+          <div class="val-field invalid">
+            <label>Amount (৳) <span class="req">*</span></label>
+            <input type="text" value="abc" style="border-color:var(--err);box-shadow:0 0 0 3px rgba(220,38,38,.1)">
+            <div class="error-msg">⚠ Please enter a valid number (e.g. 5000)</div>
+          </div>
+          <div class="val-field invalid">
+            <label>Phone <span class="req">*</span></label>
+            <input type="text" placeholder="01XXXXXXXXX" style="border-color:var(--err);box-shadow:0 0 0 3px rgba(220,38,38,.1)">
+            <div class="error-msg">⚠ This field is required</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn loading" disabled><span class="spinner"></span> Saving…</button>
+            <button class="btn danger">Delete</button>
+            <button class="btn success">Approve</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note-box">
+    <strong>Adaptation note:</strong> The real app's <code>showToast(msg, type)</code> function already exists with <code>#toast.ok</code> and <code>#toast.err</code> classes. The <code>saveNewPayment()</code>, <code>saveEditTxn()</code>, <code>confirmDeleteTxn()</code> functions already show toasts. Fix: add <code>setButtonLoading(btn, loading)</code> and <code>validateField(input)</code> JS utilities. Add <code>.has-error</code> / <code>.error-msg</code> CSS. The existing <code>input:focus</code> already uses <code>border-color:var(--accent)</code> — we add <code>box-shadow:0 0 0 3px var(--focus-ring)</code> for a visible focus ring.
+  </div>
+</section>
+
+<!-- ═══════ SECTION 6: SIDEBAR ═══════ -->
+<section class="section" id="s-sidebar">
+  <div class="section-header">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+      <h1>Fix F — Sidebar (Already Exists, Needs Polish)</h1>
+      <span class="badge-tag medium">🔵 Medium</span>
+    </div>
+    <p>The real app already has <code>.sidebar-drawer</code> with hamburger toggle (<code>#hamburgerBtn</code>). It works. Fix: add badge counts for pending items, improve scroll behavior, add user profile at bottom.</p>
+  </div>
+
+  <div style="max-width:900px;margin:0 auto;padding:0 20px 40px">
+    <div class="app-shell">
+      <div class="sb-demo">
+        <div class="sb-demo-head">
+          <span class="title">Menu</span>
+          <button class="close">✕</button>
+        </div>
+        <div class="sb-demo-menu">
+          <button class="sb-demo-item">📊 Overview</button>
+          <button class="sb-demo-item active">📋 Transactions</button>
+          <button class="sb-demo-item">🔍 Search</button>
+          <button class="sb-demo-item">👥 Employees</button>
+          <button class="sb-demo-item">➕ Add Employee</button>
+          <button class="sb-demo-item">❓ Unmatched</button>
+          <div class="sb-demo-divider"></div>
+          <button class="sb-demo-item">📋 Review Queue <span class="pill warn" style="float:right">5</span></button>
+          <button class="sb-demo-item">🔄 Sync</button>
+          <button class="sb-demo-item">✏️ Manual Entry</button>
+          <button class="sb-demo-item">👤 Operator</button>
+          <button class="sb-demo-item">💵 Cash</button>
+          <button class="sb-demo-item">📥 Income</button>
+          <div class="sb-demo-divider"></div>
+          <button class="sb-demo-item">⚙️ Admin</button>
+        </div>
+        <div class="sb-demo-social">
+          <a href="#" style="color:#1877f2">f</a>
+          <a href="#" style="color:#e1306c">📷</a>
+          <a href="#" style="color:#25d366">💬</a>
+        </div>
+      </div>
+      <div class="main-demo">
+        <div class="main-demo-top">
+          <span class="title">Transactions</span>
+          <button class="btn sm">＋ Add Payment</button>
+        </div>
+        <div class="main-demo-body">
+          <div class="stats-row">
+            <div class="stat-card"><div class="num">2,532</div><div class="lbl">Total Tx</div></div>
+            <div class="stat-card"><div class="num">৳4.8L</div><div class="lbl">Total Paid</div></div>
+            <div class="stat-card"><div class="num" style="color:var(--warn)">12</div><div class="lbl">Pending</div></div>
+            <div class="stat-card"><div class="num" style="color:var(--ok)">৳3.2L</div><div class="lbl">Approved</div></div>
+          </div>
+          <div class="table-wrap">
+            <table class="table-demo">
+              <thead><tr><th>Date</th><th>Name</th><th>Amount</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead>
+              <tbody>
+                <tr><td>Jul 02</td><td>A. Aziz</td><td class="amount">৳1</td><td><span class="pill warn">Pending</span></td><td><div class="row-actions">
+                  <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                  <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+                  <button class="btn-icon del" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </div></td></tr>
+                <tr><td>Jul 02</td><td>MD. Rubel</td><td class="amount">৳700</td><td><span class="pill ok">Paid</span></td><td><div class="row-actions">
+                  <button class="btn-icon" title="View"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                  <button class="btn-icon edit" title="Edit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+                  <button class="btn-icon del" title="Delete"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note-box">
+    <strong>Adaptation note:</strong> The real app already has a working sidebar (<code>.sidebar-drawer</code>, <code>.sidebar-backdrop</code>, <code>#hamburgerBtn</code>) with <code>drawerNavigate()</code> JS function. The provided design's sidebar with <code>--brand:indigo</code> gradient is NOT used — we keep the real app's white sidebar with <code>rgba(253,49,1,.08)</code> hover. Fix: add <code>.pill</code> badge counts to sidebar items (Review Queue, etc.), add user profile section at bottom, improve <code>overflow-y:auto</code> on <code>.sidebar-menu</code>.
+  </div>
+</section>
+
+<!-- ═══════ SECTION 7: ALL FEATURES ═══════ -->
+<section class="section" id="s-all">
+  <div class="section-header">
+    <h1>🌟 All Fixes — Adapted to Real App</h1>
+    <p>Every fix mapped to the real <code>payroll.html</code> CSS/JS structure. No new design system — all changes use existing tokens, classes, and patterns.</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#fee2e2">🪟</div>
+      <div class="fc-title">Fix A — Modal Height + Flex Footer</div>
+      <div class="fc-desc">CSS lines 236-241: Add <code>max-height:90vh</code>, <code>display:flex;flex-direction:column</code> to <code>#modal</code>. Body gets <code>overflow-y:auto;flex:1;min-height:0</code>. Footer gets <code>flex-shrink:0</code>.</div>
+      <div class="fc-tags"><span class="badge-tag critical">🔴 Critical</span><span class="badge-tag fixed">5 modals</span></div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#fef3c7">📐</div>
+      <div class="fc-title">Fix B — Remove Landscape Query</div>
+      <div class="fc-desc">CSS line 376: Remove <code>@media(max-width:900px) and (orientation:landscape)</code> that constrains <code>main</code> to 490px. Line 98: Add <code>overflow-y:auto</code> to <code>main</code>.</div>
+      <div class="fc-tags"><span class="badge-tag critical">🔴 Critical</span><span class="badge-tag fixed">All pages</span></div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#dbeafe">📋</div>
+      <div class="fc-title">Fix C — Icon Action Buttons</div>
+      <div class="fc-desc">JS lines 2403-2421: Update <code>renderTxnActionButtons()</code> and <code>renderTxnActionMenu()</code> to output <code>.btn-icon</code> SVG buttons. Add <code>.btn-icon</code> CSS after line 190.</div>
+      <div class="fc-tags"><span class="badge-tag high">🟡 High</span><span class="badge-tag fixed">All tables</span></div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#f0fdf4">📱</div>
+      <div class="fc-title">Fix D — Mobile Bottom Sheet</div>
+      <div class="fc-desc">CSS lines 264-265: Extend <code>@media(max-width:600px)</code> modal rules to <code>768px</code>. Add <code>slideUp</code> animation. Add <code>.m-fab</code> floating button to each tab.</div>
+      <div class="fc-tags"><span class="badge-tag high">🟡 High</span><span class="badge-tag fixed">Mobile 375-768px</span></div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#fdf4ff">📐</div>
+      <div class="fc-title">Fix E — Detail Panel Layout</div>
+      <div class="fc-desc">CSS line 220: Add <code>display:flex;flex-direction:column</code> to <code>#detailPanel</code>. HTML line 1237: Add <code>#panelFoot</code> div after <code>#panelBody</code>. JS: Move action buttons to <code>#panelFoot</code>.</div>
+      <div class="fc-tags"><span class="badge-tag high">🟡 High</span><span class="badge-tag fixed">Detail panel</span></div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#fff7ed">🗂</div>
+      <div class="fc-title">Fix F — Sidebar Polish</div>
+      <div class="fc-desc">Already works (<code>.sidebar-drawer</code> + <code>#hamburgerBtn</code>). Add <code>.pill</code> badge counts to menu items. Add user profile at bottom. Improve <code>overflow-y:auto</code>.</div>
+      <div class="fc-tags"><span class="badge-tag medium">🔵 Medium</span><span class="badge-tag fixed">Already works</span></div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#f0fdf4">✅</div>
+      <div class="fc-title">Fix G — Validation + Loaders</div>
+      <div class="fc-desc">Add <code>setButtonLoading()</code> and <code>validateField()</code> JS utilities. Add <code>.has-error</code>, <code>.error-msg</code>, <code>.spinner</code>, <code>.btn.loading</code> CSS. Update <code>saveNewPayment()</code> etc. to use them.</div>
+      <div class="fc-tags"><span class="badge-tag medium">🔵 Medium</span><span class="badge-tag fixed">All forms</span></div>
+    </div>
+    <div class="feature-card">
+      <div class="fc-icon" style="background:#eff6ff">↔</div>
+      <div class="fc-title">Fix H — Table Scroll Wrapper</div>
+      <div class="fc-desc">Add <code>.table-wrap{overflow-x:auto}</code> CSS. Wrap existing <code>&lt;table&gt;</code> elements in <code>&lt;div class="table-wrap"&gt;</code> in JS render functions. <code>.tbl-wrap</code> already exists but is only used on some tables.</div>
+      <div class="fc-tags"><span class="badge-tag medium">🔵 Medium</span><span class="badge-tag fixed">All tables</span></div>
+    </div>
+  </div>
+  <div class="note-box" style="margin-bottom:32px">
+    <strong>Key adaptation decisions:</strong><br>
+    1. <strong>Colors:</strong> Provided design used indigo <code>#4f46e5</code> → adapted to real app's Al-Aqsa red <code>#FD3101</code><br>
+    2. <strong>Font:</strong> Provided design used <code>-apple-system</code> → kept real app's <code>"Amasis MT Pro Medium",Georgia,serif</code><br>
+    3. <strong>Buttons:</strong> Provided design used <code>.btn-primary</code>, <code>.btn-ghost</code> → mapped to existing <code>.btn</code>, <code>.btn.secondary</code>, <code>.btn.danger</code><br>
+    4. <strong>Sidebar:</strong> Provided design used dark gradient sidebar → kept real app's white sidebar with red accent hover<br>
+    5. <strong>Modal header:</strong> Provided design used white header with border → kept real app's red <code>var(--accent)</code> header bar<br>
+    6. <strong>Pills/Badges:</strong> Provided design used <code>.status-badge</code> → mapped to existing <code>.pill</code> classes (<code>.ok</code>, <code>.warn</code>, <code>.info</code>, <code>.muted</code>)<br>
+    7. <strong>Toast:</strong> Provided design used custom toast → real app already has <code>#toast</code> with <code>.ok</code> and <code>.err</code> classes<br>
+    8. <strong>Forms:</strong> Provided design used <code>.form-group</code> with different styling → real app already has <code>.form-group</code>, <code>label</code>, <code>input</code> CSS — we add <code>.form-grid</code> and <code>.has-error</code> on top
+  </div>
+</section>
+
+<script>
+function showSection(id, btn) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.preview-nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('s-' + id).classList.add('active');
+  if (btn) btn.classList.add('active');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+</script>
+</body>
+</html>

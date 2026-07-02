@@ -64,6 +64,9 @@ yarn-error.log*
 *.orig
 *.bak.*
 
+# Generated KB artifacts (produced by scripts/sync_knowledge_base_to_runtime.py)
+resources/generated_kb/
+
 # Reports (private contact/employee data)
 reports/
 

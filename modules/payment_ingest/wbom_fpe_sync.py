@@ -82,7 +82,7 @@ async def sync_wbom_transaction(wbom_txn_id: int) -> Optional[dict]:
             """
             SELECT ct.transaction_id, ct.employee_id, ct.amount, ct.transaction_type,
                    ct.transaction_date, ct.payment_method, ct.reference_number,
-                   ct.remarks, ct.created_at,
+                   ct.remarks, ct.transaction_date,
                    e.employee_name, e.employee_mobile, e.bkash_number, e.nagad_number
             FROM   wbom_cash_transactions ct
             JOIN   wbom_employees e ON e.employee_id = ct.employee_id
@@ -122,7 +122,7 @@ async def sync_wbom_transaction(wbom_txn_id: int) -> Optional[dict]:
             payout_method = PayoutMethod.unknown
 
         amount = Decimal(str(wbom.get("amount") or 0))
-        txn_date_raw = wbom.get("transaction_date") or wbom.get("created_at")
+        txn_date_raw = wbom.get("transaction_date")
         if isinstance(txn_date_raw, datetime):
             txn_date = txn_date_raw.date()
         elif isinstance(txn_date_raw, date):
@@ -206,7 +206,7 @@ async def backfill_wbom_to_fpe(since_days: int = 30) -> Tuple[int, int]:
         rows = await fetch_all(
             """
             SELECT transaction_id FROM wbom_cash_transactions
-            WHERE  created_at >= $1
+            WHERE  transaction_date >= $1::date
             ORDER  BY transaction_id
             """,
             since,

@@ -44,6 +44,7 @@ RESOURCES_DIR = os.path.join(
 CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "320"))      # chars per chunk
 CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "60"))  # chars overlap
 MIN_TOKEN_LEN = 2
+TOP_K_RESULTS = int(os.getenv("RAG_TOP_K", "5"))           # default top-k results
 
 # BM25 params
 _K1 = 1.5
@@ -453,6 +454,37 @@ _IDX = _Index()
 
 # ── STEP 2: Recent-searches audit ring buffer (last 50 queries) ───────────────
 _RECENT_SEARCHES: deque = deque(maxlen=50)
+
+# ── BM25 result cache — reduces redundant scans for repeated queries ──────────
+# Configurable TTL; set RAG_CACHE_TTL=0 to disable. Bounded at 256 entries (LRU).
+RAG_CACHE_TTL: float = float(os.getenv("RAG_CACHE_TTL", "300"))  # 5 minutes default
+_BM25_CACHE: "OrderedDict[str, tuple[list, float]]" = OrderedDict()
+_BM25_CACHE_MAX: int = 256
+
+def _bm25_cache_get(key: str) -> "Optional[list]":
+    """Return cached BM25 result if still within TTL, else None."""
+    if RAG_CACHE_TTL <= 0:
+        return None
+    entry = _BM25_CACHE.get(key)
+    if entry is None:
+        return None
+    result, ts = entry
+    if time.time() - ts > RAG_CACHE_TTL:
+        _BM25_CACHE.pop(key, None)
+        return None
+    _BM25_CACHE.move_to_end(key)
+    return result
+
+def _bm25_cache_put(key: str, result: list) -> None:
+    """Store BM25 result in cache with current timestamp."""
+    if RAG_CACHE_TTL <= 0:
+        return
+    if key in _BM25_CACHE:
+        _BM25_CACHE.move_to_end(key)
+    else:
+        if len(_BM25_CACHE) >= _BM25_CACHE_MAX:
+            _BM25_CACHE.popitem(last=False)  # evict LRU
+    _BM25_CACHE[key] = (result, time.time())
 
 
 # ── Source loaders ─────────────────────────────────────────────────────────────
@@ -1018,7 +1050,11 @@ async def search(
     if HYBRID_SEARCH_ENABLED:
         out = await _hybrid_search(q, q_tokens, n_docs, k, role=_effective_role)
     else:
-        # Exact production BM25 path
+        # Exact production BM25 path — check result cache first
+        _cache_key = hashlib.md5(f"{q}:{k}:{min_score}:{_effective_role}".encode()).hexdigest()
+        _cached = _bm25_cache_get(_cache_key)
+        if _cached is not None:
+            return _cached
         scored = []
         for d in _IDX.docs:
             # PATCH 2: only score chunks tagged as safe for customers
@@ -1040,6 +1076,7 @@ async def search(
                 "chunk_idx": d["chunk_idx"],
                 "text": d["text"],
             })
+        _bm25_cache_put(_cache_key, out)
     # ── END HYBRID RAG Milestone 3 ─────────────────────────────────────────────
 
     # PATCH 7: source traceability — log every search with top hit details

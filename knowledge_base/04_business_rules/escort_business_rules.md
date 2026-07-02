@@ -174,6 +174,34 @@ Rules:
 - The roster UI must not send empty or malformed query parameters
 - Optional missing fields should render as `—`, not throw runtime errors
 
+## এসকর্ট পেমেন্ট ক্যালকুলেশন ফর্মুলা
+
+### ডিফল্ট ডেইলি রেট
+`DEFAULT_DAILY_RATE = ৳400/দিন` (PAY-01: ৳12,000 ÷ 30)
+
+### ডেইলি রেট ক্যালকুলেশন
+```
+daily_rate = basic_salary ÷ 30
+```
+যদি `basic_salary` না থাকে বা শূন্য হয়: `daily_rate = 400` (৳400/দিন ব্যবহার হয়)
+
+### গ্রস পেমেন্ট
+```
+gross_amount = round(duty_days × daily_rate, 2)
+```
+
+### নেট দেয় (ফ্লোর: শূন্য)
+```
+net_payable = max(gross_amount − food_bill − conveyance − advances, 0)
+```
+
+### গুরুত্বপূর্ণ নিয়ম
+- নেট পেমেন্ট কখনো ০-এর নিচে যাবে না (`max(..., 0)` দিয়ে নিশ্চিত)
+- খাদ্য বিল কর্তন (`food_bill`): প্রোগ্রাম টেবিল থেকে, ডিফল্ট ০
+- যাতায়াত কর্তন (`conveyance`): প্রোগ্রাম টেবিল থেকে, ডিফল্ট ০
+- অ্যাডভান্স কর্তন: ওই এসকর্ট প্রোগ্রাম ও চলতি মাসের `final` স্ট্যাটাস অ্যাডভান্স মাত্র
+- ডিউটি দিন: রোস্টারে দিন গণনা; না থাকলে প্রোগ্রামের তারিখের পার্থক্য + 1
+
 ## Cross References
 
 - `../05_workflows/escort_workflow.md`

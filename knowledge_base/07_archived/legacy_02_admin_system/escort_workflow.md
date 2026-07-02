@@ -1,0 +1,58 @@
+---
+title: Escort Workflow
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-06-24
+runtime_index: true
+---
+
+# Escort Workflow
+
+## Purpose
+Define the admin-only workflow for vessel escort order processing, assignment, confirmation, duty tracking, release, and payment draft handling.
+
+## Scope
+Level 2 admin system knowledge. Visible to Admin, Operation Officer, Supervisor, Accountant, and Management only.
+
+## Definitions
+- Mother Vessel: vessel name usually without mobile number, often associated with importer/product context.
+- Lighter Vessel: vessel name usually linked to master's mobile number, destination, and capacity.
+- Escort Assignment: admin-approved assignment of escort name, mobile, start date, and day/night shift.
+- Release Point: destination/location where escort is released.
+
+## Workflow
+1. Client sends escort order through Messenger, WhatsApp, or Meta channel.
+2. AI extracts mother vessel, lighter vessel, master's number, capacity, product, destination, and context.
+3. AI creates draft with blank escort name, escort mobile, and start date/shift if not provided.
+4. Admin reviews and edits the draft.
+5. Admin confirms escort assignment.
+6. Final confirmation is sent to client.
+7. Escort duty officially starts and duty record is updated.
+8. Escort submits release slip after job completion.
+9. Payment draft is prepared after release slip review and calculation.
+10. Admin approves final payment handling.
+11. Accountant receives payment message and ledger update follows.
+
+## Business Rules
+- Escort confirmation must not be sent directly without admin review.
+- Escort roster updates only after client final confirmation.
+- If assigned escort mobile does not exist in employee records, the backend may create a new employee record for escort tracking.
+- Release slip is required before final attendance and payment calculation.
+- Escort duty day is 24 hours, covering day and night.
+
+## Examples
+Client Order -> AI Draft -> Admin Edit -> Client Confirmation -> Escort Assignment -> Escort Duty -> Release Slip -> Payment Draft -> Admin Handling -> Accountant.
+
+## Exceptions
+Unclear vessel orders, missing master mobile, ambiguous destination, or conflicting vessel names should be routed to admin/manual review.
+
+## AI Notes
+Use admin-facing technical details only in Level 2 or Level 3 contexts. Client-facing replies should not expose parsing or database logic.
+
+## Cross References
+- release_slip_workflow.md
+- payment_workflow.md
+- ../03_developer_system/parser_logic.md
+
+## Revision History
+- 2026-06-19: Created from escort workflow and vessel parsing sources.
