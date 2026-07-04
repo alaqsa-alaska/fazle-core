@@ -1,12 +1,12 @@
 Source: knowledge_base/06_developer_system/database_rules.md
-SHA256: fde67f83c21885adf453e63cf989a37e135b4a4a8e7b0d502d590a54e9bcc627
-Version: fde67f83c218
+SHA256: 537cb91b8c6d5ce4d6cf330ee45dea48c2378b76524b284370ad81c111475b01
+Version: 537cb91b8c6d
 
 # Database Rules — Fazle AI Platform
 
 **Visibility:** DEVELOPER (table structure, schemas, implementation details)
 **AI Exposure:** Table names and schema details must NOT be exposed to candidates or employees. Business behavior may be summarized at ADMIN level.
-**Last Updated:** 2026-06-22 (Wave-2B — Entity Ownership Audit completion)
+**Last Updated:** 2026-07-02 (Employee unification — fpe_employees is now canonical)
 **Source:** Entity Ownership Audit 2026-06-22 + production migration files + Python inline DDL
 
 ---
@@ -23,6 +23,14 @@ The Fazle AI Platform uses a single PostgreSQL database shared across all subsys
 - No hard deletes; use deactivation, soft-delete, or status flags
 - Idempotency keys protect all financial and notification operations
 - Never expose table names, column names, or schema details to candidates or employees
+
+**Employee Identity (2026-07-02):** `fpe_employees` is now the single canonical
+employee table. It carries both identity fields (phone, name) and HR profile
+fields (`basic_salary`, `designation`, `joining_date`). All employee creation
+paths (WhatsApp parser, escort confirmation, frontend Add Employee) now create
+or link `fpe_employees` rows. Cross-reference with `wbom_employees` is
+maintained via `wbom_employee_id` soft-link. Migration 011 backfilled all 178
+WBOM employees into FPE.
 
 ---
 
@@ -142,13 +150,13 @@ Payroll runs are computed monthly per employee. The `daily_payroll_compute` sche
 | `wbom_payroll_run_items` | Physical Entity | Per-employee line items: component_type, amount, sign (+/-), source_table, source_id | Created with payroll run; immutable after locked |
 | `wbom_payroll_approval_log` | Audit Log | Immutable approval transitions: action, from_status, to_status, actor, reason, payload_json | Append-only; never modified |
 | `wbom_salary_records` | Physical Entity | Historical salary records per month: salary_month, amount, status, payment_date | Created on payroll completion; persistent salary history |
-| `wbom_staging_payments` | Staging | Pre-confirmation staging for WhatsApp-parsed payments: extracted_name, extracted_mobile, amount, matched_employee_id (FK), status (pending/approved/rejected), idempotency_key | Temporary; consumed when approved → becomes `wbom_cash_transactions`. `fpe_staging_payments` does NOT exist — this is the only staging table (U-03 resolved 2026-06-23). |
+| `wbom_staging_payments` | Staging | Pre-confirmation staging for WhatsApp-parsed payments: extracted_name, extracted_mobile, amount, matched_employee_id (FK), status (pending/approved/rejected), idempotency_key | Temporary; consumed when approved → becomes `fpe_cash_transactions` via `create_transaction()`. `fpe_staging_payments` does NOT exist — this is the only staging table (U-03 resolved 2026-06-23). |
 
 ### Cross-Domain Dependencies
 
 - `wbom_payroll_runs.employee_id → wbom_employees` (EMPLOYEE domain)
 - `wbom_payroll_run_items.source_table=escort_roster_entries` (ESCORT domain soft-reference)
-- `wbom_payroll_run_items.source_table=wbom_cash_transactions` (CASH/FPE domain soft-reference)
+- `wbom_payroll_run_items.source_table=fpe_cash_transactions` (CASH/FPE domain soft-reference)
 
 **Source Modules:** Python inline DDL (conftest.py confirmed), `modules/payroll_logic/__init__.py`
 **Related Articles:** `04_business_rules/payroll_rules.md`, `06_developer_system/fpe_overview.md`
@@ -172,9 +180,9 @@ The FPE subsystem has 5 asyncio workers (all ACTIVE — see `fpe_overview.md`). 
 The FPE maintains its own employee directory (`fpe_employees`) separate from the HR master (`wbom_employees`). After migration 008, these are soft-linked: `fpe_employees.wbom_employee_id → wbom_employees.employee_id` (nullable FK matched via phone last-10 normalization).
 
 **Payment Draft Lifecycle (cross-domain):**
-Escort program completion → `fazle_payment_drafts` created (ST) → admin approves → `wbom_cash_transactions` written + `escort_roster_entries` status updated.
+Escort program completion → `fazle_payment_drafts` created (ST) → admin approves → `fpe_cash_transactions` written via `create_transaction()` + `escort_roster_entries` status updated.
 
-**Immutable Ledger Rule:** `fpe_cash_transactions` and `fpe_income_transactions` are NEVER modified after INSERT. Corrections use counter-rows: a new reversal row references the original via `reversal_of` FK. The same pattern applies to `wbom_cash_transactions.reversal_of`.
+**Immutable Ledger Rule:** `fpe_cash_transactions` and `fpe_income_transactions` are NEVER modified after INSERT (financial columns). Corrections use counter-rows: a new reversal row references the original via `reversed_txn_id` self-FK. `wbom_cash_transactions` is legacy archive only (Owner Directive 2026-06-29).
 
 ### Tables
 
@@ -198,8 +206,9 @@ Escort program completion → `fazle_payment_drafts` created (ST) → admin appr
 | `fpe_processing_diagnostics` | Audit Log | Processing latency and outcome per message: duration_ms, success/fail | Append-only; operational monitoring |
 | `fpe_review_audit_logs` | Audit Log | Admin promote/dismiss action log on `fpe_employee_review_queue` | Append-only |
 | `fpe_transaction_repairs` | Audit Log | Repair records for manually corrected FPE transactions | **U-02: Unresolved — table created by standalone repair script; production existence unconfirmed** |
-| `wbom_cash_transactions` | Physical Entity | Core platform cash transaction record: employee_id FK, program_id FK, amount, method, status; `reversal_of` self-FK for counter-row corrections | Created on payment; corrections via new reversal row |
-| `fazle_payment_drafts` | Staging | Payment drafts pending admin approval: draft_type (escort_payment\|advance\|salary), all financial fields, correction chain via `correction_of` self-FK | Created by payment workflow; consumed when approved → produces wbom_cash_transactions |
+| `fpe_cash_transactions` | Physical Entity | **Canonical** cash transaction record (Owner Directive 2026-06-29): employee_id FK, program_id, amount, payout_phone, txn_category, source, transaction_status, approval_status; `reversed_txn_id` self-FK for counter-row corrections; `deleted_at`/`deleted_by` for soft-delete | Created on payment via `create_transaction()`; corrections via new reversal row |
+| `wbom_cash_transactions` | Legacy Archive | Historical cash transaction record (pre-2026-06-29). No new rows written. Data migrated to `fpe_cash_transactions` via `wbom_fpe_sync.py` with `legacy_wbom_transaction_id` preserving traceability. | Read-only archive |
+| `fazle_payment_drafts` | Staging | Payment drafts pending admin approval: draft_type (escort_payment\|advance\|salary), all financial fields, correction chain via `correction_of` self-FK | Created by payment workflow; consumed when approved → produces `fpe_cash_transactions` via `create_transaction()` |
 | `fazle_payment_correction_log` | Audit Log | Payment corrections: immutable; links payment_draft_id, original transaction, counter-transaction | Append-only |
 
 ### Cross-Domain Dependencies
@@ -208,7 +217,7 @@ Escort program completion → `fazle_payment_drafts` created (ST) → admin appr
 - `fazle_payment_drafts.escort_program_id → wbom_escort_programs` (ESCORT domain)
 - `fazle_payment_drafts.escort_roster_entry_id → escort_roster_entries` (ESCORT domain soft-link)
 - `fpe_wa_messages` ← `fazle_message_queue` (MESSAGING domain — FPE pulls from central queue)
-- `wbom_cash_transactions` referenced by PAYROLL `wbom_payroll_run_items` (soft-reference via source_table/source_id)
+- `fpe_cash_transactions` referenced by PAYROLL `wbom_payroll_run_items` (soft-reference via source_table/source_id)
 
 **Source Modules:** `modules/fazle_payroll_engine/`, `tools/repair_fpe_transactions.py`
 **Migration Files:** `fazle_payroll_engine/migrations/001–009`
@@ -468,7 +477,7 @@ The learning loop: LLM generates reply → `llm_learning_memory` row created →
 | HR master is person anchor for all financial domains | EMPLOYEE → PAYROLL/CASH/ESCORT | `wbom_employees.employee_id` FK |
 | FPE soft-links its employee to HR master | CASH/FPE ↔ EMPLOYEE | `fpe_employees.wbom_employee_id` (nullable, phone-matched) |
 | Escort completion triggers payment draft | ESCORT → CASH/FPE | `fazle_payment_drafts.escort_program_id → wbom_escort_programs` |
-| Payment draft approval creates transaction | CASH/FPE → CASH/FPE | `fazle_payment_drafts` → `wbom_cash_transactions` on approve |
+| Payment draft approval creates transaction | CASH/FPE → CASH/FPE | `fazle_payment_drafts` → `fpe_cash_transactions` on approve via `create_transaction()` |
 | FPE consumes from central message queue | MESSAGING → CASH/FPE | FPE workers poll `fazle_message_queue` |
 | Both channels use same KB for RAG | AI → MESSAGING + SOCIAL | `fazle_knowledge_base` queried by both |
 | AI learns from messaging draft reviews | MESSAGING → AI | `llm_learning_memory.draft_id → fazle_draft_replies` |

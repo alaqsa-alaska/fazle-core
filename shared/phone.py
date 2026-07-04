@@ -5,10 +5,17 @@ Fazle Core — Shared Phone Normalization
 A thin, stable re-export layer so all modules can import from one
 consistent location without depending on each other directly.
 
+CANONICAL SOURCE OF TRUTH: modules.fazle_payroll_engine.normalizer
+  - normalize_bd_phone() → 01XXXXXXXXX (11-digit, FPE canonical storage)
+  - to_880()             → 8801XXXXXXXXX (13-digit, WBOM/RBAC domain)
+  - from_880()           → 01XXXXXXXXX (convert from 13-digit)
+  - phone_key9()         → last 9 digits (cross-domain match key)
+  - phones_match()       → compare two phones by last 9 digits
+
 USAGE
 -----
-    from shared.phone import normalize_phone, phone_last10, phones_match
-    from shared.phone import extract_phone_candidates
+    from shared.phone import normalize_phone, phones_match, phone_key9
+    from shared.phone import extract_phone_candidates, to_880, from_880
 
 DO NOT add business logic here — keep it as a pure passthrough.
 """
@@ -18,16 +25,20 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-# Re-exports from the authoritative sources.
-# shared.phone has NO logic of its own; all implementation lives in the
-# modules it wraps so those modules can keep their own normalisation rules.
+# ── Canonical re-exports from the single source of truth ─────────────────────
+from modules.fazle_payroll_engine.normalizer import (
+    normalize_bd_phone,
+    to_880,
+    from_880,
+    phone_key9,
+    phones_match,
+)
 
+# Legacy compatibility: number_identity still provides canonical_phone (13-digit)
+# and phone_last10 for existing callers that expect the 13-digit format.
 from modules.number_identity import (
     canonical_phone,
     phone_last10,
-)
-from modules.fazle_payroll_engine.normalizer import (
-    normalize_bd_phone,
 )
 
 # ── Phone extraction helpers ──────────────────────────────────────────────────
@@ -72,38 +83,21 @@ def normalize_phone(raw: Optional[str]) -> str:
     Canonical Bangladesh phone number → 01XXXXXXXXX (11 digits).
     Returns empty string for unresolvable inputs.
 
-    Thin alias for `canonical_phone()` from modules.number_identity.
+    Delegates to normalize_bd_phone() — the single source of truth.
     """
-    return canonical_phone(raw or "") if raw else ""
-
-
-def phones_match(a: Optional[str], b: Optional[str]) -> bool:
-    """
-    Return True if two phone strings resolve to the same number.
-    Matching is done on last-10 digits, tolerating prefix differences.
-
-    Examples
-    --------
-    >>> phones_match("+8801712345678", "01712345678")
-    True
-    >>> phones_match("01712345678", "01987654321")
-    False
-    >>> phones_match(None, "017...")
-    False
-    """
-    if not a or not b:
-        return False
-    tail_a = phone_last10(a)
-    tail_b = phone_last10(b)
-    return bool(tail_a and tail_b and tail_a == tail_b)
+    result = normalize_bd_phone(raw)
+    return result if result else ""
 
 
 # Make all names importable directly from shared.phone
 __all__ = [
-    "canonical_phone",
-    "phone_last10",
     "normalize_bd_phone",
     "normalize_phone",
+    "to_880",
+    "from_880",
+    "phone_key9",
     "phones_match",
+    "canonical_phone",
+    "phone_last10",
     "extract_phone_candidates",
 ]

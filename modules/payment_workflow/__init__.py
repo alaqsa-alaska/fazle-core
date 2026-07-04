@@ -15,7 +15,7 @@ Flow (Escort Payment):
   → Sends draft to admin WhatsApp (suppressed in safe mode)
   → Admin sends PAID <id> <amount> <method>
   → System sends accountant message
-  → Records in wbom_cash_transactions
+  → Records in fpe_cash_transactions
 
 Flow (Advance):
   Employee requests advance
@@ -25,10 +25,15 @@ Flow (Advance):
 """
 import logging
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from app.database import fetch_one, fetch_all, execute, fetch_val, get_pool
 from app.config import get_settings
+from modules.fazle_payroll_engine.employee import match_or_create_employee
+from modules.fazle_payroll_engine.accounting import create_transaction
+from modules.fazle_payroll_engine.models import PayoutMethod, TxnCategory, PaymentSource
+from modules.fazle_payroll_engine.payment_event import payment_event_from_whatsapp, payment_event_to_request
 
 log = logging.getLogger("fazle.payment")
 
@@ -103,12 +108,13 @@ async def create_escort_payment_draft(
         # Only advances tied to this escort program and current payroll month.
         advances = await fetch_val(
             """SELECT COALESCE(SUM(amount), 0)
-               FROM wbom_cash_transactions
-               WHERE employee_id = $1 AND transaction_type = 'advance'
+               FROM fpe_cash_transactions
+               WHERE employee_id = $1 AND txn_category = 'advance'
                  AND program_id = $2
-                 AND transaction_date >= DATE_TRUNC('month', CURRENT_DATE)::date
-                 AND transaction_date < (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month')::date
-                 AND COALESCE(is_reversed, false) = false""",
+                 AND txn_date >= DATE_TRUNC('month', CURRENT_DATE)::date
+                 AND txn_date < (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month')::date
+                 AND transaction_status = 'final'
+                 AND deleted_at IS NULL""",
             employee_id, escort_program_id,
             conn=conn,
         ) or 0.0
@@ -244,8 +250,11 @@ async def create_advance_request_draft(
         month_start = date.today().replace(day=1)
         paid_this_month = await fetch_val(
             """SELECT COALESCE(SUM(amount), 0)
-               FROM wbom_cash_transactions
-               WHERE employee_id = $1 AND transaction_date >= $2""",
+               FROM fpe_cash_transactions
+               WHERE employee_id = $1
+                 AND txn_date >= $2
+                 AND transaction_status = 'final'
+                 AND deleted_at IS NULL""",
             employee_id, month_start,
         ) or 0.0
 
@@ -305,7 +314,7 @@ async def create_advance_request_draft(
 
 async def finalize_payment(draft_id: int, approved_amount: float, method: str) -> dict:
     """
-    Record payment in wbom_cash_transactions after admin approval.
+    C1B: Record payment in fpe_cash_transactions after admin approval.
     Returns accountant_message to forward to accountant.
     """
     try:
@@ -331,16 +340,50 @@ async def finalize_payment(draft_id: int, approved_amount: float, method: str) -
                 method_display = method_map.get(method.lower(), method.upper())
 
                 txn_type = "advance" if draft.get("draft_type") == "advance" else "escort_payment"
-                await conn.execute(
-                    """INSERT INTO wbom_cash_transactions
-                           (employee_id, program_id, amount, transaction_type, payment_method,
-                            transaction_date, remarks, idempotency_key, source)
-                       VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7, 'payment-draft')
-                       ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING""",
-                    draft.get("employee_id"), draft.get("escort_program_id"), approved_amount,
-                    txn_type, method, f"Draft #{draft_id} — approved by admin",
-                    f"payment-draft:{draft_id}",
+
+                # C1B: resolve FPE employee and create canonical transaction
+                raw_phone = draft.get("employee_mobile")
+                fpe_emp = await match_or_create_employee(
+                    name_raw=draft.get("employee_name"),
+                    payout_phone=raw_phone,
+                    employee_id_phone=raw_phone,
                 )
+                if not fpe_emp:
+                    return {"error": f"Could not resolve FPE employee for draft #{draft_id}"}
+
+                try:
+                    payout_method = PayoutMethod(method)
+                except ValueError:
+                    payout_method = PayoutMethod.cash
+
+                txn_category = TxnCategory.advance if txn_type == "advance" else TxnCategory.salary
+
+                event = payment_event_from_whatsapp(
+                    employee_id=fpe_emp.employee_id,
+                    employee_name_raw=draft.get("employee_name"),
+                    employee_id_phone=raw_phone,
+                    employee_phone=raw_phone,
+                    payout_phone=raw_phone,
+                    payout_method=payout_method,
+                    amount=Decimal(str(approved_amount)),
+                    txn_date=date.today(),
+                    txn_category=txn_category,
+                    wa_message_id=f"payment-draft:{draft_id}",
+                    source_channel="payment_workflow",
+                    source_message_text=f"Draft #{draft_id} — approved by admin",
+                    created_by="payment_workflow",
+                    program_id=draft.get("escort_program_id"),
+                    metadata={
+                        "legacy_draft_id": draft_id,
+                        "draft_type": draft.get("draft_type"),
+                        "employee_name": draft.get("employee_name"),
+                        "employee_mobile": raw_phone,
+                    },
+                )
+                event.source = PaymentSource.escort if txn_type == "escort_payment" else PaymentSource.nl_advance
+
+                req = payment_event_to_request(event)
+                txn_row = await create_transaction(req)
 
                 accountant_msg = (
                     f"💳 পেমেন্ট নির্দেশনা\n\n"
@@ -355,17 +398,20 @@ async def finalize_payment(draft_id: int, approved_amount: float, method: str) -
                 await conn.execute(
                     """UPDATE fazle_payment_drafts
                        SET status='sent', approved_amount=$1, payment_method=$2,
-                           accountant_msg=$3, approved_at=NOW(), updated_at=NOW()
+                           accountant_msg=$3, approved_at=NOW(), updated_at=NOW(),
+                           transaction_id=$5, txn_ref=$6
                        WHERE id=$4""",
-                    approved_amount, method, accountant_msg, draft_id,
+                    approved_amount, method, accountant_msg, draft_id, txn_row.id, txn_row.txn_ref,
                 )
 
-        log.info(f"[payment] finalized draft #{draft_id}: ৳{approved_amount:,.0f} via {method}")
+        log.info(f"[payment] finalized draft #{draft_id}: ৳{approved_amount:,.0f} via {method} txn={txn_row.id}")
         return {
             "accountant_msg": accountant_msg,
             "employee_name": draft.get("employee_name"),
             "amount": approved_amount,
             "method": method_display,
+            "transaction_id": txn_row.id,
+            "txn_ref": txn_row.txn_ref,
         }
 
     except Exception as e:

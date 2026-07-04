@@ -36,7 +36,7 @@ The identity brain resolves every contact to exactly one role using an ordered, 
 | 3 | accountant | `fazle_contact_roles` (role=accountant) | — |
 | 4 | vip_client | `fazle_contact_roles` (role=vip_client) | — |
 | 5 | client_escort_buyer | `fazle_contact_roles` (role=client_escort_buyer) | — |
-| 6 | repeat_client | `wbom_cash_transactions` history | — |
+| 6 | repeat_client | `fpe_cash_transactions` history | — |
 | 7 | vendor | `fazle_contact_roles` (role=vendor) | — |
 | 8 | employee | `wbom_employees` (3 phone variants) | A: cash transactions, B: attendance records, C: escort roster, D: contact DB |
 | 9 | supervisor | `fazle_contact_roles` (role=supervisor) | — |
@@ -49,7 +49,7 @@ The identity brain resolves every contact to exactly one role using an ordered, 
 
 **Employee secondary evidence (Step 8):**
 When the primary phone lookup in `wbom_employees` fails, the system tries four secondary evidence sources in order:
-- A: `wbom_cash_transactions` — any payment record with this phone
+- A: `fpe_cash_transactions` — any payment record with this phone
 - B: `wbom_attendance` — any attendance record with this phone
 - C: `escort_roster_entries` — any roster entry
 - D: `wbom_contacts` — contact DB match

@@ -163,13 +163,22 @@ async def match_or_create_employee(
         if wbom_row:
             # Look for a matching FPE record — use payout_phone as the anchor
             fpe_row = await fetch_one(
-                "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
+                "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id, wbom_employee_id "
                 "FROM fpe_employees WHERE primary_phone = $1 AND status = 'active'",
                 phone,
             )
             if fpe_row:
                 fpe_row = await _resolve_canonical(fpe_row)
                 await _maybe_enrich_full_name(fpe_row["id"], fpe_row.get("full_name"), name_raw)
+                # Ensure wbom_employee_id link is set (runtime repair — idempotent)
+                if not fpe_row.get("wbom_employee_id"):
+                    try:
+                        await execute(
+                            "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2",
+                            wbom_row["employee_id"], fpe_row["id"],
+                        )
+                    except Exception as _link_err:
+                        log.debug("[fpe.emp] wbom_employee_id link failed: %s", _link_err)
                 return _make_result(fpe_row, "wbom_phone_match")
             # FPE record absent — fall through to auto-create below (with phone evidence)
 
@@ -376,8 +385,8 @@ async def create_employee_manual(
                 """
                 INSERT INTO fpe_employees
                     (full_name, name_normalized, primary_phone, employee_id_phone,
-                     department, status, created_source, resolution_status)
-                VALUES ($1, $2, $3, $4, $5, $6, 'admin_manual_create', 'resolved')
+                     department, status, created_source, resolution_status, basic_salary)
+                VALUES ($1, $2, $3, $4, $5, $6, 'admin_manual_create', 'resolved', 10000)
                 RETURNING id
                 """,
                 clean_name,
@@ -486,9 +495,9 @@ async def _auto_create_employee(
                 """
                 INSERT INTO fpe_employees
                     (full_name, name_normalized, primary_phone, employee_id_phone,
-                     status, created_source, resolution_status)
+                     status, created_source, resolution_status, basic_salary)
                 VALUES ($1, $2, $3, $4, 'active', 'whatsapp_auto_create',
-                        'unresolved')
+                        'unresolved', 10000)
                 RETURNING id
                 """,
                 full_name,

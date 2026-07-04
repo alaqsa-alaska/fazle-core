@@ -50,6 +50,39 @@ class TxnCategory(str, Enum):
     correction = "correction"
 
 
+class TransactionStatus(str, Enum):
+    final     = "final"
+    pending   = "pending"
+    reversed  = "reversed"
+    corrected = "corrected"
+
+
+class ApprovalStatus(str, Enum):
+    approved        = "approved"
+    rejected        = "rejected"
+    pending_review  = "pending_review"
+
+
+class ReviewStatus(str, Enum):
+    pending       = "pending"
+    reviewed      = "reviewed"
+    auto_resolved = "auto_resolved"
+    dismissed     = "dismissed"
+
+
+class PaymentSource(str, Enum):
+    whatsapp       = "whatsapp"
+    manual         = "manual"
+    operator       = "operator"
+    employee_draft = "employee_draft"
+    nl_advance     = "nl_advance"
+    escort         = "escort"
+    correction     = "correction"
+    migration      = "migration"
+    admin_api      = "admin_api"
+    frontend       = "frontend"
+
+
 # ── Validators ────────────────────────────────────────────────────────────────
 
 def validate_accounting_period(period: str) -> bool:
@@ -66,7 +99,6 @@ def validate_date_format(date_str: str) -> bool:
     if not isinstance(date_str, str):
         return False
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', date_str))
-    income     = "income"      # company income received from a client, linked to an employee
 
 
 # ── Parser output ─────────────────────────────────────────────────────────────
@@ -127,6 +159,57 @@ class EmployeeMatchResult(BaseModel):
     match_score: float = 1.0
 
 
+# ── Payment Event (normalized internal model for all cash sources) ────────────
+
+class PaymentEvent(BaseModel):
+    """
+    Internal normalized representation of any cash/payment transaction before
+    it is persisted to fpe_cash_transactions.
+
+    All sources (WhatsApp, manual, operator, employee draft, NL advance,
+    escort, correction, migration, admin API, frontend) convert to this model
+    first, then call create_transaction().
+    """
+    # Employee identity
+    employee_id: Optional[int] = None
+    employee_name_raw: Optional[str] = None
+    employee_id_phone: Optional[str] = None   # phone used as ID in message
+    employee_phone: Optional[str] = None       # resolved canonical primary phone
+
+    # Payment details
+    amount: Decimal
+    payout_phone: Optional[str] = None
+    payout_method: PayoutMethod = PayoutMethod.unknown
+    txn_date: date
+    txn_category: TxnCategory = TxnCategory.salary
+
+    # Source / traceability
+    source: PaymentSource = PaymentSource.whatsapp
+    source_channel: Optional[str] = None        # bridge1, bridge2, meta, web, api
+    source_message_id: Optional[str] = None     # wa_message_id / draft id / pending id
+    source_message_text: Optional[str] = None
+    fpe_wa_message_id: Optional[int] = None
+
+    # Approval lifecycle
+    transaction_status: TransactionStatus = TransactionStatus.final
+    approval_status: Optional[ApprovalStatus] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    review_status: Optional[ReviewStatus] = None
+    submitted_by: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+
+    # Operational context
+    program_id: Optional[int] = None
+    legacy_wbom_transaction_id: Optional[int] = None
+    original_payload: Optional[dict[str, Any]] = None
+    metadata: dict[str, Any] = {}
+
+    # Audit
+    accounting_period: Optional[str] = None     # YYYY-MM; auto-derived if None
+    created_by: str = "fpe_engine"
+
+
 # ── Transaction creation ──────────────────────────────────────────────────────
 
 class TransactionCreateRequest(BaseModel):
@@ -141,6 +224,24 @@ class TransactionCreateRequest(BaseModel):
     source_message_text: Optional[str] = None
     accounting_period: Optional[str] = None   # YYYY-MM; auto-derived if None
     created_by: str = "fpe_engine"
+
+    # C1B canonical-table extensions (additive)
+    source: PaymentSource = PaymentSource.whatsapp
+    source_channel: Optional[str] = None
+    source_message_id: Optional[str] = None
+    employee_id_phone: Optional[str] = None
+    employee_phone: Optional[str] = None
+    program_id: Optional[int] = None
+    legacy_wbom_transaction_id: Optional[int] = None
+    original_payload: Optional[dict[str, Any]] = None
+    metadata: dict[str, Any] = {}
+    transaction_status: TransactionStatus = TransactionStatus.final
+    approval_status: Optional[ApprovalStatus] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    review_status: Optional[ReviewStatus] = None
+    submitted_by: Optional[str] = None
+    submitted_at: Optional[datetime] = None
 
 
 class TransactionRow(BaseModel):

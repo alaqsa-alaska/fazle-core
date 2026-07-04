@@ -297,18 +297,19 @@ async def get_daily_payments(question: str) -> dict[str, Any]:
 
     rows = await _fetch(
         """
-        SELECT t.transaction_id, t.transaction_date, t.amount,
-               t.payment_method, t.payment_mobile, t.transaction_type, t.source,
-               COALESCE(e.employee_name, '') AS employee_name,
-               COALESCE(e.employee_mobile, '') AS employee_mobile,
+        SELECT t.id AS transaction_id, t.txn_date AS transaction_date, t.amount,
+               t.payout_method AS payment_method, t.payout_phone AS payment_mobile,
+               t.txn_category AS transaction_type, t.source,
+               COALESCE(e.full_name, '') AS employee_name,
+               COALESCE(e.primary_phone, '') AS employee_mobile,
                t.employee_id
-          FROM wbom_cash_transactions t
-          LEFT JOIN wbom_employees e ON e.employee_id = t.employee_id
-         WHERE t.transaction_date >= $1::date
-           AND t.transaction_date <  $2::date
-           AND NOT COALESCE(t.is_reversed, false)
-           AND NOT COALESCE(t.is_reversal, false)
-         ORDER BY t.transaction_date ASC, t.transaction_id ASC
+          FROM fpe_cash_transactions t
+          LEFT JOIN fpe_employees e ON e.employee_id = t.employee_id
+         WHERE t.txn_date >= $1::date
+           AND t.txn_date <  $2::date
+           AND t.transaction_status = 'final'
+           AND t.deleted_at IS NULL
+         ORDER BY t.txn_date ASC, t.id ASC
         """,
         start_date, end_date, limit=100,
     )
@@ -440,35 +441,37 @@ async def get_employee_month_payments(question: str) -> dict[str, Any]:
         employee_mobile = emp_rows[0].get("employee_mobile") or ""
         rows = await _fetch(
             """
-            SELECT t.transaction_id, t.transaction_date::text AS transaction_date,
-                   t.amount, t.payment_method, t.payment_mobile, t.transaction_type,
-                   t.status, t.source
-              FROM wbom_cash_transactions t
+            SELECT t.id AS transaction_id, t.txn_date::text AS transaction_date,
+                   t.amount, t.payout_method AS payment_method, t.payout_phone AS payment_mobile,
+                   t.txn_category AS transaction_type,
+                   t.transaction_status AS status, t.source
+              FROM fpe_cash_transactions t
              WHERE t.employee_id = $1
-               AND t.transaction_date >= $2::date
-               AND t.transaction_date <  $3::date
-               AND NOT COALESCE(t.is_reversed, false)
-               AND NOT COALESCE(t.is_reversal, false)
-             ORDER BY t.transaction_date ASC, t.transaction_id ASC
+               AND t.txn_date >= $2::date
+               AND t.txn_date <  $3::date
+               AND t.transaction_status = 'final'
+               AND t.deleted_at IS NULL
+             ORDER BY t.txn_date ASC, t.id ASC
             """,
             employee_id, start, end, limit=100,
         )
     else:
         rows = await _fetch(
             """
-            SELECT t.transaction_id, t.transaction_date::text AS transaction_date,
-                   t.amount, t.payment_method, t.payment_mobile, t.transaction_type,
-                   t.status, t.source,
-                   COALESCE(e.employee_name, '') AS employee_name,
-                   COALESCE(e.employee_mobile, '') AS employee_mobile
-              FROM wbom_cash_transactions t
-              LEFT JOIN wbom_employees e ON e.employee_id = t.employee_id
-             WHERE e.employee_name ILIKE $1
-               AND t.transaction_date >= $2::date
-               AND t.transaction_date <  $3::date
-               AND NOT COALESCE(t.is_reversed, false)
-               AND NOT COALESCE(t.is_reversal, false)
-             ORDER BY t.transaction_date ASC, t.transaction_id ASC
+            SELECT t.id AS transaction_id, t.txn_date::text AS transaction_date,
+                   t.amount, t.payout_method AS payment_method, t.payout_phone AS payment_mobile,
+                   t.txn_category AS transaction_type,
+                   t.transaction_status AS status, t.source,
+                   COALESCE(e.full_name, '') AS employee_name,
+                   COALESCE(e.primary_phone, '') AS employee_mobile
+              FROM fpe_cash_transactions t
+              LEFT JOIN fpe_employees e ON e.employee_id = t.employee_id
+             WHERE e.full_name ILIKE $1
+               AND t.txn_date >= $2::date
+               AND t.txn_date <  $3::date
+               AND t.transaction_status = 'final'
+               AND t.deleted_at IS NULL
+             ORDER BY t.txn_date ASC, t.id ASC
             """,
             f"%{name}%", start, end, limit=100,
         )

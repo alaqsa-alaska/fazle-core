@@ -72,24 +72,25 @@ async def _record_run(name: str, args: dict, status: str, duration_ms: int,
 async def _b_daily_summary(date: Optional[date] = None) -> dict:  # noqa: A002
     """Daily activity snapshot — payments in/out, programs, payroll status."""
     d = date or _today()
+    # C1B: daily summary reads from canonical fpe_cash_transactions
     pay = await fetch_one(
         """SELECT
-              COALESCE(SUM(CASE WHEN transaction_type='in'  THEN amount END), 0) AS total_in,
-              COALESCE(SUM(CASE WHEN transaction_type='out' THEN amount END), 0) AS total_out,
-              COUNT(*) FILTER (WHERE transaction_type='in')  AS in_count,
-              COUNT(*) FILTER (WHERE transaction_type='out') AS out_count
-           FROM wbom_cash_transactions
-           WHERE transaction_date = $1
-             AND status = 'Completed'""",
+              COALESCE(SUM(CASE WHEN amount >= 0 THEN amount END), 0) AS total_out,
+              COALESCE(SUM(CASE WHEN amount < 0  THEN amount END), 0) AS total_in,
+              COUNT(*) FILTER (WHERE amount >= 0) AS out_count,
+              COUNT(*) FILTER (WHERE amount < 0)  AS in_count
+           FROM fpe_cash_transactions
+           WHERE txn_date = $1
+             AND transaction_status = 'final'""",
         d,
     ) or {}
     by_method = await fetch_all(
-        """SELECT payment_method, transaction_type,
+        """SELECT payout_method,
                   COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS amt
-           FROM wbom_cash_transactions
-           WHERE transaction_date=$1 AND status='Completed'
-           GROUP BY payment_method, transaction_type
-           ORDER BY payment_method, transaction_type""",
+           FROM fpe_cash_transactions
+           WHERE txn_date=$1 AND transaction_status='final'
+           GROUP BY payout_method
+           ORDER BY payout_method""",
         d,
     )
     programs = await fetch_one(
@@ -266,16 +267,17 @@ async def _b_payment_reconciliation(days: int = 7) -> dict:
 async def _b_cash_position(days: int = 30) -> dict:
     """Cash flow position — net by payment method over last N days."""
     cutoff = _today() - timedelta(days=days)
+    # C1B: cash position reads from canonical fpe_cash_transactions
     rows = await fetch_all(
-        """SELECT payment_method,
-                  COALESCE(SUM(CASE WHEN transaction_type='in'  THEN amount END), 0) AS total_in,
-                  COALESCE(SUM(CASE WHEN transaction_type='out' THEN amount END), 0) AS total_out,
-                  COUNT(*) FILTER (WHERE transaction_type='in')  AS in_count,
-                  COUNT(*) FILTER (WHERE transaction_type='out') AS out_count
-           FROM wbom_cash_transactions
-           WHERE transaction_date >= $1 AND status='Completed'
-           GROUP BY payment_method
-           ORDER BY payment_method""",
+        """SELECT payout_method,
+                  COALESCE(SUM(CASE WHEN amount < 0 THEN amount END), 0) AS total_in,
+                  COALESCE(SUM(CASE WHEN amount >= 0 THEN amount END), 0) AS total_out,
+                  COUNT(*) FILTER (WHERE amount < 0)  AS in_count,
+                  COUNT(*) FILTER (WHERE amount >= 0) AS out_count
+           FROM fpe_cash_transactions
+           WHERE txn_date >= $1 AND transaction_status='final'
+           GROUP BY payout_method
+           ORDER BY payout_method""",
         cutoff,
     )
     total_in = sum(float(r["total_in"]) for r in rows)

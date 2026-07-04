@@ -321,3 +321,35 @@ Use targeted tests for risky changes:
 | `AUDIT_REPORT.md` | Current-state audit and risk inventory |
 | `TESTING_STATUS.md` | Historical test validation notes |
 | `payroll-escort-workflow-audit-2026-06-13.md` | Focused payroll/escort workflow review |
+
+## Phone Number Normalization (2026-07-01)
+
+All Bangladeshi phone number normalization uses a **single source of truth**:
+
+```python
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
+```
+
+**Canonical storage format:** `01XXXXXXXXX` (11 digits, starts with `01`)
+
+**Cross-domain helpers:**
+
+| Function | Purpose |
+|----------|---------|
+| `normalize_bd_phone(raw)` | Any input → `01XXXXXXXXX` or `None` |
+| `to_880(canonical_11)` | `01XXXXXXXXX` → `8801XXXXXXXXX` (for WBOM/RBAC) |
+| `from_880(canonical_13)` | `8801XXXXXXXXX` → `01XXXXXXXXX` (for FPE) |
+| `phone_key9(phone)` | Last 9 digits — cross-domain match key |
+| `phones_match(a, b)` | Compare two phones by last 9 digits |
+
+**DB storage by domain:**
+
+| Domain | Format | Tables |
+|--------|--------|--------|
+| FPE (payroll) | `01XXXXXXXXX` | `fpe_employees`, `fpe_cash_transactions`, `fpe_income_transactions` |
+| WBOM (operations) | `8801XXXXXXXXX` | `wbom_employees`, `wbom_contacts` |
+| RBAC (auth) | `8801XXXXXXXXX` | `user_profiles` |
+
+**Cross-domain lookups** must match on `phone_key9()` (last 9 digits), not exact string equality.
+
+See: `knowledge_base/06_developer_system/phone_normalization_rules.md`

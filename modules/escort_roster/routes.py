@@ -35,16 +35,20 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
+from app.config import get_settings, update_repo_env_value
 from app.database import fetch_all
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
 
 from .db import (
+    confirm_slip_match,
     create_roster_entry,
     get_conveyance_config,
     get_roster_detail,
     get_roster_list,
     get_roster_summary,
+    get_slip_queue,
     recalculate_entry,
+    reject_slip_match,
     sync_all_programs,
     sync_program_to_roster,
     update_roster_entry,
@@ -118,6 +122,10 @@ class ConveyanceConfigRequest(BaseModel):
     destination: str
     conveyance_amount: float
     shift_rate: float = 200.0
+
+
+class EscortClientRequest(BaseModel):
+    phone: str
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -201,6 +209,54 @@ async def api_upsert_config(body: ConveyanceConfigRequest):
         conveyance_amount=body.conveyance_amount,
         shift_rate=body.shift_rate,
     )
+
+
+def _normalize_client_phone(raw: str) -> str:
+    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if digits.startswith("880") and len(digits) == 13:
+        return digits
+    if digits.startswith("0") and len(digits) == 11:
+        return "880" + digits[1:]
+    raise HTTPException(status_code=400, detail="Invalid Bangladesh mobile number")
+
+
+def _escort_client_phone_list() -> list[str]:
+    current = get_settings().escort_client_phones or ""
+    phones: list[str] = []
+    for item in current.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            norm = _normalize_client_phone(item)
+        except HTTPException:
+            continue
+        if norm not in phones:
+            phones.append(norm)
+    return phones
+
+
+@router.get("/escort-clients", dependencies=[Depends(_require_key)])
+async def api_get_escort_clients():
+    return {"phones": _escort_client_phone_list(), "count": len(_escort_client_phone_list())}
+
+
+@router.post("/escort-clients", dependencies=[Depends(_require_key)])
+async def api_add_escort_client(body: EscortClientRequest):
+    phone = _normalize_client_phone(body.phone)
+    phones = _escort_client_phone_list()
+    if phone not in phones:
+        phones.append(phone)
+        update_repo_env_value("ESCORT_CLIENT_PHONES", ",".join(phones))
+    return {"ok": True, "phones": phones}
+
+
+@router.delete("/escort-clients/{phone}", dependencies=[Depends(_require_key)])
+async def api_remove_escort_client(phone: str):
+    norm = _normalize_client_phone(phone)
+    phones = [p for p in _escort_client_phone_list() if p != norm]
+    update_repo_env_value("ESCORT_CLIENT_PHONES", ",".join(phones))
+    return {"ok": True, "phones": phones}
 
 
 @router.get("/sync-all", dependencies=[Depends(_require_key)])
@@ -459,11 +515,58 @@ async def api_backfill_files(
 @router.post("", dependencies=[Depends(_require_key)])
 async def api_roster_create(body: CreateRosterEntry):
     """Manually create a new roster entry."""
+    # Task 7: validate and normalise phone numbers
+    data = body.model_dump(exclude_none=True)
+    for field in ("master_mobile", "escort_mobile"):
+        raw = data.get(field)
+        if raw:
+            norm = normalize_bd_phone(raw)
+            if not norm:
+                raise HTTPException(400, detail=f"Invalid Bangladesh mobile number for '{field}': {raw!r}")
+            data[field] = norm
     try:
-        row = await create_roster_entry(body.model_dump(exclude_none=True), actor="api")
+        row = await create_roster_entry(data, actor="api")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    # Ensure escort's FPE employee record exists (non-fatal)
+    escort_mobile = data.get("escort_mobile")
+    escort_name = data.get("escort_name")
+    if escort_mobile:
+        try:
+            from modules.escort import _resolve_escort_employee_id
+            await _resolve_escort_employee_id(escort_mobile, escort_name, auto_create=True)
+        except Exception as _fpe_err:
+            log.debug("[roster_create] FPE seed non-fatal: %s", _fpe_err)
     return row
+
+
+# ── Slip Queue (Task 5) — must be BEFORE /{program_id} to avoid int parse ──
+
+@router.get("/slip-queue", dependencies=[Depends(_require_key)])
+async def api_slip_queue(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+):
+    """Return pending OCR slip extractions with their best program match candidate."""
+    return await get_slip_queue(page=page, page_size=page_size)
+
+
+@router.post("/slip-queue/{match_id}/confirm", dependencies=[Depends(_require_key)])
+async def api_confirm_slip_match(match_id: int):
+    """Admin confirms an OCR slip match (sets admin_action='keep')."""
+    ok = await confirm_slip_match(match_id, admin_phone="api")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Match {match_id} not found or already actioned")
+    return {"ok": True, "match_id": match_id, "action": "keep"}
+
+
+@router.post("/slip-queue/{match_id}/reject", dependencies=[Depends(_require_key)])
+async def api_reject_slip_match(match_id: int):
+    """Admin rejects an OCR slip match (sets admin_action='reject')."""
+    ok = await reject_slip_match(match_id, admin_phone="api")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Match {match_id} not found or already actioned")
+    return {"ok": True, "match_id": match_id, "action": "reject"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -482,6 +585,14 @@ async def api_roster_patch(program_id: int, body: PatchRosterEntry):
     updates = body.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    # Task 7: validate phone numbers in patch
+    for field in ("master_mobile", "escort_mobile"):
+        raw = updates.get(field)
+        if raw:
+            norm = normalize_bd_phone(raw)
+            if not norm:
+                raise HTTPException(400, detail=f"Invalid Bangladesh mobile number for '{field}': {raw!r}")
+            updates[field] = norm
     try:
         row = await update_roster_entry(program_id, updates, actor="api")
     except ValueError as e:
@@ -519,4 +630,3 @@ async def api_delete_draft(program_id: int):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
-

@@ -19,7 +19,9 @@ Routing priority:
   9. unknown        → intent engine → KB → AI
 """
 
+import asyncio
 import logging
+import os
 import re
 from typing import Optional
 
@@ -58,6 +60,13 @@ from modules.employee_verification import (
     start_slip_verification,
     check_identity_mismatch,
 )
+# Sprint-3A: AI Conversation Workflow for employee payment requests.
+# Produces ONLY a draft — no transaction, no ledger, no balance change.
+from modules.employee_conversation import (
+    handle_employee_payment_request as ec_handle_payment_request,
+    detect_payment_request_trigger as ec_detect_trigger,
+    get_conversation_session as ec_get_session,
+)
 
 log = logging.getLogger("fazle.router")
 
@@ -66,6 +75,11 @@ _ESCORT_ROLES = frozenset({"escort_client", "client_escort_buyer", "vip_client",
 
 # Legacy fallback only; runtime source of truth is app.config draft-always settings.
 _SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office")
+# Compiled regex for silent-skip token matching — O(n) single pass vs O(n*k) loop
+_SILENT_SKIP_PATTERN: re.Pattern = re.compile(
+    r"(?:al-aqsa|escort|client|operation|tcis|gms|dalal|office)",
+    re.IGNORECASE,
+)
 
 # Phase 4.5 / 6E: Intents cleared for auto-send (recruitment + employee info + office location).
 # Financial complaints are protected by the complaint-phrase guard in bridge_poller.
@@ -181,9 +195,15 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
         if contact:
             name_lower = (contact.get("display_name") or "").lower()
             name_tokens = settings.draft_always_name_list or list(_SILENT_SKIP_NAME_TOKENS)
-            for token in name_tokens:
-                if token in name_lower:
-                    return True, f"display_name contains '{token}' ({contact['display_name']!r})"
+            if name_tokens is list(_SILENT_SKIP_NAME_TOKENS) or not settings.draft_always_name_list:
+                # Use compiled regex for the static default token list (faster)
+                if _SILENT_SKIP_PATTERN.search(name_lower):
+                    m = _SILENT_SKIP_PATTERN.search(name_lower)
+                    return True, f"display_name contains '{m.group()}' ({contact['display_name']!r})"
+            else:
+                for token in name_tokens:
+                    if token in name_lower:
+                        return True, f"display_name contains '{token}' ({contact['display_name']!r})"
             for prefix in settings.draft_name_prefix_list:
                 if prefix and name_lower.startswith(prefix):
                     return True, f"display_name starts with '{prefix}' ({contact['display_name']!r})"
@@ -323,7 +343,11 @@ async def process_message(
     # ── 3. ADMIN ───────────────────────────────────────────────────────────────
     if role_str == "admin":
         if is_completed_escort_draft(text):
-            return await handle_admin_escort_completion(text, sender, source)
+            return (
+                "Escort confirmation is finalized only after the bridge sends it to an authorised escort client. "
+                "This admin-side text was not applied directly.",
+                None,
+            )
 
         if is_admin_command(text):
             result = await process_admin_command(text, sender)
@@ -469,6 +493,21 @@ async def process_message(
             if mismatch:
                 return mismatch, None
 
+        # ── Sprint-3A: Employee Conversation Workflow ──────────────────────────
+        # Check for an active Sprint-3A conversation session FIRST.
+        # This takes priority over the legacy verification flow so that an
+        # ongoing AI conversation (reason → amount → payout → confirm) is
+        # not interrupted by the older selfie/slip verification path.
+        ec_session = await ec_get_session(sender)
+        if ec_session:
+            reply, admin_note = await ec_handle_payment_request(
+                sender, text, source, emp_id
+            )
+            if reply:
+                return reply, admin_note
+
+        # Legacy verification session (selfie/slip flow) — still active for
+        # release-slip submissions that pre-date Sprint-3A.
         session = await get_verification_session(sender)
         if session:
             return await advance_verification(sender, text, source, emp_id)
@@ -516,8 +555,21 @@ async def process_message(
             log.warning("[COMPLAINT_DRAFT] intent=%s sender=%s emp_id=%s", intent, sender, emp_id)
             return "আপনার বার্তা পেয়েছি। দায়িত্বশীল ব্যক্তি শীঘ্রই যোগাযোগ করবেন।", None
 
-        if is_advance_request(text):
-            return await start_advance_verification(sender, source, emp_id)
+        # Sprint-3A: Route payment requests through the AI conversation workflow.
+        # This replaces the legacy start_advance_verification with a full
+        # multi-step conversation that collects reason, amount, payout, and
+        # produces a validated draft (NO transaction).
+        ec_trigger = ec_detect_trigger(text)
+        if ec_trigger:
+            reply, admin_note = await ec_handle_payment_request(
+                sender, text, source, emp_id
+            )
+            if reply:
+                return reply, admin_note
+            # Fallback: if Sprint-3A didn't start (e.g. unknown trigger edge),
+            # fall through to legacy advance verification.
+            if is_advance_request(text):
+                return await start_advance_verification(sender, source, emp_id)
 
         if intent in ("salary_query", "payment_due") and emp_id:
             payroll = await get_payroll_summary(emp_id)
@@ -526,7 +578,26 @@ async def process_message(
             return reply, None
 
     # ── 11. ADVANCE/PAYMENT REQUEST (any role not already handled) ───────────
-    # Catches employees, supervisors, unknown senders who ask for money
+    # Catches employees, supervisors, unknown senders who ask for money.
+    # Sprint-3A: Try the AI conversation workflow first (broader trigger
+    # detection: advance/salary/food_bill/conveyance/emergency).
+    ec_session_catchall = await ec_get_session(sender)
+    if ec_session_catchall:
+        reply, admin_note = await ec_handle_payment_request(
+            sender, text, source, identity.get("employee_id")
+        )
+        if reply:
+            return reply, admin_note
+
+    ec_trigger_catchall = ec_detect_trigger(text)
+    if ec_trigger_catchall and role_str != "admin":
+        reply, admin_note = await ec_handle_payment_request(
+            sender, text, source, identity.get("employee_id")
+        )
+        if reply:
+            return reply, admin_note
+
+    # Legacy fallback: advance request via old verification flow
     existing_session = await get_verification_session(sender)
     if not existing_session and is_advance_request(text) and role_str != "admin":
         return await start_advance_verification(sender, source, identity.get("employee_id"))
@@ -642,7 +713,7 @@ def _looks_like_escort_order(text: str) -> bool:
 def _resolve_forward_target(command_text: str, settings) -> Optional[str]:
     """Determine who to forward the secondary message to based on command type."""
     t = command_text.strip().lower()
-    if t.startswith(("paid", "advance")):
+    if t.startswith(("paid", "advance", "approved")):
         return settings.accountant_phone or None
     if t.startswith("escortconfirm"):
         # Buyer phone is embedded in the result from _cmd_escort_confirm
@@ -729,3 +800,64 @@ async def _cmd_admin_list() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"❌ ড্রাফট লোড ব্যর্থ: {e}"
+
+
+# ── Message normalization ──────────────────────────────────────────────────────
+_BANGLA_TO_EN = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+_EMOJI_ONLY_RE = re.compile(
+    r"^[\U0001F000-\U0001FFFF\U00002600-\U000027BF\U0000FE00-\U0000FEFF\s]+$"
+)
+_MESSAGE_MAX_LEN = int(os.getenv("MESSAGE_MAX_LEN", "4096"))
+
+
+def normalize_incoming_message(body: str) -> dict:
+    """Normalize a raw WhatsApp message body before routing.
+
+    Returns:
+      {"body": str, "type": "normal"|"empty"|"emoji_only"|"truncated", "truncated": bool}
+    """
+    if not body or not body.strip():
+        return {"body": "", "type": "empty", "truncated": False}
+
+    body = body.strip()
+    truncated = False
+
+    if len(body) > _MESSAGE_MAX_LEN:
+        body = body[:_MESSAGE_MAX_LEN]
+        truncated = True
+
+    # Normalize Bangla digits → English for consistent downstream processing
+    body = body.translate(_BANGLA_TO_EN)
+
+    if _EMOJI_ONLY_RE.match(body):
+        return {"body": body, "type": "emoji_only", "truncated": truncated}
+
+    return {"body": body, "type": "truncated" if truncated else "normal", "truncated": truncated}
+
+
+# ── Timeout wrapper ────────────────────────────────────────────────────────────
+_ROUTE_TIMEOUT_S: float = float(os.getenv("MESSAGE_ROUTE_TIMEOUT", "30"))
+
+
+async def route_message_with_timeout(
+    sender: str,
+    text: str,
+    source: str,
+    timeout: float = _ROUTE_TIMEOUT_S,
+) -> "tuple[str, Optional[dict]]":
+    """Call process_message with a configurable timeout.
+
+    Returns (reply, admin_notification). On timeout returns a Bangla retry
+    message instead of hanging. Timeout configurable via MESSAGE_ROUTE_TIMEOUT.
+    """
+    try:
+        return await asyncio.wait_for(
+            process_message(sender, text, source),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "[router] timeout sender=%s source=%s timeout=%.1fs",
+            sender, source, timeout,
+        )
+        return "অনুগ্রহ করে আবার চেষ্টা করুন।", None

@@ -1,10 +1,6 @@
----
-title: Fazle Payroll Engine (FPE) — System Overview
-owner: Fazle Core Admin
-status: active
-last_verified: 2026-06-24
-runtime_index: true
----
+Source: knowledge_base/06_developer_system/fpe_overview.md
+SHA256: 4fca5a8aac4046dd566483d19352f1cc32e2d37855e45751bf5fad40ac042ca9
+Version: 4fca5a8aac40
 
 # Fazle Payroll Engine (FPE) — System Overview
 
@@ -12,8 +8,36 @@ runtime_index: true
 **Visibility:** Admin / Developer / Superadmin
 **Source Module:** `modules/fazle_payroll_engine/`
 **Production Status:** ACTIVE — started on every `fazle-core.service` startup
-**Wave:** Wave-2A (initial) | Wave-2B (enriched) | 2026-06-22
+**Wave:** Wave-2A (initial) | Wave-2B (enriched) | 2026-06-22 | 2026-07-02 (employee unification)
 **Traceability:** PKCA Report 05, PKMA Report 13, PKMA Report 17, PKMA Report 20
+
+---
+
+## Employee Identity Unification (2026-07-02)
+
+`fpe_employees` is now the **single canonical employee table** for the entire
+platform. It carries both identity fields (phone, name) and HR profile fields
+(`basic_salary`, `designation`, `joining_date` — added by migration 011).
+
+All employee creation paths now create or link `fpe_employees` rows:
+- WhatsApp payment parser → `match_or_create_employee()` → `fpe_employees`
+- Escort program confirmation → `_ensure_fpe_employee_link()` → `fpe_employees`
+- Frontend Add Employee → `_seed_fpe()` → `fpe_employees` with `wbom_employee_id`
+- Frontend roster create → `_resolve_escort_employee_id()` → `fpe_employees`
+
+Cross-reference with `wbom_employees` is maintained via `wbom_employee_id`
+soft-link. Migration 011 backfilled all 178 WBOM employees into FPE.
+
+See: `database_rules.md` Domain 4 (CASH/FPE) for full table schema.
+
+---
+
+## Phone Normalization (2026-07-01)
+
+FPE's `normalizer.py::normalize_bd_phone()` is the **single source of truth** for
+all phone normalization across the entire codebase. All FPE tables store phones
+in `01XXXXXXXXX` (11-digit) format. Cross-domain lookups (FPE ↔ WBOM/RBAC) use
+`phone_key9()` (last 9 digits). See: `phone_normalization_rules.md`.
 
 ---
 

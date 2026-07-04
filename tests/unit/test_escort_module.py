@@ -160,44 +160,58 @@ class TestIsEscortMessage:
 class TestHandleEscortClientMessage:
     """Integration-level test: escort message → DB insert + draft creation."""
 
-    async def test_creates_escort_program_and_draft(self, test_db_pool):
-        import app.database as db_module
-        db_module._pool = test_db_pool
-
+    async def test_creates_escort_program_and_draft(self, monkeypatch):
         from modules.escort import handle_escort_client_message
+        import modules.escort as escort_module
+        import modules.message_router as router_module
 
         sender = "8801955555555"
-        text = (
-            "MV GOLDEN STAR lighter vessel AMENA-3 "
-            "master mobile 01933333333 wheat 5000MT "
-            "escort lagbe 06/05/2026 Day"
-        )
+        text = """
+        MV GOLDEN STAR
+        A/C Test Client
+        Wheat
+        01 AMENA-3 01933333333 Narayanganj 1000 MT
+        06/05/2026 Day
+        """
 
-        # Seed client as escort_buyer in contact_roles
-        async with test_db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO fazle_contact_roles (phone, role, label)
-                VALUES ($1, 'client_escort_buyer', 'Test Client')
-                ON CONFLICT (phone) DO NOTHING
-            """, sender)
+        called = {"saved": False}
 
-        result = await handle_escort_client_message(sender, text, source="bridge1")
+        async def _fake_save(*args, **kwargs):
+            called["saved"] = True
+            return [1]
 
-        # handle_escort_client_message creates an admin draft (not the DB program — that's on ESCORTCONFIRM)
-        # Just assert no exception was raised and we got some result
+        monkeypatch.setenv("ESCORT_CLIENT_PHONES", sender)
+        monkeypatch.setenv("ESCORT_TRUSTED_SOURCES", "bridge1,bridge2")
+        monkeypatch.setenv("BRIDGE1_NUMBER", "8801958122300")
+        from app.config import get_settings
+        get_settings.cache_clear()
+        monkeypatch.setattr(escort_module, "save_escort_programs", _fake_save)
+        monkeypatch.setattr(router_module, "get_primary_admin", lambda: "8801880446111")
+
+        result = await handle_escort_client_message(text, sender, source="bridge1")
+
         assert result is not None
+        assert called["saved"] is True
 
-    async def test_draft_created_in_draft_replies(self, test_db_pool):
-        import app.database as db_module
-        db_module._pool = test_db_pool
-
+    async def test_draft_created_in_draft_replies(self, monkeypatch):
         from modules.escort import handle_escort_client_message
+        import modules.escort as escort_module
+        import modules.message_router as router_module
 
         sender = "8801955555556"
-        text = "MV STAR lighter AMENA escort lagbe 07/05/2026 Night"
+        text = "MV STAR lighter AMENA 01711273432 escort lagbe 07/05/2026 Night"
 
-        result = await handle_escort_client_message(sender, text, source="bridge1")
+        monkeypatch.setenv("ESCORT_CLIENT_PHONES", sender)
+        monkeypatch.setenv("ESCORT_TRUSTED_SOURCES", "bridge1,bridge2")
+        from app.config import get_settings
+        get_settings.cache_clear()
 
-        # Escort creates an admin_draft returned in tuple[str, dict] or similar
-        # Just assert no crash and result is not None
+        async def _fake_save(*args, **kwargs):
+            return [1]
+
+        monkeypatch.setattr(escort_module, "save_escort_programs", _fake_save)
+        monkeypatch.setattr(router_module, "get_primary_admin", lambda: "8801880446111")
+
+        result = await handle_escort_client_message(text, sender, source="bridge1")
+
         assert result is not None

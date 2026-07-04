@@ -288,10 +288,11 @@ async def generate_chat_reply(
         "- বাংলায় উত্তর দাও (প্রশ্ন ইংরেজিতে হলে ইংরেজিতে)\n"
         "- সর্বোচ্চ ৪-৫ বাক্য; সরাসরি ও তথ্যবহুল হও\n"
         "- কোনো markdown, table বা internal label দেবে না\n"
-        "- শুধুমাত্র দেওয়া তথ্য ও context ব্যবহার করো; অনুমান করো না"
+        "- শুধুমাত্র দেওয়া তথ্য ও context ব্যবহার করো; অনুমান করো না\n"
+        "- তোমার কাছে fazle-core-এর live database-এর read-only অ্যাক্সেস আছে; নিচের context-এ সেই live ডেটা থাকবে"
     )
     if context and context.strip():
-        system_content += f"\n\nজ্ঞানভাণ্ডার থেকে তথ্য:\n{context}"
+        system_content += f"\n\nLive DB / জ্ঞানভাণ্ডার থেকে তথ্য:\n{context}"
 
     messages: list[dict] = [{"role": "system", "content": system_content}]
     for h in history[-6:]:

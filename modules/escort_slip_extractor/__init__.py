@@ -262,21 +262,18 @@ def _normalize_vessel(name: Optional[str]) -> Optional[str]:
 
 
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
+    """Normalize a phone number from OCR output to canonical 01XXXXXXXXX.
+
+    Handles common OCR confusions (O→0, I→1, l→1, S→5, B→8, Z→2) before
+    delegating to the canonical normalize_bd_phone() from the FPE normalizer.
+    Returns 11-digit 01XXXXXXXXX (storage format), NOT display format.
+    """
     if not phone:
         return None
     # Replace common OCR confusions: O→0, I→1, l→1, S→5, B→8, Z→2
-    phone = phone.strip()
-    phone = phone.translate(str.maketrans("OIlSBZ", "011582"))
-    # Keep only digits and hyphens
-    phone = re.sub(r"[^\d\-]", "", phone)
-    # Bangladesh mobile: 11 digits starting 01, or with country code 880
-    digits = re.sub(r"\D", "", phone)
-    if len(digits) == 11 and digits.startswith("01"):
-        return digits[:5] + "-" + digits[5:]
-    if len(digits) == 13 and digits.startswith("880"):
-        local = "0" + digits[3:]
-        return local[:5] + "-" + local[5:]
-    return phone if phone else None
+    phone = phone.strip().translate(str.maketrans("OIlSBZ", "011582"))
+    from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
+    return normalize_bd_phone(phone)
 
 
 def _normalize_date(raw: Optional[str]) -> Optional[str]:

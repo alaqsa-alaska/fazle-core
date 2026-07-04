@@ -11,8 +11,10 @@ Tests:
   6. test_node_recovery_after_stale         — re-registering after stale → back online
   7. test_deregister_marks_offline          — deregister_node() → status=offline immediately
   8. test_heartbeat_reconnect_event         — 3 consecutive failures → RECONNECTING emitted
-  9. test_get_active_nodes_shape            — get_active_nodes returns expected dict keys
-  10. test_node_offline_emits_event         — deregister emits NODE_OFFLINE with reason
+  9. test_get_active_nodes_shape            — legacy all-rows reader returns expected dict keys
+  10. test_get_current_runtime_nodes_query  — current reader filters to fresh online rows
+  11. test_get_historical_runtime_nodes_query — history reader excludes current runtime truth
+  12. test_node_offline_emits_event         — deregister emits NODE_OFFLINE with reason
 
 All tests use AsyncMock + in-memory fakes — no live DB required.
 """
@@ -334,7 +336,7 @@ async def test_heartbeat_reconnect_event_after_3_failures():
 
 @pytest.mark.asyncio
 async def test_get_active_nodes_shape():
-    """get_active_nodes returns dicts with all expected keys."""
+    """Legacy all-rows reader returns dicts with all expected keys."""
     from shared import runtime_gateway as gw
     import datetime
 
@@ -370,6 +372,44 @@ async def test_get_active_nodes_shape():
     assert n["active_requests"] == 2
     assert isinstance(n["metadata"], dict)
     assert n["metadata"]["port"] == 8200
+
+
+@pytest.mark.asyncio
+async def test_get_current_runtime_nodes_query():
+    """Current reader must query only fresh online rows."""
+    from shared import runtime_gateway as gw
+
+    fake_rows = [_make_node_row(status="online")]
+    pool, conn = _make_pool(fetch_rows=fake_rows)
+    conn.fetch = AsyncMock(return_value=fake_rows)
+
+    nodes = await gw.get_current_runtime_nodes(pool=pool)
+
+    assert len(nodes) == 1
+    sql = conn.fetch.call_args[0][0]
+    args = conn.fetch.call_args[0][1:]
+    assert "WHERE status = 'online'" in sql
+    assert "last_seen >= NOW()" in sql
+    assert args[0] == str(gw.STALE_THRESHOLD_S)
+
+
+@pytest.mark.asyncio
+async def test_get_historical_runtime_nodes_query():
+    """History reader must exclude fresh current runtime truth."""
+    from shared import runtime_gateway as gw
+
+    fake_rows = [_make_node_row(status="offline")]
+    pool, conn = _make_pool(fetch_rows=fake_rows)
+    conn.fetch = AsyncMock(return_value=fake_rows)
+
+    nodes = await gw.get_historical_runtime_nodes(pool=pool)
+
+    assert len(nodes) == 1
+    sql = conn.fetch.call_args[0][0]
+    args = conn.fetch.call_args[0][1:]
+    assert "WHERE status <> 'online'" in sql
+    assert "OR last_seen < NOW()" in sql
+    assert args[0] == str(gw.STALE_THRESHOLD_S)
 
 
 @pytest.mark.asyncio

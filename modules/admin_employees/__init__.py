@@ -100,15 +100,22 @@ def _row_to_dict(row) -> dict:
     return d
 
 
-async def _seed_fpe(name: str, mobile: str) -> None:
-    """Pre-seed FPE with new employee.  Non-fatal."""
+async def _seed_fpe(name: str, mobile: str, wbom_employee_id: int | None = None) -> None:
+    """Pre-seed FPE with new employee and set wbom_employee_id link.  Non-fatal."""
     try:
         from modules.fazle_payroll_engine.employee import match_or_create_employee
-        await match_or_create_employee(
+        from app.database import execute as _exec
+        result = await match_or_create_employee(
             name_raw=name,
             payout_phone=mobile,
             employee_id_phone=mobile,
         )
+        # Set the WBOM link so both tables stay in sync
+        if result and wbom_employee_id:
+            await _exec(
+                "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2 AND wbom_employee_id IS NULL",
+                wbom_employee_id, result.employee_id,
+            )
     except Exception as exc:
         log.warning("[admin_employees] FPE seed failed mobile=%s: %s", mobile, exc)
 
@@ -160,7 +167,7 @@ async def create_employee(body: EmployeeCreate):
         "SELECT * FROM wbom_employees WHERE employee_id = $1", emp_id
     )
 
-    await _seed_fpe(body.employee_name, norm_mobile)
+    await _seed_fpe(body.employee_name, norm_mobile, wbom_employee_id=emp_id)
 
     log.info("[admin_employees] created employee_id=%d mobile=%s", emp_id, norm_mobile)
     return {"employee": _row_to_dict(row), "fpe_seeded": True}
@@ -258,7 +265,7 @@ async def get_employee(emp_id: int):
 
     counts = await fetch_one(
         """SELECT
-               (SELECT COUNT(*) FROM wbom_cash_transactions  WHERE employee_id=$1) AS txn_count,
+               (SELECT COUNT(*) FROM fpe_cash_transactions   WHERE employee_id=$1 AND transaction_status='final') AS txn_count,
                (SELECT COUNT(*) FROM wbom_escort_programs    WHERE escort_employee_id=$1) AS escort_count,
                (SELECT COUNT(*) FROM wbom_attendance         WHERE employee_id=$1) AS attendance_count,
                (SELECT COUNT(*) FROM wbom_salary_records     WHERE employee_id=$1) AS salary_record_count

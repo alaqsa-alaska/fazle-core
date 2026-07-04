@@ -1179,7 +1179,13 @@ async def _poll_bridge(config: dict):
 
                     log.info(f"[{bridge_name}] outgoing escort completion detected → jid={chat_jid}")
                     try:
-                        await handle_admin_escort_completion(otext, admin_number, bridge_name)
+                        recipient_phone = re.sub(r"\D", "", chat_jid or "")
+                        await handle_admin_escort_completion(
+                            otext,
+                            admin_number,
+                            bridge_name,
+                            recipient_phone=recipient_phone,
+                        )
                     except Exception as _ec_err:
                         log.error(f"[{bridge_name}] escort completion error for msg {omsg_id}: {_ec_err}")
 

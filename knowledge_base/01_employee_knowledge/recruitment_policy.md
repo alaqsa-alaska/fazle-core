@@ -15,12 +15,20 @@ Define candidate-facing recruitment information for available roles, eligibility
 This article is visible to job candidates and may be used by WhatsApp, Messenger, and Facebook comment AI replies.
 
 ## Open Role Categories
-- Vessel Escort / Survey Escort
-- Security Guard
-- Security Supervisor
-- Assistant Security Supervisor
-- Operation Officer
-- Female Marketing Officer
+
+All 9 active positions (code → position name as used in recruitment system):
+
+| কোড | পদের নাম (English) | পদের নাম (বাংলা) |
+|-----|-------------------|------------------|
+| 1 | Escort | এসকর্ট |
+| 2 | Survey Scout | সার্ভে স্কাউট |
+| 3 | Security Guard | সিকিউরিটি গার্ড |
+| 4 | Security Supervisor | সিকিউরিটি সুপারভাইজার |
+| 5 | Assistant Supervisor | সহকারী সুপারভাইজার |
+| 6 | Operation Officer | অপারেশন অফিসার |
+| 7 | Security In-Charge | সিকিউরিটি ইন-চার্জ |
+| 8 | Marketing Officer | মার্কেটিং অফিসার |
+| 9 | Ghat Supervisor | ঘাট সুপারভাইজার |
 
 ## Candidate Eligibility
 - Age: 18 to 55 years.
@@ -72,7 +80,13 @@ Responsibilities include guarding assigned posts, maintaining discipline, wearin
 ### Operation Officer
 Responsibilities include recruitment coordination, duty distribution, field supervision, client communication, reporting, and office operations.
 
-### Female Marketing Officer
+### Security In-Charge (পদ ৭)
+Responsibilities include overall security team oversight, incident management, reporting to management, supervising security guards and supervisors.
+
+### Ghat Supervisor (পদ ৯)
+Responsibilities include supervising operations at the ghat (port/river landing), managing escort assignments at vessel loading points, coordinating with vessel masters.
+
+### Marketing Officer (পদ ৮)
 Responsibilities include candidate counseling, collecting candidate names and numbers, explaining job opportunities, and encouraging suitable candidates to visit the office.
 
 ## Application Workflow

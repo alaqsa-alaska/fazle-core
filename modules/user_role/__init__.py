@@ -6,13 +6,12 @@ against the company database. Returns a role context dict used by
 the reply engine to choose the right tone and DB facts.
 
 Phone normalization:
-  Bridge phones arrive as '8801XXXXXXXXX' (13-digit, 880 country code)
-  DB stores as '01XXXXXXXXXX' (11-digit, local format)
-  → Strip leading '880' to normalize.
+  Delegates to shared.phone → fazle_payroll_engine.normalizer (single source of truth).
+  Canonical storage: 01XXXXXXXXX (11-digit local format).
 """
 
 import logging
-from modules.number_identity import normalize_phone as _np
+from shared.phone import normalize_phone as _sp_normalize_phone
 from typing import TypedDict, Optional
 
 from app.database import fetch_one
@@ -57,11 +56,10 @@ def _get_accountant_phone() -> str:
 
 def normalize_phone(phone: str) -> str:
     """
-    Normalize phone to 11-digit local BD format (01XXXXXXXXXX).
-    Handles: +8801..., 8801..., 01..., 1...
+    Normalize phone to 11-digit local BD format (01XXXXXXXXX).
+    Delegates to shared.phone → fazle_payroll_engine.normalizer.normalize_bd_phone.
     """
-    variants = _np(phone)
-    return variants[0] if variants else ""
+    return _sp_normalize_phone(phone)
 
 
 class UserRole(TypedDict):

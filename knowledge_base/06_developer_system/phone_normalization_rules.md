@@ -1,0 +1,208 @@
+---
+title: Phone Normalization Rules — Single Source of Truth
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-07-01
+runtime_index: true
+---
+
+# Phone Normalization Rules — Single Source of Truth
+
+**KB Article ID:** DEV-06-PHONE-NORMALIZATION
+**Source:** `modules/fazle_payroll_engine/normalizer.py`
+**Visibility:** Developer / Admin
+**Certified:** 2026-07-01
+
+---
+
+## Owner Directive (2026-07-01)
+
+The last 9 digits of a Bangladeshi mobile number are the real identity.
+Adding "01" before them gives the 11-digit local form (`01XXXXXXXXX`).
+Adding "880" before the 11-digit form gives the 13-digit E.164 form (`8801XXXXXXXXX`).
+Adding "+880" or "00880" before the 13-digit form gives international format.
+If the last 9 digits are wrong, no prefix will fix it.
+
+---
+
+## Canonical Function
+
+**`modules.fazle_payroll_engine.normalizer.normalize_bd_phone(raw)`**
+
+This is the **single source of truth** for all phone normalization across the
+entire codebase. All other modules must import from here, directly or via
+`shared.phone`.
+
+### Output Format
+
+```
+01XXXXXXXXX   (11 digits, starts with 01, no separators)
+```
+
+### Accepted Input Formats
+
+| Input | Output |
+|-------|--------|
+| `+8801712345678` | `01712345678` |
+| `8801712345678` | `01712345678` |
+| `01712345678` | `01712345678` |
+| `1712345678` (10-digit, missing 0) | `01712345678` |
+| `০১৭১২৩৪৫৬৭৮` (Bengali numerals) | `01712345678` |
+| `017-1234-5678` (dashes) | `01712345678` |
+| `017 123 4567` (spaces) | `01712345678` |
+| `123456` (too short) | `None` |
+| `02712345678` (starts with 02, landline) | `None` |
+| `None` / `""` | `None` |
+
+Returns `None` for invalid numbers. **Never** returns raw digits for invalid input.
+
+---
+
+## Cross-Domain Conversion Helpers
+
+These functions are in `modules.fazle_payroll_engine.normalizer` and re-exported
+from `shared.phone`.
+
+### `to_880(canonical_11)` — FPE → WBOM/RBAC
+
+```
+to_880("01712345678")  → "8801712345678"
+to_880("8801712345678") → "8801712345678"  (already 13-digit)
+```
+
+### `from_880(canonical_13)` — WBOM/RBAC → FPE
+
+```
+from_880("8801712345678") → "01712345678"
+from_880("01712345678")  → "01712345678"  (already 11-digit)
+```
+
+### `phone_key9(phone)` — Cross-Domain Match Key
+
+Extracts the last 9 digits — the true phone identity. Use this for any
+lookup that must match across FPE (11-digit) and WBOM/RBAC (13-digit) tables.
+
+```
+phone_key9("01712345678")    → "712345678"
+phone_key9("8801712345678")  → "712345678"
+phone_key9("+8801712345678") → "712345678"
+```
+
+### `phones_match(a, b)` — Compare Two Phones
+
+Returns `True` if both phones share the same last 9 digits.
+
+```
+phones_match("01712345678", "8801712345678")  → True
+phones_match("01712345678", "01812345678")    → False
+```
+
+---
+
+## DB Column Storage Format
+
+### FPE Domain (Payroll) — 11-digit `01XXXXXXXXX`
+
+| Table | Column | Format |
+|-------|--------|-------|
+| `fpe_employees` | `primary_phone` | `01XXXXXXXXX` |
+| `fpe_employees` | `employee_id_phone` | `01XXXXXXXXX` |
+| `fpe_cash_transactions` | `payout_phone` | `01XXXXXXXXX` |
+| `fpe_cash_transactions` | `employee_id_phone` | `01XXXXXXXXX` |
+| `fpe_cash_transactions` | `employee_phone` | `01XXXXXXXXX` |
+| `fpe_wa_messages` | `sender_phone` | `01XXXXXXXXX` |
+| `fpe_income_transactions` | `reported_by_phone` | `01XXXXXXXXX` |
+| `fpe_employee_aliases` | `alias_value` (type='phone') | `01XXXXXXXXX` |
+
+### WBOM Domain (Operations) — 13-digit `8801XXXXXXXXX`
+
+| Table | Column | Format |
+|-------|--------|-------|
+| `wbom_employees` | `employee_mobile` | `8801XXXXXXXXX` |
+| `wbom_contacts` | `whatsapp_number` | `8801XXXXXXXXX` |
+
+### RBAC Domain (Auth) — 13-digit `8801XXXXXXXXX`
+
+| Table | Column | Format |
+|-------|--------|-------|
+| `user_profiles` | `phone_canonical` | `8801XXXXXXXXX` |
+
+### Cross-Domain Lookup (SQL)
+
+When joining FPE tables with WBOM/RBAC tables, match on last 9 digits:
+
+```sql
+-- FPE → WBOM join
+SELECT e.id, w.employee_id
+FROM fpe_employees e
+JOIN wbom_employees w
+  ON RIGHT(REGEXP_REPLACE(e.primary_phone, '\D', '', 'g'), 9)
+   = RIGHT(REGEXP_REPLACE(w.employee_mobile, '\D', '', 'g'), 9)
+```
+
+---
+
+## Module Import Map
+
+### Canonical source (use this directly in FPE modules)
+
+```python
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone, to_880, from_880, phone_key9, phones_match
+```
+
+### Shared re-export (use this in non-FPE modules)
+
+```python
+from shared.phone import normalize_phone, phones_match, phone_key9, to_880, from_880, extract_phone_candidates
+```
+
+### Legacy compatibility (still works, delegates to canonical)
+
+| Module | Function | Delegates to |
+|--------|----------|-------------|
+| `modules.phone_normalizer` | `normalize_phone()` | Returns 13-digit `8801XXXXXXXXX` (WBOM domain) |
+| `modules.number_identity` | `canonical_phone()` | Returns 13-digit via `phone_normalizer` |
+| `modules.number_identity` | `normalize_phone()` | Returns list of variants |
+| `app.critical_numbers` | `normalize_phone_880()` | Returns 13-digit via `phone_normalizer` |
+| `modules.contact_sync` | `normalize_phone()` | Returns 13-digit via `phone_normalizer` |
+| `modules.rbac` | `_normalize_phone()` | Returns 13-digit via `phone_normalizer` |
+
+These legacy functions remain for WBOM/RBAC domain code that stores 13-digit
+format. They should NOT be used in FPE domain code.
+
+---
+
+## Modules Fixed (2026-07-01)
+
+The following modules had their own buggy `_norm_phone()` copies and have been
+fixed to import from the canonical source:
+
+| Module | Before | After |
+|--------|--------|-------|
+| `fazle_payroll_engine/payment_event.py` | `_norm_phone()` — returned raw digits for invalid | Imports `normalize_bd_phone` |
+| `payment_ingest/fpe_bridge.py` | `_norm_phone()` — same bug | Imports `normalize_bd_phone` |
+| `scripts/import_missing_advance_transactions.py` | `_norm_phone()` — same bug | Imports `normalize_bd_phone` |
+| `escort_slip_extractor/__init__.py` | `_normalize_phone()` — returned display format with hyphens | Imports `normalize_bd_phone`, returns storage format |
+| `shared/phone.py` | Complex delegation chain via `number_identity` | Direct re-export from `normalizer` |
+| `shared/identity_map.py` | Delegated to `number_identity` | Delegates to `shared.phone` |
+| `modules/user_role/__init__.py` | Delegated to `number_identity` | Delegates to `shared.phone` |
+
+---
+
+## Frontend Rules
+
+- **Display:** Show phones in `01XXXXXXXXX` format (11-digit, human-readable)
+- **Input:** Accept any format (+880, 880, 01, 1, with separators, Bengali numerals)
+- **API send:** Send raw input — backend normalizes
+- **Search:** Send raw input — backend normalizes and matches on `phone_key9()`
+
+---
+
+## Rules Summary
+
+1. **Store in `01XXXXXXXXX`** (11-digit) in all FPE tables.
+2. **Store in `8801XXXXXXXXX`** (13-digit) in WBOM/RBAC tables (legacy, do not change).
+3. **Match on last 9 digits** (`phone_key9()`) for any cross-domain lookup.
+4. **Never** return raw digits for invalid input — return `None`.
+5. **Never** store display format (with hyphens) in DB columns.
+6. **One function** (`normalize_bd_phone`) is the single source of truth.

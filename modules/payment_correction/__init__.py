@@ -24,11 +24,11 @@ Admin WhatsApp commands (wired in modules.admin_commands):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 from app.database import execute, fetch_one, fetch_val, fetch_all
 from modules import observability as obs
+from modules.fazle_payroll_engine.accounting import reverse_transaction
 
 log = logging.getLogger("fazle.payment_correction")
 
@@ -45,11 +45,10 @@ async def reverse_payment(
 
     Steps:
     1. Validate draft exists and is in 'approved' or 'sent' status.
-    2. Find the matching wbom_cash_transactions row.
-    3. Mark original transaction is_reversed=true.
-    4. Write a counter-transaction with transaction_type='reversal' and negative amount.
-    5. Update fazle_payment_drafts to status='reversed', store correction metadata.
-    6. Write fazle_payment_correction_log row.
+    2. Find the matching fpe_cash_transactions row via draft.transaction_id.
+    3. Call FPE reverse_transaction() to create an immutable reversal row.
+    4. Update fazle_payment_drafts to status='reversed', store correction metadata.
+    5. Write fazle_payment_correction_log row.
     """
     draft = await fetch_one(
         "SELECT * FROM fazle_payment_drafts WHERE id = $1", draft_id
@@ -67,48 +66,21 @@ async def reverse_payment(
     if draft.get("correction_type") == "reversal":
         return {"ok": False, "error": f"Draft #{draft_id} is already a reversal — cannot double-reverse."}
 
-    # Find original transaction (most recent matching this draft's employee + amount + date)
-    orig_tx = await fetch_one(
-        """SELECT transaction_id, amount, payment_method, transaction_type
-             FROM wbom_cash_transactions
-            WHERE employee_id = $1
-              AND amount = $2
-              AND is_reversed IS NOT TRUE
-              AND transaction_type != 'reversal'
-            ORDER BY transaction_time DESC NULLS LAST
-            LIMIT 1""",
-        draft["employee_id"],
-        draft["approved_amount"] or draft["expected_amount"],
-    )
-
-    orig_tx_id: Optional[int] = orig_tx["transaction_id"] if orig_tx else None
+    # Find original canonical transaction linked to this draft
+    orig_tx_id: Optional[int] = draft.get("transaction_id")
     counter_tx_id: Optional[int] = None
 
     if orig_tx_id:
-        await execute(
-            "UPDATE wbom_cash_transactions SET is_reversed = true, correction_note = $1 WHERE transaction_id = $2",
-            (reason or "reversed by admin")[:500],
-            orig_tx_id,
-        )
-        # Write counter-transaction
-        counter_tx_id = await fetch_val(
-            """INSERT INTO wbom_cash_transactions
-                   (employee_id, program_id, transaction_type, amount,
-                    payment_method, payment_mobile, transaction_date, transaction_time,
-                    status, remarks, created_by, reversal_of, correction_note)
-               VALUES ($1, $2, 'reversal', $3, $4, $5, CURRENT_DATE, NOW(),
-                       'completed', $6, $7, $8, $9)
-               RETURNING transaction_id""",
-            draft["employee_id"],
-            draft.get("escort_program_id"),
-            -float(orig_tx["amount"]),
-            orig_tx.get("payment_method") or draft.get("payment_method"),
-            draft.get("payment_number"),
-            (reason or "reversal")[:500],
-            admin_phone,
-            orig_tx_id,
-            (reason or "reversed by admin")[:500],
-        )
+        try:
+            rev_row = await reverse_transaction(
+                txn_id=orig_tx_id,
+                reason=reason or "reversed by admin",
+                created_by=admin_phone,
+            )
+            counter_tx_id = rev_row.id
+        except Exception as exc:
+            log.error("[payment_correction] reverse_transaction failed for draft=%s txn=%s: %s", draft_id, orig_tx_id, exc)
+            return {"ok": False, "error": f"Could not reverse canonical transaction {orig_tx_id}: {exc}"}
 
     # Update draft status
     await execute(
@@ -218,11 +190,11 @@ async def adjust_payment(
         """INSERT INTO fazle_payment_drafts
                (draft_type, employee_id, employee_name, employee_mobile,
                 escort_program_id, expected_amount, payment_method,
-                status, admin_phone, source_bridge, draft_text, notes,
+                status, admin_phone, draft_text, notes,
                 correction_of, correction_type, correction_note, corrected_by, corrected_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7,
-                   'pending', $8, $9, $10, $11,
-                   $12, 'adjustment', $13, $14, NOW())
+                   'pending', $8, $9, $10,
+                   $11, 'adjustment', $12, $13, NOW())
            RETURNING id""",
         draft.get("draft_type") or "escort_payment",
         draft.get("employee_id"),
@@ -232,7 +204,6 @@ async def adjust_payment(
         new_amount,
         method,
         admin_phone,
-        draft.get("source_bridge") or "bridge2",
         adj_text,
         (reason or "")[:500],
         draft_id,

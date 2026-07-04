@@ -46,11 +46,13 @@ async def find_by_name(name: str) -> dict[str, Any] | None:
 async def get_payment_history(employee_id: int) -> list[dict[str, Any]]:
     return await fetch_all(
         """
-        SELECT amount, payment_method, transaction_date, status
-        FROM wbom_cash_transactions
+        SELECT amount, payout_method AS payment_method, txn_date AS transaction_date,
+               transaction_status AS status, txn_category AS transaction_type
+        FROM fpe_cash_transactions
         WHERE employee_id = $1
-          AND status IN ('completed', 'paid', 'approved')
-        ORDER BY transaction_date DESC
+          AND transaction_status = 'final'
+          AND deleted_at IS NULL
+        ORDER BY txn_date DESC, created_at DESC
         LIMIT 15
         """,
         employee_id,
@@ -61,9 +63,10 @@ async def get_total_paid(employee_id: int) -> float:
     val = await fetch_val(
         """
         SELECT COALESCE(SUM(amount), 0)
-        FROM wbom_cash_transactions
+        FROM fpe_cash_transactions
         WHERE employee_id = $1
-          AND status IN ('completed', 'paid', 'approved')
+          AND transaction_status = 'final'
+          AND deleted_at IS NULL
         """,
         employee_id,
     )

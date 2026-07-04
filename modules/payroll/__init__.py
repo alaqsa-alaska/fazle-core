@@ -99,11 +99,11 @@ async def compute_run(
     total_programs = len(prog_rows)
     program_allowance = round(total_days * rate, 2)
 
-    # Sum advances (transactions) within period
+    # C1B: Sum advances from canonical fpe_cash_transactions within period
     advances = await fetch_val(
-        """SELECT COALESCE(SUM(amount), 0) FROM wbom_cash_transactions
-           WHERE employee_id=$1 AND transaction_type='advance'
-             AND transaction_date BETWEEN $2 AND $3""",
+        """SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions
+           WHERE employee_id=$1 AND txn_category='advance' AND transaction_status='final'
+             AND txn_date BETWEEN $2 AND $3""",
         employee_id, period_start, period_end,
     ) or 0
     total_advances = float(advances)
@@ -160,7 +160,7 @@ async def compute_run(
                           (run_id, component_type, component_label, amount, sign,
                            source_table, notes)
                        VALUES ($1, 'advance', 'Advances Adjusted', $2, '-',
-                               'wbom_cash_transactions',
+                               'fpe_cash_transactions',
                                'sum within period')""",
                     run_id, total_advances,
                 )

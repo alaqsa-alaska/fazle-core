@@ -15,9 +15,10 @@ import hmac
 import json
 import logging
 import os
+import re
 import shutil
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Optional
 
 import httpx
@@ -37,6 +38,7 @@ from modules.bridge_poller import start_pollers
 from modules.escort_slip_extractor import extract_escort_slip, test_report as escort_test_report
 from modules.payment_workflow import create_escort_payment_draft, finalize_payment, create_advance_request_draft
 from modules.message_router import process_message, get_primary_admin
+from modules.health_monitor import check_system_health as c1b_health_check
 from modules import outbound as outbound_queue
 from modules import scheduler as fazle_scheduler
 from shared.queue import record_heartbeat
@@ -68,6 +70,36 @@ def _use_outbound_queue() -> bool:
 
 def _social_auto_reply_single_engine() -> bool:
     return os.getenv("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "true").lower() in ("1", "true", "yes")
+
+
+def _start_stale_draft_expiry_worker() -> asyncio.Task:
+    """Start periodic stale-draft expiry worker and return its task handle."""
+
+    async def _stale_draft_expiry_loop():
+        import asyncio as _aio
+
+        while True:
+            try:
+                from modules.escort_roster.db import expire_stale_drafts
+
+                result = await expire_stale_drafts(hours=48)
+                if result.get("expired", 0):
+                    log.info(f"[escort_roster] stale draft expiry: {result['expired']} expired")
+            except Exception as _e:
+                log.warning(f"[escort_roster] stale draft expiry error: {_e}")
+            await _aio.sleep(6 * 3600)  # every 6 hours
+
+    return asyncio.create_task(_stale_draft_expiry_loop())
+
+
+async def _stop_background_task(task: Optional[asyncio.Task], name: str) -> None:
+    """Cancel and await a background task if it is still running."""
+    if not task:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+    log.info(f"[{name}] background task stopped")
 
 
 async def _force_draft_by_saved_contact_name(sender_clean: str) -> bool:
@@ -278,8 +310,10 @@ async def lifespan(app: FastAPI):
             log.info(f"[escort_cleanup] startup purged {_junk_result['deleted']} junk draft programs")
     except Exception as e:
         log.warning(f"[escort_cleanup] startup cleanup failed (non-fatal): {e}")
+    stale_draft_expiry_task = _start_stale_draft_expiry_worker()
     log.info("Fazle Core started")
     yield
+    await _stop_background_task(stale_draft_expiry_task, "escort_roster")
     fazle_scheduler.stop_scheduler()
     await outbound_queue.stop_background_worker()
     # Phase 13E — stop self-healing layer
@@ -469,10 +503,36 @@ async def _should_recruitment_autoreply(sender_clean: str, text: str) -> bool:
 
 
 # ── Health (B15.5 expanded) ───────────────────────────────────────────────────
+async def _probe_db_direct() -> dict:
+    try:
+        settings = get_settings()
+        import asyncpg
+
+        conn = await asyncpg.connect(settings.database_url, timeout=2.0)
+        try:
+            v = await conn.fetchval("SELECT 1")
+            return {"status": "ok", "value": int(v or 0)}
+        finally:
+            await conn.close()
+    except Exception as e:
+        return {"status": "critical", "error": f"direct connect failed: {str(e)[:160]}"}
+
+
 async def _probe_db() -> dict:
     try:
         v = await asyncio.wait_for(fetch_val("SELECT 1"), timeout=2.0)
         return {"status": "ok", "value": int(v or 0)}
+    except RuntimeError as e:
+        message = str(e)
+        if "DB pool not initialized" in message:
+            fallback = await _probe_db_direct()
+            if fallback.get("status") == "ok":
+                return fallback
+            return {
+                "status": "critical",
+                "error": f"DB pool not initialized; fallback failed: {fallback.get('error', 'unknown')}",
+            }
+        return {"status": "critical", "error": message[:200]}
     except Exception as e:
         return {"status": "critical", "error": str(e)[:200]}
 
@@ -688,17 +748,30 @@ async def health_deep():
     return out
 
 
+@app.get("/health/c1b", dependencies=[Depends(require_api_key)])
+async def health_c1b():
+    """C1B Gate-4 health check: fpe_table integrity, WBOM freeze, RAG KB count."""
+    try:
+        result = await c1b_health_check()
+        status_code = 200 if result.get("status") == "ok" else 503
+        return JSONResponse(status_code=status_code, content=result)
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "error": str(e)[:200]},
+        )
+
+
 # ── Phase 13A — Runtime node registry ───────────────────────────────────────
 @app.get("/api/runtime/nodes", dependencies=[Depends(require_api_key)])
 async def get_runtime_nodes():
     """
-    List all registered runtime nodes (fazle-core, payroll-engine, escort-roster).
+    Legacy runtime node inventory endpoint.
 
-    Returns each node's status, last heartbeat age, active_requests, queue_depth,
-    version, and metadata_json.  Stale nodes (age_s > STALE_THRESHOLD_S) are
-    returned with status='offline' so the dashboard can highlight them.
-
-    No auth required — diagnostic data only, no secrets exposed.
+    Backward-compatible: returns all runtime rows, including historical offline
+    records. New AI and operational callers should use:
+    - /api/runtime/nodes/current
+    - /api/runtime/nodes/history
     """
     try:
         from shared.runtime_gateway import get_active_nodes
@@ -707,10 +780,52 @@ async def get_runtime_nodes():
         log.warning("[gateway] /api/runtime/nodes error: %s", exc)
         nodes = []
     return {
+        "mode": "legacy_all_rows",
+        "legacy": True,
+        "canonical_current_endpoint": "/api/runtime/nodes/current",
+        "canonical_history_endpoint": "/api/runtime/nodes/history",
         "nodes": nodes,
         "count": len(nodes),
         "online": sum(1 for n in nodes if n.get("status") == "online"),
         "ts":     time.time(),
+    }
+
+
+@app.get("/api/runtime/nodes/current", dependencies=[Depends(require_api_key)])
+async def get_runtime_nodes_current():
+    """Return verified current active runtime truth for AI and operations."""
+    try:
+        from shared.runtime_gateway import get_current_runtime_nodes
+        nodes = await get_current_runtime_nodes()
+    except Exception as exc:
+        log.warning("[gateway] /api/runtime/nodes/current error: %s", exc)
+        nodes = []
+    return {
+        "mode": "current_active_nodes",
+        "legacy": False,
+        "nodes": nodes,
+        "count": len(nodes),
+        "online": len(nodes),
+        "ts": time.time(),
+    }
+
+
+@app.get("/api/runtime/nodes/history", dependencies=[Depends(require_api_key)])
+async def get_runtime_nodes_history():
+    """Return historical runtime rows that should not be treated as current truth."""
+    try:
+        from shared.runtime_gateway import get_historical_runtime_nodes
+        nodes = await get_historical_runtime_nodes()
+    except Exception as exc:
+        log.warning("[gateway] /api/runtime/nodes/history error: %s", exc)
+        nodes = []
+    return {
+        "mode": "historical_runtime_nodes",
+        "legacy": False,
+        "nodes": nodes,
+        "count": len(nodes),
+        "online": sum(1 for n in nodes if n.get("status") == "online"),
+        "ts": time.time(),
     }
 
 
@@ -1593,6 +1708,7 @@ async def payroll_spa():
 @app.get("/payroll/review", response_class=HTMLResponse)
 @app.get("/payroll/sync", response_class=HTMLResponse)
 @app.get("/payroll/manual", response_class=HTMLResponse)
+@app.get("/payroll/operator", response_class=HTMLResponse)
 @app.get("/payroll/cash", response_class=HTMLResponse)
 @app.get("/payroll/income", response_class=HTMLResponse)
 @app.get("/payroll/admin", response_class=HTMLResponse)
@@ -1602,6 +1718,7 @@ async def payroll_spa_tab():
 
 
 @app.get("/escort-roster", response_class=HTMLResponse)
+@app.get("/escort-roster.html", response_class=HTMLResponse)
 async def escort_roster_spa():
     """Escort Roster management SPA."""
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "escort-roster.html"))
@@ -2647,7 +2764,7 @@ async def rag_reindex():
 # ── Chat Lab — Admin Knowledge Q&A ────────────────────────────────────────────
 # Full Ollama brain: KB (RAG) + read-only production DB tools + internet fetch
 # + Ollama memory DB (writable). Production DB is NEVER written by AI.
-_CHAT_ALLOWED_MODELS = {"qwen3:14b", "qwen3:8b", "qwen2.5:3b"}
+_CHAT_ALLOWED_MODELS = {"phi4-mini", "phi4-mini:latest", "qwen3:8b", "qwen3:14b", "qwen2.5:3b"}
 
 _CHAT_TIMEOUT_S = 240
 
@@ -2658,20 +2775,245 @@ _EXACT_DB_ANSWER_TOOLS = {
 }
 
 
+async def _is_ai_console_chat_enabled() -> bool:
+    """Feature flag for routing /chat/message to the Phase 8 AI Console path."""
+    settings = get_settings()
+    default_enabled = bool(settings.ai_console_chat_enabled)
+    try:
+        row = await fetch_one(
+            "SELECT value FROM fazle_runtime_settings WHERE key=$1",
+            "ai_console.chat_enabled",
+        )
+        if row and row.get("value") is not None:
+            return str(row["value"]).strip().lower() in {"true", "1", "yes", "on"}
+    except Exception as exc:
+        log.debug("[chat/message] ai_console flag lookup unavailable: %s", exc)
+    return default_enabled
+
+
+_SENSITIVE_METADATA_KEYS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "authorization",
+    "api_key",
+    "apikey",
+    "bearer",
+    "cookie",
+    "set-cookie",
+    "env",
+)
+
+_MAX_EVIDENCE_STRING = 800
+_MAX_EVIDENCE_LIST_ITEMS = 12
+_MAX_EVIDENCE_DICT_ITEMS = 24
+
+
+def _redact_metadata_text(value: str) -> str:
+    sanitized = value
+    sanitized = re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/@\s]+)@", r"\1[redacted]@", sanitized)
+    sanitized = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._-]+", r"\1[redacted]", sanitized)
+    sanitized = re.sub(
+        r"(?i)\b(token|secret|password|passwd|api[_-]?key|authorization)\b\s*[:=]\s*([^\s,;]+)",
+        r"\1=[redacted]",
+        sanitized,
+    )
+    if len(sanitized) > _MAX_EVIDENCE_STRING:
+        sanitized = f"{sanitized[:_MAX_EVIDENCE_STRING]}...[truncated]"
+    return sanitized
+
+
+def _sanitize_metadata_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 6:
+        return "[truncated]"
+    if isinstance(value, dict):
+        items = list(value.items())
+        sanitized: dict[str, Any] = {}
+        for key, item in items[:_MAX_EVIDENCE_DICT_ITEMS]:
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if any(marker in key_lower for marker in _SENSITIVE_METADATA_KEYS):
+                sanitized[key_str] = "[redacted]"
+            else:
+                sanitized[key_str] = _sanitize_metadata_value(item, depth=depth + 1)
+        if len(items) > _MAX_EVIDENCE_DICT_ITEMS:
+            sanitized["_truncated_fields"] = len(items) - _MAX_EVIDENCE_DICT_ITEMS
+        return sanitized
+    if isinstance(value, list):
+        trimmed = [
+            _sanitize_metadata_value(item, depth=depth + 1)
+            for item in value[:_MAX_EVIDENCE_LIST_ITEMS]
+        ]
+        if len(value) > _MAX_EVIDENCE_LIST_ITEMS:
+            trimmed.append({"_truncated_items": len(value) - _MAX_EVIDENCE_LIST_ITEMS})
+        return trimmed
+    if isinstance(value, tuple):
+        return _sanitize_metadata_value(list(value), depth=depth + 1)
+    if isinstance(value, str):
+        return _redact_metadata_text(value)
+    return value
+
+
+def _empty_chat_evidence() -> dict[str, Any]:
+    return {
+        "runtime": [],
+        "business": [],
+        "memory": [],
+        "knowledge": [],
+        "provider": {},
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def _sanitize_chat_evidence(evidence: Any) -> dict[str, Any]:
+    if not isinstance(evidence, dict):
+        return _empty_chat_evidence()
+    sanitized = _sanitize_metadata_value(evidence)
+    normalized = _empty_chat_evidence()
+    for key in normalized:
+        value = sanitized.get(key)
+        if isinstance(normalized[key], list):
+            normalized[key] = value if isinstance(value, list) else []
+        elif isinstance(normalized[key], dict):
+            normalized[key] = value if isinstance(value, dict) else {}
+    return normalized
+
+
+def _summarize_chat_evidence(evidence: dict[str, Any]) -> dict[str, int]:
+    return {
+        "runtime_count": len(evidence.get("runtime") or []),
+        "business_count": len(evidence.get("business") or []),
+        "memory_count": len(evidence.get("memory") or []),
+        "knowledge_count": len(evidence.get("knowledge") or []),
+        "warning_count": len(evidence.get("warnings") or []),
+        "error_count": len(evidence.get("errors") or []),
+    }
+
+
+def _tool_names_from_evidence(items: list[dict[str, Any]]) -> list[str]:
+    return [
+        item.get("tool_name") or item.get("tool_id")
+        for item in items
+        if isinstance(item, dict) and (item.get("tool_name") or item.get("tool_id"))
+    ]
+
+
+def _provider_summary(provider_meta: Any) -> Any:
+    sanitized = _sanitize_metadata_value(provider_meta)
+    if isinstance(sanitized, dict):
+        selected = sanitized.get("selected")
+        if isinstance(selected, dict):
+            return selected
+        return sanitized
+    return sanitized
+
+
+def _augment_legacy_chat_response(
+    payload: dict[str, Any],
+    *,
+    feature_path: str,
+    feature_flag_enabled: bool,
+) -> dict[str, Any]:
+    merged = dict(payload)
+    merged.setdefault("provider", None)
+    merged.setdefault("confidence", "Unknown")
+    merged.setdefault("traceability", [])
+    merged.setdefault("evidence", _empty_chat_evidence())
+    merged["evidence"] = _sanitize_chat_evidence(merged.get("evidence"))
+    merged.setdefault("evidence_summary", _summarize_chat_evidence(merged["evidence"]))
+    merged.setdefault("runtime_used", [])
+    merged.setdefault("business_used", list(merged.get("db_tools_used") or []))
+    merged.setdefault("memory_used", ["ollama_memory"] if merged.get("memory_context_used") else [])
+    merged.setdefault("knowledge_used", list(merged.get("citations") or []))
+    merged["provider"] = _provider_summary(merged.get("provider"))
+    merged["traceability"] = _sanitize_metadata_value(merged.get("traceability") or [])
+    merged["confidence"] = str(merged.get("confidence") or "Unknown")
+    merged["feature_path"] = feature_path
+    merged["ai_console_enabled"] = feature_flag_enabled
+    return merged
+
+
+def _build_ai_console_chat_response(
+    orchestration: Any,
+    *,
+    active_model: str,
+    feature_flag_enabled: bool,
+) -> dict[str, Any]:
+    evidence = _sanitize_metadata_value(orchestration.evidence or {})
+    structured_evidence = _sanitize_chat_evidence(evidence)
+    provider_result = orchestration.provider_result or {}
+    runtime = structured_evidence.get("runtime") or []
+    business = structured_evidence.get("business") or []
+    memory = structured_evidence.get("memory") or []
+    knowledge = structured_evidence.get("knowledge") or []
+    answer = provider_result.get("response") or evidence.get("response") or "উত্তর পাওয়া যায়নি।"
+    selected_provider = _provider_summary((evidence.get("provider") or {}).get("selected") or provider_result)
+    business_used = _tool_names_from_evidence(business)
+    runtime_used = _tool_names_from_evidence(runtime)
+    memory_used = _tool_names_from_evidence(memory)
+    knowledge_used = _tool_names_from_evidence(knowledge)
+    return {
+        "answer": answer,
+        "model": provider_result.get("model") or active_model,
+        "provider": selected_provider,
+        "rag_used": bool(knowledge),
+        "db_tools_used": business_used,
+        "web_fetched": False,
+        "citations": knowledge_used,
+        "top_score": None,
+        "memory_context_used": bool(memory),
+        "confidence": evidence.get("confidence", "Unknown"),
+        "traceability": _sanitize_metadata_value(orchestration.traceability),
+        "evidence_summary": _summarize_chat_evidence(structured_evidence),
+        "evidence": {
+            **structured_evidence,
+            "provider": _sanitize_metadata_value(evidence.get("provider") or {}),
+        },
+        "runtime_used": runtime_used,
+        "business_used": business_used,
+        "memory_used": memory_used,
+        "knowledge_used": knowledge_used,
+        "feature_path": "ai_console",
+        "ai_console_enabled": feature_flag_enabled,
+        "trace": _sanitize_metadata_value({
+            "mode": orchestration.mode,
+            "request_id": orchestration.request_id,
+            "selected_tools": orchestration.selected_tools,
+        }),
+    }
+
+
 @app.get("/chat/models", dependencies=[Depends(require_api_key)])
 async def chat_models():
-    """Return available models for the Chat Lab selector."""
+    """Return available models for the Chat Lab selector and AI Console metadata."""
     settings = get_settings()
-    ollama_health = await ai.check_ollama_health()
-    installed = set(ollama_health.get("models", []))
+    from modules.ai_console.provider_registry import ProviderRegistry
+
+    registry = await ProviderRegistry().list_models()
     models = []
-    for m in ("qwen3:14b", "qwen3:8b", "qwen2.5:3b"):
+    for item in registry.get("models", []):
+        model_name = item.get("model_name")
+        provider = item.get("provider")
+        selectable = provider == "ollama" and model_name in _CHAT_ALLOWED_MODELS and bool(item.get("availability"))
         models.append({
-            "id": m,
-            "available": m in installed,
-            "active": m == settings.ollama_model,
+            "id": model_name,
+            "available": bool(item.get("availability")),
+            "active": bool(item.get("active")),
+            "provider": provider,
+            "purpose_label": item.get("purpose_label"),
+            "recommended_use": item.get("recommended_use"),
+            "health_status": item.get("health_status"),
+            "selectable": selectable,
         })
-    return {"models": models, "default": settings.ollama_model}
+    return {
+        "models": models,
+        "default": settings.ollama_model,
+        "providers": registry.get("providers", {}),
+        "primary_provider": registry.get("primary_provider"),
+        "ai_console_enabled": await _is_ai_console_chat_enabled(),
+    }
 
 
 @app.get("/chat/memory/stats", dependencies=[Depends(require_api_key)])
@@ -2725,12 +3067,33 @@ async def chat_message(request: Request):
     if not q:
         raise HTTPException(status_code=400, detail="q required")
 
+    # Reject raw voice placeholders; they must be transcribed before reaching the AI.
+    if q.startswith("[voice:") and q.endswith("]"):
+        settings_for_voice = get_settings()
+        return {
+            "answer": "ভয়েস বার্তা পাওয়া গেছে, কিন্তু এটি এখনো টেক্সটে রূপান্তরিত হয়নি। অনুগ্রহ করে লিখে পাঠান অথবা STT সক্ষম করুন।",
+            "model": requested_model or settings_for_voice.ollama_model,
+            "provider": None,
+            "rag_used": False,
+            "db_tools_used": [],
+            "web_fetched": False,
+            "citations": [],
+            "top_score": None,
+            "memory_context_used": False,
+            "confidence": "Unknown",
+            "traceability": ["ORCH-001"],
+            "evidence_summary": _summarize_chat_evidence(_empty_chat_evidence()),
+            "evidence": _empty_chat_evidence(),
+            "runtime_used": [],
+            "business_used": [],
+            "memory_used": [],
+            "knowledge_used": [],
+            "feature_path": "ai_console",
+            "ai_console_enabled": await _is_ai_console_chat_enabled(),
+            "trace": {"mode": "general", "request_id": "voice-placeholder", "selected_tools": []},
+        }
+
     requested_model = (body.get("model") or "").strip() or None
-    if requested_model and requested_model not in _CHAT_ALLOWED_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"model not allowed; choose from {sorted(_CHAT_ALLOWED_MODELS)}",
-        )
 
     history = body.get("history") or []
     if not isinstance(history, list):
@@ -2742,181 +3105,96 @@ async def chat_message(request: Request):
 
     settings = get_settings()
     active_model = requested_model or settings.ollama_model
+    ai_console_enabled = await _is_ai_console_chat_enabled()
 
-    # ── 1. Ollama memory context (past relevant facts) ──────────────────────
-    memory_context = ""
-    try:
-        from modules import ollama_memory
-        recent_qs = await ollama_memory.get_recent_questions(limit=5)
-        if recent_qs:
-            mem_lines = [
-                f"[Memory Q{i+1}] {rq['question'][:120]}: {rq['answer_summary'][:200]}"
-                for i, rq in enumerate(recent_qs)
-                if rq.get("answer_summary")
-            ]
-            if mem_lines:
-                memory_context = "আগের প্রশ্নের স্মৃতি:\n" + "\n".join(mem_lines)
-    except Exception as e:
-        log.debug("ollama_memory read failed: %s", e)
+    # Capability questions should not trigger stale employee search.
+    capability_question = any(token in q.lower() for token in (
+        "তুমি কি", "পার", "can you", "able to", "capability", "ক্ষমতা",
+        "ডাটাবেস", "database", "পড়তে পার", "read data",
+    ))
+    if capability_question:
+        app_context = False
+        db_context = False
+        web_context = False
 
-    # ── 2. RAG / KB context ─────────────────────────────────────────────────
-    rag_context = ""
-    citations: list = []
-    top_score = None
-    if app_context:
-        try:
-            from modules import rag
-            res = await rag.answer(q, k=4, min_score=0.8)
-            if res:
-                rag_context = res.get("answer", "")
-                citations = res.get("citations", [])
-                top_score = res.get("top_score")
-        except Exception as e:
-            log.debug("RAG search failed: %s", e)
-
-    # ── 3. Read-only production DB tools ────────────────────────────────────
-    db_tool_results: list[dict] = []
-    db_tools_used: list[str] = []
-    exact_tools_needed: list[str] = []
-    try:
-        from modules import ai_readonly_tools
-        tools_needed = ai_readonly_tools.detect_tools_needed(q)
-        exact_tools_needed = [t for t in tools_needed if t in _EXACT_DB_ANSWER_TOOLS]
-
-        # Exact operational questions are database facts, not model opinions.
-        # Force DB tools even if the caller turns db_context off.
-        if db_context or exact_tools_needed:
-            for tool_name in tools_needed[:3]:  # max 3 tools per query
-                result = await ai_readonly_tools.run_tool(tool_name, q)
-                if result.get("data") is not None:
-                    db_tool_results.append(result)
-                    db_tools_used.append(tool_name)
-    except Exception as e:
-        log.debug("ai_readonly_tools failed: %s", e)
-
-    # Exact-data operational questions should not be reinterpreted by the LLM.
-    # Return the tool answer directly so qwen cannot invent names/amounts when
-    # RAG has weak context or no live DB evidence.
-    for tool_result in db_tool_results:
-        if tool_result.get("tool") in _EXACT_DB_ANSWER_TOOLS and tool_result.get("answer"):
-            answer = str(tool_result["answer"])
-
-            async def _save_exact_memory() -> None:
-                try:
-                    from modules import ollama_memory
-                    await ollama_memory.record_question(
-                        question=q,
-                        answer_summary=answer[:500],
-                        source_refs=[str(tool_result.get("tool"))],
-                    )
-                except Exception:
-                    pass
-            asyncio.create_task(_save_exact_memory())
-
-            return {
-                "answer": answer,
-                "model": "deterministic-db-tool",
-                "rag_used": bool(rag_context),
-                "db_tools_used": db_tools_used,
-                "web_fetched": False,
-                "citations": citations,
-                "top_score": top_score,
-                "memory_context_used": bool(memory_context),
-            }
-    if exact_tools_needed:
-        return {
-            "answer": "এই প্রশ্নের উত্তর live database থেকে দিতে হবে, কিন্তু এখন DB tool থেকে নির্ভরযোগ্য ফল পাওয়া যায়নি। তাই ভুল তথ্য না দিয়ে উত্তর বন্ধ রাখা হলো।",
-            "model": "deterministic-db-tool",
-            "rag_used": bool(rag_context),
-            "db_tools_used": db_tools_used,
-            "web_fetched": False,
-            "citations": citations,
-            "top_score": top_score,
-            "memory_context_used": bool(memory_context),
-            "error": "exact_db_tool_unavailable",
+    # Model validation: AI Console path allows any model the registry knows about;
+    # legacy path restricts to the static Ollama allowlist.
+    if requested_model and not ai_console_enabled:
+        _all_allowed = _CHAT_ALLOWED_MODELS | {
+            settings.github_model_name,
+            settings.groq_model_name,
         }
-
-    # ── 4. Internet fetch (if URL in question and web_context enabled) ──────
-    web_result: dict | None = None
-    if web_context:
-        import re as _re
-        url_match = _re.search(r"https?://[^\s\"'<>]+", q)
-        if url_match:
-            try:
-                from modules import ai_readonly_tools
-                web_result = await ai_readonly_tools.fetch_web_page(url_match.group())
-            except Exception as e:
-                log.debug("web fetch failed: %s", e)
-
-    # ── Build combined context block ─────────────────────────────────────────
-    context_parts: list[str] = []
-    if memory_context:
-        context_parts.append(memory_context)
-    if rag_context:
-        context_parts.append("জ্ঞানভাণ্ডার (KB):\n" + rag_context)
-    for tool_result in db_tool_results:
-        tool_name = tool_result["tool"]
-        data = tool_result["data"]
-        if isinstance(data, list) and data:
-            # Format as compact text table
-            keys = list(data[0].keys())[:6]
-            lines = [", ".join(str(row.get(k, "")) for k in keys) for row in data[:15]]
-            context_parts.append(f"[{tool_name}]:\n" + "\n".join(lines))
-        elif isinstance(data, dict):
-            context_parts.append(f"[{tool_name}]: " + ", ".join(f"{k}={v}" for k, v in list(data.items())[:8]))
-    if web_result and web_result.get("ok") and web_result.get("content"):
-        context_parts.append("ওয়েব তথ্য:\n" + web_result["content"][:1500])
-
-    combined_context = "\n\n".join(context_parts)
-
-    # ── Generate answer ──────────────────────────────────────────────────────
-    try:
-        answer = await asyncio.wait_for(
-            ai.generate_chat_reply(q, combined_context, history, model=active_model),
-            timeout=_CHAT_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        log.warning("[chat/message] LLM timeout after %ss model=%s", _CHAT_TIMEOUT_S, active_model)
-        return JSONResponse(
-            status_code=504,
-            content={
-                "error": "llm_timeout",
-                "answer": "মডেলটি সময়মতো উত্তর দিতে পারেনি। একটু পরে আবার চেষ্টা করুন।",
-                "model": active_model,
-                "rag_used": bool(rag_context),
-                "timeout_s": _CHAT_TIMEOUT_S,
-            },
-        )
-
-    if not answer:
-        answer = combined_context[:500] or "উত্তর পাওয়া যায়নি। অফিসে যোগাযোগ করুন।"
-
-    # ── 5. Save Q&A to Ollama memory DB (fire and forget) ───────────────────
-    async def _save_memory() -> None:
-        try:
-            from modules import ollama_memory
-            src_refs = citations + db_tools_used
-            if web_result and web_result.get("url"):
-                src_refs.append(web_result["url"])
-            await ollama_memory.record_question(
-                question=q,
-                answer_summary=answer[:500] if answer else "",
-                source_refs=src_refs,
+        if requested_model not in _all_allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"model not allowed; choose from {sorted(_all_allowed)}",
             )
-        except Exception:
-            pass
-    asyncio.create_task(_save_memory())
 
-    return {
-        "answer": answer,
-        "model": active_model,
-        "rag_used": bool(rag_context),
-        "db_tools_used": db_tools_used,
-        "web_fetched": bool(web_result and web_result.get("ok")),
-        "citations": citations,
-        "top_score": top_score,
-        "memory_context_used": bool(memory_context),
-    }
+    if ai_console_enabled:
+        from modules.ai_console import orchestrate_console_request
+
+        # Capability questions get a direct, deterministic answer.
+        if capability_question:
+            return {
+                "answer": "হ্যাঁ, আমি fazle-core-এর অনুমোদিত read-only employee ও business view পড়তে পারি। আমি শুধু পড়তে পারি, কোনো ডেটা লিখতে বা পরিবর্তন করতে পারি না।",
+                "model": active_model,
+                "provider": None,
+                "rag_used": False,
+                "db_tools_used": [],
+                "web_fetched": False,
+                "citations": [],
+                "top_score": None,
+                "memory_context_used": False,
+                "confidence": "Verified",
+                "traceability": ["ORCH-001"],
+                "evidence_summary": _summarize_chat_evidence(_empty_chat_evidence()),
+                "evidence": _empty_chat_evidence(),
+                "runtime_used": [],
+                "business_used": [],
+                "memory_used": [],
+                "knowledge_used": [],
+                "feature_path": "ai_console",
+                "ai_console_enabled": ai_console_enabled,
+                "trace": {"mode": "capability", "request_id": "capability-answer", "selected_tools": []},
+            }
+
+        orchestration = await orchestrate_console_request(
+            q,
+            requested_model=requested_model,
+            history=history,
+            app_context=app_context,
+            db_context=db_context,
+            web_context=web_context,
+            include_provider_response=True,
+        )
+        return _build_ai_console_chat_response(
+            orchestration,
+            active_model=active_model,
+            feature_flag_enabled=ai_console_enabled,
+        )
+
+    from modules import admin_chat_lab
+
+    legacy_result = await admin_chat_lab.orchestrate_chat_message(
+        question=q,
+        requested_model=requested_model,
+        active_model=active_model,
+        history=history,
+        app_context=app_context,
+        db_context=db_context,
+        web_context=web_context,
+        exact_db_answer_tools=_EXACT_DB_ANSWER_TOOLS,
+        llm_generate=ai.generate_chat_reply,
+        chat_timeout_s=_CHAT_TIMEOUT_S,
+        logger=log,
+    )
+    if isinstance(legacy_result, JSONResponse):
+        return legacy_result
+    return _augment_legacy_chat_response(
+        legacy_result,
+        feature_path="admin_chat_lab",
+        feature_flag_enabled=ai_console_enabled,
+    )
 
 
 # ── User Management APIs ──────────────────────────────────────────────────────

@@ -289,9 +289,9 @@ td.actions{white-space:nowrap;text-align:center}
             <option value="">All Status</option>
             <option value="draft">Pending (Draft)</option>
             <option value="confirmed">Confirmed</option>
-            <option value="Running">Running</option>
-            <option value="Assigned">Assigned</option>
-            <option value="Completed">Completed</option>
+            <option value="assigned">Assigned</option>
+            <option value="running">Running</option>
+            <option value="completed">Completed</option>
             <option value="cancelled">Cancelled</option>
           </select>
           <input type="date" id="startFrom" onchange="loadRoster()" title="Start date from">
@@ -319,6 +319,7 @@ td.actions{white-space:nowrap;text-align:center}
                 <th>R. Point</th>
                 <th onclick="setSort('total')">Conv.<span class="sort-icon"></span></th>
                 <th onclick="setSort('total')">Total<span class="sort-icon"></span></th>
+                <th>Net</th>
                 <th>Status</th>
                 <th class="actions">Actions</th>
               </tr>
@@ -344,7 +345,12 @@ td.actions{white-space:nowrap;text-align:center}
     <div id="tab-slips" style="display:none">
       <div class="card">
         <h2>📄 Pending Slip Reviews</h2>
-        <div id="slipQueue"><p style="color:var(--muted);padding:16px">Load slip matches by querying the API…</p></div>
+        <div id="slipQueue"><p style="color:var(--muted);padding:16px">Loading…</p></div>
+        <div id="slipQueuePager" style="margin-top:12px;display:none">
+          <button onclick="slipQueuePrev()" id="slipPrevBtn">← Prev</button>
+          <span id="slipPageInfo" style="margin:0 8px"></span>
+          <button onclick="slipQueueNext()" id="slipNextBtn">Next →</button>
+        </div>
       </div>
     </div>
 
@@ -418,6 +424,27 @@ td.actions{white-space:nowrap;text-align:center}
             <div class="form-field"><label>Shift Rate (BDT)</label><input type="number" id="cfgRate" value="200" min="0"></div>
           </div>
           <button class="btn btn-primary btn-sm" onclick="saveConfig()">Save</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>📱 Escort Client Management</h2>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Client Phone</th><th class="actions">Actions</th></tr></thead>
+            <tbody id="escortClientBody">
+              <tr class="loading-row"><td colspan="2"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="form-row">
+            <div class="form-field">
+              <label>Add Escort Client</label>
+              <input type="tel" id="escortClientInput" placeholder="8801XXXXXXXXX or 01XXXXXXXXX">
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="addEscortClient()">Add Client</button>
         </div>
       </div>
     </div>
@@ -534,27 +561,34 @@ function apiFetch(path, opts={}) {
   return fetch(BASE + path, {...opts, headers});
 }
 
+async function readApiError(r) {
+  const text = await r.text();
+  if (!text) return `${r.status} ${r.statusText}`.trim();
+  try {
+    const data = JSON.parse(text);
+    if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail.trim();
+    if (Array.isArray(data?.detail) && data.detail.length) {
+      return data.detail.map(item => item?.msg || item?.message || JSON.stringify(item)).join('; ');
+    }
+  } catch (_) {}
+  return text;
+}
+
 async function apiGet(path) {
   const r = await apiFetch(path);
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  if (!r.ok) throw new Error(await readApiError(r));
   return r.json();
 }
 
 async function apiPost(path, body) {
   const r = await apiFetch(path, {method:'POST', body: JSON.stringify(body)});
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(t || `${r.status}`);
-  }
+  if (!r.ok) throw new Error(await readApiError(r));
   return r.json();
 }
 
 async function apiPatch(path, body) {
   const r = await apiFetch(path, {method:'PATCH', body: JSON.stringify(body)});
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(t || `${r.status}`);
-  }
+  if (!r.ok) throw new Error(await readApiError(r));
   return r.json();
 }
 
@@ -588,7 +622,8 @@ function switchTab(name) {
     b.classList.toggle('active', ['roster','kanban','slips','calc','config'][i] === name);
   });
   if (name==='kanban') loadKanban();
-  if (name==='config') loadConfig();
+  if (name==='slips') loadSlipQueue();
+  if (name==='config') { loadConfig(); loadEscortClients(); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -622,20 +657,26 @@ async function loadRoster(page) {
   const status = document.getElementById('statusFilter').value;
   const startFrom = document.getElementById('startFrom').value;
   const startTo = document.getElementById('startTo').value;
-  const ps = document.getElementById('pageSz').value;
-  let url = `/api/escort-roster?page=${_curPage}&page_size=${ps}&sort_by=${_sortBy}&sort_dir=${_sortDir}`;
-  if (search) url += `&search=${encodeURIComponent(search)}`;
-  if (status) url += `&status=${status}`;
-  if (startFrom) url += `&start_from=${startFrom}`;
-  if (startTo) url += `&start_to=${startTo}`;
+  const ps = Math.max(1, parseInt(document.getElementById('pageSz').value || '50', 10) || 50);
+  const params = new URLSearchParams({
+    page: String(_curPage),
+    page_size: String(ps),
+    sort_by: _sortBy || 'start_date',
+    sort_dir: _sortDir || 'desc',
+  });
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (startFrom) params.set('start_from', startFrom);
+  if (startTo) params.set('start_to', startTo);
+  const url = `/api/escort-roster?${params.toString()}`;
 
   const tbody = document.getElementById('rosterBody');
   tbody.innerHTML = '<tr class="loading-row"><td colspan="14"><span class="spinner"></span> Loading…</td></tr>';
 
   try {
     const d = await apiGet(url);
-    renderRosterRows(d.items);
-    renderPager(d.page, d.pages, d.total);
+    renderRosterRows(Array.isArray(d.items) ? d.items : []);
+    renderPager(d.page || 1, d.pages || 1, d.total || 0);
     loadSummary();
   } catch(e) {
     tbody.innerHTML = `<tr class="loading-row"><td colspan="14" style="color:var(--err)">Error: ${e.message}</td></tr>`;
@@ -673,6 +714,7 @@ function renderRosterRows(items) {
       <td style="font-size:12px">${esc(r.release_point||'—')}</td>
       <td class="num">${r.conveyance != null ? '৳'+fmt(r.conveyance) : '—'}</td>
       <td class="num" style="font-weight:700;color:var(--accent)">${r.total != null ? '৳'+fmt(r.total) : '—'}</td>
+      <td class="num" style="font-size:12px;color:${(r.roster_status==='completed'&&r.net_payable>0)?'#27ae60':'var(--muted)'}">${(r.roster_status==='completed'&&r.net_payable>0) ? '৳'+fmt(r.net_payable) : '—'}</td>
       <td><span class="status-badge ${sc}">${_statusLabel}</span></td>
       <td class="actions">
         <button class="btn-icon" title="View details" onclick="openDetail(${r.program_id})">🔍</button>
@@ -725,16 +767,20 @@ function exportCSV() {
   const status = document.getElementById('statusFilter').value;
   const startFrom = document.getElementById('startFrom').value;
   const startTo = document.getElementById('startTo').value;
-  let url = `/api/escort-roster/export?`;
-  if (search) url += `search=${encodeURIComponent(search)}&`;
-  if (status) url += `status=${status}&`;
-  if (startFrom) url += `start_from=${startFrom}&`;
-  if (startTo) url += `start_to=${startTo}&`;
+  const params = new URLSearchParams();
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (startFrom) params.set('start_from', startFrom);
+  if (startTo) params.set('start_to', startTo);
+  const url = `/api/escort-roster/export?${params.toString()}`;
   const a = document.createElement('a');
   a.href = url;
   a.setAttribute('download','escort_roster.csv');
   // Must pass auth — use fetch and blob
-  apiFetch(url).then(r => r.blob()).then(blob => {
+  apiFetch(url).then(async r => {
+    if (!r.ok) throw new Error(await readApiError(r));
+    return r.blob();
+  }).then(blob => {
     a.href = URL.createObjectURL(blob);
     a.click();
     toast('CSV export downloaded');
@@ -1038,6 +1084,43 @@ async function loadConfig() {
   } catch(e) { document.getElementById('configBody').innerHTML = `<tr><td colspan="4" style="color:var(--err)">${e.message}</td></tr>`; }
 }
 
+async function loadEscortClients() {
+  const tbody = document.getElementById('escortClientBody');
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="2"><span class="spinner"></span></td></tr>';
+  try {
+    const data = await apiGet('/api/escort-roster/escort-clients');
+    const items = data.phones || [];
+    tbody.innerHTML = items.map(phone => `<tr>
+      <td>${esc(phone)}</td>
+      <td class="actions"><button class="btn btn-danger btn-sm" onclick="removeEscortClient('${phone}')">Remove</button></td>
+    </tr>`).join('') || '<tr><td colspan="2" style="color:var(--muted);text-align:center">No escort clients configured</td></tr>';
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="2" style="color:var(--err)">${e.message}</td></tr>`;
+  }
+}
+
+async function addEscortClient() {
+  const input = document.getElementById('escortClientInput');
+  const phone = input.value.trim();
+  if (!phone) { toast('Enter a client phone', 'warn'); return; }
+  try {
+    await apiPost('/api/escort-roster/escort-clients', {phone});
+    input.value = '';
+    toast('Escort client added');
+    loadEscortClients();
+  } catch(e) { toast('Add failed: ' + e.message, 'err'); }
+}
+
+async function removeEscortClient(phone) {
+  if (!confirm(`Remove escort client ${phone}?`)) return;
+  try {
+    const res = await apiFetch(`/api/escort-roster/escort-clients/${encodeURIComponent(phone)}`, {method:'DELETE'});
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+    toast('Escort client removed');
+    loadEscortClients();
+  } catch(e) { toast('Remove failed: ' + e.message, 'err'); }
+}
+
 async function saveConfig() {
   const dest = document.getElementById('cfgDest').value.trim();
   const conv = parseFloat(document.getElementById('cfgConv').value) || 0;
@@ -1103,6 +1186,87 @@ setInterval(() => {
     loadSummary();
   }
 }, 60000);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slip Queue (Task 5d)
+// ─────────────────────────────────────────────────────────────────────────
+let slipQueuePage = 1;
+let slipQueuePages = 1;
+
+async function loadSlipQueue() {
+  const container = document.getElementById('slipQueue');
+  const pager = document.getElementById('slipQueuePager');
+  try {
+    const d = await apiGet(`/api/escort-roster/slip-queue?page=${slipQueuePage}&page_size=25`);
+    slipQueuePages = d.pages || 1;
+    if (!d.items || d.items.length === 0) {
+      container.innerHTML = '<p style="color:var(--muted);padding:16px">✅ No pending slip reviews</p>';
+      pager.style.display = 'none';
+      return;
+    }
+    pager.style.display = '';
+    document.getElementById('slipPageInfo').textContent = `Page ${d.page} of ${d.pages} (${d.total} total)`;
+    document.getElementById('slipPrevBtn').disabled = d.page <= 1;
+    document.getElementById('slipNextBtn').disabled = d.page >= d.pages;
+
+    container.innerHTML = d.items.map(item => {
+      const conf = item.confidence != null ? (item.confidence * 100).toFixed(0) + '%' : '—';
+      const matchConf = item.match_confidence != null ? (item.match_confidence * 100).toFixed(0) + '%' : '—';
+      const docType = item.document_type || 'unknown';
+      const badgeColor = docType === 'printed_template_slip' ? '#27ae60' : docType === 'handwritten_blank_slip' ? '#e67e22' : '#95a5a6';
+      const rawText = item.raw_text ? item.raw_text.substring(0, 300).replace(/</g,'&lt;') : '';
+      const hasMatch = item.match_id != null;
+      const matchInfo = hasMatch ? `
+        <div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:6px">
+          <strong>Matched Program #${item.program_id}</strong> (${matchConf} confidence)<br>
+          MV: ${item.prog_mv || '—'} | LV: ${item.prog_lv || '—'} | Escort: ${item.prog_escort_name || '—'} | Status: ${item.prog_status || '—'}<br>
+          <button onclick="confirmSlip(${item.match_id})" style="margin-top:4px;background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">✅ Confirm</button>
+          <button onclick="rejectSlip(${item.match_id})" style="margin-top:4px;background:#e74c3c;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">❌ Reject</button>
+        </div>` : '<p style="color:var(--muted);margin-top:8px">No program match found — manual review needed</p>';
+      return `
+        <div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="background:${badgeColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${docType}</span>
+            <span style="color:var(--muted);font-size:12px">${item.created_at || ''} · OCR conf: ${conf}</span>
+          </div>
+          <div style="margin-top:8px">
+            <strong>MV:</strong> ${item.mother_vessel || '—'} |
+            <strong>LV:</strong> ${item.lighter_vessel || '—'} |
+            <strong>Escort:</strong> ${item.escort_name || '—'} ${item.escort_mobile || ''}<br>
+            <strong>Master:</strong> ${item.master_mobile || '—'} |
+            <strong>Start:</strong> ${item.start_date || '—'} |
+            <strong>Release:</strong> ${item.completion_date || '—'} @ ${item.release_place || '—'}
+          </div>
+          ${rawText ? `<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted)">Raw OCR text</summary><pre style="font-size:11px;white-space:pre-wrap;background:#f9f9f9;padding:8px;border-radius:4px">${rawText}…</pre></details>` : ''}
+          ${matchInfo}
+        </div>`;
+    }).join('');
+  } catch(e) {
+    container.innerHTML = `<p style="color:#e74c3c;padding:16px">Error loading slip queue: ${e.message}</p>`;
+    pager.style.display = 'none';
+  }
+}
+
+async function confirmSlip(matchId) {
+  try {
+    await apiPost(`/api/escort-roster/slip-queue/${matchId}/confirm`, {});
+    toast('ok', 'Slip match confirmed');
+    loadSlipQueue();
+    loadSummary();
+  } catch(e) { toast('err', 'Confirm failed: ' + e.message); }
+}
+
+async function rejectSlip(matchId) {
+  try {
+    await apiPost(`/api/escort-roster/slip-queue/${matchId}/reject`, {});
+    toast('ok', 'Slip match rejected');
+    loadSlipQueue();
+    loadSummary();
+  } catch(e) { toast('err', 'Reject failed: ' + e.message); }
+}
+
+function slipQueuePrev() { if (slipQueuePage > 1) { slipQueuePage--; loadSlipQueue(); } }
+function slipQueueNext() { if (slipQueuePage < slipQueuePages) { slipQueuePage++; loadSlipQueue(); } }
 </script>
 </body>
 </html>

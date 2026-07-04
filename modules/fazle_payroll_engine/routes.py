@@ -22,6 +22,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import json
 from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,11 @@ from .models import (
     ReversalRequest,
     TxnCategory,
     TransactionCreateRequest,
+    TransactionStatus,
+    ApprovalStatus,
+    ReviewStatus,
 )
+from .payment_event import payment_event_from_operator, payment_event_to_request
 
 log = logging.getLogger("fazle.fpe.routes")
 
@@ -550,7 +555,8 @@ async def list_employees(
         f"""
         WITH canon AS (
           SELECT e.id, e.employee_code, e.full_name, e.primary_phone,
-                 e.employee_id_phone, e.department, e.status,
+               e.employee_id_phone, e.department, e.status,
+               e.basic_salary, e.designation, e.joining_date,
                  e.created_source, e.created_at
           FROM fpe_employees e
           WHERE {where_sql}
@@ -573,6 +579,13 @@ async def list_employees(
                  ON t.employee_id = mb.member_id AND t.is_reversal = FALSE
           GROUP BY mb.canon_id
         ),
+         ledger_agg AS (
+           SELECT mb.canon_id,
+               COALESCE(SUM(l.total_advance), 0) AS total_advance
+           FROM members mb
+           LEFT JOIN fpe_employee_ledger l ON l.employee_id = mb.member_id
+           GROUP BY mb.canon_id
+         ),
         aliases AS (
           SELECT mb.canon_id,
                  array_agg(DISTINCT a.alias_value)
@@ -584,10 +597,12 @@ async def list_employees(
         SELECT c.*,
                COALESCE(ag.total_transactions, 0) AS total_transactions,
                COALESCE(ag.total_paid, 0)         AS total_paid,
+             COALESCE(la.total_advance, 0)      AS total_advance,
                ag.last_payment_date,
                al.name_aliases
         FROM canon c
         LEFT JOIN agg     ag ON ag.canon_id = c.id
+         LEFT JOIN ledger_agg la ON la.canon_id = c.id
         LEFT JOIN aliases al ON al.canon_id = c.id
         ORDER BY {outer_order}
         """,
@@ -611,6 +626,11 @@ async def list_employees(
         d["name_aliases"] = name_aliases
         d["total_transactions"] = int(d["total_transactions"] or 0)
         d["total_paid"] = float(d["total_paid"] or 0)
+        d["total_advance"] = float(d.get("total_advance") or 0)
+        d["net_balance"] = d["total_paid"] - d["total_advance"]
+        d["basic_salary"] = float(d.get("basic_salary") or 0)
+        d["designation"] = d.get("designation")
+        d["joining_date"] = d["joining_date"].isoformat() if d.get("joining_date") else None
         d["last_payment_date"] = (
             d["last_payment_date"].isoformat() if d.get("last_payment_date") else None
         )
@@ -2120,6 +2140,70 @@ async def admin_review_summary():
     }
 
 
+@router.get("/admin/salary/summary", dependencies=[Depends(_require_api_key)])
+async def admin_salary_summary():
+    """Return salary baseline summary for payroll admin controls."""
+    row = await fetch_one(
+        """
+        SELECT
+            COUNT(*)::bigint AS total_employees,
+            COUNT(*) FILTER (WHERE basic_salary = 10000)::bigint AS salary_10000_count,
+            COUNT(*) FILTER (WHERE basic_salary <> 10000)::bigint AS non_10000_count,
+            COALESCE(MIN(basic_salary), 0)::numeric AS min_salary,
+            COALESCE(MAX(basic_salary), 0)::numeric AS max_salary
+        FROM fpe_employees
+        """
+    )
+    return {
+        "total_employees": int(row["total_employees"] if row else 0),
+        "salary_10000_count": int(row["salary_10000_count"] if row else 0),
+        "non_10000_count": int(row["non_10000_count"] if row else 0),
+        "min_salary": float(row["min_salary"] if row else 0),
+        "max_salary": float(row["max_salary"] if row else 0),
+    }
+
+
+@router.post("/admin/salary/apply-uniform", dependencies=[Depends(_require_api_key)])
+async def admin_apply_uniform_salary(payload: dict):
+    """Set one salary value for all employees and record an audit event."""
+    amount = Decimal(str(payload.get("amount", "10000")))
+    if amount <= 0:
+        raise HTTPException(400, "amount must be positive")
+
+    actor = (payload.get("applied_by") or "admin_ui").strip() or "admin_ui"
+    changed = await fetch_val(
+        "WITH updated AS ("
+        "  UPDATE fpe_employees "
+        "  SET basic_salary = $1, updated_at = NOW() "
+        "  WHERE basic_salary IS DISTINCT FROM $1 "
+        "  RETURNING 1"
+        ") SELECT COUNT(*) FROM updated",
+        amount,
+    )
+    if changed is None:
+        changed = 0
+
+    total = await fetch_val("SELECT COUNT(*) FROM fpe_employees") or 0
+    await execute(
+        """
+        INSERT INTO fpe_accounting_audit_logs
+            (entity_type, entity_id, action, before_state, after_state, performed_by, reason)
+        VALUES ('employee_salary', 0, 'bulk_set_uniform_salary', $1, $2, $3, $4)
+        """,
+        json.dumps({"target_amount": str(amount)}),
+        json.dumps({"total_employees": int(total), "target_amount": str(amount)}),
+        actor,
+        "phase_2_uniform_salary_apply",
+    )
+
+    return {
+        "status": "ok",
+        "applied_amount": float(amount),
+        "total_employees": int(total),
+        "changed_rows": int(changed),
+    }
+
+
 @router.get("/admin/audit", dependencies=[Depends(_require_api_key)])
 async def admin_audit_list(
     review_item_id: Optional[int] = Query(None),
@@ -2362,7 +2446,7 @@ async def list_income_transactions(
     ps = page_size
     offset = (page - 1) * ps
 
-    conditions = ["1=1"]
+    conditions = ["t.deleted_at IS NULL"]
     params: list = []
     i = 1
 
@@ -2465,7 +2549,8 @@ async def get_income_transaction(income_id: int):
                (t.employee_id IS NOT NULL AND e.created_source = 'income_command') AS auto_created_employee
         FROM fpe_income_transactions t
         LEFT JOIN fpe_employees e ON e.id = t.employee_id
-        WHERE t.id = $1
+                WHERE t.id = $1
+                    AND t.deleted_at IS NULL
         """,
         income_id,
     )
@@ -2496,6 +2581,97 @@ async def create_income_transaction(req: IncomeCreateRequest):
     mobile = normalize_bd_phone(req.mobile_number or "") if req.mobile_number else None
     period = txn_date.strftime("%Y-%m")
 
+    employee_id: Optional[int] = None
+    if mobile:
+        # Canonical-aware phone evidence: primary/ID phone + phone aliases.
+        phone_rows = await fetch_all(
+            """
+            SELECT e.id, e.canonical_employee_id
+            FROM fpe_employees e
+            LEFT JOIN fpe_employee_aliases ap
+              ON ap.employee_id = e.id AND ap.alias_type = 'phone'
+            WHERE e.status = 'active'
+              AND (
+                e.employee_id_phone = $1
+                OR e.primary_phone = $1
+                OR ap.alias_value = $1
+              )
+            LIMIT 5
+            """,
+            mobile,
+        )
+        canon_ids: set[int] = set()
+        for row in phone_rows:
+            canon = await _resolve_canonical(dict(row))
+            canon_ids.add(int(canon["id"]))
+        if len(canon_ids) == 1:
+            employee_id = next(iter(canon_ids))
+
+        if employee_id is None:
+            emp = await fetch_one(
+                "SELECT e.id, e.canonical_employee_id "
+                "FROM fpe_cash_transactions t "
+                "JOIN fpe_employees e ON e.id = t.employee_id "
+                "WHERE t.payout_phone = $1 AND t.employee_id IS NOT NULL "
+                "ORDER BY t.txn_date DESC, t.id DESC LIMIT 1",
+                mobile,
+            )
+            if emp:
+                canon = await _resolve_canonical(dict(emp))
+                employee_id = int(canon["id"])
+
+    if employee_id is None:
+        name_norm = normalize_name(clean_name)
+        if name_norm:
+            if mobile:
+                # Strongest signal: exact normalized name + matching phone evidence.
+                name_phone_rows = await fetch_all(
+                    """
+                    SELECT e.id, e.canonical_employee_id
+                    FROM fpe_employees e
+                    LEFT JOIN fpe_employee_aliases an
+                      ON an.employee_id = e.id AND an.alias_type = 'name'
+                    LEFT JOIN fpe_employee_aliases ap
+                      ON ap.employee_id = e.id AND ap.alias_type = 'phone'
+                    WHERE e.status = 'active'
+                      AND (e.name_normalized = $1 OR an.alias_value = $1)
+                      AND (
+                        e.employee_id_phone = $2
+                        OR e.primary_phone = $2
+                        OR ap.alias_value = $2
+                      )
+                    LIMIT 5
+                    """,
+                    name_norm,
+                    mobile,
+                )
+                canon_ids: set[int] = set()
+                for row in name_phone_rows:
+                    canon = await _resolve_canonical(dict(row))
+                    canon_ids.add(int(canon["id"]))
+                if len(canon_ids) == 1:
+                    employee_id = next(iter(canon_ids))
+
+            if employee_id is None:
+                name_rows = await fetch_all(
+                    """
+                    SELECT e.id, e.canonical_employee_id
+                    FROM fpe_employees e
+                    LEFT JOIN fpe_employee_aliases an
+                      ON an.employee_id = e.id AND an.alias_type = 'name'
+                    WHERE e.status = 'active'
+                      AND (e.name_normalized = $1 OR an.alias_value = $1)
+                    LIMIT 5
+                    """,
+                    name_norm,
+                )
+                canon_ids: set[int] = set()
+                for row in name_rows:
+                    canon = await _resolve_canonical(dict(row))
+                    canon_ids.add(int(canon["id"]))
+                if len(canon_ids) == 1:
+                    employee_id = next(iter(canon_ids))
+
     # Pack income_head and money_received_by into source_message_text
     source_text = f"[{req.income_head.strip()}] Received by: {req.money_received_by.strip()}"
 
@@ -2517,12 +2693,13 @@ async def create_income_transaction(req: IncomeCreateRequest):
         new_id = await conn.fetchval(
             """
             INSERT INTO fpe_income_transactions
-                (txn_ref, employee_name_raw, amount, txn_date, accounting_period,
+                (txn_ref, employee_id, employee_name_raw, amount, txn_date, accounting_period,
                  reported_by_phone, source_message_text)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             """,
             txn_ref,
+            employee_id,
             clean_name,
             Decimal(str(req.amount)),
             txn_date,
@@ -2533,3 +2710,380 @@ async def create_income_transaction(req: IncomeCreateRequest):
 
     row = await fetch_one("SELECT * FROM fpe_income_transactions WHERE id = $1", new_id)
     return dict(row)
+
+# ── Sprint-2: Operator Submission Pipeline ─────────────────────────────────────
+# Reuses fpe_unmatched_messages with review_status='operator_pending'
+# No new table, no DB migration, no protected function modification
+# Flow: Operator → Submit → Pending → Admin Approve/Reject → Transaction → Ledger
+
+from pydantic import BaseModel as _BM, Field as _Field
+
+
+class OperatorSubmitRequest(_BM):
+    """Operator submits a pending transaction for admin approval."""
+    employee_id: int
+    employee_name_raw: Optional[str] = None
+    amount: Decimal
+    payout_method: str = "cash"
+    payout_phone: Optional[str] = None
+    txn_date: str  # YYYY-MM-DD
+    txn_category: str = "salary"
+    notes: Optional[str] = None
+
+
+@router.post("/operator/submit", dependencies=[Depends(_require_api_key)])
+async def operator_submit(req: OperatorSubmitRequest):
+    """
+    Operator submits a pending transaction entry.
+    Creates a row in fpe_unmatched_messages with review_status='operator_pending'
+    AND a pending fpe_cash_transactions row (transaction_status='pending').
+    Ledger is NOT touched until admin approval.
+    """
+    # Validate employee exists
+    emp = await fetch_one(
+        "SELECT id, full_name, status FROM fpe_employees WHERE id = $1",
+        req.employee_id,
+    )
+    if not emp:
+        raise HTTPException(400, "Employee not found")
+    if emp["status"] != "active":
+        raise HTTPException(400, "Employee is not active")
+
+    # Validate amount
+    if req.amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+
+    # Validate date
+    try:
+        txn_date = date.fromisoformat(req.txn_date)
+    except ValueError:
+        raise HTTPException(400, "txn_date must be YYYY-MM-DD")
+
+    # Validate method
+    method = req.payout_method.lower().strip()
+    if method not in {"bkash", "nagad", "cash", "bank", "unknown"}:
+        raise HTTPException(400, f"Invalid payout_method: {method}")
+
+    # Validate category
+    cat = req.txn_category.lower().strip()
+    if cat not in {"salary", "advance", "bonus", "deduction", "other"}:
+        raise HTTPException(400, f"Invalid txn_category: {cat}")
+
+    # Insert a fpe_wa_messages row first (FK constraint requires valid message ID)
+    import uuid as _uuid
+    synthetic_wa_id = f"operator_{_uuid.uuid4().hex[:16]}"
+    raw_content = req.notes or f"Operator submission: {emp['full_name']} {req.amount} {method}"
+    fpe_msg_id = await fetch_val(
+        """
+        INSERT INTO fpe_wa_messages
+            (wa_message_id, source, source_number, chat_jid, sender_phone,
+             is_from_me, raw_content, media_type, timestamp_wa, ingested_at)
+        VALUES ($1, 'operator_ui', $2, 'operator', $3, false, $4, 'text', NOW(), NOW())
+        RETURNING id
+        """,
+        synthetic_wa_id,
+        normalize_bd_phone(req.payout_phone) if req.payout_phone else "operator",
+        normalize_bd_phone(req.payout_phone) if req.payout_phone else "operator",
+        raw_content,
+    )
+
+    # Insert into fpe_unmatched_messages as operator_pending
+    new_id = await fetch_val(
+        """
+        INSERT INTO fpe_unmatched_messages
+            (fpe_wa_message_id, reason, raw_content,
+             detected_amount, detected_payout_phone, detected_employee_name,
+             detected_payout_method, detected_txn_date, parser_confidence,
+             review_status)
+        VALUES ($1, 'operator_submission', $2, $3, $4, $5, $6, $7, 1.0, 'operator_pending')
+        RETURNING id
+        """,
+        fpe_msg_id,
+        raw_content,
+        req.amount,
+        normalize_bd_phone(req.payout_phone) if req.payout_phone else None,
+        req.employee_name_raw or emp["full_name"],
+        method,
+        txn_date,
+    )
+
+    # C1B: create a pending canonical cash transaction (ledger deferred)
+    try:
+        from .models import PayoutMethod as _PM
+        method_enum = _PM(method) if method in _PM._value2member_map_ else _PM.unknown
+    except (ValueError, KeyError):
+        method_enum = _PM.unknown
+    try:
+        category_enum = TxnCategory(cat)
+    except (ValueError, KeyError):
+        category_enum = TxnCategory.salary
+
+    event = payment_event_from_operator(
+        employee_id=req.employee_id,
+        amount=req.amount,
+        payout_method=method_enum,
+        payout_phone=req.payout_phone,
+        txn_date=txn_date,
+        pending_id=new_id,
+        submitted_by="operator_ui",
+        txn_category=category_enum,
+        source_channel="web",
+        metadata={"operator_notes": req.notes, "employee_name_raw": req.employee_name_raw},
+    )
+    txn_req = payment_event_to_request(event)
+    txn_req.fpe_wa_message_id = fpe_msg_id
+    txn_req.source_message_text = raw_content
+    pending_txn = await create_transaction(txn_req)
+
+    # Link the pending row to the pending transaction
+    await execute(
+        """
+        UPDATE fpe_unmatched_messages
+        SET promoted_txn_id = $2,
+            resolved_employee_id = $3
+        WHERE id = $1
+        """,
+        new_id, pending_txn.id, req.employee_id,
+    )
+
+    log.info(
+        "[fpe.operator] submitted id=%d emp=%d amount=%s method=%s cat=%s pending_txn=%d",
+        new_id, req.employee_id, req.amount, method, cat, pending_txn.id,
+    )
+
+    return {
+        "status": "submitted",
+        "pending_id": new_id,
+        "pending_txn_id": pending_txn.id,
+        "employee_id": req.employee_id,
+        "employee_name": emp["full_name"],
+        "amount": float(req.amount),
+        "message": "Submission pending admin approval. Ledger not affected until approved.",
+    }
+
+
+@router.get("/operator/pending", dependencies=[Depends(_require_api_key)])
+async def operator_pending_list(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """
+    List all pending operator submissions awaiting admin approval.
+    Returns rows from fpe_unmatched_messages where review_status='operator_pending'.
+    """
+    rows = await fetch_all(
+        """
+        SELECT u.id, u.detected_amount, u.detected_payout_phone,
+               u.detected_employee_name, u.detected_payout_method,
+               u.detected_txn_date, u.raw_content, u.created_at,
+               u.review_status, u.resolved_employee_id,
+               e.full_name AS resolved_employee_name,
+               e.employee_id_phone AS resolved_employee_phone
+        FROM fpe_unmatched_messages u
+        LEFT JOIN fpe_employees e ON e.id = u.resolved_employee_id
+        WHERE u.review_status = 'operator_pending'
+        ORDER BY u.created_at DESC
+        LIMIT $1 OFFSET $2
+        """,
+        limit, offset,
+    )
+    total = await fetch_val(
+        "SELECT COUNT(*) FROM fpe_unmatched_messages WHERE review_status = 'operator_pending'"
+    )
+    return {
+        "total": total,
+        "items": [dict(r) for r in rows],
+    }
+
+
+@router.post("/operator/{pending_id}/approve", dependencies=[Depends(_require_api_key)])
+async def operator_approve(
+    pending_id: int,
+    employee_id: int = Query(..., gt=0),
+    reviewer: str = Query(..., min_length=1, max_length=128),
+    payout_method: Optional[str] = Query(None),
+    txn_category: str = Query("salary"),
+    amount_override: Optional[Decimal] = Query(None),
+    note: Optional[str] = Query(None, max_length=512),
+):
+    """
+    Admin approves an operator submission.
+    Creates a real transaction via create_transaction() and updates the pending row.
+    Ledger is updated by create_transaction().
+    """
+    row = await fetch_one(
+        """
+        SELECT id, review_status, detected_amount, detected_payout_phone,
+               detected_employee_name, detected_payout_method, detected_txn_date,
+               raw_content
+        FROM fpe_unmatched_messages WHERE id = $1
+        """,
+        pending_id,
+    )
+    if not row:
+        raise HTTPException(404, "Pending submission not found")
+    if row["review_status"] != "operator_pending":
+        raise HTTPException(409, f"Submission is not pending (status={row['review_status']})")
+
+    # Validate employee
+    emp = await fetch_one("SELECT id, status FROM fpe_employees WHERE id = $1", employee_id)
+    if not emp:
+        raise HTTPException(400, "Employee not found")
+    if emp["status"] != "active":
+        raise HTTPException(400, "Employee is not active")
+
+    amount = amount_override if amount_override is not None else row["detected_amount"]
+    if amount is None or Decimal(amount) <= 0:
+        raise HTTPException(400, "No amount available (provide amount_override)")
+
+    method_str = payout_method or row["detected_payout_method"] or "cash"
+    try:
+        from .models import PayoutMethod as _PM
+        method = _PM(method_str) if method_str in _PM._value2member_map_ else _PM.unknown
+    except (ValueError, KeyError):
+        method = _PM.unknown
+
+    txn_date = row["detected_txn_date"] or date.today()
+
+    try:
+        category = TxnCategory(txn_category)
+    except (ValueError, KeyError):
+        raise HTTPException(400, f"Invalid txn_category: {txn_category}")
+
+    # C1B: promote the existing pending transaction to final instead of creating a duplicate.
+    pending_txn_id = row.get("promoted_txn_id")
+    if not pending_txn_id:
+        raise HTTPException(409, "Pending submission has no linked pending transaction")
+
+    pending_txn = await fetch_one(
+        "SELECT id, txn_ref, transaction_status, employee_id, amount, payout_method, "
+        "txn_date, txn_category, accounting_period, source_message_id "
+        "FROM fpe_cash_transactions WHERE id = $1",
+        pending_txn_id,
+    )
+    if not pending_txn:
+        raise HTTPException(409, "Linked pending transaction not found")
+    if pending_txn["transaction_status"] != "pending":
+        raise HTTPException(409, f"Linked transaction is not pending (status={pending_txn['transaction_status']})")
+
+    # Validate amount override matches pending transaction amount (no silent change)
+    if amount_override is not None and Decimal(amount_override) != Decimal(pending_txn["amount"]):
+        raise HTTPException(400, "Amount override not allowed for operator approvals; reject and resubmit")
+
+    # Promote to final: update status and stamp approval
+    await execute(
+        """
+        UPDATE fpe_cash_transactions
+        SET transaction_status = 'final',
+            approval_status = 'approved',
+            approved_by = $2,
+            approved_at = NOW(),
+            review_status = 'reviewed',
+            updated_at = NOW()
+        WHERE id = $1
+        """,
+        pending_txn_id, reviewer,
+    )
+
+    # Update ledger now that the transaction is final
+    from .accounting import _upsert_ledger
+    await _upsert_ledger(
+        employee_id,
+        pending_txn["accounting_period"],
+        Decimal(pending_txn["amount"]),
+        TxnCategory(pending_txn["txn_category"]),
+    )
+
+    # Audit log for approval
+    await execute(
+        """
+        INSERT INTO fpe_accounting_audit_logs
+            (entity_type, entity_id, action, after_state, performed_by, reason)
+        VALUES ('transaction', $1, $2, $3, $4, $5)
+        """,
+        pending_txn_id,
+        "approve",
+        {
+            "txn_ref": pending_txn["txn_ref"],
+            "employee_id": employee_id,
+            "amount": str(pending_txn["amount"]),
+            "transaction_status": "final",
+            "approval_status": "approved",
+            "approved_by": reviewer,
+            "source": "operator",
+            "source_message_id": pending_txn["source_message_id"],
+        },
+        reviewer,
+        note,
+    )
+
+    # Update pending row
+    await execute(
+        """
+        UPDATE fpe_unmatched_messages
+        SET review_status = 'promoted',
+            resolved_employee_id = $2,
+            promoted_txn_id = $3,
+            reviewer = $4,
+            review_note = COALESCE($5, review_note),
+            reviewed = TRUE,
+            reviewed_at = NOW()
+        WHERE id = $1
+        """,
+        pending_id, employee_id, pending_txn_id, reviewer, note,
+    )
+
+    log.info(
+        "[fpe.operator] approved pending=%d -> txn_id=%d ref=%s reviewer=%s",
+        pending_id, pending_txn_id, pending_txn["txn_ref"][:12], reviewer,
+    )
+
+    return {
+        "status": "approved",
+        "pending_id": pending_id,
+        "txn_id": pending_txn_id,
+        "txn_ref": pending_txn["txn_ref"],
+        "employee_id": employee_id,
+        "amount": float(pending_txn["amount"]),
+    }
+
+
+@router.post("/operator/{pending_id}/reject", dependencies=[Depends(_require_api_key)])
+async def operator_reject(
+    pending_id: int,
+    reviewer: str = Query(..., min_length=1, max_length=128),
+    reason: str = Query(..., min_length=1, max_length=512),
+):
+    """
+    Admin rejects an operator submission.
+    No transaction is created, no ledger is touched.
+    """
+    row = await fetch_one(
+        "SELECT id, review_status FROM fpe_unmatched_messages WHERE id = $1",
+        pending_id,
+    )
+    if not row:
+        raise HTTPException(404, "Pending submission not found")
+    if row["review_status"] != "operator_pending":
+        raise HTTPException(409, f"Submission is not pending (status={row['review_status']})")
+
+    await execute(
+        """
+        UPDATE fpe_unmatched_messages
+        SET review_status = 'rejected',
+            reviewer = $2,
+            review_note = $3,
+            reviewed = TRUE,
+            reviewed_at = NOW()
+        WHERE id = $1
+        """,
+        pending_id, reviewer, reason,
+    )
+
+    log.info("[fpe.operator] rejected pending=%d reviewer=%s reason=%s", pending_id, reviewer, reason)
+
+    return {
+        "status": "rejected",
+        "pending_id": pending_id,
+        "reviewer": reviewer,
+    }
