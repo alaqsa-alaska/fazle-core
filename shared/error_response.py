@@ -44,24 +44,43 @@ def make_error_response(
     }
 
 
-# Common pre-built error responses for frequent cases
-ERR_EMPLOYEE_NOT_FOUND = make_error_response(
-    "employee_not_found",
-    "কর্মী খুঁজে পাওয়া যায়নি। ফোন নম্বর যাচাই করুন।",
-    retry=False,
-    suggestion="সিস্টেমে নিবন্ধিত ফোন নম্বর দিয়ে আবার চেষ্টা করুন।",
-)
+# Common pre-built error response factories for frequent cases.
+# Factories ensure each call includes a fresh timestamp and isolated dict.
+def err_employee_not_found() -> dict:
+    return make_error_response(
+        "employee_not_found",
+        "কর্মী খুঁজে পাওয়া যায়নি। ফোন নম্বর যাচাই করুন।",
+        retry=False,
+        suggestion="সিস্টেমে নিবন্ধিত ফোন নম্বর দিয়ে আবার চেষ্টা করুন।",
+    )
 
-ERR_PROCESSING_TIMEOUT = make_error_response(
-    "processing_timeout",
-    "প্রক্রিয়াকরণ সময় শেষ। আবার চেষ্টা করুন।",
-    retry=True,
-    suggestion="কয়েক সেকেন্ড পরে আবার বার্তা পাঠান।",
-)
 
-ERR_PERMISSION_DENIED = make_error_response(
-    "permission_denied",
-    "⛔ অনুমতি নেই। এই কাজের জন্য পর্যাপ্ত রোল নেই।",
-    retry=False,
-    suggestion="প্রয়োজনীয় রোলের জন্য সুপারঅ্যাডমিনের সাথে যোগাযোগ করুন।",
-)
+def err_processing_timeout() -> dict:
+    return make_error_response(
+        "processing_timeout",
+        "প্রক্রিয়াকরণ সময় শেষ। আবার চেষ্টা করুন।",
+        retry=True,
+        suggestion="কয়েক সেকেন্ড পরে আবার বার্তা পাঠান।",
+    )
+
+
+def err_permission_denied() -> dict:
+    return make_error_response(
+        "permission_denied",
+        "⛔ অনুমতি নেই। এই কাজের জন্য পর্যাপ্ত রোল নেই।",
+        retry=False,
+        suggestion="প্রয়োজনীয় রোলের জন্য সুপারঅ্যাডমিনের সাথে যোগাযোগ করুন।",
+    )
+
+
+# Backward-compatible uppercase aliases.
+def ERR_EMPLOYEE_NOT_FOUND() -> dict:
+    return err_employee_not_found()
+
+
+def ERR_PROCESSING_TIMEOUT() -> dict:
+    return err_processing_timeout()
+
+
+def ERR_PERMISSION_DENIED() -> dict:
+    return err_permission_denied()

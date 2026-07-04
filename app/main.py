@@ -18,7 +18,7 @@ import os
 import re
 import shutil
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Optional
 
 import httpx
@@ -70,6 +70,36 @@ def _use_outbound_queue() -> bool:
 
 def _social_auto_reply_single_engine() -> bool:
     return os.getenv("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "true").lower() in ("1", "true", "yes")
+
+
+def _start_stale_draft_expiry_worker() -> asyncio.Task:
+    """Start periodic stale-draft expiry worker and return its task handle."""
+
+    async def _stale_draft_expiry_loop():
+        import asyncio as _aio
+
+        while True:
+            try:
+                from modules.escort_roster.db import expire_stale_drafts
+
+                result = await expire_stale_drafts(hours=48)
+                if result.get("expired", 0):
+                    log.info(f"[escort_roster] stale draft expiry: {result['expired']} expired")
+            except Exception as _e:
+                log.warning(f"[escort_roster] stale draft expiry error: {_e}")
+            await _aio.sleep(6 * 3600)  # every 6 hours
+
+    return asyncio.create_task(_stale_draft_expiry_loop())
+
+
+async def _stop_background_task(task: Optional[asyncio.Task], name: str) -> None:
+    """Cancel and await a background task if it is still running."""
+    if not task:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+    log.info(f"[{name}] background task stopped")
 
 
 async def _force_draft_by_saved_contact_name(sender_clean: str) -> bool:
@@ -280,22 +310,10 @@ async def lifespan(app: FastAPI):
             log.info(f"[escort_cleanup] startup purged {_junk_result['deleted']} junk draft programs")
     except Exception as e:
         log.warning(f"[escort_cleanup] startup cleanup failed (non-fatal): {e}")
-    # Escort stale draft expiry background worker (Task 6)
-    async def _stale_draft_expiry_loop():
-        import asyncio as _aio
-        while True:
-            try:
-                from modules.escort_roster.db import expire_stale_drafts
-                result = await expire_stale_drafts(hours=48)
-                if result.get("expired", 0):
-                    log.info(f"[escort_roster] stale draft expiry: {result['expired']} expired")
-            except Exception as _e:
-                log.warning(f"[escort_roster] stale draft expiry error: {_e}")
-            await _aio.sleep(6 * 3600)  # every 6 hours
-
-    asyncio.create_task(_stale_draft_expiry_loop())
+    stale_draft_expiry_task = _start_stale_draft_expiry_worker()
     log.info("Fazle Core started")
     yield
+    await _stop_background_task(stale_draft_expiry_task, "escort_roster")
     fazle_scheduler.stop_scheduler()
     await outbound_queue.stop_background_worker()
     # Phase 13E — stop self-healing layer

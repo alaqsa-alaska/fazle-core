@@ -610,6 +610,7 @@ async def sync_conversation_history(
         "messages_parsed": len(messages),
         "orders_found": 0,
         "groups_created": 0,
+        "groups_reused": 0,
         "lighters_created": 0,
         "matched": 0,
         "unmatched": 0,
@@ -658,6 +659,7 @@ async def sync_conversation_history(
             lighter_records[0].destination,
             len(lighter_records),
         )
+        group_inserted = bool(group_id)
 
         if not group_id:
             # Check if already exists (duplicate message_ts + first 200 chars)
@@ -671,7 +673,10 @@ async def sync_conversation_history(
         if not group_id:
             continue
 
-        stats["groups_created"] += 1
+        if group_inserted:
+            stats["groups_created"] += 1
+        else:
+            stats["groups_reused"] += 1
 
         # Insert child lighters
         for rec in lighter_records:

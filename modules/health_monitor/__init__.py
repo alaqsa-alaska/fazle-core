@@ -12,9 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from app.database import fetch_val, execute
-
-_WBOM_FREEZE_BASELINE_KEY = "wbom_write_baseline_count"
+from app.database import fetch_val
 
 
 async def check_system_health() -> dict[str, Any]:
@@ -54,6 +52,8 @@ async def check_system_health() -> dict[str, Any]:
             health["status"] = "violation"
     except Exception as e:
         health["checks"]["wbom_freeze"] = f"error: {e}"
+        if health["status"] == "ok":
+            health["status"] = "degraded"
 
     # Check 3: RAG knowledge base indexing freshness
     try:
@@ -82,8 +82,8 @@ async def check_wbom_write_delta() -> int:
                WHERE created_at >= NOW() - INTERVAL '24 hours'"""
         )
         return int(count or 0)
-    except Exception:
-        return 0
+    except Exception as exc:
+        raise RuntimeError(f"wbom_write_check_failed: {exc}") from exc
 
 
 async def get_indexed_kb_count() -> int:
