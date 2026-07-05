@@ -2522,6 +2522,114 @@ async def b19_add_user(payload: dict, key: str = Depends(require_api_key)):
         raise HTTPException(400, str(e))
 
 
+@app.patch("/admin/users/{phone}", dependencies=[Depends(require_command("user_add"))])
+async def b19_update_user(phone: str, payload: dict, key: str = Depends(require_api_key)):
+    """Update admin identity and access fields (superadmin only)."""
+    from modules import rbac
+    from modules.phone_normalizer import normalize_phone
+
+    target = await rbac.get_admin_by_phone(phone)
+    if not target:
+        raise HTTPException(404, "unknown admin")
+
+    admin_id = int(target["id"])
+    current_phone = str(target.get("phone") or "")
+
+    new_phone_raw = (payload or {}).get("phone")
+    new_name = (payload or {}).get("name")
+    new_username = (payload or {}).get("username")
+    new_password = (payload or {}).get("password")
+    new_role = (payload or {}).get("role")
+    new_status = (payload or {}).get("status")
+
+    updates = []
+    args = []
+
+    if new_phone_raw is not None:
+        normalized_phone = normalize_phone(str(new_phone_raw))
+        if not normalized_phone:
+            raise HTTPException(400, "invalid phone")
+        owner = await fetch_val("SELECT id FROM fazle_admins WHERE phone=$1", normalized_phone)
+        if owner and int(owner) != admin_id:
+            raise HTTPException(400, "phone already exists")
+        updates.append(f"phone = ${len(args) + 1}")
+        args.append(normalized_phone)
+
+    if new_name is not None:
+        name_text = str(new_name).strip()
+        if not name_text:
+            raise HTTPException(400, "name cannot be empty")
+        updates.append(f"name = ${len(args) + 1}")
+        args.append(name_text)
+
+    normalized_username = None
+    if new_username is not None:
+        normalized_username = (str(new_username).strip().lower() if str(new_username).strip() else None)
+        if normalized_username:
+            owner = await fetch_val("SELECT id FROM fazle_admins WHERE LOWER(username)=$1", normalized_username)
+            if owner and int(owner) != admin_id:
+                raise HTTPException(400, f"username already exists: {normalized_username}")
+        updates.append(f"username = ${len(args) + 1}")
+        args.append(normalized_username)
+
+    if new_password is not None:
+        if normalized_username is None:
+            existing_username = await fetch_val("SELECT username FROM fazle_admins WHERE id=$1", admin_id)
+            if not existing_username:
+                raise HTTPException(400, "username required before setting password")
+        password_text = str(new_password)
+        if len(password_text) < 6:
+            raise HTTPException(400, "password must be at least 6 characters")
+        updates.append(f"password_hash = ${len(args) + 1}")
+        args.append(rbac.hash_password(password_text))
+
+    if new_status is not None:
+        status_text = str(new_status).strip().lower()
+        if status_text not in {"active", "disabled"}:
+            raise HTTPException(400, "status must be active or disabled")
+        updates.append(f"status = ${len(args) + 1}")
+        args.append(status_text)
+
+    if updates:
+        q = f"UPDATE fazle_admins SET {', '.join(updates)} WHERE id = ${len(args) + 1}"
+        args.append(admin_id)
+        await execute(q, *args)
+
+    role_changed = False
+    if new_role is not None:
+        role_text = str(new_role).strip().lower()
+        role_exists = await fetch_val("SELECT 1 FROM fazle_roles WHERE name=$1", role_text)
+        if not role_exists:
+            raise HTTPException(400, f"unknown role: {role_text}")
+        current_roles = await rbac.get_roles(admin_id)
+        for r in current_roles:
+            if r != role_text:
+                await execute("DELETE FROM fazle_admin_roles WHERE admin_id=$1 AND role_name=$2", admin_id, r)
+        await execute(
+            "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1,$2,'http') "
+            "ON CONFLICT (admin_id, role_name) DO NOTHING",
+            admin_id,
+            role_text,
+        )
+        role_changed = True
+
+    actor = await _rbac_actor_from_key(key)
+    await rbac.record_audit(
+        channel="http",
+        command="user_add",
+        actor_phone=actor.get("phone"),
+        actor_admin=actor,
+        args=json.dumps({"phone": current_phone, "payload": {k: v for k, v in (payload or {}).items() if k != "password"}}),
+        allowed=True,
+        required_role="superadmin",
+        result_summary=json.dumps({"status": "updated", "admin_id": admin_id, "role_changed": role_changed}),
+    )
+
+    rows = await rbac.list_admins()
+    updated = next((r for r in rows if int(r.get("id", 0)) == admin_id), None)
+    return {"status": "updated", "user": updated}
+
+
 @app.post("/admin/users/{phone}/role", dependencies=[Depends(require_command("user_role"))])
 async def b19_set_role(phone: str, payload: dict, key: str = Depends(require_api_key)):
     from modules import rbac
@@ -2579,6 +2687,27 @@ async def b19_disable_user(phone: str, key: str = Depends(require_api_key)):
             actor_phone=actor.get("phone"),
             actor_admin=actor,
             args=json.dumps({"phone": phone, "operation": "disable"}),
+            allowed=True,
+            required_role="superadmin",
+            result_summary=json.dumps(result),
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/admin/users/{phone}/enable", dependencies=[Depends(require_command("user_remove"))])
+async def b19_enable_user(phone: str, key: str = Depends(require_api_key)):
+    from modules import rbac
+    try:
+        result = await rbac.enable_admin(phone)
+        actor = await _rbac_actor_from_key(key)
+        await rbac.record_audit(
+            channel="http",
+            command="user_remove",
+            actor_phone=actor.get("phone"),
+            actor_admin=actor,
+            args=json.dumps({"phone": phone, "operation": "enable"}),
             allowed=True,
             required_role="superadmin",
             result_summary=json.dumps(result),

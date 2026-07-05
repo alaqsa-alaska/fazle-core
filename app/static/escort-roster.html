@@ -74,6 +74,10 @@ main{padding:20px 24px;max-width:1560px;margin:0 auto;width:100%;flex:1}
 .btn-ok{background:#dcfce7;color:#166534}
 .btn-icon{padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px}
 .btn-icon:hover{background:var(--surface)}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--border);border-radius:7px;background:#fff;cursor:pointer;font-size:15px}
+.icon-btn:hover{background:var(--surface)}
+.icon-btn.warn{color:#92400e}
+.icon-btn.danger{color:#b91c1c}
 .ph-ico{text-decoration:none;font-size:16px;margin:0 2px;cursor:pointer;opacity:.8;transition:opacity .15s}
 .ph-ico:hover{opacity:1}
 td.phones{white-space:nowrap;min-width:52px;text-align:center}
@@ -170,6 +174,13 @@ td.actions{white-space:nowrap;text-align:center}
   #editDeleteBtn{flex:0 0 100%;order:-1;margin-right:0}
 }
 
+#adminUserModal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:610;
+  align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px 0}
+#adminUserModal.show{display:flex}
+#adminUserBox{background:#fff;border-radius:12px;padding:24px;width:min(640px,95vw);
+  box-shadow:0 20px 60px rgba(0,0,0,.25);margin:auto;overflow-x:hidden}
+#adminUsersTable td.actions{white-space:nowrap}
+
 /* ── Kanban ─────────────────────────────────────────────────────────────── */
 .kanban{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
 .kb-col{background:var(--surface);border-radius:10px;border:1px solid var(--border);overflow:hidden}
@@ -264,6 +275,7 @@ td.actions{white-space:nowrap;text-align:center}
     <button onclick="switchTab('config')">⚙️ Config</button>
     <button onclick="switchTab('attendance')">🕒 Attendance</button>
     <button onclick="switchTab('netsalary')">💰 Net Salary</button>
+    <button id="adminTabBtn" onclick="switchTab('admin')" style="display:none">👤 Admin</button>
   </nav>
 
   <main>
@@ -482,6 +494,31 @@ td.actions{white-space:nowrap;text-align:center}
         </div>
       </div>
     </div>
+
+    <div id="tab-admin" style="display:none">
+      <div class="card">
+        <h2>👤 Admin Users
+          <span class="spacer" style="flex:1"></span>
+          <button class="btn btn-sm btn-secondary" onclick="loadAdminUsersRoster()">↻ Refresh</button>
+          <button class="btn btn-sm btn-primary" id="adminCreateBtn" style="display:none;margin-left:8px" onclick="openAdminUserModal()">➕ Add User</button>
+        </h2>
+        <div class="filter-row">
+          <input type="search" id="adminUserSearch" placeholder="Search by name / phone / username" oninput="loadAdminUsersRoster()">
+        </div>
+        <div class="tbl-wrap">
+          <table id="adminUsersTable">
+            <thead>
+              <tr>
+                <th>Name</th><th>Phone</th><th>Username</th><th>Status</th><th>Role</th><th>Last Seen</th><th class="actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="adminUsersBody">
+              <tr class="loading-row"><td colspan="7" style="color:var(--muted)">Admin access required</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -549,6 +586,42 @@ td.actions{white-space:nowrap;text-align:center}
   </div>
 </div>
 
+<div id="adminUserModal">
+  <div id="adminUserBox">
+    <h3 id="adminUserModalTitle">👤 Add Admin User</h3>
+    <input type="hidden" id="adminEditPhoneOriginal">
+    <div class="form-row-3">
+      <div class="form-field"><label>Name</label><input type="text" id="adminUserName" placeholder="Full name"></div>
+      <div class="form-field"><label>Mobile</label><input type="tel" id="adminUserPhone" placeholder="8801XXXXXXXXX"></div>
+      <div class="form-field"><label>Role</label>
+        <select id="adminUserRole">
+          <option value="viewer">viewer</option>
+          <option value="operator">operator</option>
+          <option value="accountant">accountant</option>
+          <option value="admin">admin</option>
+          <option value="superadmin">superadmin</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field"><label>Username</label><input type="text" id="adminUserUsername" placeholder="login username"></div>
+      <div class="form-field"><label>Status</label>
+        <select id="adminUserStatus">
+          <option value="active">active</option>
+          <option value="disabled">disabled</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field" style="grid-column:span 2"><label>Password</label><input type="password" id="adminUserPassword" placeholder="Set or reset password"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeAdminUserModal()">Cancel</button>
+      <button class="btn btn-primary" id="adminUserSaveBtn" onclick="saveAdminUser()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Toast Zone ────────────────────────────────────────────────────── -->
 <div id="toastZone"></div>
 
@@ -563,6 +636,7 @@ let _sortBy = 'start_date';
 let _sortDir = 'desc';
 let _lastDedupRemoved = 0;
 let _sessionUser = null;
+let _adminUsersCache = [];
 
 // ─────────────────────────────────────────────────────────────────────────
 // Auth
@@ -580,6 +654,7 @@ function doLogin() {
     if (!sessionRes.ok) throw new Error('Session validation failed');
     const session = await sessionRes.json();
     _sessionUser = session && session.user ? session.user : null;
+    syncAdminTabVisibility();
     localStorage.setItem('fpe_api_key', API_KEY);
     document.getElementById('loginOverlay').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
@@ -682,17 +757,59 @@ function debounce(fn, ms) {
 // Tab switching
 // ─────────────────────────────────────────────────────────────────────────
 function switchTab(name) {
-  ['roster','kanban','slips','calc','config','attendance','netsalary'].forEach(t => {
+  if (name === 'admin' && !canAccessAdminRosterTab()) {
+    toast('Admin access required', 'err');
+    return;
+  }
+  ['roster','kanban','slips','calc','config','attendance','netsalary','admin'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===name ? 'block' : 'none';
   });
-  document.querySelectorAll('nav button').forEach((b,i) => {
-    b.classList.toggle('active', ['roster','kanban','slips','calc','config','attendance','netsalary'][i] === name);
-  });
+  document.querySelectorAll('nav button').forEach((b) => b.classList.remove('active'));
+  const map = {
+    roster: 0,
+    kanban: 1,
+    slips: 2,
+    calc: 3,
+    config: 4,
+    attendance: 5,
+    netsalary: 6,
+    admin: 7,
+  };
+  const idx = map[name];
+  if (idx != null) {
+    const btn = document.querySelectorAll('nav button')[idx];
+    if (btn) btn.classList.add('active');
+  }
   if (name==='kanban') loadKanban();
   if (name==='slips') loadSlipQueue();
   if (name==='config') { loadConfig(); loadEscortClients(); }
   if (name==='attendance') loadAttendance();
   if (name==='netsalary') loadNetSalary();
+  if (name==='admin') loadAdminUsersRoster();
+}
+
+function normalizedSessionRoles() {
+  const roles = ((_sessionUser && _sessionUser.normalized_roles) || (_sessionUser && _sessionUser.roles) || []);
+  return roles.map(r => String(r || '').toLowerCase());
+}
+
+function hasSessionRole(role) {
+  return normalizedSessionRoles().includes(String(role || '').toLowerCase());
+}
+
+function canAccessAdminRosterTab() {
+  return hasSessionRole('admin') || hasSessionRole('superadmin') || hasSessionRole('owner');
+}
+
+function isSuperAdminRoster() {
+  return hasSessionRole('superadmin') || hasSessionRole('owner');
+}
+
+function syncAdminTabVisibility() {
+  const btn = document.getElementById('adminTabBtn');
+  if (btn) btn.style.display = canAccessAdminRosterTab() ? '' : 'none';
+  const createBtn = document.getElementById('adminCreateBtn');
+  if (createBtn) createBtn.style.display = isSuperAdminRoster() ? '' : 'none';
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1131,8 +1248,226 @@ async function recalc(pid) {
 }
 
 function canDirectDelete() {
-  const roles = ((_sessionUser && _sessionUser.normalized_roles) || (_sessionUser && _sessionUser.roles) || []).map(r => String(r || '').toLowerCase());
+  const roles = normalizedSessionRoles();
   return roles.includes('admin') || roles.includes('superadmin') || roles.includes('owner');
+}
+
+async function adminApi(path, opts={}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  const hdr = {'X-Internal-Key': API_KEY, ...(opts.headers || {})};
+  const init = {method, headers: hdr};
+  if (opts.body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch('/admin' + path, init);
+  if (!res.ok) {
+    throw new Error(await readApiError(res));
+  }
+  return res.json();
+}
+
+function adminRoleDisplay(user) {
+  const roles = String(user.roles || '').split(',').map(s => s.trim()).filter(Boolean);
+  return roles[0] || 'viewer';
+}
+
+function renderAdminUsersRows(rows) {
+  const canSuper = isSuperAdminRoster();
+  const tbody = document.getElementById('adminUsersBody');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr class="loading-row"><td colspan="7" style="color:var(--muted)">No users found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((u) => {
+    const phone = String(u.phone || '');
+    const role = adminRoleDisplay(u);
+    const status = String(u.status || '—');
+    const statusClass = status === 'active' ? 's-active' : 's-cancelled';
+    return `<tr>
+      <td>${esc(u.name || '—')}</td>
+      <td>${esc(phone || '—')}</td>
+      <td>${esc(u.username || '—')}</td>
+      <td><span class="status-badge ${statusClass}">${esc(status)}</span></td>
+      <td>${esc(role)}</td>
+      <td>${esc(u.last_seen_at || 'never')}</td>
+      <td class="actions">
+        <button class="icon-btn" title="View" onclick="openAdminUserModal('${encodeURIComponent(phone)}', true)">👁️</button>
+        ${canSuper ? `<button class="icon-btn" title="Edit" onclick="openAdminUserModal('${encodeURIComponent(phone)}', false)">✏️</button>` : ''}
+        ${canSuper ? `<button class="icon-btn warn" title="Reset Login" onclick="adminResetLoginRoster('${encodeURIComponent(phone)}')">🔑</button>` : ''}
+        ${canSuper && status === 'disabled' ? `<button class="icon-btn" title="Activate" onclick="adminActivateRoster('${encodeURIComponent(phone)}')">✅</button>` : ''}
+        ${canSuper && status === 'active' ? `<button class="icon-btn danger" title="Deactivate" onclick="adminDeactivateRoster('${encodeURIComponent(phone)}')">🗑️</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadAdminUsersRoster() {
+  if (!canAccessAdminRosterTab()) return;
+  const tbody = document.getElementById('adminUsersBody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr class="loading-row"><td colspan="7"><span class="spinner"></span> Loading…</td></tr>';
+  try {
+    const res = await adminApi('/users');
+    const rows = Array.isArray(res.users) ? res.users : [];
+    const q = (document.getElementById('adminUserSearch')?.value || '').trim().toLowerCase();
+    _adminUsersCache = rows;
+    const filtered = rows.filter((u) => {
+      if (!q) return true;
+      const text = `${u.name || ''} ${u.phone || ''} ${u.username || ''}`.toLowerCase();
+      return text.includes(q);
+    });
+    renderAdminUsersRows(filtered);
+  } catch (e) {
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="7" style="color:var(--err)">${esc(e.message || 'Failed')}</td></tr>`;
+  }
+}
+
+function openAdminUserModal(encodedPhone, viewOnly=false) {
+  if (!isSuperAdminRoster() && !viewOnly) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const modal = document.getElementById('adminUserModal');
+  const title = document.getElementById('adminUserModalTitle');
+  const saveBtn = document.getElementById('adminUserSaveBtn');
+  const originalPhone = document.getElementById('adminEditPhoneOriginal');
+  originalPhone.value = '';
+
+  const setReadonly = (flag) => {
+    ['adminUserName','adminUserPhone','adminUserRole','adminUserUsername','adminUserPassword','adminUserStatus'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (el.tagName === 'SELECT') el.disabled = flag;
+      else el.readOnly = flag;
+    });
+    saveBtn.style.display = flag ? 'none' : '';
+  };
+
+  if (!encodedPhone) {
+    title.textContent = '👤 Add Admin User';
+    document.getElementById('adminUserName').value = '';
+    document.getElementById('adminUserPhone').value = '';
+    document.getElementById('adminUserRole').value = 'viewer';
+    document.getElementById('adminUserUsername').value = '';
+    document.getElementById('adminUserPassword').value = '';
+    document.getElementById('adminUserStatus').value = 'active';
+    setReadonly(false);
+    modal.classList.add('show');
+    return;
+  }
+
+  const phone = decodeURIComponent(encodedPhone);
+  const user = _adminUsersCache.find((u) => String(u.phone || '') === phone);
+  if (!user) {
+    toast('User not found', 'err');
+    return;
+  }
+  title.textContent = viewOnly ? `👁️ View User: ${user.name || phone}` : `✏️ Edit User: ${user.name || phone}`;
+  originalPhone.value = phone;
+  document.getElementById('adminUserName').value = user.name || '';
+  document.getElementById('adminUserPhone').value = user.phone || '';
+  document.getElementById('adminUserRole').value = adminRoleDisplay(user);
+  document.getElementById('adminUserUsername').value = user.username || '';
+  document.getElementById('adminUserPassword').value = '';
+  document.getElementById('adminUserStatus').value = user.status || 'active';
+  setReadonly(!!viewOnly);
+  modal.classList.add('show');
+}
+
+function closeAdminUserModal() {
+  document.getElementById('adminUserModal').classList.remove('show');
+}
+
+async function saveAdminUser() {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const originalPhone = (document.getElementById('adminEditPhoneOriginal').value || '').trim();
+  const name = (document.getElementById('adminUserName').value || '').trim();
+  const phone = (document.getElementById('adminUserPhone').value || '').trim();
+  const role = (document.getElementById('adminUserRole').value || 'viewer').trim();
+  const username = (document.getElementById('adminUserUsername').value || '').trim();
+  const password = document.getElementById('adminUserPassword').value || '';
+  const status = (document.getElementById('adminUserStatus').value || 'active').trim();
+
+  if (!name || !phone) {
+    toast('Name and mobile are required', 'err');
+    return;
+  }
+
+  try {
+    if (!originalPhone) {
+      const body = {phone, name, role};
+      if (username) body.username = username;
+      if (password) body.password = password;
+      await adminApi('/users', {method: 'POST', body});
+      toast('User created', 'ok');
+    } else {
+      const body = {phone, name, role, status};
+      if (username !== '') body.username = username;
+      if (password) body.password = password;
+      await adminApi('/users/' + encodeURIComponent(originalPhone), {method: 'PATCH', body});
+      toast('User updated', 'ok');
+    }
+    closeAdminUserModal();
+    await loadAdminUsersRoster();
+  } catch (e) {
+    toast(e.message || 'Save failed', 'err');
+  }
+}
+
+async function adminResetLoginRoster(encodedPhone) {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone || '');
+  if (!phone) return;
+  if (!confirm(`Reset login key for ${phone}?`)) return;
+  try {
+    const result = await adminApi('/users/' + encodeURIComponent(phone) + '/apikey', {method: 'POST'});
+    prompt('New login key (shown once):', result.api_key || '');
+    toast('Login key reset', 'ok');
+  } catch (e) {
+    toast(e.message || 'Reset failed', 'err');
+  }
+}
+
+async function adminDeactivateRoster(encodedPhone) {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone || '');
+  if (!phone) return;
+  if (!confirm(`Deactivate ${phone}?`)) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(phone) + '/disable', {method: 'POST'});
+    toast('User deactivated', 'ok');
+    await loadAdminUsersRoster();
+  } catch (e) {
+    toast(e.message || 'Deactivate failed', 'err');
+  }
+}
+
+async function adminActivateRoster(encodedPhone) {
+  if (!isSuperAdminRoster()) {
+    toast('Super admin only', 'err');
+    return;
+  }
+  const phone = decodeURIComponent(encodedPhone || '');
+  if (!phone) return;
+  if (!confirm(`Activate ${phone}?`)) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(phone) + '/enable', {method: 'POST'});
+    toast('User activated', 'ok');
+    await loadAdminUsersRoster();
+  } catch (e) {
+    toast(e.message || 'Activate failed', 'err');
+  }
 }
 
 async function deleteProgram(pid) {

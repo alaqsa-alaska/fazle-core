@@ -138,6 +138,95 @@ class TestAuthEnforcement:
         assert delete_response.status_code == 403
 
 
+class TestAdminUserManagementApi:
+    async def test_patch_user_updates_name_username_status_and_role(self, client, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        async with test_db_pool.acquire() as conn:
+            aid = await conn.fetchval(
+                "INSERT INTO fazle_admins (phone, name, status, username) VALUES ('8801700000555', 'Original Name', 'active', 'orig_user') RETURNING id"
+            )
+            await conn.execute(
+                "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1, 'viewer', 'test')",
+                aid,
+            )
+
+        response = await client.patch(
+            "/admin/users/8801700000555",
+            json={
+                "name": "Updated Name",
+                "username": "updated_user",
+                "status": "disabled",
+                "role": "operator",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("status") == "updated"
+        user = data.get("user") or {}
+        assert user.get("name") == "Updated Name"
+        assert user.get("username") == "updated_user"
+        assert user.get("status") == "disabled"
+        assert "operator" in str(user.get("roles") or "")
+
+    async def test_patch_user_conflict_username_returns_400(self, client, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        async with test_db_pool.acquire() as conn:
+            aid1 = await conn.fetchval(
+                "INSERT INTO fazle_admins (phone, name, status, username) VALUES ('8801700000661', 'User One', 'active', 'user_one') RETURNING id"
+            )
+            aid2 = await conn.fetchval(
+                "INSERT INTO fazle_admins (phone, name, status, username) VALUES ('8801700000662', 'User Two', 'active', 'user_two') RETURNING id"
+            )
+            await conn.execute(
+                "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1, 'viewer', 'test'), ($2, 'viewer', 'test')",
+                aid1,
+                aid2,
+            )
+
+        response = await client.patch(
+            "/admin/users/8801700000662",
+            json={"username": "user_one"},
+        )
+        assert response.status_code == 400
+
+    async def test_disable_and_enable_user(self, client, test_db_pool):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        async with test_db_pool.acquire() as conn:
+            aid = await conn.fetchval(
+                "INSERT INTO fazle_admins (phone, name, status, username) VALUES ('8801700000777', 'Toggle User', 'active', 'toggle_user') RETURNING id"
+            )
+            await conn.execute(
+                "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1, 'viewer', 'test')",
+                aid,
+            )
+
+        disable_res = await client.post("/admin/users/8801700000777/disable")
+        assert disable_res.status_code == 200
+
+        list_after_disable = await client.get("/admin/users")
+        assert list_after_disable.status_code == 200
+        rows = list_after_disable.json().get("users") or []
+        disabled_row = next((r for r in rows if r.get("phone") == "8801700000777"), None)
+        assert disabled_row is not None
+        assert disabled_row.get("status") == "disabled"
+
+        enable_res = await client.post("/admin/users/8801700000777/enable")
+        assert enable_res.status_code == 200
+
+        list_after_enable = await client.get("/admin/users")
+        assert list_after_enable.status_code == 200
+        rows2 = list_after_enable.json().get("users") or []
+        enabled_row = next((r for r in rows2 if r.get("phone") == "8801700000777"), None)
+        assert enabled_row is not None
+        assert enabled_row.get("status") == "active"
+
+
 class TestEmployeesEndpoint:
     async def test_escort_programs_empty_initially(self, client):
         response = await client.get("/admin/escort-programs")

@@ -387,6 +387,14 @@ async def disable_admin(phone: str) -> dict[str, Any]:
     return {"status": "ok", "admin_id": a["id"]}
 
 
+async def enable_admin(phone: str) -> dict[str, Any]:
+    a = await get_admin_by_phone(phone)
+    if not a:
+        raise ValueError("unknown admin")
+    await execute("UPDATE fazle_admins SET status='active' WHERE id=$1", a["id"])
+    return {"status": "ok", "admin_id": a["id"]}
+
+
 async def issue_api_key(phone: str) -> dict[str, Any]:
     """Generate a new API key, store its hash, return the plaintext (once)."""
     a = await get_admin_by_phone(phone)
