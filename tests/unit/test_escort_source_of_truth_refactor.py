@@ -138,7 +138,7 @@ class TestEscortParserExamples:
         order = parse_escort_message(text)
         assert order["lighters"][0]["destination"] == "Narayanganj"
 
-    def test_build_admin_message_has_single_footer(self, monkeypatch):
+    def test_build_admin_message_uses_strict_template(self, monkeypatch):
         _set_escort_env(monkeypatch)
         from modules.escort import build_admin_message, parse_escort_message
 
@@ -149,7 +149,8 @@ class TestEscortParserExamples:
         """
         order = parse_escort_message(text)
         msg = build_admin_message(order, "8801670535255")
-        assert msg.count("Automated Reply System") == 1
+        assert "Automated Reply System" not in msg
+        assert msg.count("Notun escort order:") >= 1
 
 
 class TestEscortSourceOfTruth:

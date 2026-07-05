@@ -789,11 +789,11 @@ def build_admin_draft(
     cargo_type: Optional[str] = None,
     shift: Optional[str] = None,
 ) -> str:
-    """Build the standardized draft to send to admin for one lighter."""
+    """Build the strict standardized draft to send to admin for one lighter."""
     d = date_str or _TODAY()
     shift_label = shift or lighter.get("shift") or "D/N"
     lines = [
-        f"Cargo: {cargo_type or ''}",
+        "Notun escort order:",
         f"Client: {client_phone or ''}",
         "",
         f"Mother Vessel: {mv or ''}",
@@ -801,32 +801,22 @@ def build_admin_draft(
         f"Lighter Vessel: {lighter['lighter_vessel']}",
         f"Master Mobile: {lighter['master_mobile'] or ''}",
         f"Destination: {lighter.get('destination') or ''}",
-        f"Capacity: {lighter.get('capacity') or ''}",
         "Escort Name:",
         "Escort Mobile:",
         f"{d} ({shift_label})",
-        "Al-Aqsa Security & Logistics Services Ltd",
         "",
-        "─────────────────",
-        "Automated Reply System",
-        "এই বার্তাটি স্বয়ংক্রিয়ভাবে তৈরি হয়েছে। ভুল হতে পারে।",
+        "Al-Aqsa Security & Logistics Services Ltd",
     ]
     return "\n".join(lines)
 
 
 def build_admin_message(order: EscortOrder, sender_phone: str) -> str:
-    """Build the full admin message for one escort order (may include multiple lighters)."""
+    """Build strict admin draft message(s) for one escort order."""
     mv = order["mother_vessel"] or "Unknown MV"
     parts = []
-    footer = [
-        "─────────────────",
-        "Automated Reply System",
-        "এই বার্তাটি স্বয়ংক্রিয়ভাবে তৈরি হয়েছে। ভুল হতে পারে।",
-    ]
 
     for i, lighter in enumerate(order["lighters"], 1):
-        if len(order["lighters"]) > 1:
-            parts.append(f"--- Lighter {i} ---")
+        _ = i  # keeps the loop intent explicit without altering output format
         draft_text = build_admin_draft(
             mv,
             lighter,
@@ -836,14 +826,12 @@ def build_admin_message(order: EscortOrder, sender_phone: str) -> str:
             cargo_type=order.get("cargo_type"),
             shift=order.get("shift"),
         )
-        draft_lines = draft_text.splitlines()
-        if len(draft_lines) >= 3 and draft_lines[-3:] == footer:
-            draft_text = "\n".join(draft_lines[:-3]).rstrip()
         parts.append(draft_text)
-        parts.append("")
+        if i < len(order["lighters"]):
+            parts.append("")
 
     if not order["lighters"]:
-        # No lighter extracted — send partial draft for admin to fill
+        # Should not happen in strict gate flow; keep defensive fallback.
         dummy = LighterInfo(
             lighter_vessel="(লাইটার নাম যোগ করুন)",
             master_name=None,
@@ -861,13 +849,9 @@ def build_admin_message(order: EscortOrder, sender_phone: str) -> str:
             cargo_type=order.get("cargo_type"),
             shift=order.get("shift"),
         )
-        draft_lines = draft_text.splitlines()
-        if len(draft_lines) >= 3 and draft_lines[-3:] == footer:
-            draft_text = "\n".join(draft_lines[:-3]).rstrip()
         parts.append(draft_text)
 
-    body = "\n".join(parts).rstrip()
-    return body + "\n\n" + "\n".join(footer)
+    return "\n".join(parts).rstrip()
 
 
 # ── Completed draft detection & parsing ───────────────────────────────────────
@@ -1639,7 +1623,7 @@ async def handle_escort_client_message(
 
     return "", {
         "admin_phone": admin_phone,
-        "text": f"Notun escort order:\n\n{admin_msg}",
+        "text": admin_msg,
         "bridge": source,
     }
 
@@ -1647,12 +1631,26 @@ async def handle_escort_client_message(
 def _is_authoritative_bridge_confirmation(ctx: ConfirmationContext) -> bool:
     recipient = _normalize_mobile(ctx.get("recipient_phone") or "")
     bridge_number = _normalize_mobile(ctx.get("bridge_number") or "")
-    if not recipient or not bridge_number:
+    if not bridge_number:
         return False
+    if not _is_trusted_escort_source(ctx.get("source") or ""):
+        return False
+
+    # Direct system reply from an authorised admin is also authoritative.
+    s = get_settings()
+    admin_numbers: list[str] = []
+    for raw in [s.admin_meta_number, s.admin_bridge1_number, s.admin_bridge2_number, *(s.admin_number_list or [])]:
+        norm = _normalize_mobile(raw or "")
+        if norm and norm not in admin_numbers:
+            admin_numbers.append(norm)
+
+    if not recipient:
+        return bridge_number in admin_numbers
+
     if recipient not in _escort_client_phone_list():
         return False
     mapped = _bridge_number_map().get(ctx.get("source") or "")
-    return bool(mapped and bridge_number == mapped)
+    return bool((mapped and bridge_number == mapped) or (bridge_number in admin_numbers))
 
 
 async def handle_admin_escort_completion(

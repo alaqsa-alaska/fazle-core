@@ -72,6 +72,7 @@ log = logging.getLogger("fazle.router")
 
 # Roles that trigger the escort client flow
 _ESCORT_ROLES = frozenset({"escort_client", "client_escort_buyer", "vip_client", "repeat_client"})
+_ESCORT_ORDER_PREFIXES: tuple[str, ...] = ("escort", "client", "tcis", "gms")
 
 # Legacy fallback only; runtime source of truth is app.config draft-always settings.
 _SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office")
@@ -120,7 +121,7 @@ def _phone_variants(phone: str) -> list[str]:
 
 def _contact_name_has_escort_order_prefix(identity: dict) -> bool:
     name = (identity.get("display_name") or "").strip().lower()
-    return name.startswith(("escort", "tcis"))
+    return name.startswith(_ESCORT_ORDER_PREFIXES)
 
 
 def _has_client_supplied_escort_assignment(text: str) -> bool:
@@ -146,6 +147,32 @@ def _is_strict_escort_order_text(text: str) -> bool:
         (lighter.get("lighter_vessel") and lighter.get("master_mobile"))
         for lighter in (order.get("lighters") or [])
     )
+
+
+def _looks_like_escort_buying_intent(text: str) -> bool:
+    """Relaxed escort-order intent check for client-origin free-form messages.
+
+    This keeps the strict parser gate for auto-program creation, but allows
+    draft routing to admin for prefix contacts when the message is clearly
+    escort-buying context even if formatted fields are incomplete.
+    """
+    if not text or _looks_like_slip_or_complaint(text):
+        return False
+    if _is_strict_escort_order_text(text):
+        return True
+
+    intent_hint = classify(text)
+    if intent_hint in ("client_order", "escort_duty"):
+        return True
+
+    lowered = text.lower()
+    keyword_hits = sum(
+        1
+        for kw in ("escort", "vessel", "lighter", "master", "destination", "mv", "o/a", "cargo", "importer")
+        if kw in lowered
+    )
+    has_mobile = bool(re.search(r"(?:\+?880|0)1[3-9][\d\s\-]{8,}", text))
+    return keyword_hits >= 2 and has_mobile
 
 
 def _admin_review_note(
@@ -251,7 +278,7 @@ async def process_message(
     # admin-review drafts even when the contact name contains "client/escort".
     _skip, _skip_reason = await _should_silent_skip(sender)
     if _skip:
-        if is_completed_escort_draft(text) or _looks_like_escort_order(text):
+        if is_completed_escort_draft(text) or _looks_like_escort_order(text) or _looks_like_escort_buying_intent(text):
             log.info("[SILENT_SKIP_BYPASS] %s → escort workflow allowed (%s)", sender, _skip_reason)
         elif "display_name contains" in _skip_reason or "display_name starts with" in _skip_reason:
             log.info("[DRAFT_ONLY_CONTACT] %s → admin draft, no auto-reply (%s)", sender, _skip_reason)
@@ -303,14 +330,18 @@ async def process_message(
             role=role_str,
         )
 
-    # ── 2. ESCORT CLIENT roles — never reply, always draft to admin ───────────
+    # ── 2. ESCORT CLIENT roles — strict order gate + admin draft only ─────────
     if role_str in _ESCORT_ROLES:
-        has_order_prefix = _contact_name_has_escort_order_prefix(identity)
         intent_check = classify(text)
-        strict_order = _is_strict_escort_order_text(text)
-        if (has_order_prefix or role_str in {"escort_client", "client_escort_buyer"}) and strict_order:
-            return await handle_escort_client_message(text, sender, source)
-        if intent_check in ("client_order", "escort_duty") or _looks_like_escort_order(text):
+        strict_order = _looks_like_escort_order(text)
+        escort_intent = intent_check in ("client_order", "escort_duty") or strict_order
+        if strict_order and escort_intent:
+            return await handle_escort_client_message(
+                text,
+                sender,
+                source,
+            )
+        if escort_intent or _looks_like_escort_buying_intent(text):
             return "", _admin_review_note(
                 sender=sender,
                 source=source,
@@ -343,11 +374,14 @@ async def process_message(
     # ── 3. ADMIN ───────────────────────────────────────────────────────────────
     if role_str == "admin":
         if is_completed_escort_draft(text):
-            return (
-                "Escort confirmation is finalized only after the bridge sends it to an authorised escort client. "
-                "This admin-side text was not applied directly.",
-                None,
+            # Admin can finalize by replying directly to the system as well.
+            confirm_text, client_delivery = await handle_admin_escort_completion(
+                text,
+                sender,
+                source,
+                recipient_phone=None,
             )
+            return (confirm_text or "Escort confirmation processed."), client_delivery
 
         if is_admin_command(text):
             result = await process_admin_command(text, sender)
@@ -481,8 +515,12 @@ async def process_message(
             return ai_reply, None
 
     # ── 9. ESCORT ORDER (intent-triggered for non-registered senders) ─────────
-    if intent in ("client_order", "escort_duty"):
-        return await handle_escort_client_message(text, sender, source)
+    if intent in ("client_order", "escort_duty") and _looks_like_escort_order(text):
+        return await handle_escort_client_message(
+            text,
+            sender,
+            source,
+        )
 
     # ── 10. EMPLOYEE ───────────────────────────────────────────────────────────
     if role_str == "employee":
