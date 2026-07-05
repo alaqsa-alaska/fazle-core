@@ -55,14 +55,14 @@ class TestEscortRosterSearchQueries:
         count_query = calls["fetch_val"][0][0]
         list_query = calls["fetch_all"][0][0]
         for query in (count_query, list_query):
-            assert "e.mother_vessel ILIKE $1" in query
-            assert "e.lighter_vessel ILIKE $1" in query
-            assert "e.escort_name ILIKE $1" in query
-            assert "e.master_mobile ILIKE $1" in query
-            assert "e.escort_mobile ILIKE $1" in query
-            assert "e.destination ILIKE $1" in query
-            assert "COALESCE(e.start_date, p.program_date) >= $2" in query
-            assert "COALESCE(e.start_date, p.program_date) <= $3" in query
+            assert "e.mother_vessel ILIKE $" in query
+            assert "e.lighter_vessel ILIKE $" in query
+            assert "e.escort_name ILIKE $" in query
+            assert "e.master_mobile ILIKE $" in query
+            assert "e.escort_mobile ILIKE $" in query
+            assert "e.destination ILIKE $" in query
+            assert "COALESCE(e.start_date, p.program_date) >= $" in query
+            assert "COALESCE(e.start_date, p.program_date) <= $" in query
 
         assert result["total"] == 1
         assert result["items"][0]["program_id"] == 7

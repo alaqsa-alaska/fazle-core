@@ -2618,27 +2618,25 @@ async function submitNewEmployeeFromTab() {
   const name   = (document.getElementById('newEmpName').value || '').trim();
   const mobile = (document.getElementById('newEmpMobile').value || '').trim();
   const role   = (document.getElementById('newEmpRole').value || '').trim() || 'Staff';
-  const status = (document.getElementById('newEmpStatus').value || 'active').trim();
   if (!name || !mobile) { showToast('Employee name and mobile are required', 'err'); return; }
   try {
-    const r = await fetch('/api/fpe/employees', {
+    const r = await fetch('/api/admin/employees', {
       method: 'POST',
       headers: {'Content-Type':'application/json','X-Internal-Key': API_KEY},
       body: JSON.stringify({
-        full_name: name,
+        employee_name: name,
         employee_mobile: mobile,
-        role: role,
-        status: status,
+        designation: role,
       }),
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
-    showToast(`Employee '${name}' created`, 'ok');
+    const created = d.employee || {};
+    showToast(`Employee '${created.employee_name || name}' created`, 'ok');
     resetNewEmployeeForm(false);
-    employeeFilterSelectedId = d.employee.id;
     await loadEmployees(true);
     if (document.getElementById('empQuery')) {
-      document.getElementById('empQuery').value = d.employee.full_name || name;
+      document.getElementById('empQuery').value = created.employee_name || name;
       document.getElementById('empQuery').dataset.selectedLabel = document.getElementById('empQuery').value.trim();
     }
     navigate('employees');
@@ -4049,6 +4047,24 @@ function rvGetReviewer() {
 async function rvApproveOneClick(id) {
   const item = rvItems.find(x => x.id === id);
   if (!item) return;
+  if (item.item_type === 'escort_roster') {
+    try {
+      await fetch('/api/escort-roster/change-requests/' + id + '/approve', {
+        method: 'POST',
+        headers: { 'X-Internal-Key': API_KEY },
+      }).then(async r => {
+        if (!r.ok) throw new Error(await r.text() || ('HTTP ' + r.status));
+        return r.json();
+      });
+      showToast('Escort request approved', 'ok');
+      closeModal();
+      closePanel();
+      loadReview(true);
+    } catch (e) {
+      showToast('Escort approval failed: ' + e.message, 'err');
+    }
+    return;
+  }
   const candidate = item.auto_employee;
   if (!candidate || !candidate.employee_id) {
     showToast('No exact employee match available for one-click approve. Open Employee Search or Add New Employee first.', 'err');
@@ -4073,6 +4089,27 @@ async function rvApproveOneClick(id) {
 }
 
 async function rvDismissOneClick(id, asDuplicate) {
+  const item = rvItems.find(x => x.id === id);
+  if (!item) return;
+  if (item.item_type === 'escort_roster') {
+    const reviewer = rvGetReviewer();
+    const reason = asDuplicate ? 'duplicate' : 'rejected';
+    try {
+      await fetch('/api/escort-roster/change-requests/' + id + '/reject?note=' + encodeURIComponent(reason), {
+        method: 'POST',
+        headers: { 'X-Internal-Key': API_KEY },
+      }).then(async r => {
+        if (!r.ok) throw new Error(await r.text() || ('HTTP ' + r.status));
+        return r.json();
+      });
+      showToast(asDuplicate ? 'Escort request marked duplicate' : 'Escort request rejected', 'ok');
+      closeModal();
+      loadReview(true);
+    } catch (e) {
+      showToast('Escort reject failed: ' + e.message, 'err');
+    }
+    return;
+  }
   const reviewer = rvGetReviewer();
   const reason = asDuplicate ? 'duplicate' : 'not_payment';
   const qs = new URLSearchParams({

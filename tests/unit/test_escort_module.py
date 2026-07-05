@@ -126,6 +126,51 @@ class TestEscortRegexExtraction:
         assert lighter["capacity"] == "1000 MT"
         assert lighter["shift"] == "N"
 
+    def test_mv_blocks_with_capacity_and_mobile_keep_parenthesized_mv_as_mother(self):
+        from modules.escort import parse_escort_message
+
+        text = """
+        M.V Al Balad-3
+        2200 M.T
+        01716-797411
+        M.V SEA QUEST-3
+        1800 M.T
+        +880 1712-400445
+        M.V Lamha-2
+        1500 M.T
+        01839-771853
+
+        N.Gonj
+
+        O/A Ctg.
+
+        (MV HORDA)
+        """
+        order = parse_escort_message(text)
+        assert order["mother_vessel"] == "MV HORDA"
+        assert len(order["lighters"]) >= 3
+        assert "AL BALAD-3" in order["lighters"][0]["lighter_vessel"].upper()
+        assert order["lighters"][0]["master_mobile"] == "01716797411"
+
+    def test_completed_draft_parses_lighter_vessel_label_strictly(self):
+        from modules.escort import parse_completed_draft
+
+        draft = parse_completed_draft(
+            """
+            Mother Vessel: MV Horda
+            Lighter Vessel:MV Al Balad-3
+            Master Mobile: 01716797411
+            Destination: chottogram
+            Escort Name: Junaid Islam Shami
+            Escort Mobile: 01805668850
+            Start Date: 04.07.2026 (D)
+            Al-Aqsa Security Service
+            """
+        )
+        assert draft["mother_vessel"] == "MV HORDA"
+        assert draft["lighter_vessel"] == "MV Al Balad-3"
+        assert draft["master_mobile"] == "01716797411"
+
 
 class TestIsEscortMessage:
     """Test is_escort_message() detection function."""

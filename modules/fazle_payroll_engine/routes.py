@@ -1824,7 +1824,86 @@ async def admin_needs_review(
             detected_name=item.get("detected_employee_name"),
             detected_phone=item.get("detected_payout_phone"),
         )
+        item["item_type"] = "transaction"
         item["auto_employee"] = candidate
+
+    # Include escort-roster operator requests in the same review queue so admin
+    # can approve/reject from payroll review tab.
+    if status in {"pending", "promoted", "dismissed", "duplicate"}:
+        escort_status_map = {
+            "pending": "pending",
+            "promoted": "approved",
+            "dismissed": "rejected",
+            "duplicate": "rejected",
+        }
+        escort_status = escort_status_map.get(status, "pending")
+        escort_rows = await fetch_all(
+            """
+            SELECT
+                r.id,
+                r.program_id,
+                r.action,
+                r.payload,
+                r.status,
+                r.requested_by,
+                r.requested_by_phone,
+                r.requested_at,
+                r.reviewed_by,
+                r.review_note,
+                r.reviewed_at,
+                e.mother_vessel,
+                e.lighter_vessel,
+                e.escort_name,
+                e.escort_mobile
+            FROM escort_roster_change_requests r
+            LEFT JOIN escort_roster_entries e ON e.program_id = r.program_id
+            WHERE r.status = $1
+            ORDER BY r.requested_at DESC
+            LIMIT $2 OFFSET $3
+            """,
+            escort_status,
+            limit,
+            offset,
+        )
+        for row in escort_rows:
+            items.append({
+                "id": int(row["id"]),
+                "item_type": "escort_roster",
+                "fpe_wa_message_id": None,
+                "reason": f"escort_{row.get('action')}",
+                "detected_amount": None,
+                "detected_payout_phone": row.get("requested_by_phone"),
+                "detected_employee_name": row.get("requested_by") or row.get("escort_name"),
+                "detected_payout_method": None,
+                "detected_txn_date": None,
+                "parser_confidence": None,
+                "retry_count": 0,
+                "review_status": "pending" if row.get("status") == "pending" else ("promoted" if row.get("status") == "approved" else "dismissed"),
+                "resolved_employee_id": None,
+                "promoted_txn_id": row.get("program_id"),
+                "reviewer": row.get("reviewed_by"),
+                "review_note": row.get("review_note"),
+                "raw_content": f"Escort roster {row.get('action')} request for program #{row.get('program_id')}",
+                "created_at": row.get("requested_at"),
+                "timestamp_wa": row.get("requested_at"),
+                "source": "escort_roster",
+                "source_number": row.get("requested_by_phone"),
+                "chat_jid": "escort-roster",
+                "sender_phone": row.get("requested_by_phone"),
+                "escort_request": {
+                    "request_id": int(row["id"]),
+                    "program_id": row.get("program_id"),
+                    "action": row.get("action"),
+                    "payload": row.get("payload") or {},
+                    "mother_vessel": row.get("mother_vessel"),
+                    "lighter_vessel": row.get("lighter_vessel"),
+                    "escort_name": row.get("escort_name"),
+                    "escort_mobile": row.get("escort_mobile"),
+                },
+                "auto_employee": None,
+            })
+
+    items.sort(key=lambda x: str(x.get("created_at") or x.get("timestamp_wa") or ""), reverse=True)
     return {"total": int(total), "items": items}
 
 
@@ -2130,6 +2209,10 @@ async def admin_review_summary():
         "SELECT COUNT(*) FROM fpe_message_processing_state "
         "WHERE status='failed' AND attempts >= 5"
     ) or 0
+    escort_pending = await fetch_val(
+        "SELECT COUNT(*) FROM escort_roster_change_requests WHERE status = 'pending'"
+    ) or 0
+    pending = int(pending) + int(escort_pending)
     return {
         "pending_review": int(pending),
         "low_confidence": int(low_conf),

@@ -6,7 +6,6 @@ No DB access — parser is pure Python.
 """
 from __future__ import annotations
 
-import pytest
 from datetime import date
 from decimal import Decimal
 
@@ -45,6 +44,22 @@ class TestPaymentParsing:
         assert r["type"] == MessageType.payment
         p = r["payment"]
         assert p.amount == Decimal("3500")
+        assert p.payout_method == PayoutMethod.bkash
+
+    def test_id_prefix_with_slash_only_amount(self):
+        r = parse("ID: 01859213411 MD. Musa 01859213411(B) 3500/")
+        assert r["type"] == MessageType.payment
+        p = r["payment"]
+        assert p.amount == Decimal("3500")
+        assert p.employee_id_phone == "01859213411"
+        assert p.payout_phone == "01859213411"
+        assert p.payout_method == PayoutMethod.bkash
+
+    def test_amount_with_slash_plus_suffix(self):
+        r = parse("ID: 01859213411 MD. Musa 01859213411(B) 500/+")
+        assert r["type"] == MessageType.payment
+        p = r["payment"]
+        assert p.amount == Decimal("500")
         assert p.payout_method == PayoutMethod.bkash
 
     def test_name_phone_cash(self):

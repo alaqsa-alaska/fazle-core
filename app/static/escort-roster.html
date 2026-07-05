@@ -234,7 +234,9 @@ td.actions{white-space:nowrap;text-align:center}
   <div id="loginBox">
     <h2>🛡️ Escort Roster</h2>
     <p>Fazle Security — Escort Management</p>
-    <input type="password" id="apiKeyInput" placeholder="API Key" autocomplete="current-password">
+    <input type="text" id="usernameInput" placeholder="Username" autocomplete="username">
+    <input type="password" id="passwordInput" placeholder="Password" autocomplete="current-password">
+    <input type="password" id="apiKeyInput" placeholder="API Key (optional fallback)" autocomplete="current-password">
     <button class="btn btn-primary" onclick="doLogin()">Sign In</button>
     <div id="loginErr"></div>
   </div>
@@ -260,6 +262,8 @@ td.actions{white-space:nowrap;text-align:center}
     <button onclick="switchTab('slips')">📄 Slip Queue</button>
     <button onclick="switchTab('calc')">🧮 Shift Calc</button>
     <button onclick="switchTab('config')">⚙️ Config</button>
+    <button onclick="switchTab('attendance')">🕒 Attendance</button>
+    <button onclick="switchTab('netsalary')">💰 Net Salary</button>
   </nav>
 
   <main>
@@ -448,6 +452,36 @@ td.actions{white-space:nowrap;text-align:center}
         </div>
       </div>
     </div>
+
+    <div id="tab-attendance" style="display:none">
+      <div class="card">
+        <h2>🕒 Attendance</h2>
+        <div class="filter-row">
+          <input type="search" id="attendanceSearch" placeholder="Search escort name / mobile..." oninput="loadAttendance()">
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Program</th><th>Escort</th><th>Mobile</th><th>Start</th><th>End</th><th>Days</th></tr></thead>
+            <tbody id="attendanceBody"><tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-netsalary" style="display:none">
+      <div class="card">
+        <h2>💰 Net Salary</h2>
+        <div class="filter-row">
+          <input type="search" id="netSalarySearch" placeholder="Search escort / vessel..." oninput="loadNetSalary()">
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Program</th><th>Mother</th><th>Escort</th><th>Total</th><th>Food Bill</th><th>Net Payable</th></tr></thead>
+            <tbody id="netSalaryBody"><tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -527,31 +561,64 @@ const BASE = '';
 let _curPage = 1;
 let _sortBy = 'start_date';
 let _sortDir = 'desc';
+let _lastDedupRemoved = 0;
+let _sessionUser = null;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Auth
 // ─────────────────────────────────────────────────────────────────────────
 function doLogin() {
-  const k = document.getElementById('apiKeyInput').value.trim();
-  if (!k) { document.getElementById('loginErr').textContent = 'Enter API key'; return; }
-  API_KEY = k;
-  // Verify by calling summary
-  apiFetch('/api/escort-roster/summary').then(r => {
-    if (r.ok) {
-      document.getElementById('loginOverlay').style.display = 'none';
-      document.getElementById('app').style.display = 'flex';
-      loadSummary();
-      loadRoster();
-    } else {
-      document.getElementById('loginErr').textContent = 'Invalid API key';
+  const username = document.getElementById('usernameInput').value.trim();
+  const password = document.getElementById('passwordInput').value;
+  const fallbackKey = document.getElementById('apiKeyInput').value.trim();
+
+  const loginErr = document.getElementById('loginErr');
+  loginErr.textContent = '';
+
+  const doBoot = async () => {
+    const sessionRes = await apiFetch('/api/admin/session');
+    if (!sessionRes.ok) throw new Error('Session validation failed');
+    const session = await sessionRes.json();
+    _sessionUser = session && session.user ? session.user : null;
+    localStorage.setItem('fpe_api_key', API_KEY);
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    loadSummary();
+    loadRoster();
+    loadAttendance();
+    loadNetSalary();
+  };
+
+  if (username && password) {
+    fetch('/api/admin/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: 'password', username, password}),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error('Invalid username/password');
+      const data = await r.json();
+      API_KEY = data && data.credential ? data.credential.value : '';
+      if (!API_KEY) throw new Error('Missing login token');
+      await doBoot();
+    }).catch((e) => {
+      loginErr.textContent = e.message || 'Login failed';
       API_KEY = '';
-    }
-  }).catch(() => {
-    document.getElementById('loginErr').textContent = 'Connection error';
+    });
+    return;
+  }
+
+  if (!fallbackKey) {
+    loginErr.textContent = 'Enter username/password or API key';
+    return;
+  }
+  API_KEY = fallbackKey;
+  doBoot().catch(() => {
+    loginErr.textContent = 'Invalid credentials';
     API_KEY = '';
   });
 }
 document.getElementById('apiKeyInput').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+document.getElementById('passwordInput').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
 
 // ─────────────────────────────────────────────────────────────────────────
 // API wrapper
@@ -615,15 +682,17 @@ function debounce(fn, ms) {
 // Tab switching
 // ─────────────────────────────────────────────────────────────────────────
 function switchTab(name) {
-  ['roster','kanban','slips','calc','config'].forEach(t => {
+  ['roster','kanban','slips','calc','config','attendance','netsalary'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===name ? 'block' : 'none';
   });
   document.querySelectorAll('nav button').forEach((b,i) => {
-    b.classList.toggle('active', ['roster','kanban','slips','calc','config'][i] === name);
+    b.classList.toggle('active', ['roster','kanban','slips','calc','config','attendance','netsalary'][i] === name);
   });
   if (name==='kanban') loadKanban();
   if (name==='slips') loadSlipQueue();
   if (name==='config') { loadConfig(); loadEscortClients(); }
+  if (name==='attendance') loadAttendance();
+  if (name==='netsalary') loadNetSalary();
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -651,7 +720,8 @@ async function loadSummary() {
 // ─────────────────────────────────────────────────────────────────────────
 // Roster Table
 // ─────────────────────────────────────────────────────────────────────────
-async function loadRoster(page) {
+async function loadRoster(page, opts={}) {
+  const silent = !!opts.silent;
   if (page !== undefined) _curPage = page;
   const search = document.getElementById('searchInput').value.trim();
   const status = document.getElementById('statusFilter').value;
@@ -671,16 +741,63 @@ async function loadRoster(page) {
   const url = `/api/escort-roster?${params.toString()}`;
 
   const tbody = document.getElementById('rosterBody');
-  tbody.innerHTML = '<tr class="loading-row"><td colspan="14"><span class="spinner"></span> Loading…</td></tr>';
+  if (!silent) {
+    tbody.innerHTML = '<tr class="loading-row"><td colspan="14"><span class="spinner"></span> Loading…</td></tr>';
+  }
 
   try {
     const d = await apiGet(url);
-    renderRosterRows(Array.isArray(d.items) ? d.items : []);
-    renderPager(d.page || 1, d.pages || 1, d.total || 0);
+    const rawItems = Array.isArray(d.items) ? d.items : [];
+    const dedupedItems = dedupeRosterItems(rawItems);
+    renderRosterRows(dedupedItems);
+    renderPager(d.page || 1, d.pages || 1, d.total || 0, _lastDedupRemoved);
     loadSummary();
   } catch(e) {
     tbody.innerHTML = `<tr class="loading-row"><td colspan="14" style="color:var(--err)">Error: ${e.message}</td></tr>`;
   }
+}
+
+function normKeyPart(v) {
+  return String(v || '')
+    .toLowerCase()
+    .replace(/mother vessel\s*:/g, ' ')
+    .replace(/lighter vessel\s*:/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function dedupeRosterItems(items) {
+  const seenVesselDate = new Set();
+  const seenVesselEscortDate = new Set();
+  const keep = [];
+  let removed = 0;
+
+  for (const r of items) {
+    const mv = normKeyPart(r.mother_vessel);
+    const lv = normKeyPart(r.lighter_vessel);
+    const en = normKeyPart(r.escort_name);
+    const dt = String(r.start_date || r.display_date || '').slice(0, 10);
+
+    // No key fields => cannot dedupe reliably; keep the row.
+    if (!mv || !lv || !dt) {
+      keep.push(r);
+      continue;
+    }
+
+    const vesselDateKey = `${mv}|${lv}|${dt}`;
+    const vesselEscortDateKey = `${mv}|${lv}|${en}|${dt}`;
+    if (seenVesselDate.has(vesselDateKey) || (en && seenVesselEscortDate.has(vesselEscortDateKey))) {
+      removed += 1;
+      continue;
+    }
+
+    seenVesselDate.add(vesselDateKey);
+    if (en) seenVesselEscortDate.add(vesselEscortDateKey);
+    keep.push(r);
+  }
+
+  _lastDedupRemoved = removed;
+  return keep;
 }
 
 function renderRosterRows(items) {
@@ -700,6 +817,7 @@ function renderRosterRows(items) {
     const _statusLabel = r.program_status || r.roster_status || '—';
     const fmt = v => v != null ? parseFloat(v).toLocaleString('en-BD') : '—';
     const fmtDays = v => v != null ? parseFloat(v).toFixed(1) : '—';
+    const startDate = r.start_date || r.display_date || '—';
     return `<tr${r.is_historical ? ' title="Historical record"' : ''}>
       <td style="color:var(--muted);font-size:12px">${r.program_id}${r.is_historical ? ' <small style="color:#94a3b8">H</small>' : ''}</td>
       <td style="font-weight:600">${esc(r.mother_vessel||'—')}</td>
@@ -707,7 +825,7 @@ function renderRosterRows(items) {
       <td class="phones">${r.master_mobile?`<a href="tel:+88${r.master_mobile}" title="Master: ${r.master_mobile}" class="ph-ico">📱</a>`:''}
           ${r.escort_mobile?`<a href="tel:+88${r.escort_mobile}" title="Escort: ${r.escort_mobile}" class="ph-ico">📞</a>`:(!r.master_mobile?'—':'')}</td>
       <td>${esc(r.escort_name||'—')}</td>
-      <td>${r.start_date||'—'}${r.start_shift?' <small style="color:var(--muted)">('+r.start_shift+')</small>':''}</td>
+      <td>${startDate}${r.start_shift?' <small style="color:var(--muted)">('+r.start_shift+')</small>':''}</td>
       <td>${r.end_date||'—'}${r.end_shift?' <small style="color:var(--muted)">('+r.end_shift+')</small>':''}</td>
       <td class="num">${fmtDays(r.total_days)}</td>
       <td class="num">${r.salary != null ? '৳'+fmt(r.salary) : '—'}</td>
@@ -719,13 +837,14 @@ function renderRosterRows(items) {
       <td class="actions">
         <button class="btn-icon" title="View details" onclick="openDetail(${r.program_id})">🔍</button>
         <button class="btn-icon" title="Edit" onclick="openEdit(${JSON.stringify(r).replace(/"/g,'&quot;')})">✏️</button>
+        ${canDirectDelete() ? `<button class="btn-icon" title="Delete" onclick="deleteProgram(${r.program_id})">🗑</button>` : ''}
         <button class="btn-icon" title="Recalculate" onclick="recalc(${r.program_id})">⟳</button>
       </td>
     </tr>`;
   }).join('');
 }
 
-function renderPager(page, pages, total) {
+function renderPager(page, pages, total, dedupRemoved=0) {
   const pager = document.getElementById('pager');
   pager.innerHTML = '';
   if (pages <= 1) return;
@@ -744,7 +863,8 @@ function renderPager(page, pages, total) {
   add('›', page+1, false, page===pages);
   add('»', pages, false, page===pages);
   const sp = document.createElement('span');
-  sp.textContent = `${total} records · Page ${page} of ${pages}`;
+  const dedupText = dedupRemoved > 0 ? ` · hidden duplicates ${dedupRemoved}` : '';
+  sp.textContent = `${total} records · Page ${page} of ${pages}${dedupText}`;
   pager.appendChild(sp);
 }
 
@@ -902,8 +1022,8 @@ function openEdit(data) {
   document.getElementById('editStatus').value = data.roster_status || 'draft';
   document.getElementById('editNotes').value = data.notes || '';
   // Show Delete Draft button only for draft programs
-  const isDraft = (data.program_status || data.roster_status || '') === 'draft';
-  document.getElementById('editDeleteBtn').style.display = isDraft ? 'inline-flex' : 'none';
+  document.getElementById('editDeleteBtn').style.display = canDirectDelete() ? 'inline-flex' : 'none';
+  document.getElementById('editDeleteBtn').textContent = canDirectDelete() ? '🗑 Delete Program' : '🗑 Request Delete';
   document.getElementById('editModal').classList.add('show');
 }
 
@@ -986,8 +1106,12 @@ async function saveEdit() {
       toast('Program created');
     } else {
       const pid = parseInt(document.getElementById('editProgramId').value);
-      await apiPatch(`/api/escort-roster/${pid}`, body);
-      toast('Entry updated');
+      const result = await apiPatch(`/api/escort-roster/${pid}`, body);
+      if (result && result.status === 'pending_approval') {
+        toast('Edit submitted for admin approval');
+      } else {
+        toast('Entry updated');
+      }
     }
     closeEdit();
     loadRoster();
@@ -1004,6 +1128,93 @@ async function recalc(pid) {
     toast(`Program #${pid} recalculated`);
     loadRoster();
   } catch(e) { toast('Recalc failed: '+e.message, 'err'); }
+}
+
+function canDirectDelete() {
+  const roles = ((_sessionUser && _sessionUser.normalized_roles) || (_sessionUser && _sessionUser.roles) || []).map(r => String(r || '').toLowerCase());
+  return roles.includes('admin') || roles.includes('superadmin') || roles.includes('owner');
+}
+
+async function deleteProgram(pid) {
+  if (!pid) return;
+  const confirmMsg = canDirectDelete()
+    ? `Permanently delete program #${pid}? This cannot be undone.`
+    : `Submit delete request for program #${pid}?`;
+  if (!confirm(confirmMsg)) return;
+  try {
+    const res = await fetch(`/api/escort-roster/${pid}`, {
+      method: 'DELETE',
+      headers: {'X-Internal-Key': API_KEY},
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (data && data.status === 'pending_approval') {
+      toast('Delete submitted for admin approval');
+    } else {
+      toast('Program deleted');
+    }
+    closeEdit();
+    loadRoster();
+    loadSummary();
+  } catch (e) {
+    toast(e.message || 'Delete failed', 'err');
+  }
+}
+
+async function loadAttendance() {
+  const tbody = document.getElementById('attendanceBody');
+  if (!tbody) return;
+  const q = (document.getElementById('attendanceSearch')?.value || '').trim().toLowerCase();
+  try {
+    const d = await apiGet('/api/escort-roster?page=1&page_size=200&sort_by=start_date&sort_dir=desc');
+    const items = (d.items || []).filter((r) => {
+      if (!q) return true;
+      const text = `${r.escort_name || ''} ${r.escort_mobile || ''} ${r.mother_vessel || ''}`.toLowerCase();
+      return text.includes(q);
+    });
+    tbody.innerHTML = items.map((r) => `
+      <tr>
+        <td>#${r.program_id}</td>
+        <td>${esc(r.escort_name || '—')}</td>
+        <td>${esc(r.escort_mobile || '—')}</td>
+        <td>${esc(r.start_date || '—')} ${esc(r.start_shift || '')}</td>
+        <td>${esc(r.end_date || '—')} ${esc(r.end_shift || '')}</td>
+        <td class="num">${r.total_days != null ? Number(r.total_days).toFixed(1) : '—'}</td>
+      </tr>
+    `).join('') || '<tr class="loading-row"><td colspan="6" style="color:var(--muted)">No attendance rows</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6" style="color:var(--err)">${esc(e.message || 'Failed')}</td></tr>`;
+  }
+}
+
+async function loadNetSalary() {
+  const tbody = document.getElementById('netSalaryBody');
+  if (!tbody) return;
+  const q = (document.getElementById('netSalarySearch')?.value || '').trim().toLowerCase();
+  try {
+    const d = await apiGet('/api/escort-roster?page=1&page_size=200&sort_by=start_date&sort_dir=desc');
+    const items = (d.items || []).filter((r) => {
+      if (!q) return true;
+      const text = `${r.escort_name || ''} ${r.mother_vessel || ''} ${r.lighter_vessel || ''}`.toLowerCase();
+      return text.includes(q);
+    });
+    const amt = (v) => v == null ? '—' : '৳ ' + Number(v).toLocaleString('en-BD');
+    tbody.innerHTML = items.map((r) => `
+      <tr>
+        <td>#${r.program_id}</td>
+        <td>${esc(r.mother_vessel || '—')}</td>
+        <td>${esc(r.escort_name || '—')}</td>
+        <td class="num">${amt(r.total)}</td>
+        <td class="num">${amt(r.food_bill)}</td>
+        <td class="num" style="font-weight:700;color:var(--accent)">${amt(r.net_payable)}</td>
+      </tr>
+    `).join('') || '<tr class="loading-row"><td colspan="6" style="color:var(--muted)">No net salary rows</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6" style="color:var(--err)">${esc(e.message || 'Failed')}</td></tr>`;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1047,8 +1258,9 @@ async function loadKanban() {
   board.innerHTML = '<span class="spinner"></span>';
   try {
     const d = await apiGet('/api/escort-roster?page=1&page_size=200&sort_by=start_date&sort_dir=desc');
+    const items = dedupeRosterItems(Array.isArray(d.items) ? d.items : []);
     const cols = {draft:[], confirmed:[], Running:[], Assigned:[], Completed:[], cancelled:[]};
-    (d.items||[]).forEach(r => {
+    items.forEach(r => {
       const st = r.program_status || r.roster_status || 'draft';
       if (cols[st]) cols[st].push(r); else cols['draft'].push(r);
     });
@@ -1184,6 +1396,7 @@ function calcShifts() {
 setInterval(() => {
   if (API_KEY && document.getElementById('tab-roster').style.display !== 'none') {
     loadSummary();
+    loadRoster(undefined, {silent: true});
   }
 }, 60000);
 

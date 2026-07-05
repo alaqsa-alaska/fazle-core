@@ -23,8 +23,6 @@ import re
 from typing import Optional
 
 from app.database import fetch_one
-from modules.phone_normalizer import normalize_phone
-from modules.number_identity import normalize_phone as phone_variants
 
 log = logging.getLogger("fazle.identity_brain")
 
@@ -57,6 +55,28 @@ _ESCORT_CONTENT_RE = re.compile(
 )
 
 
+def _normalize_phone(phone: str) -> Optional[str]:
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return None
+    if digits.startswith("880") and len(digits) == 13:
+        canonical = digits
+    elif digits.startswith("0") and len(digits) == 11:
+        canonical = "880" + digits[1:]
+    elif digits.startswith("1") and len(digits) == 10:
+        canonical = "880" + digits
+    else:
+        return None
+    return canonical if canonical[3:5] in {"11", "12", "13", "14", "15", "16", "17", "18", "19"} else None
+
+
+def _phone_variants(phone: str) -> list[str]:
+    canonical = _normalize_phone(phone)
+    if not canonical:
+        return []
+    return ["0" + canonical[3:], canonical, "+" + canonical]
+
+
 async def detect_identity(phone: str, text: str = "") -> dict:
     """
     Unified identity detection. Returns a dict with role, confidence, source,
@@ -65,7 +85,7 @@ async def detect_identity(phone: str, text: str = "") -> dict:
     Always safe to call — never raises, falls back to unknown.
     """
     try:
-        norm = normalize_phone(phone)
+        norm = _normalize_phone(phone)
         if not norm:
             return _unknown(phone)
 
@@ -74,7 +94,7 @@ async def detect_identity(phone: str, text: str = "") -> dict:
         if admin_result:
             emp = await _lookup_employee(norm)
             return _build(
-                phone=norm, role="admin", confidence=100, source="settings",
+                _phone=norm, role="admin", confidence=100, source="settings",
                 priority=200, emp=emp,
             )
 
@@ -89,28 +109,28 @@ async def detect_identity(phone: str, text: str = "") -> dict:
 
             # For employee / supervisor seed roles — enrich with DB record
             emp = await _lookup_employee(norm) if role in ("employee", "supervisor", "admin") else None
-            log.info(f"[identity] {norm} → {role} (seed, conf={confidence}, pri={priority})")
-            return _build(phone=norm, role=role, confidence=confidence, source=source,
+            log.info("[identity] %s → %s (seed, conf=%s, pri=%s)", norm, role, confidence, priority)
+            return _build(_phone=norm, role=role, confidence=confidence, source=source,
                           priority=priority, emp=emp, notes=notes)
 
         # ── Step 3: employee DB lookup ─────────────────────────────────────────
         emp = await _lookup_employee(norm)
         if emp:
-            log.info(f"[identity] {norm} → employee (db_employee)")
-            return _build(phone=norm, role="employee", confidence=88, source="db_employee",
+            log.info("[identity] %s → employee (db_employee)", norm)
+            return _build(_phone=norm, role="employee", confidence=88, source="db_employee",
                           priority=_ROLE_PRIORITY["employee"], emp=emp)
 
         # ── Step 3.5: operational evidence lookups ─────────────────────────────
         cash_emp = await _lookup_cash_identity(norm)
         if cash_emp:
-            log.info(f"[identity] {norm} → employee (cash_payment)")
-            return _build(phone=norm, role="employee", confidence=86, source="cash_payment",
+            log.info("[identity] %s → employee (cash_payment)", norm)
+            return _build(_phone=norm, role="employee", confidence=86, source="cash_payment",
                           priority=_ROLE_PRIORITY["employee"], emp=cash_emp)
 
         attendance_emp = await _lookup_attendance_identity(norm)
         if attendance_emp:
-            log.info(f"[identity] {norm} → employee (attendance)")
-            return _build(phone=norm, role="employee", confidence=86, source="attendance",
+            log.info("[identity] %s → employee (attendance)", norm)
+            return _build(_phone=norm, role="employee", confidence=86, source="attendance",
                           priority=_ROLE_PRIORITY["employee"], emp=attendance_emp)
 
         escort_row = await _lookup_escort_roster(norm)
@@ -124,7 +144,7 @@ async def detect_identity(phone: str, text: str = "") -> dict:
                 norm, escort_role, _esc_name, _esc_status, _esc_date,
             )
             return _build(
-                phone=norm, role=escort_role, confidence=85, source="escort_roster",
+                _phone=norm, role=escort_role, confidence=85, source="escort_roster",
                 priority=_ROLE_PRIORITY.get(escort_role, _ROLE_PRIORITY["employee"]),
                 notes=f"escort_duty:{_esc_status}:{_esc_date}",
             )
@@ -135,27 +155,27 @@ async def detect_identity(phone: str, text: str = "") -> dict:
             relation = (contact.get("relation_name") or "").lower()
             role = _map_relation(relation)
             pri = _ROLE_PRIORITY.get(role, 50)
-            log.info(f"[identity] {norm} → {role} (db_contact, relation={relation})")
-            return _build_contact(phone=norm, role=role, confidence=80, source="db_contact",
+            log.info("[identity] %s → %s (db_contact, relation=%s)", norm, role, relation)
+            return _build_contact(_phone=norm, role=role, confidence=80, source="db_contact",
                                   priority=pri, contact=contact)
 
         # ── Step 5: text-hint candidate detection ─────────────────────────────
         if text and _is_candidate_text(text):
-            log.info(f"[identity] {norm} → candidate (text_hint)")
-            return _build(phone=norm, role="candidate", confidence=50, source="text_hint",
+            log.info("[identity] %s → candidate (text_hint)", norm)
+            return _build(_phone=norm, role="candidate", confidence=50, source="text_hint",
                           priority=_ROLE_PRIORITY["candidate"])
 
         # ── Step 6: escort content from unknown sender ─────────────────────────
         if text and _ESCORT_CONTENT_RE.search(text):
-            log.info(f"[identity] {norm} → repeat_client (text_hint, escort content)")
-            return _build(phone=norm, role="repeat_client", confidence=40, source="text_hint",
+            log.info("[identity] %s → repeat_client (text_hint, escort content)", norm)
+            return _build(_phone=norm, role="repeat_client", confidence=40, source="text_hint",
                           priority=_ROLE_PRIORITY["repeat_client"])
 
-        log.info(f"[identity] {norm} → unknown")
+        log.info("[identity] %s → unknown", norm)
         return _unknown(norm)
 
-    except Exception as e:
-        log.error(f"[identity] detect_identity error for {phone}: {e}")
+    except (AttributeError, LookupError, TypeError, ValueError) as e:
+        log.error("[identity] detect_identity error for %s: %s", phone, e)
         return _unknown(phone)
 
 
@@ -165,13 +185,13 @@ def _check_admin_settings(phone: str) -> bool:
     try:
         from app.config import get_settings
         s = get_settings()
-        admin_phones = set(normalize_phone(p) for p in s.admin_number_list if p)
+        admin_phones = set(_normalize_phone(p) for p in s.admin_number_list if p)
         for attr in ("admin_meta_number", "admin_bridge1_number", "admin_bridge2_number"):
             v = getattr(s, attr, "")
             if v:
-                admin_phones.add(normalize_phone(v))
+                admin_phones.add(_normalize_phone(v))
         return phone in admin_phones
-    except Exception:
+    except (AttributeError, LookupError, TypeError, ValueError):
         return False
 
 
@@ -189,7 +209,7 @@ async def _lookup_seed(phone: str) -> Optional[dict]:
 
 
 async def _lookup_employee(phone: str) -> Optional[dict]:
-    variants = phone_variants(phone)
+    variants = _phone_variants(phone)
     if not variants:
         return None
     row = await fetch_one(
@@ -201,19 +221,43 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
            LIMIT 1""",
         variants,
     )
-    return dict(row) if row else None
+    if row:
+        return dict(row)
+
+    # Fallback to FPE-linked employees created through payroll/admin/escort flows.
+    row = await fetch_one(
+        """SELECT w.employee_id,
+                  COALESCE(NULLIF(w.employee_name, ''), NULLIF(e.full_name, '')) AS employee_name,
+                  COALESCE(NULLIF(w.designation, ''), NULLIF(e.department, ''), 'Staff') AS designation,
+                  w.basic_salary,
+                  w.bkash_number,
+                  COALESCE(w.status, CASE WHEN e.status = 'active' THEN 'Active' ELSE 'Inactive' END) AS status
+           FROM fpe_employees e
+           LEFT JOIN wbom_employees w ON w.employee_id = e.wbom_employee_id
+           WHERE e.status = 'active'
+             AND (e.primary_phone = ANY($1) OR e.employee_id_phone = ANY($1))
+           ORDER BY e.id DESC
+           LIMIT 1""",
+        variants,
+    )
+    return dict(row) if row and row.get("employee_id") else None
 
 
 async def _lookup_cash_identity(phone: str) -> Optional[dict]:
     """Resolve operational identity from existing cash/payment records."""
-    variants = phone_variants(phone)
+    variants = _phone_variants(phone)
     if not variants:
         return None
     row = await fetch_one(
-        """SELECT e.employee_id, e.full_name AS employee_name, e.designation,
-                  e.basic_salary, e.bkash_number, e.status
+        """SELECT COALESCE(e.id, t.employee_id) AS employee_id,
+                  COALESCE(NULLIF(e.full_name, ''), NULLIF(w.employee_name, '')) AS employee_name,
+                  COALESCE(NULLIF(e.designation, ''), NULLIF(w.designation, '')) AS designation,
+                  COALESCE(e.basic_salary, w.basic_salary) AS basic_salary,
+                  w.bkash_number,
+                  COALESCE(e.status, w.status) AS status
            FROM fpe_cash_transactions t
-           LEFT JOIN fpe_employees e ON e.employee_id = t.employee_id
+           LEFT JOIN fpe_employees e ON e.id = t.employee_id
+           LEFT JOIN wbom_employees w ON w.employee_id = e.wbom_employee_id
            WHERE t.employee_phone = ANY($1)
               OR t.employee_id_phone = ANY($1)
               OR t.payout_phone = ANY($1)
@@ -236,7 +280,7 @@ async def _lookup_cash_identity(phone: str) -> Optional[dict]:
 
 async def _lookup_attendance_identity(phone: str) -> Optional[dict]:
     """Resolve an employee through attendance joined to the employee register."""
-    variants = phone_variants(phone)
+    variants = _phone_variants(phone)
     if not variants:
         return None
     row = await fetch_one(
@@ -254,7 +298,7 @@ async def _lookup_attendance_identity(phone: str) -> Optional[dict]:
 
 async def _lookup_escort_roster(phone: str) -> Optional[dict]:
     """Return any existing escort/ship identity before candidate classification."""
-    variants = phone_variants(phone)
+    variants = _phone_variants(phone)
     if not variants:
         return None
     row = await fetch_one(
@@ -272,7 +316,7 @@ async def _lookup_escort_roster(phone: str) -> Optional[dict]:
 
 
 async def _lookup_contact(phone: str) -> Optional[dict]:
-    variants = phone_variants(phone)
+    variants = _phone_variants(phone)
     if not variants:
         return None
     row = await fetch_one(
@@ -314,7 +358,7 @@ def _is_candidate_text(text: str) -> bool:
 
 
 def _build(
-    phone: str,
+    _phone: str,
     role: str,
     confidence: int,
     source: str,
@@ -345,7 +389,7 @@ def _build(
 
 
 def _build_contact(
-    phone: str,
+    _phone: str,
     role: str,
     confidence: int,
     source: str,
@@ -372,7 +416,7 @@ def _build_contact(
     }
 
 
-def _unknown(phone: str) -> dict:
+def _unknown(_phone: str) -> dict:
     return {
         "role":           "unknown",
         "employee_id":    None,

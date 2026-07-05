@@ -1397,6 +1397,200 @@ async def delete_draft_program(program_id: int, actor: str = "api") -> dict:
     return {"deleted": True, "program_id": program_id}
 
 
+async def create_roster_change_request(
+    program_id: int,
+    action: str,
+    payload: dict,
+    requested_by: str,
+    requested_by_phone: Optional[str] = None,
+) -> dict:
+    """Store operator roster mutation requests for admin approval."""
+    if action not in {"edit", "delete"}:
+        raise ValueError("Unsupported change request action")
+
+    existing = await fetch_one(
+        """
+        SELECT id, status FROM escort_roster_change_requests
+        WHERE program_id = $1 AND action = $2 AND status = 'pending'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        program_id,
+        action,
+    )
+    if existing:
+        return dict(existing)
+
+    row = await fetch_one(
+        """
+        INSERT INTO escort_roster_change_requests (
+            program_id, action, payload, status,
+            requested_by, requested_by_phone, requested_at
+        ) VALUES ($1, $2, $3::jsonb, 'pending', $4, $5, NOW())
+        RETURNING *
+        """,
+        program_id,
+        action,
+        json.dumps(payload or {}),
+        requested_by,
+        requested_by_phone,
+    )
+    await log_audit(
+        program_id=program_id,
+        action=f"change_request_{action}",
+        old_data=None,
+        new_data={"request_payload": payload or {}, "requested_by": requested_by},
+        performed_by=requested_by,
+        source="approval_queue",
+    )
+    return dict(row) if row else {}
+
+
+async def get_roster_change_requests(
+    status: Optional[str] = "pending",
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    """List change requests for review UIs."""
+    offset = (page - 1) * page_size
+    params: list[Any] = []
+    where = ""
+    if status:
+        params.append(status)
+        where = f"WHERE status = ${len(params)}"
+
+    params_total = list(params)
+    total = await fetch_val(
+        f"SELECT COUNT(*) FROM escort_roster_change_requests {where}",
+        *params_total,
+    ) or 0
+
+    params.append(page_size)
+    params.append(offset)
+    rows = await fetch_all(
+        f"""
+        SELECT *
+        FROM escort_roster_change_requests
+        {where}
+        ORDER BY requested_at DESC
+        LIMIT ${len(params)-1} OFFSET ${len(params)}
+        """,
+        *params,
+    )
+    return {
+        "items": [dict(r) for r in rows],
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, -(-int(total) // page_size)),
+    }
+
+
+async def get_roster_change_request(request_id: int) -> Optional[dict]:
+    row = await fetch_one(
+        "SELECT * FROM escort_roster_change_requests WHERE id = $1",
+        request_id,
+    )
+    return dict(row) if row else None
+
+
+async def decide_roster_change_request(
+    request_id: int,
+    decision: str,
+    reviewed_by: str,
+    review_note: Optional[str] = None,
+) -> dict:
+    """Approve or reject pending roster change requests and apply on approval."""
+    if decision not in {"approved", "rejected"}:
+        raise ValueError("Invalid decision")
+
+    req = await get_roster_change_request(request_id)
+    if not req:
+        raise ValueError("Change request not found")
+    if req.get("status") != "pending":
+        return req
+
+    program_id = int(req["program_id"])
+    action = str(req.get("action") or "").strip().lower()
+    payload = req.get("payload") or {}
+
+    apply_result: dict[str, Any] = {}
+    if decision == "approved":
+        if action == "edit":
+            updates = (payload or {}).get("updates") or {}
+            row = await update_roster_entry(program_id, updates, actor=reviewed_by)
+            apply_result = {"updated": bool(row), "program_id": program_id}
+        elif action == "delete":
+            apply_result = await delete_program_any_status(program_id, actor=reviewed_by)
+        else:
+            raise ValueError("Unsupported request action")
+
+    await execute(
+        """
+        UPDATE escort_roster_change_requests
+        SET status = $2,
+            reviewed_by = $3,
+            review_note = $4,
+            reviewed_at = NOW(),
+            result_payload = $5::jsonb
+        WHERE id = $1
+        """,
+        request_id,
+        decision,
+        reviewed_by,
+        review_note,
+        json.dumps(apply_result or {}),
+    )
+
+    await log_audit(
+        program_id=program_id,
+        action=f"change_request_{decision}",
+        old_data={"request_id": request_id, "action": action},
+        new_data={"result": apply_result, "note": review_note},
+        performed_by=reviewed_by,
+        source="approval_queue",
+    )
+    out = await get_roster_change_request(request_id)
+    return out or {}
+
+
+async def delete_program_any_status(program_id: int, actor: str = "admin") -> dict:
+    """
+    Admin/Superadmin hard delete with dependency safety.
+    Blocks when dependent records exist.
+    """
+    prog = await fetch_one(
+        "SELECT program_id, status, mother_vessel FROM wbom_escort_programs WHERE program_id = $1",
+        program_id,
+    )
+    roster = await fetch_one(
+        "SELECT program_id FROM escort_roster_entries WHERE program_id = $1",
+        program_id,
+    )
+    if not prog and not roster:
+        return {"error": f"Program {program_id} not found"}
+
+    if await _duplicate_has_dependencies(program_id):
+        return {"error": "Cannot delete program with dependent records"}
+
+    await execute("DELETE FROM escort_roster_entries WHERE program_id = $1", program_id)
+    await execute("DELETE FROM wbom_escort_programs WHERE program_id = $1", program_id)
+
+    await log_audit(
+        program_id=program_id,
+        action="admin_hard_delete",
+        old_data={"status": (prog or {}).get("status") if prog else None},
+        new_data=None,
+        performed_by=actor,
+        source="api",
+    )
+    return {
+        "deleted": True,
+        "program_id": program_id,
+        "status": (prog or {}).get("status") if prog else None,
+    }
+
+
 async def upsert_conveyance_config(
     destination: str,
     conveyance_amount: float,

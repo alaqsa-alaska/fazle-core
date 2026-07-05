@@ -37,7 +37,7 @@ from .models import (
     ParseResult,
     PayoutMethod,
 )
-from .normalizer import normalize_amount, normalize_bd_phone, normalize_name, normalize_payout_method
+from .normalizer import normalize_amount, normalize_bd_phone, normalize_payout_method
 
 # ── Regex building blocks ─────────────────────────────────────────────────────
 
@@ -58,10 +58,10 @@ _RE_METHOD = re.compile(
     r"\(\s*([BbNnCcRr]|[Bb][Kk]|[Cc]ash|[Nn]agad|[Bb][Kk]ash|[Rr]ocket)\s*\)",
 )
 
-# Amount: digits/commas followed by /- or ৳
-# Handles "2200/-", "2,200/-", "= 200 /-", "১,৫৩০/-"
+# Amount: digits/commas followed by "/", "/-", or "/+"
+# Handles "2200/-", "2,200/-", "= 200 /-", "১,৫৩০/-", "3500/", "500/+"
 _RE_AMOUNT = re.compile(
-    r"[=\s]*([০-৯\d][০-৯\d,\.]*)\s*/[-–]",
+    r"[=\s]*([০-৯\d][০-৯\d,\.]*)\s*/(?:[-–+])?",
 )
 
 # Balance summary patterns (Bengali):  "31/3/26=টোটাল বাকি =75,468/-"
@@ -370,10 +370,6 @@ def _parse_payment(text: str, msg_date: Optional[date]) -> ParseResult:
     phones = _RE_PHONE.findall(t_for_phones)
     # The payout phone is typically the last phone before the method tag or amount,
     # and is NOT the employee ID phone
-    id_phone_digits = None
-    if p.employee_id_phone:
-        id_phone_digits = p.employee_id_phone[-10:]  # last 10 digits for comparison
-
     resolved_phones = [normalize_bd_phone(ph) for ph in phones]
     resolved_phones = [ph for ph in resolved_phones if ph is not None]
 

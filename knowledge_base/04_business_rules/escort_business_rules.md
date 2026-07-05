@@ -2,7 +2,7 @@
 title: Escort Business Rules
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-27
+last_verified: 2026-07-05
 runtime_index: true
 ---
 
@@ -108,6 +108,10 @@ Rules:
 - `MV`, `M.V.`, `Mv`, and similar labels are helper signals only
 - Those labels may appear before both mother vessels and lighter vessels
 - Never classify mother vessel from `MV` label alone
+- `Mother Vessel:` label, when present, is the highest-priority mother-vessel source
+- `Lighter Vessel:` / `Lighter Name:` label, when present, is the highest-priority lighter-vessel source
+- In compact multiline formats, an `MV` line with nearby `MT/M.T` capacity and mobile belongs to lighter
+- A trailing parenthesized `MV` without mobile (for example `(MV HORDA)`) is a mother-vessel candidate
 
 Supported parsing modes:
 - Block-based parsing has higher priority

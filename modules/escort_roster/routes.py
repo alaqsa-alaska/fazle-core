@@ -43,8 +43,13 @@ from .db import (
     audit_exact_confirmed_duplicates,
     cleanup_exact_confirmed_duplicates,
     confirm_slip_match,
+    create_roster_change_request,
     create_roster_entry,
+    decide_roster_change_request,
+    delete_program_any_status,
     get_conveyance_config,
+    get_roster_change_request,
+    get_roster_change_requests,
     get_roster_detail,
     get_roster_list,
     get_roster_summary,
@@ -78,6 +83,44 @@ async def _require_key(key: str = Depends(_API_KEY_HEADER)):
     except Exception as e:
         log.warning(f"Auth error for key {(key or '')[:10]}...: {e}")
     raise HTTPException(status_code=403, detail="Unauthorized")
+
+
+async def _resolve_actor(key: str = Depends(_API_KEY_HEADER)) -> dict:
+    """Resolve authenticated actor context for role-aware escort-roster mutations."""
+    await _require_key(key)
+    if key == settings.internal_api_key:
+        return {
+            "api_key": key,
+            "admin_id": None,
+            "name": "owner",
+            "phone": "",
+            "roles": ["owner", "superadmin"],
+            "is_internal": True,
+            "can_operator_mutate": True,
+            "can_admin_direct": True,
+        }
+
+    from modules import rbac
+
+    admin = await rbac.get_admin_by_api_key(key or "")
+    if not admin or admin.get("status") != "active":
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    roles = await rbac.get_roles(int(admin["id"]))
+    normalized_roles = {str(role or "").strip().lower() for role in roles}
+    can_edit = await rbac.check_permission(api_key=key, command="edit")
+    can_admin_direct = bool(normalized_roles.intersection({"admin", "superadmin", "owner"}))
+
+    return {
+        "api_key": key,
+        "admin_id": int(admin["id"]),
+        "name": admin.get("name") or admin.get("username") or "admin",
+        "phone": admin.get("phone") or "",
+        "roles": list(roles),
+        "is_internal": False,
+        "can_operator_mutate": bool(can_edit.get("allowed")),
+        "can_admin_direct": can_admin_direct,
+    }
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -606,7 +649,7 @@ async def api_roster_detail(program_id: int):
 
 
 @router.patch("/{program_id}", dependencies=[Depends(_require_key)])
-async def api_roster_patch(program_id: int, body: PatchRosterEntry):
+async def api_roster_patch(program_id: int, body: PatchRosterEntry, actor: dict = Depends(_resolve_actor)):
     """Inline edit of a roster entry. Only provided fields are updated."""
     updates = body.model_dump(exclude_none=True)
     if not updates:
@@ -619,8 +662,27 @@ async def api_roster_patch(program_id: int, body: PatchRosterEntry):
             if not norm:
                 raise HTTPException(400, detail=f"Invalid Bangladesh mobile number for '{field}': {raw!r}")
             updates[field] = norm
+    actor_name = actor.get("name") or actor.get("phone") or "api"
+
+    if actor.get("can_operator_mutate") and not actor.get("can_admin_direct"):
+        req = await create_roster_change_request(
+            program_id=program_id,
+            action="edit",
+            payload={"updates": updates},
+            requested_by=actor_name,
+            requested_by_phone=actor.get("phone") or None,
+        )
+        return {
+            "status": "pending_approval",
+            "message": "Edit submitted for admin approval.",
+            "request": req,
+        }
+
+    if not actor.get("can_admin_direct"):
+        raise HTTPException(status_code=403, detail="Not allowed to edit roster directly")
+
     try:
-        row = await update_roster_entry(program_id, updates, actor="api")
+        row = await update_roster_entry(program_id, updates, actor=actor_name)
     except ValueError as e:
         msg = str(e)
         if "not found" in msg.lower():
@@ -652,10 +714,81 @@ async def api_roster_sync_one(program_id: int):
 
 
 @router.delete("/{program_id}", dependencies=[Depends(_require_key)])
-async def api_delete_draft(program_id: int):
-    """Permanently delete a draft program. Rejects non-draft programs."""
-    from modules.escort_roster.db import delete_draft_program
-    result = await delete_draft_program(program_id, actor="api")
+async def api_delete_program(program_id: int, actor: dict = Depends(_resolve_actor)):
+    """Delete behavior is role-based: operator submits approval request, admin/superadmin can delete directly."""
+    actor_name = actor.get("name") or actor.get("phone") or "api"
+
+    if actor.get("can_operator_mutate") and not actor.get("can_admin_direct"):
+        req = await create_roster_change_request(
+            program_id=program_id,
+            action="delete",
+            payload={},
+            requested_by=actor_name,
+            requested_by_phone=actor.get("phone") or None,
+        )
+        return {
+            "status": "pending_approval",
+            "message": "Delete submitted for admin approval.",
+            "request": req,
+        }
+
+    if not actor.get("can_admin_direct"):
+        raise HTTPException(status_code=403, detail="Not allowed to delete roster entries")
+
+    result = await delete_program_any_status(program_id, actor=actor_name)
     if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=409, detail=result["error"])
     return result
+
+
+@router.get("/change-requests", dependencies=[Depends(_require_key)])
+async def api_roster_change_requests(
+    status: Optional[str] = Query(default="pending"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """List roster change requests for review workflows."""
+    return await get_roster_change_requests(status=status, page=page, page_size=page_size)
+
+
+@router.post("/change-requests/{request_id}/approve", dependencies=[Depends(_require_key)])
+async def api_approve_roster_change_request(
+    request_id: int,
+    actor: dict = Depends(_resolve_actor),
+):
+    if not actor.get("can_admin_direct"):
+        raise HTTPException(status_code=403, detail="Only admin/superadmin can approve roster requests")
+
+    req = await get_roster_change_request(request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Change request not found")
+
+    decision = await decide_roster_change_request(
+        request_id=request_id,
+        decision="approved",
+        reviewed_by=actor.get("name") or actor.get("phone") or "admin",
+        review_note=None,
+    )
+    return decision
+
+
+@router.post("/change-requests/{request_id}/reject", dependencies=[Depends(_require_key)])
+async def api_reject_roster_change_request(
+    request_id: int,
+    note: Optional[str] = Query(default=None),
+    actor: dict = Depends(_resolve_actor),
+):
+    if not actor.get("can_admin_direct"):
+        raise HTTPException(status_code=403, detail="Only admin/superadmin can reject roster requests")
+
+    req = await get_roster_change_request(request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Change request not found")
+
+    decision = await decide_roster_change_request(
+        request_id=request_id,
+        decision="rejected",
+        reviewed_by=actor.get("name") or actor.get("phone") or "admin",
+        review_note=note,
+    )
+    return decision

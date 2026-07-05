@@ -2,7 +2,7 @@
 title: Escort Order Parser Source Of Truth
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-27
+last_verified: 2026-07-05
 runtime_index: true
 source_module: modules/escort
 ---
@@ -31,6 +31,10 @@ Important rules:
 - `MV`, `M.V.`, `Mv`, and similar labels are helper signals only
 - `MV` may appear before both mother and lighter vessels
 - Never rely on `MV` label alone
+- If `Mother Vessel:` label is present, that value wins for mother vessel
+- If `Lighter Vessel:` or `Lighter Name:` label is present, that value wins for lighter vessel
+- In multi-line compact blocks, `MV` line + nearby capacity + nearby mobile is a lighter candidate
+- A trailing parenthesized MV line (e.g. `(MV HORDA)`) is treated as mother vessel when no mobile is attached
 
 ## Message Direction Gates
 
@@ -127,6 +131,12 @@ Supporting clues:
 
 Hard rule:
 - if a candidate block contains a mobile, it is not the mother vessel
+
+Mother/lighter disambiguation hard rule:
+- `Mother Vessel: MV Horda` must remain mother vessel
+- `Lighter Vessel: MV Al Balad-3` must remain lighter vessel
+- `M.V Al Balad-3` + `2200 M.T` + `01716...` is a lighter block, not mother
+- `(MV HORDA)` at the end with no mobile remains mother vessel
 
 ### Importer
 

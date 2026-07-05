@@ -2,7 +2,7 @@
 title: AI Response Business Rules
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-07-04
 runtime_index: true
 ---
 
@@ -105,6 +105,96 @@ Certain contact roles must NEVER receive a directly auto-sent reply, regardless 
 **Source Function:** `_is_draft_always()`
 **PKCA Report:** 10_hidden_rule_coverage_report.md (HK-09)
 **Management Authority:** HK-09 approved in PKVC Management Decisions
+
+---
+
+## Admin-Accountant Final Payment Instruction
+
+### Purpose
+When a payment instruction is the final admin-accountant shorthand, it must be treated as a completed payment write and not as a normal customer draft.
+
+### Authoritative Payment Format
+
+Supported format (examples):
+
+- `ID: 01795122311 Manik Mea 01789123456(B) 5000/-`
+- `Manik Mea 01789123456(N) 200/-`
+- `Saiful op +8801849258074(C) 305/-`
+
+Method map:
+
+- `(B)` = `bkash`
+- `(N)` = `nagad`
+- `(C)` = `cash`
+- `(R)` = `rocket`
+- `(BANK)` = `bank`
+
+### Business Rule
+
+If this shorthand is detected in admin-accountant payment conversation, the system performs a final payment write to the canonical daily cash transaction ledger.
+
+- Canonical transaction table: `fpe_cash_transactions`
+- Legacy table is not used for new writes: `wbom_cash_transactions`
+- A missing employee is auto-created in `wbom_employees` from the authoritative instruction identity mobile.
+- The payment is stored as a finalized payroll-engine transaction with source channel `admin-accountant-instruction`.
+
+### Idempotency and Safety
+
+- If the same source message is processed again, duplicate prevention keeps only one canonical transaction.
+- Existing auto-send/draft gates for other message classes remain unchanged.
+
+**Source Module:** `modules/payment_ingest`
+**Source Function:** `parse_admin_cash_shorthand()`, `ingest_admin_cash_entry()`, `_match_or_create_instruction_employee()`
+**Ledger Engine:** `modules/fazle_payroll_engine/payment_event.py`, `modules/fazle_payroll_engine/accounting.py`
+
+---
+
+## Escort Prefix Contact Order Workflow
+
+### Purpose
+Messages from contacts whose saved name starts with escort-order buyer prefixes are handled as draft-first operational workflow and not normal auto-reply.
+
+### Prefix Scope
+
+Primary escort-order prefixes in policy and runtime config:
+
+- `escort`
+- `client`
+- `tcis`
+- `gms`
+
+Runtime also supports additional operational prefixes via configuration (for example `office`, `operation`, `dalal`).
+
+### Business Rule (Inbound Order)
+
+When an inbound message matches escort order structure:
+
+1. The message is treated as escort workflow input.
+2. A draft escort program is saved in `wbom_escort_programs` (status=`draft`).
+3. The draft is sent to admin for review/completion.
+
+### Business Rule (Admin Completion)
+
+After admin fills escort name and escort mobile and sends the completed slip from the authoritative admin bridge to the same prefixed client number:
+
+1. The draft is confirmed (or created if no draft row is found) in `wbom_escort_programs`.
+2. Program is synced to escort roster DB (`escort_roster_entries`) via roster sync.
+3. Escort identity is auto-resolved/created in employee DB:
+	- `wbom_employees` row is created/updated from escort mobile.
+	- linked `fpe_employees` identity row is ensured.
+4. Finalized slip is routed back to the originating client number.
+
+This completion message therefore acts as both:
+
+- escort roster/program confirmation source, and
+- automatic employee-onboarding source for missing escort employee records.
+
+### Draft-Always and Prefix Safety
+
+Prefix-based contacts are protected by draft gates (`draft_name_prefixes`, `draft_always_names`) so non-safe flows stay under admin review.
+
+**Source Module:** `modules/message_router`, `modules/bridge_poller`, `modules/escort`, `modules/escort_roster/db.py`
+**Source Function:** `_should_silent_skip()`, `_is_draft_always()`, `handle_escort_client_message()`, `handle_admin_escort_completion()`, `_resolve_escort_employee_id()`
 
 ---
 

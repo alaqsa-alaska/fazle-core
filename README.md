@@ -233,6 +233,8 @@ The app is operational, but these are real current risks:
    - Escort confirmation code path dedupe in `modules/escort`
    - Roster/admin audit + cleanup endpoints in `modules/escort_roster`
    - DB schema unique index migration `db/migrations/025_escort_confirmed_exact_unique.sql`
+- Escort roster edit/delete now supports operator pending approval flow with
+  migration `db/migrations/026_escort_roster_change_requests.sql`.
 - Startup and periodic maintenance now run exact confirmed duplicate cleanup
    (no AI-dependent step required).
 

@@ -2,7 +2,7 @@
 title: Daily Cash Transaction Source Of Truth
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-07-01
+last_verified: 2026-07-05
 runtime_index: true
 source_modules: modules/payment_ingest, modules/payment_workflow, modules/accountant_summary, modules/fazle_payroll_engine
 ---
@@ -114,3 +114,26 @@ Rules:
 - Transaction history is traceable through `employee_id`, `employee_id_phone`, `employee_phone`, `payout_phone`, `txn_ref`, `source`, `source_message_id`, `source_message_text`, and timestamps where present.
 - Existing DB columns must be used; do not change the DB schema for this workflow.
 - All new transactions must go through `create_transaction()` in `accounting.py` to ensure ledger consistency.
+
+## Runtime Compliance Check (2026-07-05)
+
+### Working
+
+- `fpe_cash_transactions` canonical create path is active through `create_transaction()`.
+- Ledger coupling is active: `create_transaction()` updates `fpe_employee_ledger` via `_upsert_ledger()` for final transactions.
+- Reversal/create accounting path also updates ledger via `_upsert_ledger()`.
+- Admin transaction create API writes through canonical create path.
+- `wbom_cash_transactions` has no active insert/update/delete writes in runtime modules.
+
+### Not Fully Working / Gaps
+
+- Admin-accountant shorthand amounts with suffix variants like `3500/` or `500/+` were previously parsed as non-payment and could be routed to review queue instead of canonical transaction create. Parser has been patched and regression tests added.
+- Non-strict escort-buying client messages (free-form, mixed language, partial fields) were previously dropped when minimum required fields were missing. Runtime now sends a partial admin draft for review when sender is in escort-order prefix context.
+- Prefix gate coverage was partial: `client` and `gms` were not included in escort-order prefix detection in `message_router`; now included.
+
+### Current Status Estimate
+
+- Working: ~90%
+- Needs follow-up hardening: ~10%
+
+Follow-up scope: reconcile historical unmatched rows created before parser patch, and continue improving free-form escort data extraction confidence.

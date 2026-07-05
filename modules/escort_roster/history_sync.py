@@ -72,7 +72,11 @@ _ESCORT_MOB_RE = re.compile(
 _MASTER_MOB_RE = re.compile(
     r"(?i)(?:master\s*(?:nmbr|number|mob|no|m\.?\s*no)\s*[-:=]?|mob\s*[:=])\s*(.+)"
 )
-_LIGHTER_LABEL_RE = re.compile(r"(?i)^lighter\s*[:=]\s*(.+)", re.MULTILINE)
+_LIGHTER_LABEL_RE = re.compile(
+    r"(?i)^\s*(?:lighter\s*(?:vessel|name)?(?:\s*/\s*lighter\s*(?:vessel|name))?|lv)\s*[:=]\s*(.+)",
+    re.MULTILINE,
+)
+_MOTHER_LABEL_RE = re.compile(r"(?i)^\s*mother\s*vessel\s*[:=]\s*(.+)", re.MULTILINE)
 _DEST_RE = re.compile(r"(?i)(?:destination|dest)\s*[:=]\s*(.+)")
 
 NOISE_LINES = {"al aqsa surveillance force", "al-aqsa security service",
@@ -322,6 +326,14 @@ def _parse_block(block: str, mother_vessel: Optional[str]) -> LighterRecord:
     # --- Destination ---
     rec.destination = _extract_destination(block)
 
+    # --- Mother vessel override from explicit label inside block ---
+    m = _MOTHER_LABEL_RE.search(block)
+    if m:
+        mv_label = m.group(1).strip()
+        mv_label = re.sub(r"\b01[3-9][\d\s\-]{8,12}\b.*$", "", mv_label).strip()
+        if mv_label:
+            rec.mother_vessel = mv_label
+
     # --- Lighter vessel ---
     # Priority 1: explicit "Lighter: <name>" label
     m = _LIGHTER_LABEL_RE.search(block)
@@ -359,6 +371,8 @@ def _parse_block(block: str, mother_vessel: Optional[str]) -> LighterRecord:
         # Priority 3: second non-empty line that's not a field label and not MV
         for ln in lines:
             if _is_noise(ln):
+                continue
+            if re.search(r"(?i)^\s*mother\s*vessel\s*[:=]", ln):
                 continue
             if re.search(r"(?i)^(escort|master|mob|mob[:\s]|date|start|al aqsa)", ln):
                 continue
