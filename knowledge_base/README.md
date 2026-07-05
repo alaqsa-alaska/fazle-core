@@ -48,3 +48,4 @@ Any frontend role, permission, employee, candidate, client, payment, attendance,
 
 ## Revision History
 - 2026-06-19: Rebuilt into role-centric AI knowledge architecture after conflict resolution and source normalization.
+- 2026-07-05: Added deterministic escort mother/lighter disambiguation and exact confirmed duplicate prevention references in business/workflow/developer articles.

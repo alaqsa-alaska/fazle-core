@@ -89,3 +89,8 @@ soft-link. Migration 011 backfilled all 178 WBOM employees into FPE.
 2. All statements must be idempotent (`IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`).
 3. Never drop columns or rename existing columns.
 4. Restart `fazle-core.service` — `start_fpe()` will apply it automatically.
+
+## 2026-07-05 Cross-Module Note
+
+- Escort confirmed duplicate hardening was added upstream in escort/roster
+	modules and DB migrations; FPE canonical transaction model remains unchanged.

@@ -133,7 +133,7 @@ _CD_MV_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _CD_LV_RE = re.compile(
-    r"(?:lighter(?:\s*(?:vessel|name))?|lv)\s*:\s*([A-Za-z0-9][A-Za-z0-9_/\s.\-]{1,60}?)(?=\s*\n|$)",
+    r"(?:lighter(?:\s*(?:vessel|name))?|lv)(?:\s*/\s*lighter\s*(?:vessel|name))?\s*:\s*([A-Za-z0-9][A-Za-z0-9_/\s.\-]{1,80}?)(?=\s*\n|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 _CD_MASTER_MOB_RE = re.compile(
@@ -145,6 +145,7 @@ _CD_DEST_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _AL_AQSA_RE = re.compile(r"al.?aqsa|আল.?আকসা", re.IGNORECASE)
+_TRAILING_MV_PAREN_RE = re.compile(r"\(\s*(mv\.?\s+[A-Za-z0-9][A-Za-z0-9\s.\-]{1,60})\s*\)$", re.IGNORECASE)
 
 # O/a to <destination> pattern for inbound messages
 _OA_DEST_RE = re.compile(
@@ -380,10 +381,43 @@ def _line_has_mobile(line: str) -> bool:
     return bool(_extract_mobile(line))
 
 
+def _looks_like_lighter_candidate_line(lines: list[str], idx: int) -> bool:
+    """
+    A vessel-labeled line is likely a lighter when the nearby lines carry
+    capacity and/or a master mobile number.
+    """
+    line = lines[idx] if 0 <= idx < len(lines) else ""
+    if not _MV_LABEL_ANY_RE.search(line):
+        return False
+    # Mother-like metadata on the same line should not be treated as lighter.
+    if _IMPORTER_RE.search(line) or _CARGO_RE.search(line) or re.search(r"(?i)\b(?:a/?c|account|importer|cargo|product)\b", line):
+        return False
+    window = "\n".join(lines[idx: min(len(lines), idx + 4)])
+    has_mobile_nearby = bool(_MOBILE_FMT_RE.search(window))
+    has_capacity_nearby = bool(_CAPACITY_RE.search(window) or _CAPACITY_LABEL_RE.search(window))
+    # Capacity + mobile in the same block is a strong lighter signature.
+    if has_mobile_nearby and has_capacity_nearby:
+        return True
+    # Mobile-only proximity is still likely a lighter in compact order formats.
+    if has_mobile_nearby and not re.search(r"(?i)^\s*\(?\s*mother\s*vessel\s*[:\-]", line):
+        return True
+    return False
+
+
 def _extract_mother_vessel_canonical(lines: list[str], full_text: str) -> Optional[str]:
+    # Strong signal: a trailing parenthesized MV line is mother vessel.
+    for raw in reversed(lines):
+        m = _TRAILING_MV_PAREN_RE.search(raw.strip())
+        if m:
+            name = _clean_vessel_name(m.group(1), force_mv=True)
+            if name:
+                return name
+
     candidates: list[tuple[int, str]] = []
-    for line in lines:
+    for idx, line in enumerate(lines):
         if _line_has_mobile(line):
+            continue
+        if _looks_like_lighter_candidate_line(lines, idx):
             continue
         score = 0
         if _MV_LABEL_ANY_RE.search(line):
@@ -872,6 +906,23 @@ def is_completed_escort_draft(text: str) -> bool:
 
 def parse_completed_draft(text: str) -> CompletedDraft:
     """Extract all fields from admin's completed draft."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+    def _extract_labeled_line_value(pattern: str) -> Optional[str]:
+        rx = re.compile(pattern, re.IGNORECASE)
+        for ln in lines:
+            m = rx.match(ln)
+            if m:
+                return (m.group(1) or "").strip()
+        return None
+
+    mother_label = _extract_labeled_line_value(r"^\s*mother\s*vessel\s*:\s*(.+)$")
+    lighter_label = _extract_labeled_line_value(
+        r"^\s*(?:lighter\s*(?:vessel|name)(?:\s*/\s*lighter\s*(?:vessel|name))?|lv)\s*:\s*(.+)$"
+    )
+    master_label = _extract_labeled_line_value(r"^\s*master\s*(?:mobile|number|mob|no)?\s*:\s*(.+)$")
+    destination_label = _extract_labeled_line_value(r"^\s*destination\s*:\s*(.+)$")
+
     mv_m = _CD_MV_RE.search(text)
     lv_m = _CD_LV_RE.search(text)
     master_mob_m = _CD_MASTER_MOB_RE.search(text)
@@ -881,7 +932,8 @@ def parse_completed_draft(text: str) -> CompletedDraft:
     shift_m = _CD_SHIFT_RE.search(text)
     dest_m = _CD_DEST_RE.search(text)
 
-    mv = mv_m.group(1).strip() if mv_m else None
+    mv_raw = mother_label or (mv_m.group(1).strip() if mv_m else None)
+    mv = mv_raw
     if mv:
         # Strip double MV/MV. prefix (e.g. 'MV. EVA PARIS' → 'MV EVA PARIS')
         mv = re.sub(r"^MV\.?\s+", "", mv, flags=re.IGNORECASE).strip()
@@ -889,6 +941,13 @@ def parse_completed_draft(text: str) -> CompletedDraft:
             mv = f"MV {mv.upper()}"
         else:
             mv = mv.upper()
+
+    lv_raw = lighter_label or (lv_m.group(1).strip() if lv_m else None)
+    # Guardrail: never accept a Mother Vessel label as lighter value.
+    if lv_raw and re.match(r"(?i)^mother\s*vessel\s*:", lv_raw.strip()):
+        lv_raw = None
+
+    master_mobile = _extract_mobile(master_label or "") or (master_mob_m.group(1) if master_mob_m else None)
 
     # Parse shift from '(D)'/'(N)' OR bare 'Day'/'Night' text
     shift = None
@@ -898,16 +957,27 @@ def parse_completed_draft(text: str) -> CompletedDraft:
         elif shift_m.group(2):  # matched 'Day' or 'Night'
             shift = "D" if shift_m.group(2).lower() == "day" else "N"
 
-    raw_destination = dest_m.group(1).strip() if dest_m else None
+    raw_destination = destination_label or (dest_m.group(1).strip() if dest_m else None)
     destination = _normalize_destination(raw_destination or "") or raw_destination
     capacity = _normalize_capacity(text)
     importer = _extract_importer(text)
     cargo_type = _normalize_cargo(text)
 
+    # Fallback: if lighter label is missing, infer from mobile-grouped parser.
+    if not lv_raw:
+        try:
+            inferred = parse_escort_message(text)
+            if inferred.get("lighters"):
+                lv_raw = inferred["lighters"][0].get("lighter_vessel")
+            if not mv and inferred.get("mother_vessel"):
+                mv = inferred.get("mother_vessel")
+        except Exception:
+            pass
+
     return CompletedDraft(
         mother_vessel=mv,
-        lighter_vessel=lv_m.group(1).strip() if lv_m else None,
-        master_mobile=master_mob_m.group(1) if master_mob_m else None,
+        lighter_vessel=lv_raw,
+        master_mobile=master_mobile,
         cargo_type=cargo_type,
         importer=importer,
         capacity=capacity,
@@ -1443,6 +1513,52 @@ async def _create_confirmed_from_admin(
 
         # Clean MV for comparison
         mv_clean = re.sub(r"^MV\.?\s+", "", mv, flags=re.IGNORECASE).strip().upper()
+
+        # Strong dedupe key for confirmed rows: date + mother + lighter + escort.
+        # This blocks backfill/replay from creating exact duplicates.
+        exact_existing = await fetch_one(
+            """
+            SELECT program_id
+            FROM wbom_escort_programs
+            WHERE status = 'confirmed'
+              AND COALESCE(start_date, program_date) = COALESCE($1::date, COALESCE(start_date, program_date))
+              AND UPPER(TRIM(COALESCE(mother_vessel, ''))) = UPPER(TRIM($2))
+              AND UPPER(TRIM(COALESCE(lighter_vessel, ''))) = UPPER(TRIM($3))
+              AND UPPER(TRIM(COALESCE(escort_name, ''))) = UPPER(TRIM($4))
+            ORDER BY program_id ASC
+            LIMIT 1
+            """,
+            program_date,
+            mv,
+            lv,
+            escort_name,
+        )
+        if exact_existing:
+            pid = exact_existing["program_id"]
+            log.info(
+                "[escort] exact confirmed duplicate prevented: existing=%s mv=%s lv=%s escort=%s",
+                pid,
+                mv,
+                lv,
+                escort_name,
+            )
+            await _update_program_confirmed(
+                pid,
+                escort_name,
+                escort_mobile,
+                lighter_vessel=lv,
+                shift=shift,
+                program_date=program_date,
+                escort_employee_id=emp_id,
+                mother_vessel=mv,
+                destination=normalized_destination,
+                master_mobile=draft.get("master_mobile"),
+                cargo_type=cargo_type,
+                importer=importer,
+                capacity=capacity,
+            )
+            await _sync_roster_after_confirm(pid)
+            return pid
 
         # Dedup check: prefer the same vessel/lighter/master/date. This prevents
         # a completed draft from creating a second confirmed row on re-runs.

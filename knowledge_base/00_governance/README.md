@@ -72,3 +72,8 @@ Allowed changes: corrections, append-only updates, management decision additions
 Not allowed: restructuring, deletion, authority changes.
 
 All changes require a revision history entry in the affected file.
+
+## 2026-07-05 Governance Note
+
+- Escort confirmed exact-duplicate prevention is now implemented as a
+	deterministic code-and-schema control, not an operator-only manual task.

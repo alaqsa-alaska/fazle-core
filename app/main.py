@@ -80,12 +80,19 @@ def _start_stale_draft_expiry_worker() -> asyncio.Task:
 
         while True:
             try:
-                from modules.escort_roster.db import expire_stale_drafts
+                from modules.escort_roster.db import expire_stale_drafts, cleanup_exact_confirmed_duplicates
 
                 ttl = int(settings.draft_ttl_hours)
                 result = await expire_stale_drafts(hours=ttl)
                 if result.get("expired", 0):
                     log.info(f"[escort_roster] stale draft expiry: {result['expired']} expired")
+                dup = await cleanup_exact_confirmed_duplicates(days=90, actor="scheduler")
+                if dup.get("deleted"):
+                    log.info(
+                        "[escort_roster] confirmed duplicate cleanup deleted=%d skipped=%d",
+                        len(dup.get("deleted", [])),
+                        len(dup.get("skipped_with_dependencies", [])),
+                    )
             except Exception as _e:
                 log.warning(f"[escort_roster] stale draft expiry error: {_e}")
             await _aio.sleep(6 * 3600)  # every 6 hours
@@ -302,13 +309,23 @@ async def lifespan(app: FastAPI):
         log.warning(f"[self_heal] startup failed (non-fatal): {e}")
     # Escort draft cleanup — purge empty junk rows created by failed extractions
     try:
-        from modules.escort_roster.db import cleanup_empty_drafts, cleanup_junk_drafts
+        from modules.escort_roster.db import (
+            cleanup_empty_drafts,
+            cleanup_junk_drafts,
+            cleanup_exact_confirmed_duplicates,
+        )
         _cleanup_result = await cleanup_empty_drafts(min_age_hours=0, actor="startup")
         if _cleanup_result["deleted"]:
             log.info(f"[escort_cleanup] startup purged {_cleanup_result['deleted']} empty draft programs")
         _junk_result = await cleanup_junk_drafts(actor="startup")
         if _junk_result["deleted"]:
             log.info(f"[escort_cleanup] startup purged {_junk_result['deleted']} junk draft programs")
+        _dup_result = await cleanup_exact_confirmed_duplicates(days=90, actor="startup")
+        if _dup_result.get("deleted"):
+            log.info(
+                "[escort_cleanup] startup removed %d exact confirmed duplicates",
+                len(_dup_result.get("deleted", [])),
+            )
     except Exception as e:
         log.warning(f"[escort_cleanup] startup cleanup failed (non-fatal): {e}")
     stale_draft_expiry_task = _start_stale_draft_expiry_worker()

@@ -71,6 +71,17 @@ Al-Aqsa Security & Logistics Services Ltd
 
 If found, returns existing `program_id` and skips INSERT.
 
+## Deterministic Hardening (2026-07-05)
+
+- Confirmed assignment dedupe now enforces an exact key check before insert:
+  - `COALESCE(start_date, program_date)`
+  - `mother_vessel`
+  - `lighter_vessel`
+  - `escort_name`
+- If an exact confirmed match exists, the module updates that row instead of
+  creating a new one.
+- This logic is code-first and does not depend on any AI agent output.
+
 `handle_admin_escort_completion()` updates the same draft row by matching mother vessel, lighter vessel, master mobile, program date, and stored client phone when available. If no matching draft exists and admin sent a complete assignment, it may create one confirmed row directly.
 
 ## Order vs Review

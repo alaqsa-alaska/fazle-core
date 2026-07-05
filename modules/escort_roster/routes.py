@@ -40,6 +40,8 @@ from app.database import fetch_all
 from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
 
 from .db import (
+    audit_exact_confirmed_duplicates,
+    cleanup_exact_confirmed_duplicates,
     confirm_slip_match,
     create_roster_entry,
     get_conveyance_config,
@@ -386,6 +388,28 @@ async def api_cleanup_junk_drafts():
     return await cleanup_junk_drafts(actor="api")
 
 
+@router.get("/audit-exact-duplicates", dependencies=[Depends(_require_key)])
+async def api_audit_exact_duplicates(days: int = Query(default=30, ge=1, le=3650)):
+    """
+    Audit exact duplicate confirmed rows by key:
+    duty_date + mother_vessel + lighter_vessel + escort_name.
+    """
+    groups = await audit_exact_confirmed_duplicates(days=days)
+    return {
+        "days": days,
+        "groups": len(groups),
+        "items": groups,
+    }
+
+
+@router.post("/cleanup-exact-duplicates", dependencies=[Depends(_require_key)])
+async def api_cleanup_exact_duplicates(days: int = Query(default=30, ge=1, le=3650)):
+    """
+    Cleanup exact duplicate confirmed rows (keep earliest program_id per key).
+    """
+    return await cleanup_exact_confirmed_duplicates(days=days, actor="api")
+
+
 @router.post("/reconcile", dependencies=[Depends(_require_key)])
 async def api_reconcile_drafts():
     """
@@ -526,6 +550,8 @@ async def api_roster_create(body: CreateRosterEntry):
             data[field] = norm
     try:
         row = await create_roster_entry(data, actor="api")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     # Ensure escort's FPE employee record exists (non-fatal)
@@ -596,7 +622,10 @@ async def api_roster_patch(program_id: int, body: PatchRosterEntry):
     try:
         row = await update_roster_entry(program_id, updates, actor="api")
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=409, detail=msg)
     if not row:
         raise HTTPException(status_code=404, detail="Program not found")
     return dict(row)

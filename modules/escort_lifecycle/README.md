@@ -32,6 +32,11 @@ Employee sends release slip (photo or text)
 same program.  The `shared.draft.find_existing_escort_draft()` helper also
 provides this check from outside the module.
 
+## 2026-07-05 Integration Note
+
+- Upstream escort confirmation now enforces exact confirmed-key dedupe
+  (`date + mother + lighter + escort`) before lifecycle close-out steps.
+
 ## DB Tables
 
 - `wbom_escort_programs` — escort duty records

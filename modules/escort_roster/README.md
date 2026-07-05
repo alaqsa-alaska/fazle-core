@@ -74,6 +74,8 @@ escort-roster.html (frontend SPA)
 | POST | `/api/escort-roster/cleanup-drafts` | Delete all drafts |
 | POST | `/api/escort-roster/cleanup-empty-drafts` | Delete empty drafts |
 | POST | `/api/escort-roster/cleanup-junk-drafts` | Delete junk drafts |
+| GET | `/api/escort-roster/audit-exact-duplicates` | Audit exact confirmed duplicates by date+mother+lighter+escort |
+| POST | `/api/escort-roster/cleanup-exact-duplicates` | Remove exact confirmed duplicates (keeps earliest `program_id`) |
 | POST | `/api/escort-roster/reconcile` | Bulk reconciliation |
 | POST | `/api/escort-roster/sync-history` | Sync from WA file |
 | POST | `/api/escort-roster/rebuild-history` | Full rebuild |
@@ -120,6 +122,15 @@ for all phone validation in create/update routes. The canonical FPE format is
 - `save_escort_programs()` → `_sync_roster_draft(pid)` — on client order save
 - `handle_admin_escort_completion()` → `_sync_roster_after_confirm(pid)` — on admin confirmation
 - Stale draft expiry loop — every 6 hours in `app/main.py` lifespan
+- Exact confirmed duplicate cleanup — every 6 hours in `app/main.py` lifespan
+
+## Deterministic Duplicate Guard (2026-07-05)
+
+- Module-level cleanup utility: `cleanup_exact_confirmed_duplicates(days=...)`
+- Audit utility: `audit_exact_confirmed_duplicates(days=...)`
+- Duplicate key: `COALESCE(start_date, program_date) + mother_vessel + lighter_vessel + escort_name`
+- Cleanup keeps the earliest `program_id` per key and removes leftovers when
+    there are no dependent references.
 
 ## Frontend
 

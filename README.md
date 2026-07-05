@@ -227,6 +227,15 @@ The app is operational, but these are real current risks:
 7. The complete test suite may require a live or Docker test stack. A green
    `/health` endpoint is not the same thing as a green regression suite.
 
+## Deterministic Hardening Update (2026-07-05)
+
+- Escort duplicate prevention is now enforced at three layers:
+   - Escort confirmation code path dedupe in `modules/escort`
+   - Roster/admin audit + cleanup endpoints in `modules/escort_roster`
+   - DB schema unique index migration `db/migrations/025_escort_confirmed_exact_unique.sql`
+- Startup and periodic maintenance now run exact confirmed duplicate cleanup
+   (no AI-dependent step required).
+
 ## Running Locally Or On The VPS
 
 Production is managed by systemd:

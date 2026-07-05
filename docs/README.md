@@ -27,4 +27,11 @@ Security.
 - `whatsapp2/` — Bridge2 (OPS, port 8081)
 - `whatsapp-erp/` — read-only ERP query layer (separate service)
 
+## 2026-07-05 Operations Note
+
+- Escort confirmed exact-duplicate prevention is now deterministic and
+	enforceable via API audit/cleanup plus DB schema unique index.
+- Use `/api/escort-roster/audit-exact-duplicates` and
+	`/api/escort-roster/cleanup-exact-duplicates` for operational verification.
+
 See per-batch implementation notes under `/memories/repo/batch*.md`.

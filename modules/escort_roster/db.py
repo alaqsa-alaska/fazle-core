@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
@@ -47,6 +48,84 @@ def _safe_json(text: Optional[str]) -> dict:
         return json.loads(raw)
     except Exception:
         return {}
+
+
+def _norm_dup_text(value: Optional[str]) -> str:
+    """Normalise vessel/escort text for duplicate checks."""
+    text = (value or "").strip().lower()
+    # Strip noisy prefixes often coming from OCR/admin-draft text.
+    text = text.replace("mother vessel:", " ").replace("lighter vessel:", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+async def _find_duplicate_roster_entry(
+    mother_vessel: Optional[str],
+    lighter_vessel: Optional[str],
+    start_date: Optional[date],
+    escort_name: Optional[str],
+    *,
+    exclude_program_id: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Detect same-day duplicate entries.
+    Rules:
+      1) same mother_vessel + lighter_vessel + date must be unique
+      2) same mother_vessel + lighter_vessel + escort_name + date must be unique
+    """
+    if not start_date:
+        return None
+
+    mv = _norm_dup_text(mother_vessel)
+    lv = _norm_dup_text(lighter_vessel)
+    if not mv or not lv:
+        return None
+
+    dup_primary = await fetch_one(
+        """
+        SELECT program_id, mother_vessel, lighter_vessel, escort_name, start_date
+        FROM escort_roster_entries
+        WHERE start_date = $1
+          AND LOWER(TRIM(COALESCE(mother_vessel, ''))) = $2
+          AND LOWER(TRIM(COALESCE(lighter_vessel, ''))) = $3
+          AND ($4::INT IS NULL OR program_id <> $4)
+        ORDER BY program_id DESC
+        LIMIT 1
+        """,
+        start_date,
+        mv,
+        lv,
+        exclude_program_id,
+    )
+    if dup_primary:
+        return {"type": "vessel_date", **dict(dup_primary)}
+
+    en = _norm_dup_text(escort_name)
+    if not en:
+        return None
+
+    dup_with_escort = await fetch_one(
+        """
+        SELECT program_id, mother_vessel, lighter_vessel, escort_name, start_date
+        FROM escort_roster_entries
+        WHERE start_date = $1
+          AND LOWER(TRIM(COALESCE(mother_vessel, ''))) = $2
+          AND LOWER(TRIM(COALESCE(lighter_vessel, ''))) = $3
+          AND LOWER(TRIM(COALESCE(escort_name, ''))) = $4
+          AND ($5::INT IS NULL OR program_id <> $5)
+        ORDER BY program_id DESC
+        LIMIT 1
+        """,
+        start_date,
+        mv,
+        lv,
+        en,
+        exclude_program_id,
+    )
+    if dup_with_escort:
+        return {"type": "vessel_escort_date", **dict(dup_with_escort)}
+
+    return None
 
 
 async def _get_conveyance_for_destination(destination: Optional[str]) -> Decimal:
@@ -480,7 +559,8 @@ async def get_roster_list(
                p.is_historical,
                p.remarks,
                p.capacity,
-               p.whatsapp_message_id
+             p.whatsapp_message_id,
+             COALESCE(e.start_date, p.program_date) AS display_date
         FROM escort_roster_entries e
         {join_clause}
         {where_clause}
@@ -612,6 +692,27 @@ async def update_roster_entry(
     if not old:
         raise ValueError(f"Roster entry for program {program_id} not found")
 
+    # Duplicate guard on the final, prospective row values.
+    prospective = dict(old)
+    prospective.update(clean)
+    dup = await _find_duplicate_roster_entry(
+        prospective.get("mother_vessel"),
+        prospective.get("lighter_vessel"),
+        prospective.get("start_date"),
+        prospective.get("escort_name"),
+        exclude_program_id=program_id,
+    )
+    if dup:
+        if dup.get("type") == "vessel_date":
+            raise ValueError(
+                "Duplicate roster blocked: same mother vessel + lighter vessel already exists on this date "
+                f"(program_id={dup.get('program_id')})."
+            )
+        raise ValueError(
+            "Duplicate roster blocked: same mother vessel + lighter vessel + escort already exists on this date "
+            f"(program_id={dup.get('program_id')})."
+        )
+
     set_clauses = []
     params: list[Any] = [program_id]
     idx = 2
@@ -683,6 +784,23 @@ async def create_roster_entry(data: dict, actor: str = "system") -> dict:
         """
     )
     program_id = int(max_pid)
+
+    dup = await _find_duplicate_roster_entry(
+        data.get("mother_vessel"),
+        data.get("lighter_vessel"),
+        data.get("start_date"),
+        data.get("escort_name"),
+    )
+    if dup:
+        if dup.get("type") == "vessel_date":
+            raise ValueError(
+                "Duplicate roster blocked: same mother vessel + lighter vessel already exists on this date "
+                f"(program_id={dup.get('program_id')})."
+            )
+        raise ValueError(
+            "Duplicate roster blocked: same mother vessel + lighter vessel + escort already exists on this date "
+            f"(program_id={dup.get('program_id')})."
+        )
 
     # Calculate pay if dates are provided
     salary = None
@@ -1102,10 +1220,9 @@ async def reconcile_drafts_for_confirmation(
         return {"reconciled": 0}
 
     from difflib import SequenceMatcher
-    import re as _re
 
     lv_key = lighter_vessel.strip().lower()
-    mv_key = _re.sub(r"^mv\.?\s+", "", (mother_vessel or "").lower()).strip()
+    mv_key = re.sub(r"^mv\.?\s+", "", (mother_vessel or "").lower()).strip()
 
     candidates = await fetch_all(
         """
@@ -1127,7 +1244,7 @@ async def reconcile_drafts_for_confirmation(
             continue
         # Optional mother vessel filter — skip if both non-empty and too different
         if mv_key:
-            mv_row = _re.sub(r"^mv\.?\s+", "", (row["mother_vessel"] or "").lower()).strip()
+            mv_row = re.sub(r"^mv\.?\s+", "", (row["mother_vessel"] or "").lower()).strip()
             if mv_row and SequenceMatcher(None, mv_key, mv_row).ratio() < 0.60:
                 continue
         to_delete.append(row["program_id"])
@@ -1308,3 +1425,124 @@ async def upsert_conveyance_config(
         "SELECT * FROM escort_calculation_config WHERE destination_key = $1", key
     )
     return dict(row) if row else {}
+
+
+async def audit_exact_confirmed_duplicates(days: int = 30) -> list[dict]:
+    """
+    Return exact duplicate groups for recent confirmed programs.
+
+    Exact key:
+      date + mother_vessel + lighter_vessel + escort_name
+    where date = COALESCE(start_date, program_date)
+    """
+    rows = await fetch_all(
+        """
+        WITH recent AS (
+            SELECT
+                program_id,
+                COALESCE(start_date, program_date) AS duty_date,
+                UPPER(TRIM(COALESCE(mother_vessel, ''))) AS mother_norm,
+                UPPER(TRIM(COALESCE(lighter_vessel, ''))) AS lighter_norm,
+                UPPER(TRIM(COALESCE(escort_name, ''))) AS escort_norm
+            FROM wbom_escort_programs
+            WHERE status = 'confirmed'
+              AND COALESCE(start_date, program_date) >= CURRENT_DATE - ($1::int || ' days')::interval
+        )
+        SELECT
+            duty_date,
+            mother_norm,
+            lighter_norm,
+            escort_norm,
+            COUNT(*) AS row_count,
+            ARRAY_AGG(program_id ORDER BY program_id) AS program_ids
+        FROM recent
+        WHERE duty_date IS NOT NULL
+          AND mother_norm <> ''
+          AND lighter_norm <> ''
+          AND escort_norm <> ''
+        GROUP BY duty_date, mother_norm, lighter_norm, escort_norm
+        HAVING COUNT(*) > 1
+        ORDER BY duty_date DESC, row_count DESC
+        """,
+        days,
+    )
+    return [dict(r) for r in rows]
+
+
+async def _duplicate_has_dependencies(program_id: int) -> bool:
+    """Return True if program row has dependent rows that block hard delete."""
+    dep = await fetch_val(
+        """
+        SELECT (
+            (SELECT COUNT(*) FROM escort_order_lighters WHERE program_id = $1)
+          + (SELECT COUNT(*) FROM fazle_payment_drafts WHERE escort_program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_billing_records WHERE program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_cases WHERE related_program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_cash_transactions WHERE program_id = $1)
+          + (SELECT COUNT(*) FROM wbom_whatsapp_messages WHERE related_program_id = $1)
+        )
+        """,
+        program_id,
+    )
+    return int(dep or 0) > 0
+
+
+async def cleanup_exact_confirmed_duplicates(days: int = 30, actor: str = "scheduler") -> dict:
+    """
+    Remove leftover exact duplicates among confirmed programs.
+
+    Keeps the lowest program_id in each duplicate group, attempts hard delete for
+    remaining IDs after removing roster projection rows, and skips rows with
+    dependent references.
+    """
+    groups = await audit_exact_confirmed_duplicates(days=days)
+    if not groups:
+        return {
+            "groups": 0,
+            "kept": [],
+            "deleted": [],
+            "skipped_with_dependencies": [],
+        }
+
+    kept: list[int] = []
+    deleted: list[int] = []
+    skipped_with_dependencies: list[int] = []
+
+    for g in groups:
+        ids = list(g.get("program_ids") or [])
+        if len(ids) < 2:
+            continue
+        keep_id = int(ids[0])
+        kept.append(keep_id)
+        for dup_id in [int(x) for x in ids[1:]]:
+            if await _duplicate_has_dependencies(dup_id):
+                skipped_with_dependencies.append(dup_id)
+                continue
+
+            await execute("DELETE FROM escort_roster_entries WHERE program_id = $1", dup_id)
+            await execute("DELETE FROM wbom_escort_programs WHERE program_id = $1", dup_id)
+            deleted.append(dup_id)
+
+            await log_audit(
+                program_id=dup_id,
+                action="confirmed_exact_duplicate_deleted",
+                old_data={"duplicate_of": keep_id},
+                new_data=None,
+                performed_by=actor,
+                source="cleanup",
+            )
+
+    if deleted or skipped_with_dependencies:
+        log.info(
+            "[cleanup_confirmed_exact_duplicates] groups=%d deleted=%d skipped_with_dependencies=%d",
+            len(groups),
+            len(deleted),
+            len(skipped_with_dependencies),
+        )
+
+    return {
+        "groups": len(groups),
+        "kept": kept,
+        "deleted": deleted,
+        "skipped_with_dependencies": skipped_with_dependencies,
+    }
