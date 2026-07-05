@@ -23,6 +23,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
 
+from app.config import get_settings
 from app.database import execute, fetch_all, fetch_one, fetch_val
 from .calculations import calculate_pay, parse_date_shift
 
@@ -422,9 +423,19 @@ async def get_roster_list(
         sort_by = "start_date"
     sort_dir = "DESC" if sort_dir.lower() == "desc" else "ASC"
 
+    ttl_hours = int(get_settings().draft_ttl_hours)
+
     conditions = []
     params: list[Any] = []
     idx = 1
+
+    # Never show stale, unconfirmed draft rows in roster list after TTL.
+    conditions.append(
+        f"NOT (LOWER(COALESCE(e.roster_status, 'draft')) = 'draft' "
+        f"AND e.created_at < NOW() - (${idx} || ' hours')::INTERVAL)"
+    )
+    params.append(str(ttl_hours))
+    idx += 1
 
     if search:
         conditions.append(
@@ -751,14 +762,20 @@ async def create_roster_entry(data: dict, actor: str = "system") -> dict:
 
 async def get_roster_summary() -> dict:
     """Aggregate stats for dashboard widget."""
+    ttl_hours = int(get_settings().draft_ttl_hours)
     rows = await fetch_all(
         """
         SELECT roster_status, COUNT(*) AS cnt,
                COALESCE(SUM(total), 0) AS total_amount,
                COALESCE(SUM(net_payable), 0) AS net_payable_amount
         FROM escort_roster_entries
+        WHERE NOT (
+            LOWER(COALESCE(roster_status, 'draft')) = 'draft'
+            AND created_at < NOW() - ($1 || ' hours')::INTERVAL
+        )
         GROUP BY roster_status
-        """
+        """,
+        str(ttl_hours),
     )
     by_status: dict = {}
     grand_total = 0.0
@@ -785,7 +802,14 @@ async def get_roster_summary() -> dict:
            WHERE rm.id IS NULL"""
     )
     true_draft_count = await fetch_val(
-        "SELECT COUNT(*) FROM wbom_escort_programs WHERE LOWER(status) = 'draft'"
+                """
+                SELECT COUNT(*)
+                FROM escort_roster_entries e
+                LEFT JOIN wbom_escort_programs p ON p.program_id = e.program_id
+                WHERE LOWER(COALESCE(p.status, e.roster_status, 'draft')) = 'draft'
+                    AND e.created_at >= NOW() - ($1 || ' hours')::INTERVAL
+                """,
+                str(ttl_hours),
     )
 
     return {
@@ -1014,10 +1038,12 @@ async def cleanup_draft_entries(actor: str = "system") -> dict:
     return {"deleted": deleted, "message": f"Deleted {deleted} draft entries"}
 
 
-async def expire_stale_drafts(hours: int = 48, actor: str = "scheduler") -> dict:
+async def expire_stale_drafts(hours: int = 24, actor: str = "scheduler") -> dict:
     """
-    Expire stale draft entries and their source programs without hard delete.
-    Keeping the rows preserves audit trail and prevents payroll/attendance gaps.
+    Permanently delete stale draft entries and their source draft programs.
+
+    Requirement: unconfirmed escort drafts must not remain visible in the
+    frontend after TTL. We keep audit trail via escort_roster_audit_logs.
     """
     stale = await fetch_all(
         """
@@ -1034,37 +1060,30 @@ async def expire_stale_drafts(hours: int = 48, actor: str = "scheduler") -> dict
         d = dict(draft)
         await log_audit(
             program_id=d.get("program_id"),
-            action="draft_expired",
+            action="draft_ttl_deleted",
             old_data=d,
-            new_data={"roster_status": "expired", "program_status": "expired"},
+            new_data={"roster_status": "deleted", "program_status": "deleted"},
             performed_by=actor,
             source="scheduler",
         )
 
     program_ids = [r["program_id"] for r in stale]
     await execute(
-        """
-        UPDATE escort_roster_entries
-           SET roster_status = 'expired',
-               updated_at = NOW()
-         WHERE roster_status = 'draft'
-           AND created_at < NOW() - ($1 || ' hours')::INTERVAL
-        """,
-        str(hours),
+        "DELETE FROM escort_roster_entries WHERE program_id = ANY($1::int[])",
+        program_ids,
     )
     if program_ids:
         await execute(
             """
-            UPDATE wbom_escort_programs
-               SET status = 'expired'
+            DELETE FROM wbom_escort_programs
              WHERE program_id = ANY($1::int[])
                AND status = 'draft'
             """,
             program_ids,
         )
     count = len(stale)
-    log.info(f"[expire_drafts] Expired {count} stale drafts (>{hours}h, actor={actor})")
-    return {"expired": count, "message": f"Expired {count} stale draft(s) older than {hours}h"}
+    log.info(f"[expire_drafts] Deleted {count} stale drafts (>{hours}h, actor={actor})")
+    return {"expired": count, "message": f"Deleted {count} stale draft(s) older than {hours}h"}
 
 
 async def reconcile_drafts_for_confirmation(

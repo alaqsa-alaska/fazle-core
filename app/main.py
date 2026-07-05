@@ -82,7 +82,8 @@ def _start_stale_draft_expiry_worker() -> asyncio.Task:
             try:
                 from modules.escort_roster.db import expire_stale_drafts
 
-                result = await expire_stale_drafts(hours=48)
+                ttl = int(settings.draft_ttl_hours)
+                result = await expire_stale_drafts(hours=ttl)
                 if result.get("expired", 0):
                     log.info(f"[escort_roster] stale draft expiry: {result['expired']} expired")
             except Exception as _e:
