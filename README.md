@@ -20,8 +20,8 @@ domains are still transitional and must stay under human review.
 | Database | PostgreSQL plus WhatsApp bridge SQLite stores |
 | Queue/cache | Redis-backed helpers plus PostgreSQL queues |
 | Local AI | Ollama, default model `qwen3:8b` |
-| Branch in this checkout | `backup/vps-core-20260612` |
-| Last README review | 2026-06-26 |
+| Branch in this checkout | `main` |
+| Last README review | 2026-07-06 |
 
 ## Operating Mode
 
@@ -237,6 +237,32 @@ The app is operational, but these are real current risks:
   migration `db/migrations/026_escort_roster_change_requests.sql`.
 - Startup and periodic maintenance now run exact confirmed duplicate cleanup
    (no AI-dependent step required).
+
+## Deterministic Hardening Update (2026-07-06)
+
+- Payroll false-positive transaction guardrails were strengthened in the FPE path:
+   - Historical sync now honors explicit target JID lists instead of broad bridge-wide ingestion.
+   - Ingestion enqueue now requires authorized payroll sender/source conditions.
+   - Parser worker prefilter blocks review-only/approval-marker traffic from payment parsing.
+   - Parser human-name validation rejects approval/review artifacts as candidate names.
+- Ollama power-path controls were wired to config-backed safe bounds:
+   - Task-tier model defaults are now resolved via `modules/ai_console/model_router.py` and settings.
+   - Inference/chat semaphores and generation options in `app/ollama.py` are config-bounded.
+   - Shared Ollama daemon HTTP pool limits in `app/ollama_daemon.py` are config-driven.
+- Recruitment routing was unified to a single canonical decision path:
+   - `modules/recruitment_flow.route_recruitment_message(...)` now owns eligibility + reply routing.
+   - `modules/message_router` uses canonical recruitment routing for candidate/new-lead/unknown paths.
+   - `modules/conversation_layer/recruitment.py` keeps shadow naming only as a backward-compatible alias.
+- Chat deterministic DB-contract tests were migrated and stabilized:
+   - `tests/unit/test_chat_exact_db_tools.py` now asserts current `admin_chat_lab` orchestrator contract.
+   - Test-only stubs suppress background persistence task teardown noise for this file.
+
+Focused verification evidence:
+
+- `pytest -q tests/unit/test_chat_exact_db_tools.py`
+   - Result: 4 passed
+- `pytest -q tests/unit/test_chat_exact_db_tools.py tests/unit/test_chat_message_smoke.py tests/unit/test_phase8a_chat_integration.py tests/unit/test_phase8c_structured_evidence.py tests/unit/test_recruitment_ai_restricted.py tests/unit/test_message_router_identity_seed.py -ra`
+   - Result: 27 passed, no async teardown warnings in this run
 
 ## Running Locally Or On The VPS
 
