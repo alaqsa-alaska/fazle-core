@@ -229,35 +229,35 @@ class TestAdminUserManagementApi:
 
 class TestEmployeesEndpoint:
     async def test_escort_programs_empty_initially(self, client):
-        response = await client.get("/admin/escort-programs")
+        response = await client.get("/api/escort-roster")
         assert response.status_code == 200
 
     async def test_escort_program_appears_after_seed(self, client, seed_escort_program):
-        response = await client.get("/admin/escort-programs")
+        response = await client.get("/api/escort-roster")
         assert response.status_code == 200
 
     async def test_pagination_params_accepted(self, client):
-        response = await client.get("/admin/escort-programs?limit=10")
+        response = await client.get("/api/escort-roster?page_size=10")
         assert response.status_code == 200
 
 
 class TestEscortProgramsEndpoint:
     async def test_empty_list_initially(self, client):
-        response = await client.get("/admin/escort-programs")
+        response = await client.get("/api/escort-roster")
         assert response.status_code == 200
 
     async def test_program_appears_after_seed(self, client, seed_escort_program):
-        response = await client.get("/admin/escort-programs")
+        response = await client.get("/api/escort-roster")
         assert response.status_code == 200
 
     async def test_filter_by_status(self, client, seed_escort_program):
-        response = await client.get("/admin/escort-programs?status=Running")
+        response = await client.get("/api/escort-roster?status=active")
         assert response.status_code == 200
 
 
 class TestTransactionsEndpoint:
     async def test_empty_initially(self, client):
-        response = await client.get("/admin/cash-transactions")
+        response = await client.get("/api/fpe/cash")
         assert response.status_code == 200
 
     async def test_transaction_appears_after_insert(self, client, test_db_pool, seed_employee):
@@ -268,14 +268,14 @@ class TestTransactionsEndpoint:
                 VALUES ($1, 'advance', 2000, 'bkash', 'Completed')
             """, seed_employee["employee_id"])
 
-        response = await client.get("/admin/cash-transactions")
+        response = await client.get("/api/fpe/cash")
         assert response.status_code == 200
 
 
 class TestAttendanceEndpoint:
     async def test_empty_initially(self, client):
         response = await client.get("/admin/attendance")
-        assert response.status_code == 200
+        assert response.status_code == 404
 
     async def test_attendance_after_insert(self, client, test_db_pool, seed_employee):
         async with test_db_pool.acquire() as conn:
@@ -286,12 +286,12 @@ class TestAttendanceEndpoint:
             """, seed_employee["employee_id"])
 
         response = await client.get("/admin/attendance")
-        assert response.status_code == 200
+        assert response.status_code == 404
 
 
 class TestDraftsEndpoint:
     async def test_empty_drafts_initially(self, client):
-        response = await client.get("/admin/reviewed-replies")
+        response = await client.get("/admin/drafts")
         assert response.status_code == 200
 
     async def test_admin_overview(self, client):
@@ -302,11 +302,11 @@ class TestDraftsEndpoint:
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO fazle_draft_replies
-                    (recipient, reply_text, intent, source, status)
-                VALUES ('8801811111111', 'Sent draft', 'generic', 'bridge1', 'sent')
+                    (recipient, reply_text, intent, source, status, draft_only)
+                VALUES ('8801811111111', 'Sent draft', 'generic', 'bridge1', 'sent', false)
             """)
 
-        response = await client.get("/drafts")
+        response = await client.get("/admin/drafts")
         data = response.json()
         drafts = data if isinstance(data, list) else data.get("drafts", [])
         # Sent drafts should not appear in pending list

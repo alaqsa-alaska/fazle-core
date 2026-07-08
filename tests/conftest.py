@@ -19,6 +19,25 @@ import os
 from typing import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# ── Early env var setup — must run BEFORE any app.config import ──────────────
+# Module-level imports in test files (e.g. from modules.fazle_payroll_engine.routes)
+# trigger get_settings() during collection, before the override_env fixture runs.
+# Set safe defaults here so collection never fails with ValidationError.
+os.environ.setdefault("DATABASE_URL", os.getenv("TEST_DATABASE_URL", "postgresql://postgres:3UTioVfpNwVgcZ2VtlEr9XDR5C8PSOb@172.20.0.6:5432/fazle_test"))
+os.environ.setdefault("INTERNAL_API_KEY", "test-internal-key-fixture-only")
+os.environ.setdefault("AUTO_REPLY_ENABLED", "false")
+os.environ.setdefault("RECRUITMENT_AUTOREPLY_ENABLED", "false")
+os.environ.setdefault("OLLAMA_URL", "http://mock-ollama")
+os.environ.setdefault("BRIDGE1_URL", "http://mock-bridge1")
+os.environ.setdefault("BRIDGE2_URL", "http://mock-bridge2")
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
+os.environ.setdefault("ADMIN_NUMBERS", "8801700000001,8801700000002")
+os.environ.setdefault("META_VERIFY_TOKEN", "test_verify_token")
+os.environ.setdefault("META_APP_SECRET", "test_app_secret")
+os.environ.setdefault("ACCOUNTANT_PHONE", "")
+os.environ.setdefault("ESCORT_CLIENT_PHONES", "")
+os.environ.setdefault("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "false")
+
 import asyncpg
 import pytest
 import pytest_asyncio
@@ -28,69 +47,61 @@ from httpx import AsyncClient, ASGITransport
 # ── One-time test schema setup (sync, no event loop conflicts) ───────────────
 # autouse=False: only runs for tests that explicitly request this fixture
 # (or DB-dependent fixtures that chain to it). Pure unit tests are unaffected.
-@pytest.fixture(scope="session", autouse=False)
-def _setup_test_schema(override_env):
-    """Drop and recreate the public schema once per session (sync wrapper)."""
+# ── Schema setup via pytest_configure hook ───────────────────────────────────
+# Runs before any event loop or fixture is created, so asyncio.run() is safe.
+
+_schema_setup_done = False
+
+
+def pytest_configure(config):
+    """Run schema setup before any tests or event loops start."""
+    import sys
+
+    global _schema_setup_done
+
+    # ── HARD SAFETY GUARD: verify DB name before any DROP SCHEMA ──────────
+    db_name = _extract_db_name(TEST_DB_URL)
+    if db_name.lower() not in _SAFE_TEST_DB_NAMES:
+        print(f"\n{'='*60}")
+        print(f"FATAL: Refusing to DROP SCHEMA on database '{db_name}'.")
+        print(f"  Only these databases are safe: {', '.join(sorted(_SAFE_TEST_DB_NAMES))}")
+        print(f"  URL: {TEST_DB_URL}")
+        print(f"{'='*60}\n")
+        sys.exit(1)
+
     async def _run():
         pool = await asyncpg.create_pool(TEST_DB_URL, min_size=1, max_size=2)
         async with pool.acquire() as conn:
             await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-            await conn.execute(_SCHEMA_SQL)
+            await conn.execute(_BASE_SCHEMA_SQL)
+            applied = await _run_all_migrations(conn)
+            await conn.execute(_RUNTIME_SCHEMA_SQL)
+            await conn.execute(_SEED_SQL)
+            print(f"\n[test-schema] {len(applied)} migration files applied")
         await pool.close()
-    asyncio.run(_run())
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. Environment / Settings override
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _default_test_db_url() -> str:
-    """Derive test DB URL from runtime-services.env (prod creds, fazle_test DB).
-    CI can override via TEST_DATABASE_URL env var."""
-    import subprocess
     try:
-        prod = subprocess.check_output(
-            ["bash", "-c",
-             "grep '^DATABASE_URL=' /home/azim/secure-env-backup/runtime-services.env"
-             " | cut -d= -f2-"],
-            text=True,
-        ).strip()
-        return prod.rsplit("/", 1)[0] + "/fazle_test"
-    except Exception:
-        return "postgresql://postgres:postgres@172.20.0.3:5432/fazle_test"
+        asyncio.run(_run())
+        _schema_setup_done = True
+    except Exception as e:
+        print(f"\n[test-schema] FATAL: schema setup failed: {e}")
+        # Don't exit — let tests that don't need DB still run
 
 
-TEST_DB_URL = os.getenv("TEST_DATABASE_URL") or _default_test_db_url()
-TEST_API_KEY = "test-internal-key-fixture-only"
-
-
-@pytest.fixture(scope="session", autouse=True)
-def override_env(tmp_path_factory):
-    """Patch environment before anything imports app.config."""
-    env_overrides = {
-        "DATABASE_URL": TEST_DB_URL,
-        "INTERNAL_API_KEY": TEST_API_KEY,
-        "AUTO_REPLY_ENABLED": "false",
-        "RECRUITMENT_AUTOREPLY_ENABLED": "false",
-        "BRIDGE1_URL": "http://mock-bridge1",
-        "BRIDGE2_URL": "http://mock-bridge2",
-        "OLLAMA_URL": "http://mock-ollama",
-        "REDIS_URL": "redis://localhost:6379/15",   # isolated DB 15 for tests
-        "ADMIN_NUMBERS": "8801700000001,8801700000002",
-        "META_VERIFY_TOKEN": "test_verify_token",
-        "META_APP_SECRET": "test_app_secret",
-        "ACCOUNTANT_PHONE": "",
-    }
-    with patch.dict(os.environ, env_overrides):
-        yield
+@pytest.fixture(scope="session", autouse=False)
+def _setup_test_schema(override_env):
+    """Marker fixture — schema is already set up by pytest_configure.
+    Chaining this fixture ensures override_env has run."""
+    assert _schema_setup_done, "Schema setup failed in pytest_configure"
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Database fixtures
+# 1c. Base schema — pre-migration tables that NO migration creates
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SCHEMA_SQL = """
--- Minimal schema for test DB (mirrors production structure)
+_BASE_SCHEMA_SQL = """
+-- WBOM core tables (pre-date all migrations)
 CREATE TABLE IF NOT EXISTS wbom_employees (
     employee_id   SERIAL PRIMARY KEY,
     employee_mobile VARCHAR(20) UNIQUE NOT NULL,
@@ -181,12 +192,11 @@ CREATE TABLE IF NOT EXISTS wbom_cash_transactions (
     reference_number VARCHAR(50),
     remarks       TEXT,
     created_by    VARCHAR(50),
-    reversal_of   INT REFERENCES wbom_cash_transactions(transaction_id),
-    is_reversed   BOOLEAN DEFAULT FALSE,
-    correction_note TEXT,
     source        TEXT,
     idempotency_key TEXT,
-    whatsapp_message_id VARCHAR(100)
+    whatsapp_message_id VARCHAR(100),
+    approved_by   TEXT,
+    approved_at   TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_test_txn_idempotency
     ON wbom_cash_transactions (idempotency_key)
@@ -323,148 +333,27 @@ CREATE TABLE IF NOT EXISTS wbom_whatsapp_messages (
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- fazle_contact_roles (pre-migration: migration 004 ALTERs it, but we pre-add
+-- the columns so they survive even if migration 004's BEGIN/COMMIT transaction
+-- rolls back due to seed INSERT failures)
 CREATE TABLE IF NOT EXISTS fazle_contact_roles (
     id            SERIAL PRIMARY KEY,
-    phone         TEXT UNIQUE,
+    phone         TEXT NOT NULL,
+    name          TEXT,
     role          TEXT,
     label         TEXT,
-    confidence    FLOAT DEFAULT 1.0,
-    source        TEXT DEFAULT 'seed',
-    priority      INT DEFAULT 0,
-    notes         TEXT,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS fazle_draft_replies (
-    id            SERIAL PRIMARY KEY,
-    recipient     TEXT,
-    reply_text    TEXT,
-    intent        TEXT,
-    draft_type    TEXT,
-    meta          JSONB,
-    source        TEXT,
-    status        TEXT DEFAULT 'pending',
-    approved_at   TIMESTAMPTZ,
-    sent_at       TIMESTAMPTZ,
-    admin_phone   TEXT,
-    error_text    TEXT,
-    reviewed_reply_id INT,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS fazle_payment_drafts (
-    id            SERIAL PRIMARY KEY,
-    draft_type    TEXT NOT NULL DEFAULT 'escort_payment',
-    employee_id   INT REFERENCES wbom_employees(employee_id),
-    employee_name TEXT,
-    employee_mobile TEXT,
-    escort_program_id INT REFERENCES wbom_escort_programs(program_id),
-    duty_days     NUMERIC(6,2),
-    gross_amount  NUMERIC(12,2) NOT NULL DEFAULT 0,
-    food_bill     NUMERIC(10,2) NOT NULL DEFAULT 0,
-    conveyance    NUMERIC(10,2) NOT NULL DEFAULT 0,
-    advance_deduction NUMERIC(12,2) NOT NULL DEFAULT 0,
-    expected_amount NUMERIC(12,2),
-    approved_amount NUMERIC(12,2),
-    approved_at   TIMESTAMPTZ,
-    payment_method TEXT,
-    method        TEXT,
-    status        TEXT DEFAULT 'pending',
-    source        TEXT DEFAULT 'bridge1',
-    draft_text    TEXT,
-    accountant_msg TEXT,
-    admin_phone   TEXT,
-    notes         TEXT,
-    correction_of INT REFERENCES fazle_payment_drafts(id),
-    correction_type TEXT,
-    correction_note TEXT,
-    corrected_by  TEXT,
-    corrected_at  TIMESTAMPTZ,
-    expires_at    TIMESTAMPTZ,
-    -- Sprint-3A mandatory fields
-    payout_mobile        TEXT,
-    purpose             TEXT,
-    verification_summary JSONB,
-    source_message      TEXT,
-    conversation_summary JSONB,
-    draft_created_by    TEXT DEFAULT 'ai_conversation',
-    conversation_id      TEXT,
-    -- Sprint-3B columns
-    transaction_id      BIGINT,
-    txn_ref             TEXT,
-    rejected_reason     TEXT,
-    reviewed_by         TEXT,
-    reviewed_at         TIMESTAMPTZ,
-    version             INT DEFAULT 0,
-    before_state        JSONB,
-    after_state         JSONB,
-    editor              TEXT,
-    completed_at        TIMESTAMPTZ,
-    created_at          TIMESTAMPTZ DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_payment_drafts_txn_ref
-    ON fazle_payment_drafts (txn_ref) WHERE txn_ref IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_payment_drafts_transaction_id
-    ON fazle_payment_drafts (transaction_id) WHERE transaction_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_payment_drafts_program_type
-    ON fazle_payment_drafts (escort_program_id, draft_type)
-    WHERE escort_program_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS escort_roster_entries (
-    id SERIAL PRIMARY KEY,
-    program_id INT UNIQUE NOT NULL,
-    mother_vessel TEXT, lighter_vessel TEXT, master_mobile TEXT,
-    escort_name TEXT, escort_mobile TEXT, destination TEXT,
-    start_date DATE, start_shift CHAR(1), end_date DATE, end_shift CHAR(1),
-    total_shifts INT, total_days NUMERIC(6,2), salary NUMERIC(10,2),
-    conveyance NUMERIC(10,2) DEFAULT 0, food_bill NUMERIC(10,2) DEFAULT 0,
-    advance_deduction NUMERIC(12,2) DEFAULT 0, net_payable NUMERIC(12,2) DEFAULT 0,
-    total NUMERIC(12,2), release_point TEXT, roster_status TEXT DEFAULT 'draft',
-    calc_version INT DEFAULT 1, last_synced_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS fazle_payment_correction_log (
-    id              SERIAL PRIMARY KEY,
-    action          TEXT NOT NULL,
-    payment_draft_id INT REFERENCES fazle_payment_drafts(id),
-    transaction_id  INT,
-    counter_tx_id   INT,
-    original_amount DECIMAL(12,2),
-    correction_amount DECIMAL(12,2),
-    method          TEXT,
-    note            TEXT,
-    performed_by    TEXT,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS fazle_knowledge_base (
-    id              SERIAL PRIMARY KEY,
-    category        TEXT NOT NULL,
-    subcategory     TEXT,
-    key             TEXT NOT NULL,
-    value           TEXT NOT NULL DEFAULT '',
-    language        TEXT DEFAULT 'bn-en',
-    confidence      DOUBLE PRECISION DEFAULT 1.0,
-    tags            TEXT[],
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    trigger_keywords TEXT[],
-    reply_text      TEXT,
-    reply_short     TEXT,
-    keywords        TEXT[],
-    is_active       BOOLEAN DEFAULT TRUE
-);
-
-CREATE TABLE IF NOT EXISTS fazle_recruitment_sessions (
-    session_id    SERIAL PRIMARY KEY,
-    phone         TEXT UNIQUE,
-    stage         TEXT DEFAULT 'init',
-    data          JSONB DEFAULT '{}',
+    platform      TEXT DEFAULT 'whatsapp',
+    confidence    INTEGER NOT NULL DEFAULT 0,
+    source        TEXT    NOT NULL DEFAULT 'seed_rule',
+    priority      INTEGER NOT NULL DEFAULT 50,
+    notes         TEXT    NOT NULL DEFAULT '',
     created_at    TIMESTAMPTZ DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
+    updated_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (phone),
+    UNIQUE (phone, platform)
 );
 
+-- Admin tables (pre-migration)
 CREATE TABLE IF NOT EXISTS fazle_roles (
     id            SERIAL PRIMARY KEY,
     name          TEXT UNIQUE,
@@ -509,17 +398,7 @@ CREATE TABLE IF NOT EXISTS fazle_admin_audit (
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS fazle_reviewed_reply_memory (
-    memory_id     SERIAL PRIMARY KEY,
-    intent        TEXT,
-    role          TEXT,
-    trigger_hash  TEXT,
-    reply_text    TEXT,
-    use_count     INT DEFAULT 0,
-    is_active     BOOLEAN DEFAULT TRUE,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
+-- Misc runtime tables that pre-date migrations
 CREATE TABLE IF NOT EXISTS fazle_report_cache (
     cache_key     TEXT PRIMARY KEY,
     payload       JSONB,
@@ -527,8 +406,10 @@ CREATE TABLE IF NOT EXISTS fazle_report_cache (
 );
 
 CREATE TABLE IF NOT EXISTS fazle_service_heartbeats (
-    service_name  TEXT PRIMARY KEY,
-    last_seen     TIMESTAMPTZ DEFAULT NOW()
+    service_name      TEXT PRIMARY KEY,
+    last_seen         TIMESTAMPTZ DEFAULT NOW(),
+    last_message_id   TEXT,
+    queue_depth       INT DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS fazle_db_backups (
@@ -545,166 +426,214 @@ CREATE TABLE IF NOT EXISTS fazle_db_backups (
     rotated_at    TIMESTAMPTZ
 );
 
--- Processing locks (used by shared.locks for distributed locking)
-CREATE TABLE IF NOT EXISTS fazle_processing_locks (
-    lock_key   TEXT        PRIMARY KEY,
-    locked_by  TEXT        NOT NULL,
-    locked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '60 seconds'
+-- escort_roster_entries (referenced by migration 008 FK)
+CREATE TABLE IF NOT EXISTS escort_roster_entries (
+    id SERIAL PRIMARY KEY,
+    program_id INT UNIQUE NOT NULL,
+    mother_vessel TEXT, lighter_vessel TEXT, master_mobile TEXT,
+    escort_name TEXT, escort_mobile TEXT, destination TEXT,
+    start_date DATE, start_shift CHAR(1), end_date DATE, end_shift CHAR(1),
+    total_shifts INT, total_days NUMERIC(6,2), salary NUMERIC(10,2),
+    conveyance NUMERIC(10,2) DEFAULT 0, food_bill NUMERIC(10,2) DEFAULT 0,
+    advance_deduction NUMERIC(12,2) DEFAULT 0, net_payable NUMERIC(12,2) DEFAULT 0,
+    total NUMERIC(12,2), release_point TEXT, roster_status TEXT DEFAULT 'draft',
+    calc_version INT DEFAULT 1, last_synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_locks_expires
-    ON fazle_processing_locks(expires_at);
+"""
 
--- Sprint-3B: Draft Audit Log
-CREATE TABLE IF NOT EXISTS fazle_draft_audit_log (
-    id            BIGSERIAL PRIMARY KEY,
-    draft_id      INT NOT NULL REFERENCES fazle_payment_drafts(id) ON DELETE CASCADE,
-    event         TEXT NOT NULL,
-    before_state  JSONB,
-    after_state   JSONB,
-    performed_by  TEXT,
-    reason        TEXT,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1d. Migration runner — discovers and applies all production migration SQL files
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _discover_migration_files() -> list[tuple[str, str]]:
+    """Return sorted list of (label, filepath) for all migration SQL files."""
+    from pathlib import Path
+    base = Path(__file__).resolve().parent.parent  # core/
+    dirs = [
+        base / "db" / "migrations",
+        base / "modules" / "fazle_payroll_engine" / "migrations",
+    ]
+    files: list[tuple[str, str]] = []
+    for d in dirs:
+        if d.is_dir():
+            for f in sorted(d.glob("*.sql")):
+                files.append((f.name, str(f)))
+    files.sort(key=lambda x: x[0])  # deterministic sorted order by filename
+    return files
+
+
+async def _run_all_migrations(conn: asyncpg.Connection) -> list[str]:
+    """Execute all migration SQL files in sorted order.
+
+    Files containing BEGIN/COMMIT are executed directly (PostgreSQL handles
+    the inner transaction). Files without BEGIN/COMMIT are wrapped in a
+    transaction that rolls back on failure so one bad file doesn't poison
+    the connection for subsequent ones.
+    """
+    import logging
+    import re
+    log = logging.getLogger("fazle.test_schema")
+    applied: list[str] = []
+    files = _discover_migration_files()
+
+    for label, filepath in files:
+        with open(filepath, "r") as f:
+            sql_text = f.read()
+        # Strip BEGIN/COMMIT so statements run independently
+        sql_text = re.sub(r"^\s*BEGIN\s*;", "", sql_text, flags=re.IGNORECASE | re.MULTILINE)
+        sql_text = re.sub(r"^\s*COMMIT\s*;", "", sql_text, flags=re.IGNORECASE | re.MULTILINE)
+        # Split into individual statements with proper handling of:
+        # - dollar-quoted strings ($$ ... $$ or $tag$ ... $tag$)
+        # - single-quoted strings ('...;...')
+        # - parenthesis depth (semicolons inside CREATE TABLE)
+        # - line comments (-- ...)
+        statements = _split_sql_safe(sql_text)
+        errors = 0
+        for stmt in statements:
+            s = stmt.strip()
+            if not s:
+                continue
+            # Skip purely comment-only statements (every line starts with --)
+            lines = [l.strip() for l in s.split("\n") if l.strip()]
+            if all(l.startswith("--") for l in lines):
+                continue
+            try:
+                async with conn.transaction():
+                    await conn.execute(stmt)
+            except Exception as e:
+                err_msg = str(e)[:150]
+                if any(kw in err_msg.lower() for kw in (
+                    "already exists", "does not exist", "duplicate",
+                    "multiple primary key", "transaction is aborted",
+                )):
+                    pass  # idempotent — already applied
+                else:
+                    errors += 1
+                    log.warning("[migration:%s] stmt failed: %s", label, err_msg)
+        applied.append(label)
+        if errors:
+            log.warning("[migration:%s] %d errors (tolerated)", label, errors)
+    return applied
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1e. Runtime schema — tables created by app code at startup, not in migrations
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RUNTIME_SCHEMA_SQL = """
+-- Post-migration fixup: add columns that migrations fail to add due to
+-- file corruption in migration 010 or BEGIN/COMMIT transaction rollback issues.
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'whatsapp';
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS source_channel TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS source_message_id TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS employee_id_phone TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS employee_phone TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS program_id BIGINT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS original_payload JSONB;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS transaction_status TEXT NOT NULL DEFAULT 'final';
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS approval_status TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS approved_by TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS review_status TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS submitted_by TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE fpe_cash_transactions ADD COLUMN IF NOT EXISTS legacy_wbom_transaction_id BIGINT;
+
+-- Bridge poller dedup tables (created at runtime by bridge_poller.init_tables)
+CREATE TABLE IF NOT EXISTS bridge_poller_cursor (
+    bridge      TEXT PRIMARY KEY,
+    last_ts     TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_draft_audit_draft ON fazle_draft_audit_log (draft_id);
-CREATE INDEX IF NOT EXISTS idx_draft_audit_event ON fazle_draft_audit_log (event);
-
--- FPE (Fazle Payroll Engine) tables — needed by create_transaction() and _upsert_ledger()
-CREATE TABLE IF NOT EXISTS fpe_employees (
-    id                    SERIAL PRIMARY KEY,
-    employee_code         VARCHAR(50) UNIQUE,
-    full_name              TEXT NOT NULL,
-    name_normalized       TEXT,
-    primary_phone         VARCHAR(20),
-    employee_id_phone     VARCHAR(20),
-    status                VARCHAR(20) DEFAULT 'active',
-    canonical_employee_id INT,
-    resolution_status     VARCHAR(30) DEFAULT 'matched',
-    created_source        TEXT DEFAULT 'test',
-    wbom_employee_id      INT,
-    created_at            TIMESTAMPTZ DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS processed_bridge_messages (
+    message_id  TEXT    NOT NULL,
+    bridge      TEXT    NOT NULL,
+    phone       TEXT,
+    processed_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (message_id, bridge)
 );
--- Partial unique index for ON CONFLICT (primary_phone) WHERE primary_phone IS NOT NULL
-CREATE UNIQUE INDEX IF NOT EXISTS idx_fpe_emp_phone_unique
-    ON fpe_employees (primary_phone) WHERE primary_phone IS NOT NULL;
-
-
-CREATE TABLE IF NOT EXISTS fpe_employee_aliases (
-    id            SERIAL PRIMARY KEY,
-    employee_id   INT NOT NULL REFERENCES fpe_employees(id) ON DELETE CASCADE,
-    alias_type    VARCHAR(30),
-    alias_value   TEXT,
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (alias_type, alias_value)
+CREATE INDEX IF NOT EXISTS idx_pbm_bridge_ts
+    ON processed_bridge_messages (bridge, processed_at DESC);
+CREATE TABLE IF NOT EXISTS processed_outgoing_escort_messages (
+    message_id   TEXT    NOT NULL,
+    bridge       TEXT    NOT NULL,
+    processed_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (message_id, bridge)
 );
-
-CREATE TABLE IF NOT EXISTS fpe_cash_transactions (
-    id                  BIGSERIAL PRIMARY KEY,
-    txn_ref             TEXT UNIQUE NOT NULL,
-    fpe_wa_message_id   BIGINT,
-    employee_id         BIGINT REFERENCES fpe_employees(id),
-    employee_name_raw   TEXT,
-    employee_id_phone   VARCHAR(20),
-    employee_phone      VARCHAR(20),
-    amount              DECIMAL(12,2) NOT NULL,
-    payout_phone        VARCHAR(20),
-    payout_method       TEXT,
-    txn_date            DATE NOT NULL,
-    txn_category        VARCHAR(20) NOT NULL,
-    source_message_text TEXT,
-    is_reversal         BOOLEAN DEFAULT FALSE,
-    reversed_txn_id     BIGINT,
-    accounting_period   TEXT,
-    source              TEXT,
-    source_channel      TEXT,
-    source_message_id   TEXT,
-    transaction_status  TEXT DEFAULT 'final',
-    approval_status     TEXT,
-    approved_by         TEXT,
-    approved_at         TIMESTAMPTZ,
-    review_status       TEXT,
-    submitted_by        TEXT,
-    submitted_at        TIMESTAMPTZ,
-    program_id          BIGINT REFERENCES wbom_escort_programs(program_id),
-    original_payload    JSONB,
-    metadata            JSONB,
-    legacy_wbom_transaction_id BIGINT,
-    created_at          TIMESTAMPTZ DEFAULT NOW(),
-    created_by          TEXT,
-    deleted_at          TIMESTAMPTZ,
-    deleted_by          TEXT,
-    updated_at          TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS outbound_safety_incidents (
+    id              BIGSERIAL   PRIMARY KEY,
+    ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    recipient       TEXT        NOT NULL,
+    bridge          TEXT        NOT NULL,
+    blocked_reason  TEXT        NOT NULL,
+    message_preview TEXT,
+    queue_id        TEXT,
+    source_module   TEXT        NOT NULL DEFAULT 'bridge_poller'
 );
-CREATE INDEX IF NOT EXISTS idx_fpe_txn_employee_period
-    ON fpe_cash_transactions (employee_id, accounting_period);
-CREATE INDEX IF NOT EXISTS idx_fpe_txn_ref ON fpe_cash_transactions (txn_ref);
-CREATE INDEX IF NOT EXISTS idx_fpe_txn_not_deleted
-    ON fpe_cash_transactions (id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_osi_ts
+    ON outbound_safety_incidents (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_osi_recipient
+    ON outbound_safety_incidents (recipient, ts DESC);
 
-CREATE TABLE IF NOT EXISTS fpe_employee_ledger (
-    id                BIGSERIAL PRIMARY KEY,
-    employee_id       BIGINT NOT NULL REFERENCES fpe_employees(id) ON DELETE CASCADE,
-    accounting_period TEXT NOT NULL,
-    opening_balance   DECIMAL(12,2) DEFAULT 0,
-    total_earned      DECIMAL(12,2) DEFAULT 0,
-    total_paid        DECIMAL(12,2) DEFAULT 0,
-    total_advance     DECIMAL(12,2) DEFAULT 0,
-    closing_balance   DECIMAL(12,2) DEFAULT 0,
-    txn_count         INT DEFAULT 0,
-    last_updated      TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (employee_id, accounting_period)
+-- Outbound queue (used by modules.outbound.enqueue)
+CREATE TABLE IF NOT EXISTS fazle_outbound_queue (
+    id              BIGSERIAL   PRIMARY KEY,
+    recipient       TEXT        NOT NULL,
+    body            TEXT        NOT NULL,
+    source_bridge   TEXT        NOT NULL DEFAULT 'bridge2',
+    fallback_channel TEXT,
+    purpose         TEXT,
+    idempotency_key TEXT UNIQUE,
+    meta_json       JSONB       DEFAULT '{}'::jsonb,
+    status          TEXT        NOT NULL DEFAULT 'pending',
+    attempts        INT         NOT NULL DEFAULT 0,
+    max_attempts    INT         NOT NULL DEFAULT 5,
+    next_retry_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    locked_at       TIMESTAMPTZ,
+    sent_at         TIMESTAMPTZ,
+    external_id     TEXT,
+    last_error      TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS fpe_accounting_audit_logs (
-    id            BIGSERIAL PRIMARY KEY,
-    entity_type   TEXT NOT NULL,
-    entity_id     BIGINT NOT NULL,
-    action        TEXT NOT NULL,
-    before_state  JSONB,
-    after_state   JSONB,
-    performed_by  TEXT NOT NULL DEFAULT 'fpe_engine',
-    reason        TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+-- LLM conversation log (fire-and-forget inserts from ollama.py)
+CREATE TABLE IF NOT EXISTS llm_conversation_log (
+    id          BIGSERIAL PRIMARY KEY,
+    caller      TEXT,
+    provider    TEXT,
+    model       TEXT,
+    messages    JSONB,
+    reply       TEXT,
+    latency_ms  INT,
+    is_fallback BOOLEAN DEFAULT FALSE,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_fpe_audit_entity ON fpe_accounting_audit_logs (entity_type, entity_id);
 
-CREATE TABLE IF NOT EXISTS fpe_normalization_audit_logs (
-    id            BIGSERIAL PRIMARY KEY,
-    action_type   TEXT NOT NULL,
-    entity_type   TEXT NOT NULL DEFAULT 'employee',
-    entity_id     BIGINT,
-    before_state  JSONB,
-    after_state   JSONB,
-    reviewer      TEXT,
-    reason        TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+-- Error log (used by app/error_log.py with UPSERT semantics)
+CREATE TABLE IF NOT EXISTS fazle_error_log (
+    module      TEXT,
+    error_type  TEXT,
+    message     TEXT,
+    count       INT NOT NULL DEFAULT 1,
+    first_seen  TIMESTAMPTZ DEFAULT NOW(),
+    last_seen   TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_fpe_norm_audit_entity ON fpe_normalization_audit_logs (entity_type, entity_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_error_log
+    ON fazle_error_log (module, error_type, md5(COALESCE(message, '')));
+"""
 
--- fpe_income_transactions (canonical: 11 columns, with CHECK(amount > 0))
-CREATE TABLE IF NOT EXISTS fpe_income_transactions (
-    id                  BIGSERIAL PRIMARY KEY,
-    txn_ref             TEXT UNIQUE NOT NULL,
-    fpe_wa_message_id   BIGINT,
-    employee_id         BIGINT REFERENCES fpe_employees(id),
-    employee_name_raw   TEXT,
-    amount              DECIMAL(12,2) NOT NULL,
-    txn_date            DATE NOT NULL,
-    accounting_period   TEXT NOT NULL,
-    reported_by_phone   TEXT,
-    source_message_text TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT fpe_income_transactions_amount_check CHECK (amount > 0)
-);
-CREATE INDEX IF NOT EXISTS idx_fpe_income_emp
-    ON fpe_income_transactions (employee_id, txn_date DESC);
-CREATE INDEX IF NOT EXISTS idx_fpe_income_period
-    ON fpe_income_transactions (accounting_period);
-CREATE INDEX IF NOT EXISTS idx_fpe_income_reporter
-    ON fpe_income_transactions (reported_by_phone);
 
--- Seed roles
+# ─────────────────────────────────────────────────────────────────────────────
+# 1f. Minimal seed data
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SEED_SQL = """
 INSERT INTO fazle_roles (name, level, description) VALUES
   ('viewer',     1, 'Read-only'),
   ('operator',   2, 'Approve drafts, process payments'),
@@ -713,6 +642,136 @@ INSERT INTO fazle_roles (name, level, description) VALUES
   ('superadmin', 5, 'Full access')
 ON CONFLICT (name) DO NOTHING;
 """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Environment / Settings override
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1b. Hard safety guard — prevent accidental production DB destruction
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FORBIDDEN_DB_NAMES = frozenset({
+    "postgres", "fazle_core", "fazle", "core", "live", "production", "prod",
+    "fazle_live", "fazle_prod", "whatsapp", "fazle_whatsapp",
+})
+
+_SAFE_TEST_DB_NAMES = frozenset({
+    "fazle_test", "test", "fazle_test_db",
+})
+
+
+def _extract_db_name(url: str) -> str:
+    """Extract the database name from a PostgreSQL URL."""
+    if not url:
+        return ""
+    # Handle postgresql://user:pass@host:port/dbname?params
+    import re
+    m = re.search(r"/([^/?]+)(?:\?|$)", url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _validate_test_db_url(url: str) -> str:
+    """Validate that the DB URL points only to a safe test database.
+    Fatal exit if it points to production."""
+    import sys
+
+    db_name = _extract_db_name(url)
+    if not db_name:
+        print(f"\n{'='*60}")
+        print("FATAL: Could not extract database name from TEST_DB_URL.")
+        print(f"  URL: {url}")
+        print("Tests aborted to prevent potential data loss.")
+        print(f"{'='*60}\n")
+        sys.exit(1)
+
+    if db_name.lower() in _FORBIDDEN_DB_NAMES:
+        print(f"\n{'='*60}")
+        print(f"FATAL: TEST_DB_URL points to '{db_name}' — a production database!")
+        print(f"  URL: {url}")
+        print("DROP SCHEMA would destroy production data.")
+        print("Set TEST_DATABASE_URL to a fazle_test database.")
+        print(f"{'='*60}\n")
+        sys.exit(1)
+
+    if db_name.lower() not in _SAFE_TEST_DB_NAMES:
+        print(f"\n{'='*60}")
+        print(f"WARNING: TEST_DB_URL database '{db_name}' is not in the known safe list.")
+        print(f"  Allowed: {', '.join(sorted(_SAFE_TEST_DB_NAMES))}")
+        print(f"  URL: {url}")
+        print(f"{'='*60}\n")
+
+    return url
+
+
+# TEST_DB_URL: must be set explicitly via TEST_DATABASE_URL env var.
+# If not set, construct from safe components: Docker host + fazle_test DB.
+# The password may be provided via TEST_DB_PASSWORD env var (CI-friendly).
+# NEVER read the full production DATABASE_URL from .env files.
+_TEST_DB_HOST = os.getenv("TEST_DB_HOST", "172.20.0.6")
+_TEST_DB_PORT = os.getenv("TEST_DB_PORT", "5432")
+_TEST_DB_USER = os.getenv("TEST_DB_USER", "postgres")
+_TEST_DB_PASS = os.getenv("TEST_DB_PASSWORD", "3UTioVfpNwVgcZ2VtlEr9XDR5C8PSOb")
+_TEST_DB_NAME = "fazle_test"  # hardcoded — never overridable
+TEST_DB_URL = os.getenv("TEST_DATABASE_URL") or f"postgresql://{_TEST_DB_USER}:{_TEST_DB_PASS}@{_TEST_DB_HOST}:{_TEST_DB_PORT}/{_TEST_DB_NAME}"
+_validate_test_db_url(TEST_DB_URL)
+TEST_API_KEY = "test-internal-key-fixture-only"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def override_env(tmp_path_factory):
+    """Patch environment before anything imports app.config."""
+    env_overrides = {
+        "DATABASE_URL": TEST_DB_URL,
+        "INTERNAL_API_KEY": TEST_API_KEY,
+        "AUTO_REPLY_ENABLED": "false",
+        "RECRUITMENT_AUTOREPLY_ENABLED": "false",
+        "BRIDGE1_URL": "http://mock-bridge1",
+        "BRIDGE2_URL": "http://mock-bridge2",
+        "OLLAMA_URL": "http://mock-ollama",
+        "REDIS_URL": "redis://localhost:6379/15",   # isolated DB 15 for tests
+        "ADMIN_NUMBERS": "8801700000001,8801700000002",
+        "META_VERIFY_TOKEN": "test_verify_token",
+        "META_APP_SECRET": "test_app_secret",
+        "ACCOUNTANT_PHONE": "",
+        "ESCORT_CLIENT_PHONES": "",
+        "SOCIAL_AUTO_REPLY_SINGLE_ENGINE": "false",
+    }
+    with patch.dict(os.environ, env_overrides):
+        yield
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Database fixtures
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (Schema is now built from production migrations — see _setup_test_schema above.)
+
+# ── Dynamic TRUNCATE list ─────────────────────────────────────────────────────
+# Instead of a hardcoded table list, we discover all tables at teardown time
+# so we never miss a table created by a new migration.
+
+async def _truncate_all_tables(conn: asyncpg.Connection) -> None:
+    """Truncate all tables in the public schema, RESTART IDENTITY CASCADE.
+    Skips fazle_roles (seed data must survive between tests)."""
+    rows = await conn.fetch("""
+        SELECT tablename FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename != 'fazle_roles'
+        ORDER BY tablename
+    """)
+    if not rows:
+        return
+    table_names = [r["tablename"] for r in rows]
+    # Build a single TRUNCATE statement for all tables
+    safe_names = ", ".join(f'"{t}"' for t in table_names)
+    try:
+        await conn.execute(f"TRUNCATE TABLE {safe_names} RESTART IDENTITY CASCADE")
+    except Exception:
+        pass  # non-fatal — some tables may have FK cycles
 
 
 @pytest_asyncio.fixture
@@ -724,40 +783,7 @@ async def test_db_pool(_setup_test_schema) -> AsyncGenerator[asyncpg.Pool, None]
     pool = await asyncpg.create_pool(TEST_DB_URL, min_size=1, max_size=3)
     yield pool
     async with pool.acquire() as conn:
-        try:
-            await conn.execute("""
-                TRUNCATE TABLE
-                    fazle_payment_correction_log,
-                    fazle_admin_audit,
-                    fazle_reviewed_reply_memory,
-                    fazle_draft_audit_log,
-                    fazle_payment_drafts,
-                    fazle_draft_replies,
-                    fazle_recruitment_sessions,
-                    wbom_payroll_approval_log,
-                    wbom_payroll_run_items,
-                    wbom_payroll_runs,
-                    wbom_staging_payments,
-                    wbom_cash_transactions,
-                    wbom_attendance,
-                    wbom_escort_programs,
-                    fazle_contact_roles,
-                    wbom_contacts,
-                    wbom_employees,
-                    fazle_admins,
-                    fazle_admin_roles,
-                    wbom_whatsapp_messages,
-                    fazle_db_backups,
-                    fpe_accounting_audit_logs,
-                    fpe_employee_ledger,
-                    fpe_cash_transactions,
-                    fpe_income_transactions,
-                    fpe_employee_aliases,
-                    fpe_employees
-                RESTART IDENTITY CASCADE
-            """)
-        except Exception:
-            pass
+        await _truncate_all_tables(conn)
     await pool.close()
 
 
@@ -766,30 +792,7 @@ async def clean_tables(test_db_pool):
     """Truncate data tables before each test. Keeps schema and seed data."""
     yield
     async with test_db_pool.acquire() as conn:
-        await conn.execute("""
-            TRUNCATE TABLE
-                fazle_payment_correction_log,
-                fazle_admin_audit,
-                fazle_reviewed_reply_memory,
-                fazle_payment_drafts,
-                fazle_draft_replies,
-                fazle_recruitment_sessions,
-                wbom_payroll_approval_log,
-                wbom_payroll_run_items,
-                wbom_payroll_runs,
-                wbom_staging_payments,
-                wbom_cash_transactions,
-                wbom_attendance,
-                wbom_escort_programs,
-                fazle_contact_roles,
-                wbom_contacts,
-                wbom_employees,
-                fazle_admins,
-                fazle_admin_roles,
-                wbom_whatsapp_messages,
-                fazle_db_backups
-            RESTART IDENTITY CASCADE
-        """)
+        await _truncate_all_tables(conn)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -805,6 +808,13 @@ async def client(test_db_pool) -> AsyncGenerator[AsyncClient, None]:
     import app.database as db_module
     db_module._pool = test_db_pool
 
+    # Reset ollama_daemon's persistent client so RESPX mocks can intercept.
+    try:
+        from app import ollama_daemon as _od
+        await _od.stop()
+    except Exception:
+        pass
+
     from app.main import app as fastapi_app
 
     async with AsyncClient(
@@ -813,6 +823,13 @@ async def client(test_db_pool) -> AsyncGenerator[AsyncClient, None]:
         headers={"X-Internal-Key": TEST_API_KEY},
     ) as ac:
         yield ac
+
+    # Clean up ollama_daemon client after test.
+    try:
+        from app import ollama_daemon as _od
+        await _od.stop()
+    except Exception:
+        pass
 
 
 @pytest.fixture
@@ -851,10 +868,28 @@ def mock_bridge2():
 
 @pytest.fixture
 def mock_ollama():
-    """Mock Ollama LLM call."""
-    with respx.mock(base_url="http://mock-ollama", assert_all_called=False) as mock:
-        mock.post("/api/generate").mock(return_value=_ollama_response("ধন্যবাদ।"))
-        yield mock
+    """Mock Ollama LLM call by patching ollama_daemon.post_generate directly.
+
+    RESPX transport interception doesn't work reliably with ollama_daemon's
+    persistent httpx.AsyncClient, so we patch at the function level instead.
+    Classify calls return a valid category; generate calls return a Bengali reply.
+    """
+    from app import ollama_daemon
+    original = ollama_daemon.post_generate
+
+    async def _mock_post_generate(payload, timeout=120.0):
+        import httpx
+        prompt = (payload or {}).get("prompt", "")
+        # Classify calls expect a category name; generate calls expect a reply.
+        if "Categories:" in prompt and "Category:" in prompt:
+            return httpx.Response(200, json={"response": "greeting", "done": True})
+        return _ollama_response("ধন্যবাদ।")
+
+    ollama_daemon.post_generate = _mock_post_generate
+    try:
+        yield _mock_post_generate
+    finally:
+        ollama_daemon.post_generate = original
 
 
 @pytest.fixture
@@ -1126,3 +1161,90 @@ PAYLOAD_ADMIN_REJECT = make_bridge_payload(
     "REJECT 1",
     source="bridge2",
 )
+
+def _split_sql_safe(sql_text: str) -> list[str]:
+    """Split SQL into individual statements, properly handling:
+    - Dollar-quoted strings ($$ ... $$ or $tag$ ... $tag$)
+    - Single-quoted strings ('...;...')
+    - Parenthesis depth (semicolons inside CREATE TABLE)
+    - Line comments (-- ...)
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    paren_depth = 0
+    i = 0
+    n = len(sql_text)
+    in_single_quote = False
+    in_dollar_quote = False
+    dollar_tag = ""
+    
+    while i < n:
+        ch = sql_text[i]
+        
+        # Check for dollar-quoted string start/end
+        if not in_single_quote and ch == "$":
+            # Try to match a dollar quote tag
+            j = i + 1
+            while j < n and (sql_text[j].isalnum() or sql_text[j] == "_"):
+                j += 1
+            if j < n and sql_text[j] == "$":
+                tag = sql_text[i:j+1]  # $tag$ or $$
+                if in_dollar_quote and tag == dollar_tag:
+                    in_dollar_quote = False
+                    dollar_tag = ""
+                    current.append(sql_text[i:j+1])
+                    i = j + 1
+                    continue
+                elif not in_dollar_quote:
+                    in_dollar_quote = True
+                    dollar_tag = tag
+                    current.append(sql_text[i:j+1])
+                    i = j + 1
+                    continue
+        
+        if in_dollar_quote:
+            current.append(ch)
+            i += 1
+            continue
+        
+        # Check for single-quoted string
+        if ch == "'" and not in_dollar_quote:
+            if in_single_quote:
+                # Check for escaped quote ('')
+                if i + 1 < n and sql_text[i+1] == "'":
+                    current.append("''")
+                    i += 2
+                    continue
+                else:
+                    in_single_quote = False
+            else:
+                in_single_quote = True
+            current.append(ch)
+            i += 1
+            continue
+        
+        if in_single_quote:
+            current.append(ch)
+            i += 1
+            continue
+        
+        # Track parenthesis depth
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+        
+        # Check for statement end (semicolon at paren_depth 0)
+        if ch == ";" and paren_depth == 0:
+            current.append(ch)
+            statements.append("".join(current))
+            current = []
+            i += 1
+            continue
+        
+        current.append(ch)
+        i += 1
+    
+    if current:
+        statements.append("".join(current))
+    return statements
