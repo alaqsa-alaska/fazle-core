@@ -38,6 +38,47 @@ WBOM employees into FPE.
 
 ---
 
+## Migration Governance (added 2026-07-08, System Consolidation Sprint — Task 4)
+
+**Status:** first safe consolidation step per `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 4 / Report 7 Tier 2 Task 2. This section declares policy only — **no migration files have been renamed, renumbered, dropped, or altered as part of this step**, and no production schema was changed.
+
+### Canonical path going forward
+
+**`db/migrations/` + `db/migrate.py` is the single canonical, tracked migration path for all new schema changes, effective immediately.** It is the only one of the four schema-creation mechanisms with a real tracking table (`schema_migrations`), transactional per-file apply, and dry-run support. **Every new schema change — for any domain (payroll, escort, social, AI, or otherwise) — must land as a new, sequentially-numbered `db/migrations/0NN_*.sql` file, using the next never-before-used integer.** As of 2026-07-08 that next integer is `029` (see "Known duplicate/missing numbers" below for why — do not reuse an existing number even where one looks "free").
+
+### Legacy / historical paths (do not add new files here; do not delete yet)
+
+These three remain as historical, unreconciled sources until a dedicated reconciliation pass (Report 4's recommended strategy) is scheduled and executed:
+
+1. **`/home/azim/core/migrations/`** (6 files, `002`–`005` + 2 unnumbered schema files, no `001`) — has **no automated execution path**; historically applied via manual `psql -f`. Legacy/historical. Do not add new files here.
+2. **`/home/azim/core/modules/fazle_payroll_engine/migrations/`** (14 files, own independent `001`–`014` sequence) — **re-run in full, statement-by-statement, on every app startup** (`fazle_payroll_engine/__init__.py:25-38`), with per-statement exceptions swallowed as warnings. Not tracked in `schema_migrations`. Legacy/historical. Do not add new files here.
+3. **Inline Python DDL** in `modules/contact_sync/__init__.py`, `modules/social_auto_reply/__init__.py`, `modules/bridge_poller/__init__.py`, `modules/wa_chat_frontend/__init__.py` — all `CREATE TABLE IF NOT EXISTS`, re-executed at every startup, genuinely idempotent, not tracked. Treated as a deliberate idempotent-bootstrap pattern, not a restructuring target for now. Do not add new inline DDL to new modules going forward — use `db/migrations/` instead.
+
+### Known duplicate/missing numbers in `db/migrations/` (documented, not renamed)
+
+- **Duplicate `012`**: `012_ai_readonly_views.sql` and `012_queue_arbiter.sql` both exist. **Not renamed** — `schema_migrations` keys on full filename, not numeric prefix, so there is no runtime collision; renaming either file risks orphaning or re-triggering already-applied production history.
+- **Duplicate `020`**: `020_escort_roster_employee_fk.sql` and `020_preflight_guard_tables.sql` both exist. Same reasoning — **not renamed**.
+- **Missing `009`**: no `009_*.sql` file exists in `db/migrations/`. **Intentionally left as a gap, not backfilled** — inventing content for a number retroactively risks someone assuming it must exist and re-deriving the wrong content. If you are reading this and wondering "where is 009," the answer is: it never existed or was removed before this repository's current history; there is no production impact.
+- **`023` fragmented into 5 files**: `023_c0d_001` through `023_c0d_004` plus `023_model_router_tables.sql`. This follows the same "new suffixed files, not renumbering" precedent already set by this repo's own Sprint-C0D pattern — the right approach, kept as-is.
+
+**Rule going forward:** filename is the uniqueness key, not the leading number. Never assume the numeric prefix alone identifies a migration or that gaps must be filled.
+
+### Known cross-directory schema-collision risk (documented, not yet fixed)
+
+`SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 4 found genuine `ALTER TABLE` collisions across the three governed directories on `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, and `fazle_payment_drafts`, plus a fully duplicated schema definition for all 8 `social_auto_reply` tables (identical in both `db/migrations/013_social_auto_reply.sql` and the inline DDL in `modules/social_auto_reply/__init__.py`). These are **documented here as known risk, not resolved by this task** — resolving them safely requires the dedicated reconciliation pass below, since several may have already been applied to production under their current form.
+
+### Checklist for future migration reconciliation (not started — tracked here for whoever picks it up)
+
+- [ ] Port `/home/azim/core/migrations/*.sql` into `db/migrations/` under new numbers (≥029), annotated as reconciliation-only
+- [ ] Port `fazle_payroll_engine/migrations/*.sql` into `db/migrations/` under new numbers, after diffing shared-table statements (`fpe_cash_transactions`, `fpe_income_transactions`, `fazle_payment_drafts`, `wbom_escort_programs`) against actual production columns
+- [ ] Retire the FPE inline-DDL startup loop once its migrations are ported and confirmed already-applied in `schema_migrations`
+- [ ] Dedupe the `social_auto_reply` schema definition — pick one of the two identical sources as canonical, have the other reference it
+- [ ] Write one new `db/migrations/0NN_bootstrap_core_tables.sql` for the 24 tables with no schema source of truth outside `tests/conftest.py` (see `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 4 §7 and Report 9 for the full list, including two confirmed live writers: `fazle_error_log`, `llm_conversation_log`) — use real production `\d <table>` output as the column source, **not** `conftest.py`'s guess, which is already known to disagree with production
+- [ ] Commit or explicitly abandon the 4 previously-untracked `db/migrations/` files (`020_preflight_guard_tables.sql`, `023_model_router_tables.sql`, `027_assistant_feature_flags.sql`, `028_assistant_ext_location_audit.sql`)
+- [ ] Update this document's table count and domain list once the above is complete (see "Unresolved Schema Questions" below for the existing staleness note)
+
+---
+
 ## Domain 1 — ESCORT
 
 **Business Purpose:** Manage the full lifecycle of escort programs — assignment, vessel tracking, shift logging, OCR slip extraction, and handover/release matching.
