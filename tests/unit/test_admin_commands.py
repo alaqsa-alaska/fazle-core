@@ -177,3 +177,106 @@ class TestProcessPaidCommand:
                 "SELECT COUNT(*) FROM fpe_cash_transactions"
             )
         assert count == 0
+
+    async def test_paid_command_rbac_exception_fails_closed(
+        self, test_db_pool, seed_fpe_employee, seed_payment_draft
+    ):
+        """
+        Regression test for the RBAC fail-open bug (2026-07-08 audit finding):
+        if rbac.check_permission() itself raises (e.g. a transient DB error),
+        the command must be DENIED, never silently executed.
+        """
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.admin_commands import process_admin_command
+
+        draft_id = seed_payment_draft["id"]
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(side_effect=RuntimeError("simulated rbac db outage")),
+        ):
+            result = await process_admin_command(
+                text=f"PAID {draft_id} 1500 bkash",
+                admin_phone="8801700000001",
+            )
+
+        # Must read as a denial, not a success confirmation
+        assert "⛔" in result
+
+        # No canonical transaction may be created when the permission check
+        # itself failed — this is the money-safety guarantee this fix protects.
+        async with test_db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM fpe_cash_transactions"
+            )
+        assert count == 0
+
+
+class TestRbacFailClosed:
+    """
+    Isolated, DB-independent regression tests for the RBAC fail-open bug
+    (2026-07-08 audit finding, modules/admin_commands/__init__.py). These do
+    not depend on any DB fixture, so they still catch a regression even if
+    the test database schema drifts (see TestProcessPaidCommand for the
+    end-to-end equivalents, which do exercise the real ledger table).
+    """
+
+    async def test_rbac_exception_never_reaches_paid_handler(self):
+        from modules.admin_commands import process_admin_command
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(side_effect=RuntimeError("simulated rbac db outage")),
+        ), patch(
+            "modules.rbac.record_audit", new=AsyncMock(return_value=None)
+        ), patch(
+            "modules.admin_commands._cmd_paid", new=AsyncMock(return_value="should not run")
+        ) as mock_cmd_paid:
+            result = await process_admin_command(
+                text="PAID 1 1500 bkash",
+                admin_phone="8801700000001",
+            )
+
+        mock_cmd_paid.assert_not_called()
+        assert "⛔" in result
+
+    async def test_rbac_allowed_true_still_reaches_paid_handler(self):
+        """Sanity check: the fail-closed fix must not also fail closed when allowed."""
+        from modules.admin_commands import process_admin_command
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": True, "required_role": "accountant", "admin": True}),
+        ), patch(
+            "modules.rbac.record_audit", new=AsyncMock(return_value=None)
+        ), patch(
+            "modules.admin_commands._cmd_paid", new=AsyncMock(return_value="handled")
+        ) as mock_cmd_paid:
+            result = await process_admin_command(
+                text="PAID 2 1500 bkash",
+                admin_phone="8801700000001",
+            )
+
+        mock_cmd_paid.assert_called_once()
+        assert result == "handled"
+
+    async def test_rbac_denied_never_reaches_paid_handler(self):
+        from modules.admin_commands import process_admin_command
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": False, "required_role": "accountant", "reason": "Insufficient role"}),
+        ), patch(
+            "modules.rbac.record_audit", new=AsyncMock(return_value=None)
+        ), patch(
+            "modules.admin_commands._cmd_paid", new=AsyncMock(return_value="should not run")
+        ) as mock_cmd_paid:
+            result = await process_admin_command(
+                text="PAID 3 1500 bkash",
+                admin_phone="8801700000001",
+            )
+
+        mock_cmd_paid.assert_not_called()
+        assert "⛔" in result

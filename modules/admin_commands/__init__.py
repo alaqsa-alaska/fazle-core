@@ -249,35 +249,52 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
         return ""  # silent drop, no double-process
 
     # ── Batch 19 — RBAC guard + audit ────────────────────────────────────────
+    # SECURITY: this gate must fail CLOSED. If rbac.check_permission() itself
+    # raises (DB hiccup, etc.), the command is denied — it must never fall
+    # through to execution just because the permission check couldn't run.
     cmd_name = _classify_command(t)
     if cmd_name is not None:
+        from modules import rbac
         try:
-            from modules import rbac
             perm = await rbac.check_permission(phone=admin_phone, command=cmd_name)
-            if not perm["allowed"]:
-                await rbac.record_audit(
-                    channel="whatsapp", command=cmd_name,
-                    actor_phone=admin_phone, actor_admin=perm.get("admin"),
-                    args=t[:400], allowed=False,
-                    required_role=perm.get("required_role"),
-                    denied_reason=perm.get("reason"),
-                )
-                return (
-                    f"⛔ অনুমতি নেই: কমান্ড `{cmd_name}` চালাতে "
-                    f"`{perm.get('required_role')}` রোল প্রয়োজন।"
-                )
-            # allowed — record (best-effort, non-blocking)
+        except Exception as e:
+            log.error(f"[admin_cmd] rbac check raised — failing CLOSED, command denied: {e}")
             try:
                 await rbac.record_audit(
                     channel="whatsapp", command=cmd_name,
-                    actor_phone=admin_phone, actor_admin=perm.get("admin"),
-                    args=t[:400], allowed=True,
-                    required_role=perm.get("required_role"),
+                    actor_phone=admin_phone, actor_admin=None,
+                    args=t[:400], allowed=False,
+                    required_role=None,
+                    denied_reason=f"rbac_check_exception: {e}",
                 )
-            except Exception as e:
-                log.warning(f"[admin_cmd] audit (allowed) failed: {e}")
+            except Exception as audit_exc:
+                log.warning(f"[admin_cmd] audit (rbac exception) failed: {audit_exc}")
+            return (
+                "⛔ অনুমতি যাচাই করা যায়নি (সিস্টেম ত্রুটি)। নিরাপত্তার কারণে কমান্ডটি বাতিল করা হলো। "
+                "আবার চেষ্টা করুন বা অ্যাডমিনকে জানান।"
+            )
+        if not perm["allowed"]:
+            await rbac.record_audit(
+                channel="whatsapp", command=cmd_name,
+                actor_phone=admin_phone, actor_admin=perm.get("admin"),
+                args=t[:400], allowed=False,
+                required_role=perm.get("required_role"),
+                denied_reason=perm.get("reason"),
+            )
+            return (
+                f"⛔ অনুমতি নেই: কমান্ড `{cmd_name}` চালাতে "
+                f"`{perm.get('required_role')}` রোল প্রয়োজন।"
+            )
+        # allowed — record (best-effort, non-blocking)
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command=cmd_name,
+                actor_phone=admin_phone, actor_admin=perm.get("admin"),
+                args=t[:400], allowed=True,
+                required_role=perm.get("required_role"),
+            )
         except Exception as e:
-            log.warning(f"[admin_cmd] rbac check failed (failing open for now): {e}")
+            log.warning(f"[admin_cmd] audit (allowed) failed: {e}")
     # ─────────────────────────────────────────────────────────────────────────
 
     m = _APPROVE_RE.match(t)
@@ -851,7 +868,7 @@ async def _cmd_escort_confirm(
         # Update program with escort details
         await _ex(
             """UPDATE wbom_escort_programs
-               SET status = 'confirmed', shift = $2,
+               SET status = 'Assigned', shift = $2,
                    remarks = remarks::jsonb || jsonb_build_object(
                        'escort_name', $3::text,
                        'escort_mobile', $4::text,
