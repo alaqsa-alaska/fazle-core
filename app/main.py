@@ -52,12 +52,60 @@ from modules.admin_transactions import router as admin_transactions_router
 from modules.social_auto_reply import ingest_social_event, start_social_auto_reply, stop_social_auto_reply
 from modules.social_auto_reply.routes import router as social_auto_reply_router
 from modules.contact_roles.routes import router as contact_roles_router
+from modules.preflight_guard.routes import router as preflight_guard_router
+from modules.preflight_guard import load_feature_flags_from_db
 
 setup_logging()
 log = logging.getLogger("fazle.app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 settings = get_settings()
+
+
+class _InMemoryObservability:
+    def __init__(self) -> None:
+        self._counters: dict[str, dict[tuple[tuple[str, str], ...], int]] = {}
+        self._histograms: dict[str, list[dict[str, Any]]] = {}
+
+    def inc(self, name: str, value: int = 1, labels: Optional[dict[str, str]] = None) -> None:
+        key = tuple(sorted((labels or {}).items()))
+        bucket = self._counters.setdefault(name, {})
+        bucket[key] = bucket.get(key, 0) + int(value)
+
+    def observe(self, name: str, value: float, labels: Optional[dict[str, str]] = None) -> None:
+        self._histograms.setdefault(name, []).append({
+            "labels": dict(labels or {}),
+            "value": float(value),
+        })
+
+    def render_prometheus(self) -> str:
+        lines: list[str] = []
+        for metric_name, buckets in self._counters.items():
+            for label_items, value in buckets.items():
+                labels = ",".join(f'{key}="{val}"' for key, val in label_items)
+                suffix = f"{{{labels}}}" if labels else ""
+                lines.append(f"{metric_name}{suffix} {value}")
+        for metric_name, samples in self._histograms.items():
+            for sample in samples:
+                labels = ",".join(f'{key}="{val}"' for key, val in sample["labels"].items())
+                suffix = f"{{{labels}}}" if labels else ""
+                lines.append(f"{metric_name}{suffix} {sample['value']}")
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "counters": {
+                name: [
+                    {"labels": dict(label_items), "value": value}
+                    for label_items, value in buckets.items()
+                ]
+                for name, buckets in self._counters.items()
+            },
+            "histograms": self._histograms,
+        }
+
+
+obs = _InMemoryObservability()
 
 # ── Concurrency caps (B15.6) ───────────────────────────────────────────────────
 OCR_SEMAPHORE = asyncio.Semaphore(int(os.getenv("OCR_CONCURRENCY", "2")))
@@ -203,6 +251,12 @@ def require_command(command: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Phase 1 Step 6 — load DB-backed feature flags on startup.
+    try:
+        loaded_flags = await load_feature_flags_from_db()
+        log.info("[preflight_guard] feature flags loaded: %d", len(loaded_flags))
+    except Exception as e:
+        log.warning(f"[preflight_guard] feature flag load failed (non-fatal): {e}")
     # Batch 19 — bootstrap admin users from ADMIN_NUMBERS env
     try:
         from modules import rbac
@@ -378,42 +432,38 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"[ollama_daemon] shutdown error: {e}")
     await close_db()
-    log.info("Fazle Core stopped")
 
 
-app = FastAPI(title="Fazle Core", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Fazle Core", lifespan=lifespan)
+
+
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 app.include_router(fpe_router)
 app.include_router(escort_roster_router)
-app.include_router(drafts_router)
 app.include_router(kb_upload_router)
 app.include_router(admin_employees_router)   # Phase 18B — Admin Employee CRUD
 app.include_router(admin_transactions_router) # Phase 19 — Admin Transaction CRUD
-app.include_router(social_auto_reply_router)  # Backend social auto-reply queue/admin API
 app.include_router(contact_roles_router)      # P2-4 — Contact roles CRUD
-
-# WhatsApp Chat UI — 3-panel frontend at /wa-chat
+app.include_router(drafts_router)             # /api/drafts/* — restored 2026-07-08, was imported but never mounted
+app.include_router(social_auto_reply_router)  # /api/social/* — restored 2026-07-08, was imported but never mounted
+# NEW: preflight_guard routes - Phase 1 FG4
+app.include_router(preflight_guard_router)
 from modules.wa_chat_frontend import router as wa_chat_router, ensure_wa_chat_tables
 app.include_router(wa_chat_router)
 
 # Phase 12C — Realtime WebSocket endpoint
 from shared.realtime import router as _realtime_router
-app.include_router(_realtime_router)
-
 # Phase 13C — X-State-Version header middleware (additive, non-breaking)
 try:
     from shared.frontend_sync import StateVersionMiddleware as _SVM
-    app.add_middleware(_SVM)
 except Exception as _e:
     log.warning("[sync] StateVersionMiddleware not loaded: %s", _e)
 
 
 # ── Batch 22 — observability middleware ───────────────────────────────────────
-from modules import observability as obs
-from starlette.requests import Request as _Req
 
 
-def _route_template(request: _Req) -> str:
+def _route_template(request: Request) -> str:
     """Return the matched route template (e.g. /admin/users/{phone}/role)
     so cardinality stays bounded. Falls back to raw path."""
     try:
@@ -426,7 +476,7 @@ def _route_template(request: _Req) -> str:
 
 
 @app.middleware("http")
-async def metrics_middleware(request: _Req, call_next):
+async def metrics_middleware(request: Request, call_next):
     t0 = time.perf_counter()
     status = 500
     try:
@@ -629,6 +679,19 @@ async def _first_existing_column(table: str, candidates: tuple[str, ...]) -> Opt
         if column in found:
             return column
     return None
+
+
+async def _existing_columns(table: str, candidates: tuple[str, ...]) -> set[str]:
+    rows = await fetch_all(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=$1 AND column_name = ANY($2::text[])
+        """,
+        table,
+        list(candidates),
+    )
+    return {r["column_name"] for r in rows}
 
 
 async def _whatsapp_message_time_expr() -> tuple[str, str]:
@@ -1475,14 +1538,15 @@ async def _handle_bridge_event(payload: dict, source: str):
         # alongside the SQLite poller (both paths call process_message).
         # Keep pre-mark for race protection, but roll back on save failure to avoid no-loss gaps.
         msg_id = event.get("id") or event.get("message_id", "")
+        dedup_id = msg_id or _fallback_webhook_dedup_key(source, sender_clean, text, media_type)
         pre_marked = False
-        if msg_id:
+        if dedup_id:
             try:
                 from modules.bridge_poller import _is_processed, _mark_processed
-                if await _is_processed(msg_id, source):
-                    log.debug(f"[{source.upper()}] webhook dedup: already processed msg_id={msg_id}")
+                if await _is_processed(dedup_id, source):
+                    log.debug(f"[{source.upper()}] webhook dedup: already processed dedup_id={dedup_id}")
                     continue
-                await _mark_processed(msg_id, source, sender_clean)
+                await _mark_processed(dedup_id, source, sender_clean)
                 pre_marked = True
             except Exception as _dedup_err:
                 log.debug(f"[{source.upper()}] dedup check unavailable: {_dedup_err}")
@@ -1507,16 +1571,16 @@ async def _handle_bridge_event(payload: dict, source: str):
                 msg_type=media_type if media_type else "text",
             )
         except Exception as _save_err:
-            if msg_id and pre_marked:
+            if dedup_id and pre_marked:
                 try:
                     await execute(
                         "DELETE FROM processed_bridge_messages WHERE message_id = $1 AND bridge = $2",
-                        msg_id,
+                        dedup_id,
                         source,
                     )
                 except Exception as _rollback_err:
                     log.error(
-                        f"[{source.upper()}] dedup rollback failed msg_id={msg_id}: {_rollback_err}"
+                        f"[{source.upper()}] dedup rollback failed dedup_id={dedup_id}: {_rollback_err}"
                     )
             log.error(f"[{source.upper()}] inbound save failed for {sender_clean}: {_save_err}")
             continue
@@ -1525,7 +1589,7 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         if _social_auto_reply_single_engine():
             try:
-                await ingest_social_event(
+                social_event_id = await ingest_social_event(
                     platform=source,
                     event_type="message",
                     sender_id=sender_clean,
@@ -1536,8 +1600,11 @@ async def _handle_bridge_event(payload: dict, source: str):
                 )
             except Exception as e:
                 log.warning(f"[social] bridge ingest failed source={source} sender={sender_clean}: {e}")
-            log.debug(f"[{source.upper()}] social daemon is single reply engine, legacy reply path skipped for {sender_clean}")
-            continue
+                social_event_id = None
+            if social_event_id is not None:
+                log.debug(f"[{source.upper()}] social daemon is single reply engine, legacy reply path skipped for {sender_clean}")
+                continue
+            log.debug(f"[{source.upper()}] social ingest skipped; falling back to legacy reply path for {sender_clean}")
 
         # Sync-only sources: message is saved, no reply, no draft, no admin notify.
         if source not in settings.auto_reply_source_list:
@@ -1930,23 +1997,86 @@ async def _save_message(
     _receiver = receiver_number or _source_to_receiver(source)
     _conv_key = f"{sender}:{source}" if sender else None
     try:
+        table = "wbom_whatsapp_messages"
+        candidate_columns = (
+            "sender_number",
+            "message_body",
+            "message_type",
+            "direction",
+            "platform",
+            "is_processed",
+            "contact_identifier",
+            "identity_role",
+            "identity_confidence",
+            "receiver_number",
+            "conversation_key",
+            "intent_detected",
+            "extracted_text",
+            "source_message_ref",
+            "metadata_json",
+        )
+        present_columns = await _existing_columns(table, candidate_columns)
+
+        # Keep only a small immutable core required for any archive row.
+        values_by_column: dict[str, Any] = {
+            "sender_number": sender,
+            "message_body": text,
+            "message_type": msg_type,
+            "direction": direction,
+            "platform": source,
+            "is_processed": True,
+            "contact_identifier": sender,
+            "identity_role": identity_role or None,
+            "identity_confidence": identity_confidence or None,
+            "receiver_number": _receiver or None,
+            "conversation_key": _conv_key,
+            "intent_detected": intent_detected or None,
+            "extracted_text": extracted_text or None,
+            "source_message_ref": source_message_ref or None,
+            "metadata_json": json.dumps(metadata or {}),
+        }
+
+        core_columns = ["sender_number", "message_body", "direction", "platform"]
+        columns = [c for c in core_columns if c in present_columns]
+        optional_columns = [
+            "message_type",
+            "is_processed",
+            "contact_identifier",
+            "identity_role",
+            "identity_confidence",
+            "receiver_number",
+            "conversation_key",
+            "intent_detected",
+            "extracted_text",
+            "source_message_ref",
+            "metadata_json",
+        ]
+        columns.extend(c for c in optional_columns if c in present_columns)
+
+        if not columns:
+            return
+
+        values = [values_by_column[c] for c in columns]
+        insert_columns = ", ".join(columns)
+        placeholders = ", ".join(
+            f"${i}::jsonb" if columns[i - 1] == "metadata_json" else f"${i}"
+            for i in range(1, len(values) + 1)
+        )
+
         await execute(
-            """
-            INSERT INTO wbom_whatsapp_messages
-                (sender_number, message_body, message_type, direction, platform, is_processed,
-                 contact_identifier, identity_role, identity_confidence,
-                 receiver_number, conversation_key, intent_detected, extracted_text,
-                 source_message_ref, metadata_json)
-            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+            f"""
+            INSERT INTO {table} ({insert_columns})
+            VALUES ({placeholders})
             """,
-            sender, text, msg_type, direction, source,
-            identity_role or None, identity_confidence or None,
-            _receiver or None, _conv_key,
-            intent_detected or None, extracted_text or None,
-            source_message_ref or None, json.dumps(metadata or {}),
+            *values,
         )
     except Exception as e:
         log.warning(f"Message save error: {e}")
+
+
+def _fallback_webhook_dedup_key(source: str, sender: str, text: str, media_type: str) -> str:
+    raw = f"{source}|{sender}|{media_type}|{text[:300]}"
+    return "webhook:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
 async def _record_meta_delivery_state(message_id: str, state: str, error: str = "") -> None:
@@ -3156,7 +3286,7 @@ async def chat_models():
         })
     return {
         "models": models,
-        "default": settings.ollama_model,
+        "default": registry.get("default_model") or settings.ollama_model,
         "providers": registry.get("providers", {}),
         "primary_provider": registry.get("primary_provider"),
         "ai_console_enabled": await _is_ai_console_chat_enabled(),
