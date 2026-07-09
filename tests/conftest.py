@@ -782,9 +782,23 @@ async def test_db_pool(_setup_test_schema) -> AsyncGenerator[asyncpg.Pool, None]
     (no-DB) unit tests never request test_db_pool so they are unaffected."""
     pool = await asyncpg.create_pool(TEST_DB_URL, min_size=1, max_size=3)
     yield pool
-    async with pool.acquire() as conn:
-        await _truncate_all_tables(conn)
-    await pool.close()
+    try:
+        async with pool.acquire() as conn:
+            await _truncate_all_tables(conn)
+    finally:
+        await pool.close()
+        # Many tests point the shared app.database._pool singleton at this
+        # fixture's pool directly (`db_module._pool = test_db_pool`), bypassing
+        # dependency injection. If we don't clear that reference here, the next
+        # test in the session that relies on app.database's global pool (e.g.
+        # any ASGI call through app.main.app that never re-assigns it) inherits
+        # a closed-pool reference and fails with "pool is closed" — regardless
+        # of whether *this* test passed, failed, or errored. Only clear it if
+        # it's still pointing at the pool we just closed, so we never stomp on
+        # a different pool some other fixture may have set up in the meantime.
+        import app.database as db_module
+        if db_module._pool is pool:
+            db_module._pool = None
 
 
 @pytest_asyncio.fixture
