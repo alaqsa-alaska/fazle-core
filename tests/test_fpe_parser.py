@@ -110,6 +110,14 @@ class TestPaymentParsing:
         r = parse("Assalamu Alaikum")
         assert r["type"] == MessageType.other
 
+    def test_attendance_draft_with_sender_label_is_not_payment(self):
+        r = parse("\n\nপ্রেরক: 8801733364777\nApproved by office\n")
+        assert r["type"] == MessageType.other
+
+    def test_approve_reject_text_is_not_payment(self):
+        r = parse("APPROVE / REJECT this attendance draft")
+        assert r["type"] == MessageType.other
+
 
 # ── Balance summary ───────────────────────────────────────────────────────
 

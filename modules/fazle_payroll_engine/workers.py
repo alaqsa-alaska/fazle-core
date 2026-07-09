@@ -17,11 +17,13 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import re
 import time
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
+from app.config import get_settings
 from app.database import fetch_all, fetch_one
 from .accounting import create_income_transaction, create_transaction
 from .ai_enhancer import ai_enhance_parse
@@ -46,6 +48,56 @@ log = logging.getLogger("fazle.fpe.workers")
 POLL_INTERVAL = 3       # seconds between DB polls
 BATCH_SIZE = 20         # messages per worker tick
 MAX_ATTEMPTS = 5        # give up after this many failures
+
+_PAYROLL_COMMAND_RE = re.compile(r"^\s*(cash|income)\b", re.IGNORECASE)
+_REVIEW_ONLY_MARKER_RE = re.compile(r"(?:প্রেরক\s*:|approve\b|reject\b|attendance\s+draft)", re.IGNORECASE)
+
+
+def _configured_sync_jids() -> set[str]:
+    settings = get_settings()
+    raw = getattr(settings, "fpe_sync_chat_jids", None) or ""
+    jids = {jid.strip() for jid in raw.split(",") if jid.strip()}
+    if not jids:
+        accountant = getattr(settings, "accountant_phone", "") or ""
+        if accountant:
+            jids.add(f"{accountant}@s.whatsapp.net")
+    return jids
+
+
+def _is_authorized_payroll_command(sender_phone: Optional[str], content: str) -> bool:
+    match = _PAYROLL_COMMAND_RE.match(content or "")
+    if not match:
+        return False
+
+    settings = get_settings()
+    sender = normalize_bd_phone(sender_phone or "")
+    if not sender:
+        return False
+
+    command = match.group(1).lower()
+    if command == "cash":
+        return sender in settings.fpe_cash_authorized_phone_list
+    if command == "income":
+        return sender in settings.fpe_income_authorized_phone_list
+    return False
+
+
+def _should_skip_payroll_parse(row: dict, content: str) -> tuple[bool, str]:
+    text = (content or "").strip()
+    if not text:
+        return True, "empty_content"
+
+    chat_jid = (row.get("chat_jid") or "").strip()
+    if chat_jid in _configured_sync_jids():
+        return False, ""
+
+    if _is_authorized_payroll_command(row.get("sender_phone"), text):
+        return False, ""
+
+    if _REVIEW_ONLY_MARKER_RE.search(text):
+        return True, "review_only_marker"
+
+    return True, "non_payroll_or_unauthorized_source"
 
 
 def _eligible_for_accounting_review(pdata: dict) -> bool:
@@ -138,6 +190,16 @@ async def _process_pending_batch() -> None:
         is_from_me = row["is_from_me"]
 
         try:
+            skip_parse, skip_reason = _should_skip_payroll_parse(row, content)
+            if skip_parse:
+                await store_unmatched(msg_id, skip_reason, content)
+                await mark_processing_status(msg_id, "skipped", skip_reason)
+                log.info(
+                    "[fpe.worker.parser] blocked msg=%d source=%s jid=%s reason=%s",
+                    msg_id, row.get("source"), row.get("chat_jid"), skip_reason,
+                )
+                continue
+
             await mark_processing_status(msg_id, "parsing")
 
             # Parse the message

@@ -15,7 +15,7 @@ from modules.fazle_payroll_engine.validation import (
     MESSAGE_RULES,
     get_rule,
 )
-from modules.fazle_payroll_engine.workers import _eligible_for_accounting_review
+from modules.fazle_payroll_engine.workers import _eligible_for_accounting_review, _should_skip_payroll_parse
 from modules.fazle_payroll_engine.employee import (
     create_employee_manual,
     _is_valid_human_name,
@@ -166,6 +166,36 @@ class TestEmployeeNameValidation:
         assert _is_valid_human_name("Jakir Hossain")
         assert _is_valid_human_name("মোঃ আল মোমিন")
         assert _is_valid_human_name("Md. Jakir")
+
+
+class TestPayrollParseGate:
+    """Bridge1 review-only messages must not reach the payroll parser."""
+
+    def test_bridge1_attendance_draft_is_blocked(self):
+        row = {
+            "source": "bridge1",
+            "chat_jid": "8801880446111@s.whatsapp.net",
+            "sender_phone": "8801958122300",
+        }
+        blocked, reason = _should_skip_payroll_parse(
+            row,
+            "Attendance draft\nপ্রেরক: 8801733364777\nAPPROVE / REJECT",
+        )
+        assert blocked
+        assert reason in {"review_only_marker", "non_payroll_or_unauthorized_source"}
+
+    def test_allowlisted_sync_chat_is_not_blocked(self):
+        row = {
+            "source": "bridge2",
+            "chat_jid": "8801844836824@s.whatsapp.net",
+            "sender_phone": "8801880446111",
+        }
+        blocked, reason = _should_skip_payroll_parse(
+            row,
+            "Jakir 01725494969(N) 2200/-",
+        )
+        assert not blocked
+        assert reason == ""
 
 
 class TestCreateEmployeeManual:

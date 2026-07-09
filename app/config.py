@@ -8,7 +8,6 @@ from functools import lru_cache
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import field_validator
-from typing import Optional
 import re
 
 
@@ -22,6 +21,29 @@ class Settings(BaseSettings):
     # Ollama
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "phi4-mini:latest"
+    # Task-tier model routing (falls back to ollama_model when empty)
+    ollama_runtime_model: str = "phi4-mini"
+    ollama_business_model: str = "qwen3:8b"
+    ollama_memory_model: str = "phi4-mini"
+    ollama_general_model: str = "phi4-mini"
+    ollama_deep_reasoning_model: str = "qwen3:8b"
+    # Safe bounded concurrency for local inference paths
+    ollama_infer_concurrency: int = 1
+    ollama_chat_concurrency: int = 1
+    # Shared daemon HTTP pool tuning
+    ollama_http_max_connections: int = 16
+    ollama_http_max_keepalive_connections: int = 8
+    # Runtime tuning (bounded at call-site before use)
+    ollama_num_ctx_default: int = 512
+    ollama_num_ctx_classify: int = 256
+    ollama_num_predict_reply: int = 50
+    ollama_num_predict_recruitment: int = 50
+    ollama_num_predict_chat: int = 100
+    ollama_num_predict_rag: int = 150
+    ollama_temperature_reply: float = 0.4
+    ollama_temperature_recruitment: float = 0.2
+    ollama_temperature_chat: float = 0.3
+    ollama_temperature_rag: float = 0.3
 
     # GitHub Models (OpenAI-compatible — https://models.github.ai/inference)
     github_token: str = ""
@@ -71,6 +93,19 @@ class Settings(BaseSettings):
 
     # Media
     media_processor_url: str = "http://localhost:8090"
+
+    # LocationWhere adapter (Phase 2 / FG1)
+    locationwhere_base_url: str = "http://127.0.0.1:3000/api/v1"
+    locationwhere_jwt_token: str = ""
+    locationwhere_employee_location_endpoint: str = "/location/live"
+    locationwhere_device_status_endpoint: str = "/device/{device_id}/status"
+    locationwhere_health_endpoint: str = "/gateway/status"
+    location_adapter_timeout_s: float = 2.0
+    location_adapter_retries: int = 2
+    location_adapter_cache_ttl_s: int = 30
+    location_adapter_circuit_max_failures: int = 5
+    location_adapter_circuit_window_s: int = 120
+    location_adapter_circuit_open_s: int = 60
 
     # App
     app_port: int = 8200

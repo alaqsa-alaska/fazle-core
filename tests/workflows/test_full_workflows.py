@@ -82,15 +82,12 @@ class TestEscortFullWorkflow:
                 VALUES ($1, 'Test Admin', 'active')
                 ON CONFLICT (phone) DO NOTHING
             """, ADMIN_PHONE)
-            role = await conn.fetchrow(
-                "SELECT role_id FROM fazle_roles WHERE role_name='superadmin'"
-            )
             admin = await conn.fetchrow(
-                "SELECT admin_id FROM fazle_admins WHERE phone=$1", ADMIN_PHONE
+                "SELECT id FROM fazle_admins WHERE phone=$1", ADMIN_PHONE
             )
             await conn.execute(
-                "INSERT INTO fazle_admin_roles (admin_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
-                admin["admin_id"], role["role_id"],
+                "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1,'superadmin','test') ON CONFLICT DO NOTHING",
+                admin["id"],
             )
 
         r = await client.post("/webhook/mcp2", json=confirm_payload)
@@ -176,13 +173,12 @@ class TestAdvanceWorkflow:
                 INSERT INTO fazle_admins (phone, name, status)
                 VALUES ($1, 'Admin', 'active')
                 ON CONFLICT (phone) DO NOTHING
-                RETURNING admin_id
+                RETURNING id
             """, ADMIN_PHONE)
             if admin_row:
-                role = await conn.fetchrow("SELECT role_id FROM fazle_roles WHERE role_name='superadmin'")
                 await conn.execute(
-                    "INSERT INTO fazle_admin_roles (admin_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
-                    admin_row["admin_id"], role["role_id"],
+                    "INSERT INTO fazle_admin_roles (admin_id, role_name, granted_by) VALUES ($1,'superadmin','test') ON CONFLICT DO NOTHING",
+                    admin_row["id"],
                 )
 
         # Guard requests advance

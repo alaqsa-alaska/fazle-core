@@ -158,28 +158,34 @@ async def ingest_social_event(
 ) -> int | None:
     external_id = message_id or comment_id
     key = event_key(platform=platform, event_type=event_type, external_id=external_id, sender_id=sender_id, text=text)
-    row = await fetch_one(
-        """
-        INSERT INTO social_inbox_events
-            (event_key, platform, event_type, sender_id, sender_name, conversation_id,
-             message_id, comment_id, parent_id, message_text, media_flag, raw_payload)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
-        ON CONFLICT (event_key) DO NOTHING
-        RETURNING id
-        """,
-        key,
-        platform,
-        event_type,
-        sender_id,
-        sender_name,
-        conversation_id,
-        message_id,
-        comment_id,
-        parent_id,
-        text,
-        media_flag,
-        json.dumps(raw_payload or {}, ensure_ascii=False, default=str),
-    )
+    try:
+        row = await fetch_one(
+            """
+            INSERT INTO social_inbox_events
+                (event_key, platform, event_type, sender_id, sender_name, conversation_id,
+                 message_id, comment_id, parent_id, message_text, media_flag, raw_payload)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+            ON CONFLICT (event_key) DO NOTHING
+            RETURNING id
+            """,
+            key,
+            platform,
+            event_type,
+            sender_id,
+            sender_name,
+            conversation_id,
+            message_id,
+            comment_id,
+            parent_id,
+            text,
+            media_flag,
+            json.dumps(raw_payload or {}, ensure_ascii=False, default=str),
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ == "UndefinedTableError":
+            log.warning("[social] social_inbox_events missing; ingest skipped")
+            return None
+        raise
     if not row:
         return None
     event_id = int(row["id"])

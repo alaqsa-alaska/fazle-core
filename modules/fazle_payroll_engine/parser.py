@@ -435,6 +435,18 @@ def _is_valid_human_name(name: Optional[str]) -> bool:
     digits_only = re.sub(r"[\s\-\+\(\)\.]", "", s)
     if digits_only.isdigit():
         return False
+    blocked_prefixes = (
+        "প্রেরক",
+        "sender",
+        "from",
+        "approve",
+        "reject",
+        "attendance",
+        "draft",
+    )
+    lowered = s.lower().rstrip(":：")
+    if lowered in blocked_prefixes:
+        return False
     # Must contain at least one alphabetic char (Latin or Bengali)
     if not re.search(r"[A-Za-z\u0980-\u09FF]", s):
         return False

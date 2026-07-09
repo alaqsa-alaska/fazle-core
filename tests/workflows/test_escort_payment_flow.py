@@ -213,7 +213,7 @@ async def pending_draft(test_db_pool, flow_employee, completed_program):
             INSERT INTO fazle_payment_drafts
                 (draft_type, employee_id, employee_name, employee_mobile,
                  escort_program_id, duty_days, expected_amount,
-                 payment_method, payment_number, status, source, draft_text)
+                 payment_method, payout_mobile, status, source, draft_text)
             VALUES
                 ('escort_payment', $1, $2, $3, $4,
                  5.0, 1500.00, 'bkash', '01811111111',
@@ -1571,7 +1571,7 @@ class TestPaymentCorrection:
                 INSERT INTO fazle_payment_drafts
                     (draft_type, employee_id, employee_name, employee_mobile,
                      duty_days, expected_amount, approved_amount,
-                     payment_method, payment_number, status, source, draft_text)
+                     payment_method, payout_mobile, status, source, draft_text)
                 VALUES ('escort_payment', $1, $2, $3,
                         5.0, 1500.00, 1500.00,
                         'bkash', '01811111111', 'sent', 'test', 'Draft #X')
@@ -1601,7 +1601,7 @@ class TestPaymentCorrection:
                 INSERT INTO fazle_payment_drafts
                     (draft_type, employee_id, employee_name, employee_mobile,
                      duty_days, expected_amount, approved_amount,
-                     payment_method, payment_number, status, source, draft_text)
+                     payment_method, payout_mobile, status, source, draft_text)
                 VALUES ('escort_payment', $1, $2, $3,
                         5.0, 1500.00, 1500.00,
                         'bkash', '01811111111', 'sent', 'test', 'Draft #X')
@@ -1648,7 +1648,7 @@ class TestPaymentCorrection:
                 INSERT INTO fazle_payment_drafts
                     (draft_type, employee_id, employee_name, employee_mobile,
                      duty_days, expected_amount, approved_amount,
-                     payment_method, payment_number, status, source, draft_text)
+                     payment_method, payout_mobile, status, source, draft_text)
                 VALUES ('advance', $1, $2, $3,
                         0.0, 2000.00, 2000.00,
                         'bkash', '01811111111', 'sent', 'test', 'Advance Draft')

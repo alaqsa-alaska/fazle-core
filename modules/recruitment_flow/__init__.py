@@ -363,3 +363,50 @@ async def recruitment_eligibility(
                 "active_session": active_session}
     return {"eligible": False, "autosend": False, "reason": "no_recruitment_context",
             "active_session": active_session}
+
+
+async def route_recruitment_message(
+    phone: str,
+    text: str,
+    *,
+    source: str,
+    role: str = "unknown",
+    intent: str = "unknown",
+    history: str = "",
+    contact_context: str = "",
+) -> dict:
+    """Canonical recruitment route: eligibility + live reply in one place."""
+    decision = await recruitment_eligibility(phone, text, role=role, intent=intent)
+    if not decision.get("eligible"):
+        return {
+            "eligible": False,
+            "autosend": bool(decision.get("autosend")),
+            "reason": decision.get("reason", "no_recruitment_context"),
+            "reply": None,
+        }
+
+    from modules.conversation_layer import generate_recruitment_reply
+
+    reply = await generate_recruitment_reply(
+        phone=phone,
+        text=text,
+        source=source,
+        contact_context=contact_context,
+        history=history,
+    )
+
+    if not reply:
+        active_session = decision.get("active_session") or {}
+        step = active_session.get("collection_step") if isinstance(active_session, dict) else None
+        if step:
+            reply = STEP_QUESTIONS.get(step, STEP_QUESTIONS["name"])
+        else:
+            intake = await intake_message(phone, text, source)
+            reply = (intake.get("reply") or "").strip() or STEP_QUESTIONS["name"]
+
+    return {
+        "eligible": True,
+        "autosend": bool(decision.get("autosend")),
+        "reason": decision.get("reason", "explicit_recruitment"),
+        "reply": reply,
+    }

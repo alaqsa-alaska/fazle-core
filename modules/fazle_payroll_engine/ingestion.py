@@ -11,15 +11,62 @@ This layer is intentionally thin — fast ingest, deferred heavy processing.
 """
 from __future__ import annotations
 
+import re
 import logging
-from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
+from app.config import get_settings
 from app.database import execute, fetch_one, fetch_val
+from .normalizer import normalize_bd_phone
 from .models import IngestionRequest
 
 log = logging.getLogger("fazle.fpe.ingestion")
+
+_PAYROLL_COMMAND_RE = re.compile(r"^\s*(cash|income)\b", re.IGNORECASE)
+
+
+def _configured_sync_jids() -> set[str]:
+    settings = get_settings()
+    raw = getattr(settings, "fpe_sync_chat_jids", None) or ""
+    jids = {jid.strip() for jid in raw.split(",") if jid.strip()}
+    if not jids:
+        accountant = getattr(settings, "accountant_phone", "") or ""
+        if accountant:
+            jids.add(f"{accountant}@s.whatsapp.net")
+    return jids
+
+
+def _is_authorized_payroll_sender(req: IngestionRequest, content: str) -> bool:
+    settings = get_settings()
+    match = _PAYROLL_COMMAND_RE.match(content or "")
+    if not match:
+        return False
+
+    sender = normalize_bd_phone(req.sender_phone or "") or (req.sender_phone or "").strip()
+    if not sender:
+        return False
+
+    command = match.group(1).lower()
+    if command == "cash":
+        return sender in settings.fpe_cash_authorized_phone_list
+    if command == "income":
+        return sender in settings.fpe_income_authorized_phone_list
+    return False
+
+
+def _should_enqueue_for_parsing(req: IngestionRequest, content: str) -> tuple[bool, str]:
+    text = (content or "").strip()
+    if not text:
+        return False, "empty_content"
+
+    if req.chat_jid in _configured_sync_jids():
+        return True, ""
+
+    if _is_authorized_payroll_sender(req, text):
+        return True, ""
+
+    return False, "non_payroll_or_unauthorized_source"
 
 
 async def ingest_message(req: IngestionRequest) -> Optional[int]:
@@ -58,7 +105,7 @@ async def ingest_message(req: IngestionRequest) -> Optional[int]:
 
     if fpe_id is None:
         # Race condition — another worker inserted first
-        row = await fetch_one(
+        await fetch_one(
             "SELECT id FROM fpe_wa_messages WHERE wa_message_id = $1 AND source = $2",
             req.wa_message_id, req.source,
         )
@@ -73,6 +120,16 @@ async def ingest_message(req: IngestionRequest) -> Optional[int]:
         """,
         fpe_id,
     )
+
+    content = req.raw_content or ""
+    should_enqueue, blocked_reason = _should_enqueue_for_parsing(req, content)
+    if not should_enqueue:
+        await mark_processing_status(fpe_id, "skipped", blocked_reason)
+        log.info(
+            "[fpe.ingest] blocked id=%d source=%s chat_jid=%s reason=%s",
+            fpe_id, req.source, req.chat_jid, blocked_reason,
+        )
+        return fpe_id
 
     log.debug(
         "[fpe.ingest] ingested id=%d source=%s wa_id=%s from_me=%s",

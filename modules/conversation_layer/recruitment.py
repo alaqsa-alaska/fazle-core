@@ -124,7 +124,7 @@ async def simulate_current_core_reply(sender: str, text: str, source: str = "sha
     }
 
 
-async def generate_recruitment_reply_shadow(
+async def generate_recruitment_reply(
     sender: str,
     text: str,
     source: str = "shadow",
@@ -194,3 +194,22 @@ async def generate_recruitment_reply_shadow(
         "mutated": False,
         "sent": False,
     }
+
+
+async def generate_recruitment_reply_shadow(
+    sender: str,
+    text: str,
+    source: str = "shadow",
+    history: str | None = None,
+    use_llm: bool = True,
+    llm_timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    """Backward-compatible alias for older callers/tests."""
+    return await generate_recruitment_reply(
+        sender=sender,
+        text=text,
+        source=source,
+        history=history,
+        use_llm=use_llm,
+        llm_timeout_seconds=llm_timeout_seconds,
+    )

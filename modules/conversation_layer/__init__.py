@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .recruitment import generate_recruitment_reply_shadow, simulate_current_core_reply
+from .recruitment import (
+    generate_recruitment_reply as _generate_recruitment_reply,
+    generate_recruitment_reply_shadow,
+    simulate_current_core_reply,
+)
 
 __all__ = ["generate_recruitment_reply", "generate_recruitment_reply_shadow", "simulate_current_core_reply"]
 
@@ -27,7 +31,7 @@ async def generate_recruitment_reply(
     Replaces modules.recruitment_ai.generate_recruitment_reply in the live router.
     """
     del contact_context  # not used by conversation_layer (same as recruitment_ai)
-    result = await generate_recruitment_reply_shadow(
+    result = await _generate_recruitment_reply(
         sender=phone,
         text=text,
         source=source,

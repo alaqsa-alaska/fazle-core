@@ -201,18 +201,25 @@ async def api_roster_active(
 @router.get("/export", dependencies=[Depends(_require_key)])
 async def api_roster_export(
     search: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     start_from: Optional[str] = Query(None),
+    startFrom: Optional[str] = Query(None),
     start_to: Optional[str] = Query(None),
+    startTo: Optional[str] = Query(None),
 ):
     """Export roster as CSV download."""
+    effective_search = search if search is not None else q
+    effective_start_from = start_from if start_from is not None else startFrom
+    effective_start_to = start_to if start_to is not None else startTo
+
     result = await get_roster_list(
         page=1,
         page_size=10000,
-        search=search,
+        search=effective_search,
         status=status,
-        start_from=start_from,
-        start_to=start_to,
+        start_from=effective_start_from,
+        start_to=effective_start_to,
         sort_by="start_date",
         sort_dir="desc",
     )
@@ -338,23 +345,36 @@ async def api_match_slip(body: SlipMatchRequest):
 async def api_roster_list(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    pageSize: Optional[int] = Query(None, ge=1, le=200),
     search: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     start_from: Optional[str] = Query(None),
+    startFrom: Optional[str] = Query(None),
     start_to: Optional[str] = Query(None),
+    startTo: Optional[str] = Query(None),
     sort_by: str = Query("start_date"),
+    sortBy: Optional[str] = Query(None),
     sort_dir: str = Query("desc"),
+    sortDir: Optional[str] = Query(None),
 ):
     """Paginated, searchable, filterable roster list."""
+    effective_page_size = pageSize if pageSize is not None else page_size
+    effective_search = search if search is not None else q
+    effective_start_from = start_from if start_from is not None else startFrom
+    effective_start_to = start_to if start_to is not None else startTo
+    effective_sort_by = sortBy if sortBy is not None else sort_by
+    effective_sort_dir = sortDir if sortDir is not None else sort_dir
+
     return await get_roster_list(
         page=page,
-        page_size=page_size,
-        search=search,
+        page_size=effective_page_size,
+        search=effective_search,
         status=status,
-        start_from=start_from,
-        start_to=start_to,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
+        start_from=effective_start_from,
+        start_to=effective_start_to,
+        sort_by=effective_sort_by,
+        sort_dir=effective_sort_dir,
     )
 
 

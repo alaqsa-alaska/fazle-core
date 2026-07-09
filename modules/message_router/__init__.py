@@ -26,7 +26,7 @@ import re
 from typing import Optional
 
 from app.config import get_settings
-from app.database import fetch_one, fetch_all, execute
+from app.database import fetch_one, fetch_all, fetch_val, execute
 from shared.draft_reply import create_draft_reply
 from modules.intent import classify
 from modules.phone_normalizer import normalize_phone
@@ -43,8 +43,8 @@ from modules.escort import (
 from modules.knowledge_base import get_reply as kb_get_reply
 from modules.recruitment_flow import (
     recruitment_eligibility,
+    route_recruitment_message,
 )
-from modules.conversation_layer import generate_recruitment_reply
 from modules.admin_commands import is_admin_command, process_admin_command, list_payment_drafts
 from modules.admin_commands.nl_router import is_nl_admin_query, process_nl_admin_query
 from modules.payment_workflow import is_advance_request
@@ -67,6 +67,9 @@ from modules.employee_conversation import (
     detect_payment_request_trigger as ec_detect_trigger,
     get_conversation_session as ec_get_session,
 )
+from modules.escort_lifecycle import is_release_intent
+from modules.fazle_payroll_engine.employee import match_or_create_employee
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
 
 log = logging.getLogger("fazle.router")
 
@@ -101,6 +104,15 @@ _SAFE_AUTOSEND_INTENTS: frozenset[str] = frozenset({
     "attendance",       # attendance rules, absence policy
     "leave",            # leave policy, resignation rules
     "escort_duty",      # duty schedule, transport/food policy info
+})
+
+_OPERATIONAL_AUTO_CREATE_INTENTS: frozenset[str] = frozenset({
+    "salary_query",
+    "payment_due",
+    "attendance",
+    "leave",
+    "escort_duty",
+    "slip_submission",
 })
 
 _ESCORT_ASSIGNMENT_FIELDS_RE = re.compile(
@@ -147,6 +159,115 @@ def _is_strict_escort_order_text(text: str) -> bool:
         (lighter.get("lighter_vessel") and lighter.get("master_mobile"))
         for lighter in (order.get("lighters") or [])
     )
+
+
+async def _seed_unknown_employee_identity(
+    sender: str,
+    text: str,
+    identity: dict,
+) -> tuple[dict, bool]:
+    """Best-effort identity seed for phone-backed operational senders."""
+    role_hint = (identity.get("role") or identity.get("identity_role") or "unknown").strip().lower()
+    if role_hint != "unknown":
+        return identity, False
+
+    sender_norm = normalize_phone(sender)
+    if not sender_norm:
+        local_phone = normalize_bd_phone(sender)
+        if local_phone and local_phone.startswith("01") and len(local_phone) == 11:
+            sender_norm = "880" + local_phone[1:]
+    if not sender_norm:
+        return identity, False
+
+    intent_hint = classify(text) if text else "unknown"
+    operational_trigger = (
+        intent_hint in _OPERATIONAL_AUTO_CREATE_INTENTS
+        or is_advance_request(text)
+        or is_release_intent(text)
+        or is_attendance_message(text)
+        or is_supervisor_attendance(text)
+        or ec_detect_trigger(text)
+        or _looks_like_escort_order(text)
+        or _looks_like_escort_buying_intent(text)
+        or is_completed_escort_draft(text)
+    )
+    if not operational_trigger:
+        return identity, False
+
+    employee_name = (
+        identity.get("employee_name")
+        or identity.get("display_name")
+        or "Unknown"
+    )
+    employee_name = str(employee_name).strip() or "Unknown"
+    designation = str(identity.get("designation") or "Staff").strip() or "Staff"
+
+    existing = await fetch_one(
+        "SELECT employee_id, employee_name, designation, basic_salary, status FROM wbom_employees WHERE employee_mobile = $1 LIMIT 1",
+        sender_norm,
+    )
+    if existing:
+        wbom_row = dict(existing)
+    else:
+        wbom_id = await fetch_val(
+            """INSERT INTO wbom_employees
+                   (employee_name, employee_mobile, designation, status, joining_date)
+               VALUES ($1, $2, $3, 'Active', CURRENT_DATE)
+               ON CONFLICT (employee_mobile) DO UPDATE
+                   SET employee_name = COALESCE(NULLIF(EXCLUDED.employee_name, ''), wbom_employees.employee_name),
+                       designation = COALESCE(NULLIF(EXCLUDED.designation, ''), wbom_employees.designation),
+                       status = 'Active'
+               RETURNING employee_id""",
+            employee_name,
+            sender_norm,
+            designation,
+        )
+        wbom_row = await fetch_one(
+            "SELECT employee_id, employee_name, designation, basic_salary, status FROM wbom_employees WHERE employee_id = $1",
+            wbom_id,
+        ) or {
+            "employee_id": wbom_id,
+            "employee_name": employee_name,
+            "designation": designation,
+            "basic_salary": None,
+            "status": "Active",
+        }
+
+    try:
+        fpe_row = await match_or_create_employee(
+            name_raw=employee_name,
+            payout_phone=sender_norm,
+            employee_id_phone=sender_norm,
+        )
+        if fpe_row:
+            await execute(
+                "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2 AND wbom_employee_id IS NULL",
+                wbom_row["employee_id"],
+                fpe_row.employee_id,
+            )
+    except Exception as exc:
+        log.warning("[identity-seed] FPE seed failed sender=%s: %s", sender_norm, exc)
+
+    refreshed = await detect_identity(sender_norm, text)
+    if refreshed:
+        refreshed["identity_source"] = "message_router_auto_create"
+        refreshed["identity_confidence"] = max(int(refreshed.get("identity_confidence") or 0), 60)
+        return refreshed, True
+
+    updated_identity = dict(identity)
+    updated_identity.update(
+        {
+            "role": "employee",
+            "employee_id": wbom_row["employee_id"],
+            "employee_name": wbom_row.get("employee_name") or employee_name,
+            "designation": wbom_row.get("designation") or designation,
+            "basic_salary": wbom_row.get("basic_salary"),
+            "identity_role": "employee",
+            "identity_source": "message_router_auto_create",
+            "identity_confidence": 60,
+        }
+    )
+    return updated_identity, True
 
 
 def _looks_like_escort_buying_intent(text: str) -> bool:
@@ -299,6 +420,10 @@ async def process_message(
 
     identity = await detect_identity(sender, text)
     role_str = identity["role"]
+
+    identity, seeded = await _seed_unknown_employee_identity(sender, text, identity)
+    if seeded:
+        role_str = identity.get("role") or "employee"
     log.info(
         f"[IDENTITY] {sender} → {role_str} "
         f"(conf={identity['identity_confidence']}, src={identity['identity_source']})"
@@ -504,13 +629,16 @@ async def process_message(
     if recruit_decision["eligible"]:
         db_ctx = await get_contact_context(sender)
         history = "\n".join(await get_recent_history(sender))
-        ai_reply = await generate_recruitment_reply(
+        rec_route = await route_recruitment_message(
             phone=sender,
             text=text,
             source=source,
+            role=role_str,
+            intent=intent,
             contact_context=db_ctx,
             history=history,
         )
+        ai_reply = (rec_route.get("reply") or "").strip()
         if ai_reply:
             return ai_reply, None
 

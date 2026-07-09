@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, field
+import json
 from typing import Awaitable, Callable, Optional
 from typing import Any
+from uuid import uuid4
 
 from fastapi.responses import JSONResponse
+from modules.ai_console.model_router import TaskClass, decide_model, log_decision
 
 
 @dataclass
@@ -55,6 +58,7 @@ class ProviderSelection:
     provider_chain: list[str] = field(default_factory=lambda: ["ollama", "groq", "github_models"])
     selected_model: str = ""
     reason: str = "default_local_preference"
+    decision_log: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -144,10 +148,16 @@ def build_tool_plan(req: OrchestratorRequest, exact_db_answer_tools: set[str]) -
 
 
 def build_provider_selection(req: OrchestratorRequest) -> ProviderSelection:
-    reason = "requested_model" if req.requested_model else "default_local_preference"
+    decision = decide_model(
+        task_class=_task_class_for_mode(req.mode),
+        requested_model=req.requested_model,
+    )
+    decision_log = log_decision(decision=decision)
     return ProviderSelection(
-        selected_model=req.active_model,
-        reason=reason,
+        provider_chain=decision.provider_chain,
+        selected_model=decision.selected_model,
+        reason=decision.reason,
+        decision_log=decision_log,
     )
 
 
@@ -165,6 +175,7 @@ async def orchestrate_chat_message(
     chat_timeout_s: int,
     logger: Any,
 ) -> dict[str, Any] | JSONResponse:
+    request_id = f"phase4-{uuid4().hex[:12]}"
     req = build_request(
         question=question,
         requested_model=requested_model,
@@ -177,6 +188,11 @@ async def orchestrate_chat_message(
     context_plan = build_context_plan(req)
     tool_plan = build_tool_plan(req, exact_db_answer_tools)
     provider_selection = build_provider_selection(req)
+    asyncio.create_task(_persist_model_decision(
+        request_id=request_id,
+        req=req,
+        provider_selection=provider_selection,
+    ))
 
     memory_context = await _load_memory_context()
     rag_context, citations, top_score = await _load_rag_context(
@@ -287,6 +303,7 @@ async def orchestrate_chat_message(
         "top_score": top_score,
         "memory_context_used": bool(memory_context),
         "trace": {
+            "request_id": request_id,
             "mode": req.mode,
             "context_plan": asdict(context_plan),
             "tool_plan": asdict(tool_plan),
@@ -294,6 +311,52 @@ async def orchestrate_chat_message(
             "evidence_count": len(evidence),
         },
     }
+
+
+def _task_class_for_mode(mode: str) -> TaskClass:
+    if mode == "runtime":
+        return TaskClass.RUNTIME
+    if mode == "business":
+        return TaskClass.BUSINESS
+    if mode == "memory":
+        return TaskClass.MEMORY
+    if mode == "investigation":
+        return TaskClass.DEEP_REASONING
+    return TaskClass.GENERAL
+
+
+async def _persist_model_decision(
+    *,
+    request_id: str,
+    req: OrchestratorRequest,
+    provider_selection: ProviderSelection,
+) -> None:
+    try:
+        from app.database import execute
+
+        await execute(
+            """
+            INSERT INTO assistant_model_decisions (
+                request_id,
+                task_class,
+                selected_model,
+                provider_chain,
+                reason,
+                requested_model,
+                decision_payload
+            )
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb)
+            """,
+            request_id,
+            _task_class_for_mode(req.mode).value,
+            provider_selection.selected_model,
+            json.dumps(provider_selection.provider_chain),
+            provider_selection.reason,
+            req.requested_model,
+            json.dumps(provider_selection.decision_log),
+        )
+    except Exception:
+        return
 
 
 def build_evidence_package(

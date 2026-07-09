@@ -26,7 +26,7 @@ Admin fills Escort Name + Escort Mobile, sends completed draft back
   → handle_admin_escort_completion()
   → match existing draft by MV/lighter/master/date/client context
   → build_final_slip() → sent to original client
-  → wbom_escort_programs status → 'confirmed'
+  → wbom_escort_programs status → 'Assigned'
   → roster sync
 ```
 
@@ -73,16 +73,16 @@ If found, returns existing `program_id` and skips INSERT.
 
 ## Deterministic Hardening (2026-07-05)
 
-- Confirmed assignment dedupe now enforces an exact key check before insert:
+- Assigned dedupe now enforces an exact key check before insert:
   - `COALESCE(start_date, program_date)`
   - `mother_vessel`
   - `lighter_vessel`
   - `escort_name`
-- If an exact confirmed match exists, the module updates that row instead of
+- If an exact assigned match exists, the module updates that row instead of
   creating a new one.
 - This logic is code-first and does not depend on any AI agent output.
 
-`handle_admin_escort_completion()` updates the same draft row by matching mother vessel, lighter vessel, master mobile, program date, and stored client phone when available. If no matching draft exists and admin sent a complete assignment, it may create one confirmed row directly.
+`handle_admin_escort_completion()` updates the same draft row by matching mother vessel, lighter vessel, master mobile, program date, and stored client phone when available. If no matching draft exists and admin sent a complete assignment, it may create one assigned row directly.
 
 ## Order vs Review
 
@@ -99,7 +99,7 @@ Those cases become admin-review drafts and must be verified against DB/roster da
 ## Confirmation Rules
 
 - Draft row duplicate is forbidden: one order creates one draft program row and one draft roster row per lighter.
-- Admin confirmation is required: `confirmed` needs admin-origin Escort Name + Escort Mobile.
+- Admin confirmation is required: `Assigned` needs admin-origin Escort Name + Escort Mobile.
 - Existing draft update is required: confirmation updates the old program and roster rows; it does not create a second roster duty.
 - Unconfirmed drafts expire by status (`expired`), not hard delete.
 
@@ -116,6 +116,6 @@ historical data. This saves the DB record but suppresses admin notification.
 
 `wbom_escort_programs` — key columns:
 - `program_id`, `mother_vessel`, `lighter_vessel`, `master_mobile`
-- `status`: `draft` → `confirmed` → `Active` → `Closed`
+- `status`: `draft` → `Assigned` → `Active` → `Closed`
 - `remarks`: JSON blob with `sender_phone`, `source_bridge`, `escort_name`, `escort_mobile`
 - `is_historical`: TRUE for imported records (added in migration 009)

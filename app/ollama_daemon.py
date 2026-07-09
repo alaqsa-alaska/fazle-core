@@ -23,6 +23,15 @@ _started_at: float | None = None
 _last_warm_at: float | None = None
 _last_error: str | None = None
 _request_count = 0
+_client_limits: dict[str, int] = {}
+
+
+def _bounded_int(value: int, *, minimum: int, maximum: int, default: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        return default
+    return max(minimum, min(maximum, n))
 
 
 async def start() -> None:
@@ -40,15 +49,35 @@ async def stop() -> None:
 
 
 async def _get_client() -> httpx.AsyncClient:
-    global _client, _started_at
+    global _client, _started_at, _client_limits
     if _client is not None:
         return _client
     async with _client_lock:
         if _client is None:
+            settings = get_settings()
+            max_conn = _bounded_int(
+                settings.ollama_http_max_connections,
+                minimum=4,
+                maximum=64,
+                default=16,
+            )
+            max_keepalive = _bounded_int(
+                settings.ollama_http_max_keepalive_connections,
+                minimum=2,
+                maximum=max_conn,
+                default=8,
+            )
             _client = httpx.AsyncClient(
-                limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+                limits=httpx.Limits(
+                    max_keepalive_connections=max_keepalive,
+                    max_connections=max_conn,
+                ),
                 timeout=httpx.Timeout(120.0, connect=5.0),
             )
+            _client_limits = {
+                "max_connections": max_conn,
+                "max_keepalive_connections": max_keepalive,
+            }
             _started_at = time.time()
             log.info("[ollama_daemon] shared client started")
     return _client
@@ -115,4 +144,5 @@ def diagnostics() -> dict[str, Any]:
         "last_warm_at": _last_warm_at,
         "last_error": _last_error,
         "request_count": _request_count,
+        "client_limits": dict(_client_limits),
     }

@@ -12,7 +12,7 @@ FLOW:
        → looks up original client from DB remarks
        → sends finalized slip to client via admin_note routing
        → replies to admin with delivery confirmation
-       → updates DB status to 'confirmed'
+      → updates DB status to 'Assigned'
 
 DB usage (no schema change):
   wbom_escort_programs columns used:
@@ -1514,13 +1514,13 @@ async def _create_confirmed_from_admin(
         # Clean MV for comparison
         mv_clean = re.sub(r"^MV\.?\s+", "", mv, flags=re.IGNORECASE).strip().upper()
 
-        # Strong dedupe key for confirmed rows: date + mother + lighter + escort.
+        # Strong dedupe key for assigned rows: date + mother + lighter + escort.
         # This blocks backfill/replay from creating exact duplicates.
         exact_existing = await fetch_one(
             """
             SELECT program_id
             FROM wbom_escort_programs
-            WHERE status = 'confirmed'
+            WHERE status IN ('confirmed', 'Assigned')
               AND COALESCE(start_date, program_date) = COALESCE($1::date, COALESCE(start_date, program_date))
               AND UPPER(TRIM(COALESCE(mother_vessel, ''))) = UPPER(TRIM($2))
               AND UPPER(TRIM(COALESCE(lighter_vessel, ''))) = UPPER(TRIM($3))
@@ -1575,7 +1575,7 @@ async def _create_confirmed_from_admin(
         if existing:
             pid = existing["program_id"]
             log.info(
-                f"[escort] confirmed record already exists (program_id={pid}) "
+                f"[escort] assigned record already exists (program_id={pid}) "
                 f"— updating missing fields from admin msg"
             )
             await _update_program_confirmed(
@@ -1594,14 +1594,14 @@ async def _create_confirmed_from_admin(
                 """SELECT program_id FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                      AND LOWER(escort_name) = LOWER($2)
-                     AND status = 'confirmed'
+                     AND status IN ('confirmed', 'Assigned')
                    ORDER BY program_id DESC LIMIT 1""",
                 mv_clean, escort_name,
             )
             if existing:
                 pid = existing["program_id"]
                 log.info(
-                    f"[escort] confirmed record already exists (program_id={pid}) "
+                    f"[escort] assigned record already exists (program_id={pid}) "
                     f"— updating missing fields from admin msg"
                 )
             await _update_program_confirmed(
@@ -1649,7 +1649,7 @@ async def _create_confirmed_from_admin(
             escort_mobile,
             emp_id,
             shift,
-            "confirmed",
+            "Assigned",
             program_date,
             json.dumps(remarks_data, ensure_ascii=False),
         ]

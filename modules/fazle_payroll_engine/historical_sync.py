@@ -30,7 +30,7 @@ from typing import Optional
 
 from app.config import get_settings
 from .checkpoint import get_checkpoint, update_checkpoint, touch_checkpoint
-from .ingestion import ingest_message, mark_processing_status
+from .ingestion import ingest_message
 from .models import IngestionRequest
 
 log = logging.getLogger("fazle.fpe.hsync")
@@ -74,18 +74,20 @@ async def run_historical_sync_once(chat_jids: Optional[list[str]] = None) -> dic
     # BRIDGE1_INGEST_ALL_DMS: when true, bridge1 ingests ALL individual DM JIDs
     bridge1_all_dms: bool = os.getenv("BRIDGE1_INGEST_ALL_DMS", "false").lower() in ("true", "1", "yes")
 
+    if bridge1_all_dms:
+        log.warning(
+            "[fpe.hsync] bridge1 all_dms override ignored; explicit chat JIDs only"
+        )
+
     if not target_jids and not bridge1_all_dms:
         log.warning("[fpe.hsync] No target chat JIDs configured — skipping historical sync")
         return {}
 
     results = {}
     for bridge in _BRIDGE_CONFIGS:
-        if bridge["name"] == "bridge1" and bridge1_all_dms:
-            count = await _sync_bridge_all_dms(bridge)
-        else:
-            if not target_jids:
-                continue
-            count = await _sync_bridge(bridge, target_jids)
+        if not target_jids:
+            continue
+        count = await _sync_bridge(bridge, target_jids)
         results[bridge["name"]] = count
 
     return results
@@ -186,7 +188,7 @@ async def _sync_bridge(bridge: dict, target_jids: list[str]) -> int:
         last_msg_ts = None
 
         for row in rows:
-            fpe_id = await _ingest_row(row, bridge, jid, lid_map)
+            fpe_id = await _ingest_row(row, bridge, lid_map)
             if fpe_id is not None:
                 ingested += 1
             last_msg_id = row["id"]
@@ -211,7 +213,7 @@ async def _sync_bridge(bridge: dict, target_jids: list[str]) -> int:
     return total_ingested
 
 
-async def _ingest_row(row: dict, bridge: dict, jid: str, lid_map: dict) -> Optional[int]:
+async def _ingest_row(row: dict, bridge: dict, lid_map: dict) -> Optional[int]:
     """Convert a SQLite messages row to an IngestionRequest and ingest it."""
     content = row.get("content") or row.get("processed_text") or ""
     if not content.strip():

@@ -109,6 +109,101 @@ class TestEscortRosterSearchQueries:
         assert response.media_type == "text/csv"
         assert "escort_roster.csv" in response.headers["Content-Disposition"]
 
+    @pytest.mark.asyncio
+    async def test_roster_list_status_filter_uses_roster_fallback_expression(self, monkeypatch):
+        from modules.escort_roster import db as roster_db
+
+        calls = {"fetch_val": [], "fetch_all": []}
+
+        async def _fake_fetch_val(query, *args, **kwargs):
+            calls["fetch_val"].append((query, args))
+            return 0
+
+        async def _fake_fetch_all(query, *args, **kwargs):
+            calls["fetch_all"].append((query, args))
+            return []
+
+        monkeypatch.setattr(roster_db, "fetch_val", _fake_fetch_val)
+        monkeypatch.setattr(roster_db, "fetch_all", _fake_fetch_all)
+
+        await roster_db.get_roster_list(status="draft", page=1, page_size=20)
+
+        count_query = calls["fetch_val"][0][0]
+        list_query = calls["fetch_all"][0][0]
+        expected = "LOWER(COALESCE(NULLIF(TRIM(p.status), ''), NULLIF(TRIM(e.roster_status), ''), 'draft'))"
+        assert expected in count_query
+        assert expected in list_query
+
+    @pytest.mark.asyncio
+    async def test_roster_list_accepts_frontend_alias_params(self, monkeypatch):
+        from modules.escort_roster import routes as roster_routes
+
+        captured = {}
+
+        async def _fake_get_roster_list(**kwargs):
+            captured.update(kwargs)
+            return {"items": [], "total": 0, "page": 1, "page_size": 25, "pages": 1}
+
+        monkeypatch.setattr(roster_routes, "get_roster_list", _fake_get_roster_list)
+
+        await roster_routes.api_roster_list(
+            page=1,
+            page_size=50,
+            pageSize=25,
+            search=None,
+            q="mv search",
+            status="running",
+            start_from=None,
+            startFrom="2026-07-01",
+            start_to=None,
+            startTo="2026-07-31",
+            sort_by="start_date",
+            sortBy="program_id",
+            sort_dir="desc",
+            sortDir="asc",
+        )
+
+        assert captured["page_size"] == 25
+        assert captured["search"] == "mv search"
+        assert captured["status"] == "running"
+        assert captured["start_from"] == "2026-07-01"
+        assert captured["start_to"] == "2026-07-31"
+        assert captured["sort_by"] == "program_id"
+        assert captured["sort_dir"] == "asc"
+
+    @pytest.mark.asyncio
+    async def test_roster_export_accepts_frontend_alias_params(self, monkeypatch):
+        from modules.escort_roster import routes as roster_routes
+
+        captured = {}
+
+        async def _fake_get_roster_list(**kwargs):
+            captured.update(kwargs)
+            return {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "page_size": 10000,
+                "pages": 1,
+            }
+
+        monkeypatch.setattr(roster_routes, "get_roster_list", _fake_get_roster_list)
+
+        await roster_routes.api_roster_export(
+            search=None,
+            q="escort",
+            status="confirmed",
+            start_from=None,
+            startFrom="2026-07-01",
+            start_to=None,
+            startTo="2026-07-31",
+        )
+
+        assert captured["search"] == "escort"
+        assert captured["status"] == "confirmed"
+        assert captured["start_from"] == "2026-07-01"
+        assert captured["start_to"] == "2026-07-31"
+
 
 class TestEscortRosterSyncStatus:
     @pytest.mark.asyncio

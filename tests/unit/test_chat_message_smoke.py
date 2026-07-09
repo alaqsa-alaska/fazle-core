@@ -7,6 +7,7 @@ pytestmark = pytest.mark.asyncio
 async def test_chat_message_route_smoke_delegates_to_orchestrator(monkeypatch):
     from httpx import ASGITransport, AsyncClient
 
+    from app.config import get_settings
     from app.main import app
     from modules import admin_chat_lab
 
@@ -31,10 +32,15 @@ async def test_chat_message_route_smoke_delegates_to_orchestrator(monkeypatch):
         fake_orchestrate_chat_message,
     )
 
+    async def fake_flag():
+        return False
+
+    monkeypatch.setattr("app.main._is_ai_console_chat_enabled", fake_flag)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://testserver",
-        headers={"X-Internal-Key": "test-internal-key-fixture-only"},
+        headers={"X-Internal-Key": get_settings().internal_api_key},
     ) as ac:
         response = await ac.post(
             "/chat/message",

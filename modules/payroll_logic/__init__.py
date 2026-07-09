@@ -51,6 +51,7 @@ async def get_payroll_summary(employee_id: int) -> PayrollSummary:
     """
     today = date.today()
     month_start = today.replace(day=1)
+    month_key = month_start.strftime("%Y-%m")
 
     # Employee base info
     emp = await fetch_one(
@@ -112,10 +113,10 @@ async def get_payroll_summary(employee_id: int) -> PayrollSummary:
 
     # Check salary_records for current month
     salary_rec = await fetch_one(
-        """SELECT net_salary, payment_status, payment_date
+          """SELECT amount AS net_salary, status AS payment_status, payment_date
            FROM wbom_salary_records
-           WHERE employee_id = $1 AND year = $2 AND month = $3""",
-        employee_id, today.year, today.month,
+              WHERE employee_id = $1 AND salary_month = $2""",
+          employee_id, month_key,
     )
 
     # Determine if under review

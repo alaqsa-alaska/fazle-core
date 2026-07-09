@@ -26,6 +26,22 @@ from shared.reply_policy import (
 log = logging.getLogger("fazle.ollama")
 
 
+def _bounded_int(value: int, *, minimum: int, maximum: int, default: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        return default
+    return max(minimum, min(maximum, n))
+
+
+def _bounded_float(value: float, *, minimum: float, maximum: float, default: float) -> float:
+    try:
+        n = float(value)
+    except Exception:
+        return default
+    return max(minimum, min(maximum, n))
+
+
 async def _log_llm(
     caller: str,
     model: str,
@@ -54,11 +70,16 @@ async def _log_llm(
 
 # Serializes WhatsApp auto-reply Ollama calls — prevents concurrent-request timeout failures.
 # Ollama on this hardware takes ~17s per generate; two simultaneous = one times out.
-_ollama_sem = asyncio.Semaphore(1)
+_settings = get_settings()
+_ollama_sem = asyncio.Semaphore(
+    _bounded_int(_settings.ollama_infer_concurrency, minimum=1, maximum=4, default=1)
+)
 
 # Separate semaphore for Web UI chat lab — independent from WhatsApp pipeline so
 # admin chat requests don't queue behind automated reply processing.
-_rag_sem = asyncio.Semaphore(1)
+_rag_sem = asyncio.Semaphore(
+    _bounded_int(_settings.ollama_chat_concurrency, minimum=1, maximum=4, default=1)
+)
 
 
 async def classify_intent_llm(text: str) -> str:
@@ -80,7 +101,16 @@ async def classify_intent_llm(text: str) -> str:
                 "model": settings.ollama_model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 10, "num_ctx": 256},
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 10,
+                    "num_ctx": _bounded_int(
+                        settings.ollama_num_ctx_classify,
+                        minimum=128,
+                        maximum=4096,
+                        default=256,
+                    ),
+                },
             }
             if _is_qwen3(settings.ollama_model):
                 payload["think"] = False
@@ -131,7 +161,26 @@ async def generate_reply(
                 "model": settings.ollama_model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0.4, "num_predict": 50, "num_ctx": 512},
+                "options": {
+                    "temperature": _bounded_float(
+                        settings.ollama_temperature_reply,
+                        minimum=0.0,
+                        maximum=1.0,
+                        default=0.4,
+                    ),
+                    "num_predict": _bounded_int(
+                        settings.ollama_num_predict_reply,
+                        minimum=16,
+                        maximum=512,
+                        default=50,
+                    ),
+                    "num_ctx": _bounded_int(
+                        settings.ollama_num_ctx_default,
+                        minimum=256,
+                        maximum=8192,
+                        default=512,
+                    ),
+                },
             }
             if _is_qwen3(settings.ollama_model):
                 payload["think"] = False
@@ -194,9 +243,24 @@ async def generate_recruitment_reply(
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0.2,
-                    "num_predict": 50,
-                    "num_ctx": 512,
+                    "temperature": _bounded_float(
+                        settings.ollama_temperature_recruitment,
+                        minimum=0.0,
+                        maximum=1.0,
+                        default=0.2,
+                    ),
+                    "num_predict": _bounded_int(
+                        settings.ollama_num_predict_recruitment,
+                        minimum=16,
+                        maximum=512,
+                        default=50,
+                    ),
+                    "num_ctx": _bounded_int(
+                        settings.ollama_num_ctx_default,
+                        minimum=256,
+                        maximum=8192,
+                        default=512,
+                    ),
                     "repeat_penalty": 1.08,
                 },
             }
@@ -273,8 +337,24 @@ async def generate_rag_answer(
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.3,
-            "num_predict": 150,
+            "temperature": _bounded_float(
+                settings.ollama_temperature_rag,
+                minimum=0.0,
+                maximum=1.0,
+                default=0.3,
+            ),
+            "num_predict": _bounded_int(
+                settings.ollama_num_predict_rag,
+                minimum=32,
+                maximum=1024,
+                default=150,
+            ),
+            "num_ctx": _bounded_int(
+                settings.ollama_num_ctx_default,
+                minimum=256,
+                maximum=8192,
+                default=512,
+            ),
             "repeat_penalty": 1.05,
         },
     }
@@ -339,8 +419,24 @@ Admin-এর প্রশ্ন: {question[:400]}
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.3,
-            "num_predict": 100,   # 100 tok @ 1.1 tok/s ≈ 91s → fits in 180s window
+            "temperature": _bounded_float(
+                settings.ollama_temperature_chat,
+                minimum=0.0,
+                maximum=1.0,
+                default=0.3,
+            ),
+            "num_predict": _bounded_int(
+                settings.ollama_num_predict_chat,
+                minimum=32,
+                maximum=1024,
+                default=100,
+            ),   # 100 tok @ 1.1 tok/s ≈ 91s → fits in 180s window
+            "num_ctx": _bounded_int(
+                settings.ollama_num_ctx_default,
+                minimum=256,
+                maximum=8192,
+                default=512,
+            ),
             "repeat_penalty": 1.05,
         },
     }

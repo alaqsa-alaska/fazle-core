@@ -71,8 +71,9 @@ class TestParserPhoneExtraction:
         from modules.fazle_payroll_engine.parser import parse_message
         result = parse_message("Saiful op +880 1849-258074(N) 305/-")
         assert result is not None
-        assert result.payout_phone == "01849258074", (
-            f"Expected 01849258074, got {result.payout_phone!r}"
+        assert result.payment is not None
+        assert result.payment.payout_phone == "01849258074", (
+            f"Expected 01849258074, got {result.payment.payout_phone!r}"
         )
 
     def test_employee_id_phone_fallback(self):
@@ -80,8 +81,9 @@ class TestParserPhoneExtraction:
         from modules.fazle_payroll_engine.parser import parse_message
         result = parse_message("Karim 01712345678(B) 1500/-")
         assert result is not None
-        assert result.payout_phone is not None
-        assert result.employee_id_phone == result.payout_phone, (
+        assert result.payment is not None
+        assert result.payment.payout_phone is not None
+        assert result.payment.employee_id_phone == result.payment.payout_phone, (
             "employee_id_phone should fall back to payout_phone when no 'ID:' prefix"
         )
 
@@ -90,7 +92,8 @@ class TestParserPhoneExtraction:
         from modules.fazle_payroll_engine.parser import parse_message
         result = parse_message("Rahman 01712345678(B) 2500/-")
         assert result is not None
-        assert result.amount == 2500.0
+        assert result.payment is not None
+        assert result.payment.amount == 2500.0
 
 
 # ─── Phase 4: Name-only match returns None ────────────────────────────────────

@@ -200,7 +200,9 @@ async def _lookup_seed(phone: str) -> Optional[dict]:
     row = await fetch_one(
         """SELECT role, confidence, source, priority, notes
            FROM fazle_contact_roles
-           WHERE phone = $1 AND is_active = true
+           WHERE phone = $1
+             AND COALESCE((to_jsonb(fazle_contact_roles)->>'is_active')::boolean, true) = true
+             AND LOWER(COALESCE(to_jsonb(fazle_contact_roles)->>'status', 'active')) = 'active'
            ORDER BY priority DESC
            LIMIT 1""",
         phone,
@@ -228,7 +230,7 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
     row = await fetch_one(
         """SELECT w.employee_id,
                   COALESCE(NULLIF(w.employee_name, ''), NULLIF(e.full_name, '')) AS employee_name,
-                  COALESCE(NULLIF(w.designation, ''), NULLIF(e.department, ''), 'Staff') AS designation,
+                  COALESCE(NULLIF(w.designation, ''), 'Staff') AS designation,
                   w.basic_salary,
                   w.bkash_number,
                   COALESCE(w.status, CASE WHEN e.status = 'active' THEN 'Active' ELSE 'Inactive' END) AS status
@@ -251,7 +253,7 @@ async def _lookup_cash_identity(phone: str) -> Optional[dict]:
     row = await fetch_one(
         """SELECT COALESCE(e.id, t.employee_id) AS employee_id,
                   COALESCE(NULLIF(e.full_name, ''), NULLIF(w.employee_name, '')) AS employee_name,
-                  COALESCE(NULLIF(e.designation, ''), NULLIF(w.designation, '')) AS designation,
+                  COALESCE(NULLIF(w.designation, ''), 'Staff') AS designation,
                   COALESCE(e.basic_salary, w.basic_salary) AS basic_salary,
                   w.bkash_number,
                   COALESCE(e.status, w.status) AS status
@@ -320,12 +322,11 @@ async def _lookup_contact(phone: str) -> Optional[dict]:
     if not variants:
         return None
     row = await fetch_one(
-        """SELECT c.contact_id, c.display_name, c.company_name,
-                  COALESCE(rt.relation_name, c.relation) AS relation_name
-           FROM wbom_contacts c
-           LEFT JOIN wbom_relation_types rt
-                  ON rt.relation_type_id = c.relation_type_id
-           WHERE c.whatsapp_number = ANY($1) AND c.is_active = true
+        """SELECT c.contact_id,
+                  c.contact_name AS display_name,
+                  COALESCE(c.contact_type, 'repeat_client') AS relation_name
+              FROM wbom_contacts c
+              WHERE c.whatsapp_number = ANY($1)
            ORDER BY c.contact_id DESC
            LIMIT 1""",
         variants,
