@@ -49,6 +49,8 @@ sudo systemctl restart fazle-core.service
 sleep 4 && curl -s http://127.0.0.1:8200/health | jq
 ```
 
+**⚠️ 2026-07-09 note:** this checkout (`/home/azim/core`) runs directly off the working tree with no build/artifact step — the `git checkout`/`git pull` steps above don't reflect how this specific instance is actually deployed. See `docs/DEPLOYMENT_RESTART_GATE.md` for the designed (not yet implemented) pre-restart gate — working-tree cleanliness, secret scan, xfail count, targeted tests, migration inventory, `.env` critical-flag acknowledgment, and backup freshness — that should run before any restart of this instance.
+
 ## Database
 
 - Postgres 15 via Docker Compose (`ai-call-platform/ai-infra/docker-compose.yaml`).

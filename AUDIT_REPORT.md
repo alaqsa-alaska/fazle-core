@@ -1,3 +1,5 @@
+> ⚠️ **STALE — do not treat as current.** Generated 2026-06-14; superseded by later schema/table counts (e.g. `knowledge_base/06_developer_system/database_rules.md`, 2026-07-02) and by newer audits (`payroll-escort-workflow-audit-2026-07-04.md`, `FAZLE_CORE_CODE_QUALITY_AUDIT_2026-06-26.md`). Re-verify any figure here against current state before relying on it. Flagged 2026-07-08.
+
 # FAZLE-CORE AUDIT REPORT
 **Generated:** 2026-06-14 01:30 UTC  
 **Auditor:** Claude Agent (Sonnet 4.6) via SSH  

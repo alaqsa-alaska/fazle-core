@@ -1,4 +1,5 @@
 {
+  "_stale_notice": "STALE as of 2026-07-08 — superseded by database_rules.md (2026-07-02 recount) and 2026-07-04/05 audits; do not treat these figures as current.",
   "audit_date": "2026-06-14T01:30:00Z",
   "app_location": "/home/azim/core/",
   "tech_stack": "Python 3 / FastAPI 0.115 / asyncpg / PostgreSQL (Docker) / uvicorn",

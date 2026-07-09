@@ -1,3 +1,5 @@
+> ⚠️ **STALE — do not treat as current.** This checkpoint (2026-05-07) predates the much larger test suite and the 2026-07-05/06 triage (`reports/release/go_no_go_decision_package_2026-07-05.md`, `reports/release/failure_triage_protocol_2026-07-05.md`). Do not cite the numbers below as current test status. Flagged 2026-07-08.
+
 # Testing Status — Fazle Core
 
 **Checkpoint:** pre-chaos-stable-2026-05-07

@@ -1,5 +1,7 @@
 # Fazle Core
 
+> **New to this repo, or an AI agent picking up cold?** Read [`SYSTEM_ATLAS.md`](SYSTEM_ATLAS.md) first — it's the single canonical entry point and document map. This README covers the same ground in narrative form.
+
 Fazle Core is the production WhatsApp-first operations backend for Al-Aqsa
 Security and Logistics Services Ltd. It is a FastAPI service that ingests
 messages from WhatsApp bridge databases, bridge webhooks, Meta/Facebook
@@ -9,6 +11,56 @@ payment, knowledge-base, memory, and observability workflows.
 This README describes the app as it exists in this checkout, not as a clean
 target architecture. The system is live, useful, and feature-rich, but several
 domains are still transitional and must stay under human review.
+
+## Product Overview
+
+**What it is:** a bilingual (Bangla/English) WhatsApp-first operations platform
+that runs Al-Aqsa Security & Logistics Services Ltd's day-to-day business —
+recruitment, employee/guard payroll, escort (vessel security) service
+dispatch and duty tracking, client and employee communication, and a growing
+AI-driven console over that data. It is not a generic chatbot framework; every
+workflow is specific to this company's business.
+
+**Who uses it:**
+- **The Owner/Admin** — runs the business through WhatsApp admin commands and
+  the web dashboards (`/dashboard`, `/payroll`, `/escort-roster`), approving
+  payments, managing employees, and reviewing AI-drafted replies.
+- **HR/office assistants** — restricted "operator" role access to the payroll
+  dashboard for income/cash entry (see `HR_OFFICER_SETUP.md`).
+- **The accountant** — receives payment instructions via WhatsApp and
+  confirms/executes them; some flows treat accountant replies as
+  notification-only, not a data-entry path (see `BUSINESS-CONSTITUTION.md`
+  Article I).
+- **Employees/guards** — message in for attendance, salary/advance requests,
+  and duty-related communication; receive AI-drafted or auto-sent replies
+  depending on role and safe-mode configuration.
+- **Recruitment candidates** — message in and go through an automated intake
+  funnel with a restricted AI reply flow.
+- **Corporate escort/vessel clients** — send vessel escort orders via
+  WhatsApp; receive drafted (never auto-sent) confirmations.
+
+**Main business domains:** recruitment, payroll/cash disbursement (single-entry
+ledger, not yet full accounting — see `docs/DEVELOPER_GUIDE.md` §E), escort
+(vessel security) order intake/dispatch/duty tracking, WhatsApp/Meta
+communication and reply automation, an internal knowledge base with
+RAG-backed AI answers, and (in progress) an AI Operating Console for
+natural-language queries over business data.
+
+**Problems it solves:** replaces what would otherwise be entirely manual
+WhatsApp-based coordination (an admin manually reading and replying to every
+message) with AI-assisted, human-supervised automation — while keeping every
+financial action behind an explicit approval step and an immutable audit
+trail. It is explicitly **not yet** a complete business operating system: it
+has no client billing/invoicing, no guard dispatch conflict-checking, and no
+double-entry accounting — see `docs/DEVELOPER_GUIDE.md` §J and
+`SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` for the full gap analysis and
+roadmap toward that goal.
+
+**For full developer documentation** (runtime/infra detail, every frontend
+page's APIs/forms/search fields, module-by-module risk map, finance/employee/
+escort/AI code-path tracing, and known strengths/weaknesses/roadmap), see
+[`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) and
+[`docs/MODULE_MAP.md`](docs/MODULE_MAP.md).
 
 | Item | Current value |
 |---|---|
@@ -351,12 +403,16 @@ Use targeted tests for risky changes:
 
 | Doc | Purpose |
 |---|---|
+| `docs/DEVELOPER_GUIDE.md` | Runtime/infra detail, frontend page APIs/forms/search fields, finance/employee/escort/AI code-flow tracing, strengths/weaknesses/roadmap (2026-07-09) |
+| `docs/MODULE_MAP.md` | Module-by-module purpose/APIs/tables/dependencies/risk level for 26 core backend modules (2026-07-09) |
+| `docs/NEXT_IMPLEMENTATION_QUEUE.md` | Prioritized queue of what to work on next, Tier 0 through Phase 3 |
+| `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` | Full 10-report architecture/risk/gap audit and consolidation roadmap |
 | `docs/ARCHITECTURE.md` | Deeper system and data-flow notes |
 | `docs/API.md` | HTTP endpoint reference |
 | `docs/OPERATIONS.md` | Deployment, restart, backup, and troubleshooting |
 | `docs/ROADMAP.md` | Batch/version history and forward work |
-| `AUDIT_REPORT.md` | Current-state audit and risk inventory |
-| `TESTING_STATUS.md` | Historical test validation notes |
+| `AUDIT_REPORT.md` | Current-state audit and risk inventory (⚠️ stale, see file header) |
+| `TESTING_STATUS.md` | Historical test validation notes (⚠️ stale, see file header) |
 | `payroll-escort-workflow-audit-2026-06-13.md` | Focused payroll/escort workflow review |
 
 ## Phone Number Normalization (2026-07-01)

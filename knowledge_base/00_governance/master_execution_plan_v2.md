@@ -44,7 +44,7 @@ All facts below verified by direct code and file reading.
 | Qdrant Vector DB | ✅ ACTIVE | Server mode at `172.20.0.2:6333`; collection `fazle_rag_chunks`; 251 indexed points |
 | MiniLM Encoder | ✅ ACTIVE | `paraphrase-multilingual-MiniLM-L12-v2`, 384 dims, LRU cache 2000 entries |
 | Prompt Builder | ✅ STRUCTURED | `POLICY_VERSION="structured_v2"`, 6-section format (`shared/reply_policy.py`) |
-| Auto Reply | ⚠️ DRAFT MODE | `AUTO_REPLY_ENABLED=false` — all AI replies go to admin queue before sending |
+| Auto Reply | ✅ LIVE | `AUTO_REPLY_ENABLED=true` — activated per Management decision S11-02 (2026-06-23, see `management_decisions.md`); `DRAFT_QUALITY_GATE=true` remains as a safety net. **Correction 2026-07-09:** this row previously said DRAFT MODE — stale, missed the same-session S11-02 decision. |
 | Draft Quality Gate | ✅ ACTIVE | `DRAFT_QUALITY_GATE=true`; 4 criteria |
 | Scheduler | ✅ ACTIVE | `SCHEDULER_ENABLED=true`; 15 jobs; `SCHEDULER_TIMEZONE=Asia/Dhaka` |
 | Outbound Queue | ✅ ACTIVE | `OUTBOUND_ENABLED=true`; default sweep interval 10s |
@@ -217,7 +217,7 @@ These are the remaining development items in priority order, across KB and produ
 | Item | Type | Impact |
 |---|---|---|
 | P3 utility module docs (voice_processor, conversation_layer) | KB | Brings weighted coverage from 67% → ~80% |
-| Auto-reply enable (`AUTO_REPLY_ENABLED=true`) | Config + testing | Moves from draft-only mode to live; requires thorough QA first |
+| ~~Auto-reply enable (`AUTO_REPLY_ENABLED=true`)~~ | Config + testing | **Correction 2026-07-09: already done, per S11-02 (2026-06-23) — this row is obsolete, kept struck through for history.** |
 | `AGENT_PROACTIVE_OUTBOUND_ENABLED=true` | Config + testing | Enables agent-initiated outbound; no code written for this path yet |
 | Social auto-reply enable (`SOCIAL_AUTO_REPLY_ENABLED=true`) | Config | Currently kill-switched; requires tested scenarios before enabling |
 
@@ -274,10 +274,10 @@ Any rows found need manual reset to `pending` or `failed` after confirming no de
 **Risk:** If production DDL was created differently (e.g., via a migration not in the `db/migrations/` folder), the KB schema may have wrong column types or names.
 **Mitigation:** U-03 equivalent — run `\d wbom_payroll_runs` in psql. If schema differs from `payroll_module.md`, update the KB article under a new change authorization.
 
-### RISK-09 — AUTO_REPLY_ENABLED Permanently Off (LOW — Operational)
-**What:** `AUTO_REPLY_ENABLED=false` means every AI reply requires manual admin approval before sending. This is the safest mode but creates an admin workload bottleneck.
-**Risk:** If admin queue is not reviewed frequently, WhatsApp contacts get no response. Draft TTL is 24h — after that, the draft expires and the contact receives nothing.
-**Mitigation:** Monitor `/api/drafts/stats` daily. Alert if `pending` count exceeds threshold. Consider enabling `AUTO_REPLY_ENABLED=true` for `SAFE_AUTO_SEND_INTENTS` only, after QA sign-off.
+### RISK-09 — AUTO_REPLY_ENABLED Permanently Off (SUPERSEDED 2026-07-09)
+**Original risk (obsolete):** `AUTO_REPLY_ENABLED=false` meant every AI reply required manual admin approval, creating an admin workload bottleneck if the queue wasn't reviewed frequently (draft TTL 24h — unreviewed drafts expired with no reply sent).
+**Why superseded:** the flag was flipped to `true` per Management decision S11-02 on 2026-06-23 — the same session this document itself was written in, and before this document's own `last_verified: 2026-06-24` date. This risk entry was simply never updated to reflect that; corrected 2026-07-09 rather than deleted, to preserve the decision history.
+**Current relevant risk (new, replaces this one):** with auto-reply live, unreviewed AI-generated replies could reach customers outside the `DRAFT_ALWAYS_ROLES`/`DRAFT_ALWAYS_PHONES`/`DRAFT_ALWAYS_NAMES` allowlist and the `DRAFT_QUALITY_GATE`. Mitigation unchanged in spirit: monitor `/api/drafts/stats` and the quality-gate reject rate, not the old "queue is piling up" framing.
 
 ---
 

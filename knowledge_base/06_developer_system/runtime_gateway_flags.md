@@ -34,7 +34,7 @@ Current production values are shown. These may differ in staging/test environmen
 
 | Flag | Current Value | Module That Reads It | Effect When Disabled |
 |---|---|---|---|
-| `AUTO_REPLY_ENABLED` | `false` | `modules/bridge_poller` | All AI replies go to `fazle_draft_replies` for admin review; nothing auto-sent to WhatsApp |
+| `AUTO_REPLY_ENABLED` | `true` (corrected 2026-07-09 — was wrongly listed `false`, stale since before Management decision S11-02, 2026-06-23) | `modules/bridge_poller` | All AI replies go to `fazle_draft_replies` for admin review; nothing auto-sent to WhatsApp |
 | `HYBRID_SEARCH_ENABLED` | `true` | `modules/rag/__init__.py` | Falls back to BM25-only search; Qdrant not contacted; `_hybrid_search()` path skipped |
 | `DRAFT_QUALITY_GATE` | `true` | `modules/draft_quality` | Disables all 4 quality checks; all replies pass to queue without scoring |
 | `AI_SAFE_MODE` | `false` | `modules/bridge_poller` (line 1426) | When `true`: forces draft (no auto-send) for replies that are: >200 chars, identity confidence <50, or intent = "unknown"/"unclear" |

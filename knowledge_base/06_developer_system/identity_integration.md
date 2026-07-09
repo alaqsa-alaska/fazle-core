@@ -132,7 +132,7 @@ Source: `shared/reply_policy.py`. Full section documentation in `system_prompt.m
 | **Numbers in `DRAFT_ALWAYS_PHONES`** | Any intent | ALWAYS draft |
 | **Escort client roles** | Escort order content | Draft (admin reviews vessel data before confirmation) |
 
-**`AUTO_REPLY_ENABLED=false` (current production state):** ALL replies regardless of role, intent, or disposition rules go to `fazle_draft_replies` for admin review. The rules above apply when `AUTO_REPLY_ENABLED=true`.
+**`AUTO_REPLY_ENABLED=true` (current production state, corrected 2026-07-09 — was wrongly documented as `false` here since before this file's own 2026-06-24 verification date, per Management decision S11-02, 2026-06-23):** the disposition rules in the table above apply as written. If the flag were ever reverted to `false`, ALL replies regardless of role/intent/disposition would go to `fazle_draft_replies` for admin review instead.
 
 **`AI_SAFE_MODE=true` (currently false):** Forces draft for any reply > 200 chars, identity_confidence < 50, or intent = unknown/unclear — regardless of role.
 
