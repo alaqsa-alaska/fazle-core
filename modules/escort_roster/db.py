@@ -480,6 +480,20 @@ async def recalculate_entry(program_id: int, actor: str = "system") -> dict:
 # Queries
 # ────────────────────────────────────────────────────────────────────────────
 
+def _parse_date_filter(raw: str) -> Optional[date]:
+    """Parse a start_from/start_to query filter into a real date object.
+
+    asyncpg requires an actual datetime.date for a date-typed column bind
+    parameter — passing the raw query string directly raises
+    AttributeError: 'str' object has no attribute 'toordinal'. Returns None
+    on anything unparsable so callers can skip the filter instead of 500ing.
+    """
+    try:
+        return date.fromisoformat(raw.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
 async def get_roster_list(
     page: int = 1,
     page_size: int = 50,
@@ -526,20 +540,31 @@ async def get_roster_list(
         idx += 1
 
     if status:
-        # Case-insensitive match — wbom_escort_programs uses mixed case (Running, Assigned, Completed)
-        conditions.append(f"LOWER(p.status) = LOWER(${idx})")
+        # Case-insensitive match using source program status when present,
+        # otherwise fall back to roster_status for roster-only/manual entries.
+        conditions.append(
+            f"LOWER(COALESCE(NULLIF(TRIM(p.status), ''), NULLIF(TRIM(e.roster_status), ''), 'draft')) = LOWER(${idx})"
+        )
         params.append(status)
         idx += 1
 
     if start_from:
-        conditions.append(f"COALESCE(e.start_date, p.program_date) >= ${idx}")
-        params.append(start_from)
-        idx += 1
+        parsed_start_from = _parse_date_filter(start_from)
+        if parsed_start_from is not None:
+            conditions.append(f"COALESCE(e.start_date, p.program_date) >= ${idx}")
+            params.append(parsed_start_from)
+            idx += 1
+        else:
+            log.warning(f"[escort_roster] ignoring unparsable start_from filter: {start_from!r}")
 
     if start_to:
-        conditions.append(f"COALESCE(e.start_date, p.program_date) <= ${idx}")
-        params.append(start_to)
-        idx += 1
+        parsed_start_to = _parse_date_filter(start_to)
+        if parsed_start_to is not None:
+            conditions.append(f"COALESCE(e.start_date, p.program_date) <= ${idx}")
+            params.append(parsed_start_to)
+            idx += 1
+        else:
+            log.warning(f"[escort_roster] ignoring unparsable start_to filter: {start_to!r}")
 
     # Always JOIN wbom_escort_programs so p.status filter works
     join_clause = "LEFT JOIN wbom_escort_programs p ON p.program_id = e.program_id"
