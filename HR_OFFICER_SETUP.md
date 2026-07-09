@@ -1,19 +1,21 @@
 # HR Officer Mobile Payroll Setup Guide
 
+> ⚠️ **Security note (2026-07-08):** this document previously contained live plaintext API keys and passwords. Those values have been redacted and replaced with pointers to `.env` / the owner's secure vault. If you are reading this before the credentials referenced below have been rotated, treat them as still compromised — the git history for this file (and `DEPLOYMENT_SUMMARY.md`, `migrations/002_add_hr_officers.sql`, `CHAOS_TEST_PLAN.md`, `scripts/setup_hr_officers.py`) contains the old plaintext values and should be scrubbed or the credentials rotated, whichever the Owner decides.
+
 ## Overview
 This document provides setup instructions for adding two HR Officer users (OfficeAssistant01 and OfficeAssistant02) to the payroll dashboard with mobile-friendly access.
 
 ## User Credentials
 
 ### OfficeAssistant01
-- **API Key**: `fk_oHYBRq0koo2EOuoWCQLNvCmDSuNgdz3oUg8jB2-SPQs`
-- **Password/Note**: Office1234 (reference only; API key is the actual authentication)
+- **API Key**: `<redacted — see HROFFICER_01_APIKEY in .env>`
+- **Password/Note**: `<redacted — see HROFFICER_01_PASSWORD in .env>` (reference only; API key is the actual authentication)
 - **Role**: Operator (can view all, create entries, no edit/delete)
 - **Phone (for DB)**: 01700000001
 
 ### OfficeAssistant02
-- **API Key**: `fk_LVvuQciEYTq2JwfQ9lgcuhB29xErPtIf_ipdQpPvAWE`
-- **Password/Note**: Assistant1234 (reference only; API key is the actual authentication)
+- **API Key**: `<redacted — see HROFFICER_02_APIKEY in .env>`
+- **Password/Note**: `<redacted — see HROFFICER_02_PASSWORD in .env>` (reference only; API key is the actual authentication)
 - **Role**: Operator (can view all, create entries, no edit/delete)
 - **Phone (for DB)**: 01700000002
 
@@ -51,16 +53,16 @@ Expected output:
 
 ### 2. Environment Configuration
 
-The API keys are already configured in `.env` under the "HR Officer Users" section:
+The API keys are already configured in `.env` under the "HR Officer Users" section. **Do not store real values here — read them directly from the production `.env` file or the owner's secure vault.** Expected shape:
 
 ```env
 HROFFICER_01_NAME=OfficeAssistant01
-HROFFICER_01_APIKEY=fk_oHYBRq0koo2EOuoWCQLNvCmDSuNgdz3oUg8jB2-SPQs
-HROFFICER_01_PASSWORD=Office1234
+HROFFICER_01_APIKEY=<see .env — do not copy the real value into any git-tracked file>
+HROFFICER_01_PASSWORD=<see .env — do not copy the real value into any git-tracked file>
 
 HROFFICER_02_NAME=OfficeAssistant02
-HROFFICER_02_APIKEY=fk_LVvuQciEYTq2JwfQ9lgcuhB29xErPtIf_ipdQpPvAWE
-HROFFICER_02_PASSWORD=Assistant1234
+HROFFICER_02_APIKEY=<see .env — do not copy the real value into any git-tracked file>
+HROFFICER_02_PASSWORD=<see .env — do not copy the real value into any git-tracked file>
 ```
 
 ### 3. Mobile Payroll Dashboard Access

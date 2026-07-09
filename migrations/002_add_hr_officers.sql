@@ -4,7 +4,7 @@
 -- Usage: psql -d postgres -f migrations/002_add_hr_officers.sql
 
 -- Insert HR Officer 1: OfficeAssistant01
--- API Key: fk_oHYBRq0koo2EOuoWCQLNvCmDSuNgdz3oUg8jB2-SPQs
+-- API Key: <redacted 2026-07-08 — see HROFFICER_01_APIKEY in .env; the hash below is one-way and not itself a secret>
 -- Hash: 0dc6ea9e147395007f39c2a4b926f0d8ef8ea6293f9a57d7e4ce8b1b6f884eec
 INSERT INTO fazle_admins (phone, name, status, api_key_hash, notes)
 VALUES (
@@ -17,7 +17,7 @@ VALUES (
 ON CONFLICT (phone) DO NOTHING;
 
 -- Insert HR Officer 2: OfficeAssistant02
--- API Key: fk_LVvuQciEYTq2JwfQ9lgcuhB29xErPtIf_ipdQpPvAWE
+-- API Key: <redacted 2026-07-08 — see HROFFICER_02_APIKEY in .env; the hash below is one-way and not itself a secret>
 -- Hash: 7f55978c97a0ae223851a9a27d025e60c965e2385abe1ada948c3bd1e1bb880c
 INSERT INTO fazle_admins (phone, name, status, api_key_hash, notes)
 VALUES (

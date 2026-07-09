@@ -61,8 +61,10 @@ docker exec ai-postgres psql -U postgres -c "SELECT COUNT(*) FROM wbom_employees
 # Usage: python scripts/chaos_load.py --rps 10 --duration 300
 import asyncio, argparse, aiohttp, time, sys
 
+import os
+
 API_BASE = "http://localhost:8200"
-API_KEY = "fk_MpRgBQCHFk43X1os4cgXrSjFnCqHVEyvlfciuUM7LPI"
+API_KEY = os.environ["INTERNAL_API_KEY"]  # read from .env — never hardcode this value
 HEADERS = {"X-Internal-Key": API_KEY, "Content-Type": "application/json"}
 
 async def health_poll(session, results):
@@ -257,9 +259,10 @@ curl -sf http://localhost:8200/health/deep | python3 -m json.tool
 # scripts/chaos_flood.py
 # Usage: python scripts/chaos_flood.py --count 500 --concurrency 50
 import asyncio, aiohttp, argparse, time
+import os
 
 API_BASE = "http://localhost:8200"
-API_KEY = "fk_MpRgBQCHFk43X1os4cgXrSjFnCqHVEyvlfciuUM7LPI"
+API_KEY = os.environ["INTERNAL_API_KEY"]  # read from .env — never hardcode this value
 
 FAKE_WEBHOOK = {
     "object": "whatsapp_business_account",

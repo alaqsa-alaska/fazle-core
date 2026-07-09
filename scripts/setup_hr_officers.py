@@ -56,12 +56,12 @@ async def setup_hr_officers():
         print(f"\nUser 1:")
         print(f"  Username: OfficeAssistant01")
         print(f"  API Key: {key1['api_key']}")
-        print(f"  Password: Office1234 (use API Key above instead)")
-        
+        print(f"  Password: see HROFFICER_01_PASSWORD in .env (use API Key above instead)")
+
         print(f"\nUser 2:")
         print(f"  Username: OfficeAssistant02")
         print(f"  API Key: {key2['api_key']}")
-        print(f"  Password: Assistant1234 (use API Key above instead)")
+        print(f"  Password: see HROFFICER_02_PASSWORD in .env (use API Key above instead)")
         
         print("\nAccess the payroll dashboard:")
         print("  URL: https://your-server/app/static/payroll.html")

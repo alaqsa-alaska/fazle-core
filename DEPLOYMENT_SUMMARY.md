@@ -128,8 +128,8 @@ pm2 restart fazle-core
 
 1. Open `/app/static/payroll.html` on a mobile device or mobile browser emulation
 2. At the login prompt, paste one of these API keys:
-   - **OfficeAssistant01**: `fk_oHYBRq0koo2EOuoWCQLNvCmDSuNgdz3oUg8jB2-SPQs`
-   - **OfficeAssistant02**: `fk_LVvuQciEYTq2JwfQ9lgcuhB29xErPtIf_ipdQpPvAWE`
+   - **OfficeAssistant01**: `<redacted — see HROFFICER_01_APIKEY in .env>`
+   - **OfficeAssistant02**: `<redacted — see HROFFICER_02_APIKEY in .env>`
 3. Verify the dashboard loads with mobile-optimized UI
 4. Test income entry form (📥 Income tab)
 5. Verify touch targets are at least 44px (use browser DevTools)
