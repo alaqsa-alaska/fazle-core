@@ -35,13 +35,13 @@
 - **Writes money / sends messages / read-only:** Writes money. Does not itself send messages.
 
 ### `modules.payroll`
-- **Purpose:** Monthly payroll batch engine — aggregates escort-duty/attendance data into `wbom_payroll_runs` with a state machine (`draft → reviewed → approved → locked → paid`, or `cancelled`), idempotent per employee/period.
-- **Key files:** `__init__.py` (338 lines) — only file.
-- **Main APIs:** No `routes.py` of its own; HTTP endpoints live in `app/main.py` (`/payroll/compute`, `/payroll/run/{id}/transition`, `/payroll/runs`, `/payroll/runs/{id}`), which import and call `compute_run`, `compute_all_for_period`, `submit_run`, `approve_run`, `lock_run`, `mark_paid`, `cancel_run`, `list_runs`, `get_run`.
-- **DB tables used:** `wbom_payroll_runs`, `wbom_payroll_run_items`, `wbom_payroll_approval_log`, `fpe_cash_transactions`, `wbom_employees`, `wbom_escort_programs`.
-- **Critical dependencies:** `app.database` only.
-- **Risk level:** Critical — `mark_paid` transitions write against `fpe_cash_transactions`. **Certification finding (2026-07-09):** in production, this state machine has never progressed past `draft` — all 703 `wbom_payroll_runs` rows are `status='draft'` with `total_programs=0`. Its `program_allowance` formula (flat `DEFAULT_PER_PROGRAM_RATE=400`/day) is one of three unenforced pay formulas — see `docs/PRODUCTION_CERTIFICATION_v1.0.md` Finance Status.
-- **Writes money / sends messages / read-only:** Writes money. Does not send messages.
+- **Purpose:** Monthly payroll batch engine — aggregates escort-duty/attendance data into `wbom_payroll_runs` with a state machine (`draft → reviewed → approved → locked → paid`, or `cancelled`), idempotent per employee/period. Plus (2026-07-10/11, Office Payroll Hardening) `eligibility.py`'s centralized office-staff classification and `dry_run.py`'s read-only eligibility-preview/dry-run/reconciliation layer.
+- **Key files:** `__init__.py` (compute engine + state machine + `compute_all_for_period_office_only`, new), `eligibility.py` (new — `classify_office_staff`, single source of truth, do not duplicate), `dry_run.py` (new — `eligibility_preview`/`payroll_dry_run`/`reconciliation_report`, all non-mutating).
+- **Main APIs:** No `routes.py` of its own for the compute engine; HTTP endpoints live in `app/main.py` (`/payroll/compute`, `/payroll/run/{id}/transition`, `/payroll/runs`, `/payroll/runs/{id}`). The new eligibility/dry-run/reconciliation endpoints live in `modules.attendance.routes` instead (`/admin/payroll/eligibility-preview`, `/dry-run`, `/reconciliation`).
+- **DB tables used:** `wbom_payroll_runs`, `wbom_payroll_run_items`, `wbom_payroll_approval_log`, `fpe_cash_transactions`, `wbom_employees`, `wbom_escort_programs`, `wbom_attendance` (new, for the dry-run/reconciliation layer), `fazle_draft_replies` (new, for pending/rejected parser-draft counts).
+- **Critical dependencies:** `app.database` only for the compute engine; `dry_run.py` additionally depends on `modules.payroll.eligibility`.
+- **Risk level:** Critical — `mark_paid` transitions write against `fpe_cash_transactions`. **Certification finding (2026-07-09), still true:** in production, this state machine has never progressed past `draft`. Its `compute_run`'s internal formula (basic_salary + escort-program day-count allowance) has **not yet** been rewritten to the new calendar-days/attendance-based formula — `compute_all_for_period_office_only` filters by eligibility but still calls the old, un-rewritten `compute_run`. **`job_daily_payroll` (modules.scheduler) is guarded behind `settings.office_payroll_authoritative_enabled` (default False, 2026-07-11)** — while off, the daily job runs `dry_run.payroll_dry_run` only and creates no payroll rows.
+- **Writes money / sends messages / read-only:** Writes money (compute engine, guarded). `eligibility.py`/`dry_run.py` are pure read/compute, no mutation ever.
 
 ### `modules.payment_workflow`
 - **Purpose:** Builds payment drafts for two flows — escort duty release payment and advance-payment requests — and finalizes salary payment after admin approval.
@@ -49,7 +49,7 @@
 - **Main APIs (no HTTP routes):** `create_escort_payment_draft(...)` (`:46`), `create_advance_request_draft(...)` (`:231`), `finalize_payment(draft_id, approved_amount, method)` (`:315`), `is_advance_request(text)` (`:439`).
 - **DB tables used:** `fazle_payment_drafts`, `fpe_cash_transactions`, `wbom_employees`, `wbom_escort_programs`.
 - **Critical dependencies:** `app.database`, `modules.fazle_payroll_engine.accounting/employee/models/payment_event`.
-- **Risk level:** Critical — `finalize_payment` writes `fpe_cash_transactions` via FPE's canonical transaction creator. **Certification finding (2026-07-09):** `create_escort_payment_draft`'s `basic_salary/30` formula has never resulted in a completed payment in production — all 47 `escort_payment` drafts ever created are `status='expired'`. Real `PAID` commands bypass this draft's suggested amount entirely (admin types a free amount). See `docs/PRODUCTION_CERTIFICATION_v1.0.md` Finance Status.
+- **Risk level:** Critical — `finalize_payment` writes `fpe_cash_transactions` via FPE's canonical transaction creator. **Formula fixed (Owner decision, 2026-07-10):** `create_escort_payment_draft` previously used `basic_salary/30` (a formula meant for office staff, not escort duty) and subtracted conveyance instead of adding it. Now: flat `DEFAULT_DAILY_RATE` (400tk/day, matching `escort_roster/calculations.py`'s shift-rate model) × `duty_days`, with conveyance added. **Certification finding (2026-07-09), historical context:** before this fix, all 47 `escort_payment` drafts ever created were `status='expired'` — real `PAID` commands bypass this draft's suggested amount entirely (admin types a free amount). See `docs/PRODUCTION_CERTIFICATION_v1.0.md` Finance Status.
 - **Writes money / sends messages / read-only:** Writes money. Does not send messages itself (produces drafts).
 
 ### `modules.payment_ingest`
@@ -126,13 +126,14 @@
 - **Writes money / sends messages / read-only:** Read/write (program + attendance + payment drafts); does not directly write `fpe_cash_transactions` or send messages.
 
 ### `modules.attendance`
-- **Purpose:** Handles guard attendance reports via WhatsApp (e.g. "হাজির"/"Present") — detects the message, creates an admin-approval draft, and on approval saves to `wbom_attendance`.
-- **Key files:** `__init__.py` (246 lines) — only file.
-- **Main APIs (no HTTP routes):** `is_attendance_message(text)` (`:50`), `handle_attendance_message(...)` (`:74`), `save_attendance(...)` (`:167`), `get_attendance_summary(...)` (`:202`).
-- **DB tables used:** `wbom_attendance`, `wbom_employees`.
-- **Critical dependencies:** `app.database`, `shared.draft_reply`.
-- **Risk level:** Medium — no cash-table writes.
+- **Purpose:** Two things: (1) WhatsApp self-report attendance ("হাজির"/"Present") → admin-approval draft → `wbom_attendance`; (2) the shared attendance-finalization service (`finalize_attendance_draft`, Owner decision 2026-07-11) used by BOTH the WhatsApp `APPROVE <id>` command and the frontend Review Queue's approve button for `intent='attendance'` drafts, so the two channels cannot drift.
+- **Key files:** `__init__.py` (attendance-message handling + `finalize_attendance_draft`), `crud.py` (new, 2026-07-11 — manual Office Attendance CRUD + structured `wbom_employees` lookup), `routes.py` (new, 2026-07-11 — `/admin/attendance*` + `/admin/payroll/*` endpoints, admin+/superadmin RBAC).
+- **Main APIs:** `GET/POST /admin/attendance`, `GET/PUT/DELETE /admin/attendance/{id}`, `GET /admin/attendance/lookup/by-id/{employee_id}`, `GET /admin/attendance/lookup/suggest`, `GET /admin/payroll/eligibility-preview`, `GET /admin/payroll/dry-run`, `GET /admin/payroll/reconciliation`. Non-HTTP: `is_attendance_message`, `handle_attendance_message`, `save_attendance` (extended with `entry_source`/`approval_channel`/`approved_by`/`source_draft_id`, migration 040), `finalize_attendance_draft`.
+- **DB tables used:** `wbom_attendance` (+5 new audit columns, migration 040), `wbom_employees`, `fazle_draft_replies`.
+- **Critical dependencies:** `app.database`, `shared.draft_reply`, `modules.escort_lifecycle` (`mark_program_running_on_attendance`), `modules.escort_roster.routes` (`_resolve_actor`, RBAC reuse).
+- **Risk level:** Medium — no direct cash-table writes; does gate what counts as office-payroll duty data (Owner Decision 2 governs which `entry_source` values `modules.payroll.dry_run` may read).
 - **Writes money / sends messages / read-only:** Read/write attendance records only; no money, no direct sends.
+- **Known limitation:** the `confirmed -> running` transition (escort side) has no other trigger besides first accepted attendance — a date-only fallback was explicitly rejected by the Owner, so a guard who never sends/gets an attendance approval never transitions their program to `running`.
 
 ### `modules.recruitment_flow`
 - **Purpose:** Async recruitment funnel — conversational intake (name → age → area → job preference → experience → phone confirmation), tracked per-phone in `fazle_recruitment_sessions` with a 24h session TTL.
@@ -167,7 +168,7 @@
 - **Main APIs (`APIRouter(tags=["drafts"])`):** `GET /api/drafts/stats` (`:55`), `GET /api/drafts` (`:71`), `POST /api/drafts/{id}/approve` (`:127`), `POST /api/drafts/{id}/edit` (`:189`), `POST /api/drafts/{id}/delete` (`:220`), `POST /api/drafts/{id}/block` (`:243`). Protected by `X-Internal-Key`.
 - **DB tables used:** `fazle_contact_roles`, `fazle_draft_replies`, `wbom_contacts`.
 - **Critical dependencies:** `app.config`, `app.database`, `modules.outbound` (approve action calls `outbound.enqueue`).
-- **Risk level:** Critical — `/approve` directly triggers real outbound sends. **Note:** this router's mounting in `app/main.py` was found dropped by in-flight uncommitted work and restored 2026-07-09 — verify a restart has happened since, or the fix isn't live yet.
+- **Risk level:** Critical — `/approve` directly triggers real outbound sends. **Note:** this router's mounting in `app/main.py` was found dropped by in-flight uncommitted work and restored 2026-07-09 — verify a restart has happened since, or the fix isn't live yet. **Real bug fixed (2026-07-11):** `/approve` was intent-agnostic and never called `save_attendance()` — approving an `intent='attendance'` draft from this dashboard silently marked it approved and sent the reply without ever saving to `wbom_attendance`. Now delegates to `modules.attendance.finalize_attendance_draft()` for that intent specifically (same shared service the WhatsApp `APPROVE <id>` command uses); every other intent's behavior is unchanged.
 - **Writes money / sends messages / read-only:** Sends messages (via outbound enqueue on approve); no cash writes.
 
 ### `modules.outbound`
@@ -239,7 +240,7 @@
 - **Main APIs (no HTTP routes):** `start_scheduler()` (`:502`), `stop_scheduler()` (`:670`), `register_job(...)` (`:118`), `trigger_job(name)` (`:122`), `get_status()` (`:680`), `list_job_names()` (`:720`), plus job functions `job_daily_payroll`, `job_dlq_alert`, `job_health_summary`, `job_stale_escort_reminder`, `job_payment_reconciliation`, `job_backup_staleness`, `job_daily_memory_review`, `job_rag_rebuild`.
 - **DB tables used:** `fazle_draft_replies`, `fazle_payment_drafts`, `fazle_reconciliation_log`, `fazle_reminders_sent`, `fazle_scheduled_jobs`, `fazle_service_heartbeats`, `wbom_employees`, `wbom_escort_programs`, `wbom_staging_payments`, `wbom_whatsapp_messages`.
 - **Critical dependencies:** `app.config`, `app.database`, `app.error_log`, `app.main`, `modules.backup`, `modules.payroll`, `modules.message_router`, `modules.escort_roster.db`, `modules.memory_extractor`, `modules.reports`, `shared.queue`, `shared.locks`.
-- **Risk level:** Critical — `job_daily_payroll` triggers real payroll compute (writes `fpe_cash_transactions` transitively), and several jobs call `outbound.enqueue(...)` to send real admin alert messages.
+- **Risk level:** Critical — several jobs call `outbound.enqueue(...)` to send real admin alert messages. **`job_daily_payroll` is now guarded (Owner decision, 2026-07-11):** behind `settings.office_payroll_authoritative_enabled` (default False), it runs `modules.payroll.dry_run.payroll_dry_run` only and creates no `wbom_payroll_runs` rows — it does not call `compute_all_for_period`/`compute_all_for_period_office_only` while the flag is off.
 - **Writes money / sends messages / read-only:** Both (indirectly, via payroll compute + alert sends).
 
 ### `modules.backup`

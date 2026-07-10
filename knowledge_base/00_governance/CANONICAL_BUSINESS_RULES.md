@@ -150,15 +150,21 @@ Each section below covers: Business Purpose, Canonical Workflow, Canonical Entit
 
 **Business Purpose:** Track whether a guard/employee was present for a given day, both for standalone daily attendance and as a backfilled record of escort-duty days.
 
-**Canonical Workflow:** Two entry points converge on the same table: (1) a guard reports attendance directly (draft → admin APPROVEs → `save_attendance()`), or (2) an escort program's release event backfills attendance for every day of the duty (`modules/escort_lifecycle`'s `_backfill_attendance()`-equivalent, `ON CONFLICT DO NOTHING` idempotent). Both write `wbom_attendance`.
+**Canonical Workflow (updated 2026-07-11, Office Payroll Hardening):** Four entry points now converge on `wbom_attendance`, distinguished by the `entry_source` column (migration 040):
+1. `manual_office` — direct admin entry via the frontend Office Attendance tab (`modules.attendance.crud`), approved immediately at creation (no draft stage).
+2. `message_parser` — a supervisor's WhatsApp message parsed by `modules.attendance_parser`, held as a `fazle_draft_replies` draft until an admin approves it (via WhatsApp `APPROVE <id>` or the frontend Review Queue's approve button — both now call the same shared `modules.attendance.finalize_attendance_draft()` service, so the two channels cannot drift).
+3. `whatsapp_escort` — a guard's own self-report ("হাজির আছি"), same draft→approve mechanism, but this source **never** counts toward office payroll regardless of approval (Owner decision).
+4. `escort_release` — `modules.escort_lifecycle`'s retroactive backfill on program release, automatic, escort-only.
 
-**Canonical Entity Names:** "Attendance" always refers to one row per (employee, date). Do not conflate with "duty days" (`wbom_escort_programs.day_count`), which is a program-level aggregate, not a per-day attendance row — they are related but distinct concepts.
+**Owner decision (2026-07-10/11): office payroll's duty-day source is `manual_office` and admin-approved `message_parser` only** — never `whatsapp_escort` or `escort_release`, regardless of approval status. This is enforced by `modules.payroll.dry_run`'s explicit `entry_source` filter, not by inference.
 
-**Canonical Database Tables:** `wbom_attendance` (employee_id, attendance_date, status, location, recorded_by, remarks) is canonical, per `modules/attendance/__init__.py`'s own docstring and every write path found in this repo.
+**Canonical Entity Names:** "Attendance" always refers to one row per (employee, date). Do not conflate with "duty days" (`wbom_escort_programs.day_count`, escort-only shift-based aggregate) — office attendance's duty-day value is separately derived per row from `status` (`Present`=1.0, `Half Day`=0.5, `Absent`=0.0), never a client-submitted number.
 
-**Canonical APIs:** `modules/attendance/__init__.py::save_attendance(employee_id, attendance_date, status="Present", location="", recorded_by="system", remarks="")` — note the real signature requires `attendance_date` positionally; several tests in this repo call an older shape and fail (documented in `docs/PRODUCTION_CERTIFICATION_v1.0.md` Testing Status, Category C).
+**Canonical Database Tables:** `wbom_attendance` (employee_id, attendance_date, status, location, recorded_by, remarks, **+ `entry_source`/`approval_channel`/`approved_by`/`approved_at`/`source_draft_id`, migration 040**) is canonical, per `modules/attendance/__init__.py`'s own docstring and every write path found in this repo.
 
-**Canonical Status Values:** `Present`, `Absent` (confirmed via `modules/attendance/__init__.py` filtering logic). `wbom_employees.status` uses `Active` (capitalized) as its confirmed value — note the capitalization convention differs from the lowercase RBAC/admin status values (`active`) — this is a real, minor naming/casing inconsistency, recorded here rather than silently normalized.
+**Canonical APIs:** `modules/attendance/__init__.py::save_attendance(employee_id, attendance_date, status="Present", location="", recorded_by="system", remarks="", entry_source="legacy", approval_channel=None, approved_by=None, source_draft_id=None, conn=None)`, `finalize_attendance_draft(draft_id, *, channel, actor)` (the shared approval service). `modules/attendance/crud.py::create_manual_attendance/update_manual_attendance/delete_manual_attendance/list_attendance/lookup_employee_by_id/suggest_employees_by_name` (2026-07-11, manual CRUD — `POST /admin/attendance` rejects a duplicate employee+date with 409, unlike the parser-approval path's idempotent upsert).
+
+**Canonical Status Values:** `Present`, `Half Day`, `Absent` (extended 2026-07-11 for manual entry; the escort-side self-report/backfill paths still only ever write `Present`). `wbom_employees.status` uses `Active` (capitalized) as its confirmed value — note the capitalization convention differs from the lowercase RBAC/admin status values (`active`) — this is a real, minor naming/casing inconsistency, recorded here rather than silently normalized.
 
 **Known Legacy Variants:** `ops_attendance` exists live in production with no migration record anywhere in this repo (found during the 2026-07-09 schema-drift diff, `docs/PRODUCTION_CERTIFICATION_v1.0.md` Database Status) — it is presumed to be a legacy/superseded table from an older "ops_*" system, not a second active attendance pipeline, but this has **not been individually confirmed**; treat as **Legacy** pending verification, not as a second canonical source.
 
@@ -190,32 +196,66 @@ Each section below covers: Business Purpose, Canonical Workflow, Canonical Entit
 
 **Canonical Status Values:** Payroll run state machine: `draft → reviewed → approved → locked → paid`, with `cancelled` reachable from any non-`paid` state (`modules/payroll/__init__.py::ALLOWED_TRANSITIONS`). Payment draft status: `pending`/`approved`/`rejected`/`sent`/`expired` (confirmed all 47 real escort-payment drafts ended in `expired`).
 
-### Formula Rule — escort-duty pay (three formulas found, none canonical in practice)
+### Formula Rule — RESOLVED 2026-07-10 (Owner decision, canonical going forward)
+
+Two separate, non-overlapping formulas — the earlier "three formulas, none canonical" state is now resolved by explicit domain split:
 
 ```
-Formula A (modules/payroll::compute_run):
-    program_allowance = total_days × 400 ৳/day  (flat, DEFAULT_PER_PROGRAM_RATE, company-wide)
-    gross = basic_salary + program_allowance   (no food/conveyance deduction)
-    Status: defined, never actually executed with total_programs > 0 in production.
+Formula 1 — escort/vessel-duty pay (canonical for Escort-designation employees):
+    12h shift = 200tk, 24h (D+N) = 400tk (flat, shift-based, independent of
+    the guard's own basic_salary). Matches modules/escort_roster/
+    calculations.py::calculate_pay's existing, already-correct shift-rate
+    model.
+    modules/payment_workflow::create_escort_payment_draft (FIXED 2026-07-10,
+    was previously using basic_salary/30 -- Formula 3, wrong for escort duty):
+        gross_amount = duty_days × DEFAULT_DAILY_RATE (400tk/day)
+        net_payable  = gross_amount − food_bill + conveyance − advances
+                       (conveyance ADDED, not subtracted -- Owner decision)
+    Status: this is the function that actually computes every real escort
+    payment draft on release -- now correct.
 
-Formula B (modules/escort_roster/calculations.py::calculate_pay):
-    salary = total_shifts × 200 ৳/shift  (= 400/day equivalent — numerically matches A's default)
-    total  = salary + conveyance          (conveyance ADDED)
-    net_payable = total − food_bill
-    Status: feeds escort_roster_entries, a roster/reconciliation record — not itself a payment trigger.
+Formula 3 — monthly office-staff salary (canonical for Office-staff-
+classified employees only, per the Office-Staff Eligibility rule below --
+NEVER for Escort-designation employees):
+    monthly_payable_salary = basic_salary ÷ calendar_days_in_payroll_month
+                              × approved_duty_days
+    approved_duty_days comes ONLY from wbom_attendance rows with
+    entry_source IN ('manual_office', 'message_parser') -- see Attendance
+    section above. No separate absence/unpaid-leave/holiday/overtime
+    deduction -- not being credited a duty day for a day not attended is
+    the entire mechanism (Owner decision, 2026-07-11: "do not invent leave
+    logic, holiday logic, overtime, or deductions").
+    Implemented in modules/payroll/dry_run.py (read-only preview/dry-run/
+    reconciliation) and modules/payroll::compute_all_for_period_office_only
+    (the authoritative path -- NOT YET SAFE TO ENABLE, see below).
 
-Formula C (modules/payment_workflow::create_escort_payment_draft):
-    daily_rate = basic_salary ÷ 30        (personalized per employee — NOT flat 400)
-    net_payable = (duty_days × daily_rate) − food_bill − conveyance − advances
-                                             (conveyance SUBTRACTED — opposite sign from B)
-    Status: feeds fazle_payment_drafts; all 47 real drafts ever created expired unused.
+modules/payroll::compute_run's OWN internal formula (basic_salary, full and
+unprorated, + a flat per-day escort-program allowance) has NOT been
+rewritten to Formula 3 yet -- compute_all_for_period_office_only filters
+WHO compute_run runs for (office staff only, via classify_office_staff),
+but compute_run itself still computes the OLD, pre-Owner-decision amount.
+This is why job_daily_payroll (modules.scheduler) is guarded behind
+settings.office_payroll_authoritative_enabled (default False, 2026-07-11)
+-- the authoritative path must not be enabled until compute_run's own
+formula is rewritten to match Formula 3.
 
-Actual production payment path: admin types a free amount in "PAID <id> <amount> <method>";
-the system records exactly that number via create_transaction(), with NO cross-check against
-any of A, B, or C. fpe_cash_transactions.program_id is NULL on all 3,671 real transactions.
+Actual production payment path for basic salary today, unchanged: admin
+types a free amount in "PAID <id> <amount> <method>"; the system records
+exactly that number via create_transaction(), with no cross-check against
+Formula 3 either. fpe_cash_transactions.program_id is NULL on all 3,671
+real transactions.
 ```
 
-**Owner Changeable Rules:** Which of A/B/C's rate policy (flat company-wide day-rate vs. personalized `basic_salary/30`) is the intended one, and whether conveyance should add to or subtract from pay, are **business policy decisions the Owner has not yet made explicitly** — this document cannot invent that decision. Until decided, this is recorded as an **open Alternative** (per the Conflict Resolution Rule), not silently resolved. See `docs/PRODUCTION_CERTIFICATION_v1.0.md` Finance Status for the full evidence and `docs/NEXT_IMPLEMENTATION_QUEUE.md` Tier 0 for the queued decision item.
+### Office-Staff Eligibility Rule (Owner decision, 2026-07-10/11, canonical)
+
+An employee is Office Staff (and therefore eligible for Formula 3, never Formula 1) when, per `modules/payroll/eligibility.py::classify_office_staff` (the single centralized helper -- do not duplicate this logic):
+1. `status='Active'` (case-sensitive, matching `wbom_employees`'s own confirmed casing).
+2. `designation` is not `'Escort'` (case-insensitive).
+3. Not an obvious bookkeeping/test/placeholder record (best-effort name-substring heuristic — disclosed as imperfect, not a guarantee).
+4. `basic_salary > 0`.
+5. Either the employee name contains (case-insensitive, anywhere) `Al-Aqsa`/`Office`/`Operation`/`SV`, OR `designation` is one of `Staff`/`Guard`/`Labor`/`Day Labour`/`Supervisor`/`Operation Officer`/`Office Assistant`/`Security Guard`.
+
+**Confirmed production result (2026-07-11): 0 of 188 employees are currently eligible** — 184 are Escort-designation (excluded by rule #2), and the remaining 4 non-Escort records each fail a different gate (one inactive, two with `basic_salary=0`, one flagged as a likely bookkeeping/test row). This is a **data-state condition, not an implementation failure** — the eligibility pipeline is built and verified correct against real production data; it is simply dormant until a real, active, positively-salaried office employee exists.
 
 **Structural Rules:** Regardless of which formula policy the Owner picks, `fpe_cash_transactions` remains the only table real money is recorded in, and `create_transaction()` remains the only function allowed to write it (Article I) — that structural rule does not change no matter which pay-formula policy wins.
 

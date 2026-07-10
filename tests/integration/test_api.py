@@ -273,20 +273,29 @@ class TestTransactionsEndpoint:
 
 
 class TestAttendanceEndpoint:
+    """Owner decision 2026-07-11: GET /admin/attendance is now real (manual
+    Office Attendance CRUD) -- was a "not implemented yet" placeholder
+    (404) before this feature existed."""
+
     async def test_empty_initially(self, client):
         response = await client.get("/admin/attendance")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+        assert response.json()["items"] == []
 
     async def test_attendance_after_insert(self, client, test_db_pool, seed_employee):
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO wbom_attendance
-                    (employee_id, attendance_date, status, recorded_by)
-                VALUES ($1, CURRENT_DATE, 'Present', 'test')
+                    (employee_id, attendance_date, status, recorded_by, entry_source)
+                VALUES ($1, CURRENT_DATE, 'Present', 'test', 'manual_office')
             """, seed_employee["employee_id"])
 
         response = await client.get("/admin/attendance")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["items"][0]["employee_id"] == seed_employee["employee_id"]
 
 
 class TestDraftsEndpoint:
