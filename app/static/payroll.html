@@ -1260,6 +1260,92 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       </div>
       <div id="adminAuditBox" class="tbl-wrap"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
     </div>
+
+    <div class="card">
+      <h2>Client Settings</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+        Client billing rates (revenue side) — separate from employee payroll (cost side). Contact Person Mobile must already be authorized in the escort-client phone list.
+      </p>
+      <div class="row" style="align-items:flex-end">
+        <button class="btn" onclick="openClientBillingForm(false)">Add Client</button>
+        <button class="btn sm secondary" onclick="loadClientBillingProfiles()">Refresh</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px">
+          <input type="checkbox" id="clientBillingShowInactive" onchange="loadClientBillingProfiles()"> Show inactive
+        </label>
+      </div>
+
+      <div id="clientBillingFormBox" class="card" style="margin-top:12px;display:none;background:var(--bg-alt,rgba(255,255,255,.03))">
+        <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+          <div><label>Client Name*</label><input id="cbClientName" type="text"></div>
+          <div><label>Office Address</label><input id="cbOfficeAddress" type="text"></div>
+          <div><label>Contact Person Name</label><input id="cbContactPersonName" type="text"></div>
+          <div><label>Contact Person Mobile*</label>
+            <select id="cbContactPersonMobile"></select>
+          </div>
+          <div><label>Chairman Name</label><input id="cbChairmanName" type="text"></div>
+          <div><label>Chairman Mobile</label><input id="cbChairmanMobile" type="text"></div>
+          <div><label>Managing Member Name</label><input id="cbManagingMemberName" type="text"></div>
+          <div><label>Managing Member Mobile</label><input id="cbManagingMemberMobile" type="text"></div>
+        </div>
+        <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+          <div><label>General Rate (৳)</label><input id="cbGeneralRate" type="number" min="0" step="0.01"></div>
+          <div><label>24 Hour Rate (৳)</label><input id="cbRate24h" type="number" min="0" step="0.01"></div>
+          <div><label>12 Hour Rate (৳)</label><input id="cbRate12h" type="number" min="0" step="0.01"></div>
+          <div><label>Monthly Rate (৳)</label><input id="cbRateMonthly" type="number" min="0" step="0.01"></div>
+        </div>
+        <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+          <div><label>Deployed Wage — General (৳)</label><input id="cbWageGeneral" type="number" min="0" step="0.01"></div>
+          <div><label>Deployed Wage — 24H (৳)</label><input id="cbWage24h" type="number" min="0" step="0.01"></div>
+          <div><label>Deployed Wage — 12H (৳)</label><input id="cbWage12h" type="number" min="0" step="0.01"></div>
+          <div><label>Deployed Wage — Monthly (৳)</label><input id="cbWageMonthly" type="number" min="0" step="0.01"></div>
+        </div>
+        <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+          <div><label>VAT (৳, flat)</label><input id="cbVat" type="number" min="0" step="0.01" value="0"></div>
+          <div><label>Tax (৳, flat)</label><input id="cbTax" type="number" min="0" step="0.01" value="0"></div>
+          <div><label>Other Charges (৳, flat)</label><input id="cbOtherCharges" type="number" min="0" step="0.01" value="0"></div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px">
+            <input type="checkbox" id="cbIsActive" checked> Active
+          </label>
+        </div>
+        <div class="row">
+          <div style="flex:1"><label>Notes</label><textarea id="cbNotes" rows="2" style="width:100%"></textarea></div>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="saveClientBillingProfile()">Save</button>
+          <button class="btn sm secondary" onclick="closeClientBillingForm()">Cancel</button>
+        </div>
+        <div id="clientBillingFormError" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+      </div>
+
+      <div id="clientBillingBox" class="tbl-wrap" style="margin-top:12px"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Generate Bill</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+        Manually generate a client bill for a Completed escort program whose client has an active Client Settings profile. One bill per program (enforced).
+      </p>
+      <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+        <div style="min-width:260px">
+          <label>Completed Program</label>
+          <select id="gbProgramId"></select>
+        </div>
+        <div>
+          <label>Duty Type</label>
+          <select id="gbDutyType">
+            <option value="general">General</option>
+            <option value="24h">24 Hour</option>
+            <option value="12h">12 Hour</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+        <div><label>Other Charges (৳)</label><input id="gbOtherCharges" type="number" min="0" step="0.01" value="0"></div>
+        <button class="btn" onclick="generateBill()">Generate Bill</button>
+        <button class="btn sm secondary" onclick="loadBillingSection()">Refresh</button>
+      </div>
+      <div id="generateBillError" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+      <div id="billsBox" class="tbl-wrap" style="margin-top:12px"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
+    </div>
   </section>
 
 </main>
@@ -1943,7 +2029,250 @@ async function loadAdminActivity() {
 }
 
 async function loadAdminTab() {
-  await Promise.all([loadAdminUsers(), loadAdminActivity(), loadAdminSalarySummary()]);
+  await Promise.all([loadAdminUsers(), loadAdminActivity(), loadAdminSalarySummary(), loadClientBillingProfiles(), loadBillingSection()]);
+}
+
+// ── Client Billing Profiles (Phase 2B) ──────────────────────────────────────
+// Dedicated fetch helper, deliberately not reusing api()/adminApi() (each
+// already resolves to a different base path in this file) — avoids any risk
+// of changing shared routing behavior for unrelated existing features.
+async function clientBillingFetch(path, opts = {}) {
+  const headers = { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  const r = await fetch('/admin' + path, { ...opts, headers });
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch (_) {}
+    throw new Error(detail || r.statusText);
+  }
+  return r.json();
+}
+
+let _cbEditingId = null;
+
+async function loadClientBillingProfiles() {
+  if (!canAccessAdminMenu()) return;
+  const box = document.getElementById('clientBillingBox');
+  if (!box) return;
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const showInactive = document.getElementById('clientBillingShowInactive').checked;
+    const data = await clientBillingFetch('/client-billing-profiles?active=' + (!showInactive));
+    const profiles = data.profiles || [];
+    if (!profiles.length) {
+      box.innerHTML = '<div class="empty"><div class="icon">📋</div>No client profiles yet.</div>';
+      return;
+    }
+    const rows = profiles.map(p => `
+      <tr>
+        <td>${esc(p.client_name)}</td>
+        <td>${esc(p.contact_person_name || '')}</td>
+        <td>${esc(p.contact_person_mobile)}</td>
+        <td>${esc(p.office_address || '')}</td>
+        <td>${p.general_rate != null ? '৳' + fmtNum(p.general_rate) : ''}</td>
+        <td>${p.rate_24h != null ? '৳' + fmtNum(p.rate_24h) : ''}</td>
+        <td>${p.rate_12h != null ? '৳' + fmtNum(p.rate_12h) : ''}</td>
+        <td>${p.rate_monthly != null ? '৳' + fmtNum(p.rate_monthly) : ''}</td>
+        <td>${p.is_active ? 'Active' : 'Inactive'}</td>
+        <td>
+          <button class="btn sm secondary" onclick="openClientBillingForm(true, ${p.client_id})" title="Edit">✏️</button>
+          <button class="btn sm secondary" onclick="deleteClientBillingProfile(${p.client_id})" title="Delete permanently">🗑</button>
+        </td>
+      </tr>`).join('');
+    box.innerHTML = `<table><thead><tr>
+      <th>Client Name</th><th>Contact Person</th><th>Contact Mobile</th><th>Office Address</th>
+      <th>General</th><th>24H</th><th>12H</th><th>Monthly</th><th>Status</th><th>Actions</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
+}
+
+async function openClientBillingForm(isEdit, clientId) {
+  document.getElementById('clientBillingFormError').textContent = '';
+  const mobileSelect = document.getElementById('cbContactPersonMobile');
+  try {
+    const data = await clientBillingFetch('/escort-clients/authorized-numbers');
+    mobileSelect.innerHTML = (data.phones || []).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')
+      || '<option value="">(no authorized numbers configured)</option>';
+  } catch (e) {
+    mobileSelect.innerHTML = '<option value="">(failed to load authorized numbers)</option>';
+  }
+
+  _cbEditingId = isEdit ? clientId : null;
+  const fields = ['cbClientName','cbOfficeAddress','cbContactPersonName','cbChairmanName','cbChairmanMobile',
+    'cbManagingMemberName','cbManagingMemberMobile','cbGeneralRate','cbRate24h','cbRate12h','cbRateMonthly',
+    'cbWageGeneral','cbWage24h','cbWage12h','cbWageMonthly','cbNotes'];
+  fields.forEach(id => document.getElementById(id).value = '');
+  document.getElementById('cbVat').value = 0;
+  document.getElementById('cbTax').value = 0;
+  document.getElementById('cbOtherCharges').value = 0;
+  document.getElementById('cbIsActive').checked = true;
+
+  if (isEdit && clientId) {
+    try {
+      const p = await clientBillingFetch('/client-billing-profiles/' + clientId);
+      document.getElementById('cbClientName').value = p.client_name || '';
+      document.getElementById('cbOfficeAddress').value = p.office_address || '';
+      document.getElementById('cbContactPersonName').value = p.contact_person_name || '';
+      if (p.contact_person_mobile) mobileSelect.value = p.contact_person_mobile;
+      document.getElementById('cbChairmanName').value = p.chairman_name || '';
+      document.getElementById('cbChairmanMobile').value = p.chairman_mobile || '';
+      document.getElementById('cbManagingMemberName').value = p.managing_member_name || '';
+      document.getElementById('cbManagingMemberMobile').value = p.managing_member_mobile || '';
+      document.getElementById('cbGeneralRate').value = p.general_rate ?? '';
+      document.getElementById('cbRate24h').value = p.rate_24h ?? '';
+      document.getElementById('cbRate12h').value = p.rate_12h ?? '';
+      document.getElementById('cbRateMonthly').value = p.rate_monthly ?? '';
+      document.getElementById('cbWageGeneral').value = p.employee_wage_general ?? '';
+      document.getElementById('cbWage24h').value = p.employee_wage_24h ?? '';
+      document.getElementById('cbWage12h').value = p.employee_wage_12h ?? '';
+      document.getElementById('cbWageMonthly').value = p.employee_wage_monthly ?? '';
+      document.getElementById('cbVat').value = p.vat_amount ?? 0;
+      document.getElementById('cbTax').value = p.tax_amount ?? 0;
+      document.getElementById('cbOtherCharges').value = p.other_charges ?? 0;
+      document.getElementById('cbNotes').value = p.notes || '';
+      document.getElementById('cbIsActive').checked = !!p.is_active;
+    } catch (e) {
+      document.getElementById('clientBillingFormError').textContent = 'Failed to load profile: ' + e.message;
+    }
+  }
+  document.getElementById('clientBillingFormBox').style.display = 'block';
+}
+
+function closeClientBillingForm() {
+  document.getElementById('clientBillingFormBox').style.display = 'none';
+  _cbEditingId = null;
+}
+
+function _cbNum(id) {
+  const v = document.getElementById(id).value;
+  return v === '' ? null : Number(v);
+}
+
+async function saveClientBillingProfile() {
+  const errBox = document.getElementById('clientBillingFormError');
+  errBox.textContent = '';
+  const body = {
+    client_name: document.getElementById('cbClientName').value.trim(),
+    contact_person_mobile: document.getElementById('cbContactPersonMobile').value,
+    office_address: document.getElementById('cbOfficeAddress').value || null,
+    contact_person_name: document.getElementById('cbContactPersonName').value || null,
+    chairman_name: document.getElementById('cbChairmanName').value || null,
+    chairman_mobile: document.getElementById('cbChairmanMobile').value || null,
+    managing_member_name: document.getElementById('cbManagingMemberName').value || null,
+    managing_member_mobile: document.getElementById('cbManagingMemberMobile').value || null,
+    general_rate: _cbNum('cbGeneralRate'),
+    rate_24h: _cbNum('cbRate24h'),
+    rate_12h: _cbNum('cbRate12h'),
+    rate_monthly: _cbNum('cbRateMonthly'),
+    employee_wage_general: _cbNum('cbWageGeneral'),
+    employee_wage_24h: _cbNum('cbWage24h'),
+    employee_wage_12h: _cbNum('cbWage12h'),
+    employee_wage_monthly: _cbNum('cbWageMonthly'),
+    vat_amount: _cbNum('cbVat') || 0,
+    tax_amount: _cbNum('cbTax') || 0,
+    other_charges: _cbNum('cbOtherCharges') || 0,
+    notes: document.getElementById('cbNotes').value || null,
+  };
+  if (!body.client_name) { errBox.textContent = 'Client Name is required.'; return; }
+  if (!body.contact_person_mobile) { errBox.textContent = 'Contact Person Mobile is required.'; return; }
+  try {
+    if (_cbEditingId) {
+      await clientBillingFetch('/client-billing-profiles/' + _cbEditingId, { method: 'PUT', body: JSON.stringify(body) });
+      showToast('Client profile updated', 'ok');
+    } else {
+      await clientBillingFetch('/client-billing-profiles', { method: 'POST', body: JSON.stringify(body) });
+      showToast('Client profile added', 'ok');
+    }
+    closeClientBillingForm();
+    await loadClientBillingProfiles();
+  } catch (e) {
+    errBox.textContent = e.message;
+  }
+}
+
+async function deleteClientBillingProfile(clientId) {
+  if (!confirm('Permanently delete this client profile? This cannot be undone.')) return;
+  try {
+    await clientBillingFetch('/client-billing-profiles/' + clientId, { method: 'DELETE' });
+    showToast('Client profile deleted', 'ok');
+    await loadClientBillingProfiles();
+  } catch (e) {
+    showToast('Failed: ' + e.message, 'err');
+  }
+}
+
+// ── Bill Generation (Phase 2B, Commit C) ────────────────────────────────────
+// Manual, admin-triggered — see modules/client_billing/bills.py docstring for
+// why this is not an automatic hook on program completion.
+async function loadBillingSection() {
+  if (!canAccessAdminMenu()) return;
+  await Promise.all([loadBillableProgramsSelect(), loadBillsList()]);
+}
+
+async function loadBillableProgramsSelect() {
+  const sel = document.getElementById('gbProgramId');
+  if (!sel) return;
+  try {
+    const data = await clientBillingFetch('/bills/billable-programs');
+    const programs = data.programs || [];
+    sel.innerHTML = programs.length
+      ? programs.map(p => `<option value="${p.program_id}">#${p.program_id} — ${esc(p.client_name)} — ${esc(p.mother_vessel || '')} (${esc(p.program_date || '')})</option>`).join('')
+      : '<option value="">(no billable programs — needs Completed status, linked contact, and an active Client Settings profile)</option>';
+  } catch (e) {
+    sel.innerHTML = '<option value="">(failed to load: ' + esc(e.message) + ')</option>';
+  }
+}
+
+async function generateBill() {
+  const errBox = document.getElementById('generateBillError');
+  errBox.textContent = '';
+  const programId = document.getElementById('gbProgramId').value;
+  if (!programId) { errBox.textContent = 'Select a billable program first.'; return; }
+  const body = {
+    program_id: Number(programId),
+    duty_type: document.getElementById('gbDutyType').value,
+    other_charges: Number(document.getElementById('gbOtherCharges').value) || 0,
+  };
+  try {
+    const bill = await clientBillingFetch('/bills/generate', { method: 'POST', body: JSON.stringify(body) });
+    showToast('Bill ' + bill.bill_number + ' generated', 'ok');
+    document.getElementById('gbOtherCharges').value = 0;
+    await loadBillingSection();
+  } catch (e) {
+    errBox.textContent = e.message;
+  }
+}
+
+async function loadBillsList() {
+  const box = document.getElementById('billsBox');
+  if (!box) return;
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const data = await clientBillingFetch('/bills');
+    const bills = data.bills || [];
+    if (!bills.length) {
+      box.innerHTML = '<div class="empty"><div class="icon">🧾</div>No bills generated yet.</div>';
+      return;
+    }
+    const rows = bills.map(b => `
+      <tr>
+        <td>${esc(b.bill_number || '')}</td>
+        <td>${esc(b.client_name || '')}</td>
+        <td>#${b.program_id}</td>
+        <td>${esc(b.bill_date || '')}</td>
+        <td>৳${fmtNum(b.service_charge)}</td>
+        <td>৳${fmtNum(b.other_charges)}</td>
+        <td>৳${fmtNum(b.total_amount)}</td>
+        <td>${esc(b.payment_status || '')}</td>
+      </tr>`).join('');
+    box.innerHTML = `<table><thead><tr>
+      <th>Bill Number</th><th>Client</th><th>Program</th><th>Bill Date</th>
+      <th>Service Charge</th><th>Other Charges</th><th>Total</th><th>Status</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
 }
 
 async function loadAdminSalarySummary() {
