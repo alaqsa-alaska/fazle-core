@@ -174,6 +174,8 @@ class TestReverseTransaction:
             "fpe_wa_message_id": None,
             "employee_id": 999,
             "employee_name_raw": "TestEmp",
+            "employee_id_phone": "01712345678",
+            "employee_phone": "01712345678",
             "amount": Decimal("5000"),
             "payout_phone": "01712345678",
             "payout_method": "bkash",

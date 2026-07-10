@@ -846,6 +846,22 @@ async def client(test_db_pool) -> AsyncGenerator[AsyncClient, None]:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _reset_admin_command_dedup_cache():
+    """Clear modules.admin_commands' in-process dedup LRU before each test.
+
+    That cache is a module-level OrderedDict keyed by sha1(admin_phone+text)
+    with a 30s TTL — correct for production (single-worker duplicate-send
+    suppression) but not test-isolated: two tests in the same pytest process
+    that send the same admin command text within 30s of each other collide
+    and the second is silently treated as a duplicate.
+    """
+    from modules.admin_commands import _dedup_cache
+    _dedup_cache.clear()
+    yield
+    _dedup_cache.clear()
+
+
 @pytest.fixture
 def auth_headers() -> dict:
     return {"X-Internal-Key": TEST_API_KEY}
@@ -987,7 +1003,7 @@ async def seed_escort_program(test_db_pool, seed_employee) -> dict:
             VALUES
                 ('MV TEST VESSEL', 'LT TEST LIGHTER', '8801933333333',
                  $1, $2,
-                 '2026-05-01', 'D', 'Running', '2026-05-01')
+                 '2026-05-01', 'D', 'running', '2026-05-01')
             RETURNING *
         """, seed_employee["employee_id"], seed_employee["employee_mobile"])
     return dict(row)
@@ -1194,7 +1210,18 @@ def _split_sql_safe(sql_text: str) -> list[str]:
     
     while i < n:
         ch = sql_text[i]
-        
+
+        # Check for line comment (-- ...) — consume verbatim through end of
+        # line so semicolons inside human-readable comment text (extremely
+        # common in pg_dump output, e.g. "-- Name: x; Type: TABLE; ...") never
+        # get treated as statement boundaries.
+        if not in_single_quote and not in_dollar_quote and ch == "-" and i + 1 < n and sql_text[i + 1] == "-":
+            eol = sql_text.find("\n", i)
+            eol = n if eol == -1 else eol + 1
+            current.append(sql_text[i:eol])
+            i = eol
+            continue
+
         # Check for dollar-quoted string start/end
         if not in_single_quote and ch == "$":
             # Try to match a dollar quote tag

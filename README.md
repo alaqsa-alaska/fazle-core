@@ -406,6 +406,9 @@ Use targeted tests for risky changes:
 | `docs/DEVELOPER_GUIDE.md` | Runtime/infra detail, frontend page APIs/forms/search fields, finance/employee/escort/AI code-flow tracing, strengths/weaknesses/roadmap (2026-07-09) |
 | `docs/MODULE_MAP.md` | Module-by-module purpose/APIs/tables/dependencies/risk level for 26 core backend modules (2026-07-09) |
 | `docs/NEXT_IMPLEMENTATION_QUEUE.md` | Prioritized queue of what to work on next, Tier 0 through Phase 3 |
+| `docs/PRODUCTION_CERTIFICATION_v1.0.md` | Phase 1.5 evidence-based production certification (2026-07-09) — is this actually ready for Phase 2? |
+| `docs/PHASE2_ENTRY_GATE.md` | The GO/NO-GO checklist for Phase 2a (dispatch) and Phase 2b (billing/GL) |
+| `knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md` | Second-highest-priority doc after the Constitution — the single source of truth for business rules, canonical naming (e.g. which of 7 phone-column names means what), and known formula/status conflicts |
 | `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` | Full 10-report architecture/risk/gap audit and consolidation roadmap |
 | `docs/ARCHITECTURE.md` | Deeper system and data-flow notes |
 | `docs/API.md` | HTTP endpoint reference |

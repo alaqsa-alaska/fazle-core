@@ -77,6 +77,19 @@ These three remain as historical, unreconciled sources until a dedicated reconci
 - [ ] Commit or explicitly abandon the 4 previously-untracked `db/migrations/` files (`020_preflight_guard_tables.sql`, `023_model_router_tables.sql`, `027_assistant_feature_flags.sql`, `028_assistant_ext_location_audit.sql`)
 - [ ] Update this document's table count and domain list once the above is complete (see "Unresolved Schema Questions" below for the existing staleness note)
 
+### Migration dry-run safety rule (added 2026-07-09, incident-driven)
+
+**Incident:** During Phase 2B preparation (`db/migrations/032_client_tier_status_model.sql`), a transaction-preview dry run against production (`BEGIN; <migration>; <inspect>; ROLLBACK;`) was used to safely inspect a migration's effect before requesting Owner approval — the same method that worked cleanly for migration 031. This time, the migration contained a `SELECT setval(...)` call (fixing a sequence desync left over from migration 031's explicit-ID insert). **The `setval()` call survived the `ROLLBACK` and permanently changed production** — PostgreSQL sequence state changes (`nextval()`, `setval()`, `currval()`, and by extension `IDENTITY`/`SERIAL` counter advances) are **not transactional in Postgres by design** (this is documented upstream behavior, not a bug in this codebase) — sequences exist specifically so concurrent transactions don't block on shared counter access, and their state is deliberately excluded from MVCC/rollback semantics. Every other statement in the same migration (the two new `CREATE TABLE`s, both `ALTER TABLE ADD COLUMN`s) rolled back correctly, confirmed by direct inspection immediately after.
+
+**Impact of this specific incident:** low/accepted — the sequence fix was itself a disclosed, beneficial correction (see migration 031/032 headers), it touches no business/client data, and the Owner explicitly accepted keeping it rather than reverting (reverting would reintroduce the exact collision risk the fix closes). It is documented here as a **process exception**, not swept under a rug: the fix reached production one step earlier than intended, without having gone through the explicit-approval gate first.
+
+**Rule going forward:**
+1. **Never include `setval()`/`nextval()`/any sequence-mutating statement inside a rollback-based production dry run.** A `ROLLBACK` will not undo it — that "preview" is actually a permanent write.
+2. **Sequence-affecting statements must be validated by one of these two paths instead, never by transaction-preview against production:**
+   - A read-only pre-check query (e.g. `SELECT last_value FROM the_seq`, compared against `SELECT MAX(id) FROM the_table`) to confirm a fix is needed and to compute the exact target value, executed and reasoned about *before* deciding whether to apply — no preview-and-rollback needed for a `setval`, since there's nothing to "try and see" that a read-only comparison doesn't already tell you.
+   - Scratch-DB-only validation (per the standard 5-step method) for confirming the *statement's syntax and effect* — the scratch DB is disposable, so a `setval()` running there is inconsequential.
+3. When a migration file mixes sequence-mutating statements with regular transactional DDL/DML, split the transaction-preview step to **only include the transactional parts** — run the sequence-mutating statement separately, after everything else has been previewed and approved, or apply it via the read-only-pre-check-then-direct-apply path above with its own explicit approval callout.
+
 ---
 
 ## Domain 1 — ESCORT

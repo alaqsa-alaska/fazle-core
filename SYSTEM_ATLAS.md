@@ -4,7 +4,7 @@
 **Date:** 2026-07-09
 **Purpose:** the single entry point for understanding Fazle Core — what it is, who it's for, how it's built, what state it's in right now, and where to go for detail. Read this first. Everything below links to the document that actually owns that detail — this file summarizes and indexes, it does not duplicate.
 
-**Authority order for anything below:** live code and live database > this Atlas > the documents it links to > memory of any past conversation. If this Atlas and the code ever disagree, the code is right and this file is stale — fix the file, don't trust it blindly.
+**Authority order for anything below:** live code and live database > `BUSINESS-CONSTITUTION.md` (immutable governance) > `knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md` (the single source of truth for current business rules/naming — see below) > this Atlas > the documents it links to > memory of any past conversation. If this Atlas and the code ever disagree, the code is right and this file is stale — fix the file, don't trust it blindly.
 
 ---
 
@@ -33,6 +33,9 @@ Fazle Core is the production WhatsApp-first operations backend for **Al-Aqsa Sec
 | "How does an escort order become a paid duty?" | [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) §G |
 | "How does message routing / AI / RAG work, what can the AI touch?" | [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) §H |
 | "What's broken, what's already fixed, what's next?" | [`docs/NEXT_IMPLEMENTATION_QUEUE.md`](docs/NEXT_IMPLEMENTATION_QUEUE.md) (the actionable queue) and [`SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md`](SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md) (the full 10-report audit + evidence) |
+| "Is this system actually certified/ready for Phase 2?" | [`docs/PRODUCTION_CERTIFICATION_v1.0.md`](docs/PRODUCTION_CERTIFICATION_v1.0.md) (evidence-based Phase 1.5 certification) and [`docs/PHASE2_ENTRY_GATE.md`](docs/PHASE2_ENTRY_GATE.md) (the GO/NO-GO checklist itself) |
+| "What does `employee_mobile` vs `payout_phone` vs `canonical_employee_id` actually mean — which name is canonical?" / "Which of 3 pay formulas is correct?" / "What are the canonical status values for X?" | [`knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md`](knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md) — the single source of truth for business rules, naming, and known conflicts (second-highest-priority document after the Constitution) |
+| "What is 'a client' in this system — which table, which fields, is billing ready?" | [`docs/CANONICAL_CLIENT_DOMAIN.md`](docs/CANONICAL_CLIENT_DOMAIN.md) (discovery + architecture) and [`docs/CLIENT_DOMAIN_IMPLEMENTATION_PLAN.md`](docs/CLIENT_DOMAIN_IMPLEMENTATION_PLAN.md) (phased fix, Phase 2A/2B/2C) |
 | "What are the unbreakable rules for financial code?" | [`BUSINESS-CONSTITUTION.md`](BUSINESS-CONSTITUTION.md) — Article VII currently governs whether new features are even allowed (see §5 below) |
 | "What's the long-term roadmap and feasibility verdict?" | `~/.claude/plans/now-you-are-in-squishy-chipmunk.md` |
 | "Which migration directory do I add a new schema change to?" | [`db/MIGRATION_INVENTORY.md`](db/MIGRATION_INVENTORY.md) and [`knowledge_base/06_developer_system/database_rules.md`](knowledge_base/06_developer_system/database_rules.md)'s Migration Governance section — **always `db/migrations/`, never the other two legacy paths** |
@@ -47,9 +50,19 @@ FastAPI app (`app/main.py`, composition root) ingests WhatsApp messages from two
 
 ---
 
-## 4. Current operational state (as of 2026-07-09, this session)
+## 4. Current operational state (as of 2026-07-09, Phase 1.6/1.7 pass)
 
 This section is a point-in-time snapshot from the most recent consolidation work. **Re-verify against live systemctl/git status before trusting it in a future session** — it will go stale.
+
+**Phase 1.5 (Production Certification) result: NOT CERTIFIED FOR PHASE 2 — conditional, narrow gap.** Full evidence in `docs/PRODUCTION_CERTIFICATION_v1.0.md`; the gate itself is `docs/PHASE2_ENTRY_GATE.md`. Short version: the specific bugs fixed in the previous pass (RBAC, routers, toordinal) are genuinely fixed and re-verified. Two larger, newly-evidenced gaps remain open and need an Owner decision, not more engineering guessing: (1) production's schema has ~150 tables and ~88 columns with zero corresponding migration file anywhere in the repo — larger than previously documented; (2) escort-duty payroll has three separate pay formulas (flat 400/day monthly rollup, shift-based roster reconciliation, `basic_salary/30` payment-draft) and production evidence shows **none of them currently gates a real payment** — real money moves via a free-typed admin amount with no cross-check. Neither is an active incident. Dispatch (Phase 2a) doesn't depend on either and has a conditional GO; Billing/GL (Phase 2b) does depend on both and is NO GO until they close or the Owner explicitly accepts the risk.
+
+Also fixed this pass, evidence-based (not guesswork): the test suite looked catastrophically broken (376 setup errors) but was actually two narrow, unrelated causes — e2e/Playwright tests corrupting the shared event loop when run in the same process as the async DB suite, and a comment-handling bug in the test harness's own SQL splitter that silently dropped real `ALTER TABLE` statements. Both root-caused and the splitter fixed; e2e must simply never share a process with the rest of the suite. Real failures dropped from 40 to 29 after 4 small, safe, test-only/migration-only fixes; the remaining 29 are individually classified in the certification report, mostly stale tests that predate an intentional 2026-06-19 safety guard on escort-release finalization.
+
+Also newly found: the RAG index-rebuild availability gap (previously documented as restart-only) actually recurs **every day at 18:00** via a scheduler cron job, not just on restart — escalated from Tier 2 to Tier 1 in the implementation queue.
+
+**Phase 2B (Client Billing Activation), 2026-07-09:** Migration 032 (client tier/status model) applied to production. A fresh re-audit found the **single largest blocker in the whole client/billing effort**: no client-facing rate/price field exists anywhere in this schema (only guard-cost fields do) — bill creation cannot proceed until the Owner decides what determines `service_charge`. The one decision-independent piece — a concurrency-safe, gap-free `AQS-YYYY-NNNNNN` invoice-number generator (`modules/billing/invoice_numbering.py` + `db/migrations/033_invoice_number_counters.sql`) — was implemented and tested (schema check, scratch-DB concurrency/rollback tests, permanent unit tests), but **not applied to production** yet. Full detail: `docs/PHASE2B_READINESS_REPORT.md`.
+
+**Phase 1.6/1.7 (Canonical Business Rules + Client Domain Canonicalization), same day:** produced `knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md` (naming/formula/status audit across 21+ business functions) and `docs/CANONICAL_CLIENT_DOMAIN.md` + `docs/CLIENT_DOMAIN_IMPLEMENTATION_PLAN.md` (the deepest single finding: `wbom_billing_records` already exists in production with a correct, ready schema — 0 rows, never wired to any code — and three uncoordinated client-classification mechanisms coexist with no single source of truth). Architecture and discovery only — no migrations applied, no code changed.
 
 - **Service:** `fazle-core.service`, restarted twice this session (07:32:45 and 07:35:05 CEST, 2026-07-09) to pick up fixes below. Currently active/healthy.
 - **Fixed and live:** the RBAC fail-open bug (now fails closed), the `drafts_router`/`social_auto_reply_router` unmounting regression (both restored), and the escort-roster `toordinal` date-filter crash (`modules/escort_roster/db.py` — `start_from`/`start_to` now parsed into real `date` objects before binding). All three verified live via real HTTP requests post-restart, not just unit tests.
@@ -70,6 +83,7 @@ For the full blow-by-blow (files changed, tests run, exact validation commands),
 3. **Migration governance** — all new schema changes go in `db/migrations/`, tracked via `db/migrate.py`. Never the other two legacy migration directories, never inline DDL in a new module.
 4. **AI/production boundary** — Ollama and the AI console never get direct DB write access, unrestricted SQL, or the ability to send WhatsApp messages. Any change that would blur this line needs explicit Owner sign-off, not an incremental judgment call.
 5. **Working-tree deployment risk** — because there's no build step, treat every restart as "whatever is on disk goes live." Check `git status` before restarting; know what you're actually deploying.
+6. **`knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md`** — no module, migration, or AI agent may invent a new name for an existing entity, a new status value, or a new formula for an existing business calculation without first checking (and if needed, updating) that document. Business policy may change any time at the Owner's discretion; business structure (names, tables, IDs, statuses) may not silently diverge across modules.
 
 ---
 

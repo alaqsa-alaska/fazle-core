@@ -1,7 +1,7 @@
 # Fazle Core — Module Map
 
 **Last updated:** 2026-07-09
-**Scope:** the 26 core backend modules named in the developer-documentation task, covering the message/identity/routing critical path, payroll/payment, escort, RBAC/drafts/outbound, AI/RAG, and ops/scheduling domains. For the other ~37 modules under `modules/`, see `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 2 (Module Dependency Matrix), which covers all 63.
+**Scope:** the 26 core backend modules named in the developer-documentation task, covering the message/identity/routing critical path, payroll/payment, escort, RBAC/drafts/outbound, AI/RAG, and ops/scheduling domains. For the other ~37 modules under `modules/`, see `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 2 (Module Dependency Matrix), which covers all 63. `modules/contact_sync` and `modules/contact_roles` (the client/contact-identity modules) are covered in detail in `docs/CANONICAL_CLIENT_DOMAIN.md` Task 3 rather than here, to avoid duplicating that document's ER-relationship-map format.
 
 **How to read each entry:** Purpose, Key files, Main APIs, DB tables used, Critical dependencies, Risk level (Critical = touches the cash ledger `fpe_cash_transactions`/`fpe_employee_ledger` or sends real outbound WhatsApp messages; High = on the identity/routing critical path; Medium/Low otherwise), and an explicit writes-money/sends-messages/read-only tag.
 
@@ -40,7 +40,7 @@
 - **Main APIs:** No `routes.py` of its own; HTTP endpoints live in `app/main.py` (`/payroll/compute`, `/payroll/run/{id}/transition`, `/payroll/runs`, `/payroll/runs/{id}`), which import and call `compute_run`, `compute_all_for_period`, `submit_run`, `approve_run`, `lock_run`, `mark_paid`, `cancel_run`, `list_runs`, `get_run`.
 - **DB tables used:** `wbom_payroll_runs`, `wbom_payroll_run_items`, `wbom_payroll_approval_log`, `fpe_cash_transactions`, `wbom_employees`, `wbom_escort_programs`.
 - **Critical dependencies:** `app.database` only.
-- **Risk level:** Critical — `mark_paid` transitions write against `fpe_cash_transactions`.
+- **Risk level:** Critical — `mark_paid` transitions write against `fpe_cash_transactions`. **Certification finding (2026-07-09):** in production, this state machine has never progressed past `draft` — all 703 `wbom_payroll_runs` rows are `status='draft'` with `total_programs=0`. Its `program_allowance` formula (flat `DEFAULT_PER_PROGRAM_RATE=400`/day) is one of three unenforced pay formulas — see `docs/PRODUCTION_CERTIFICATION_v1.0.md` Finance Status.
 - **Writes money / sends messages / read-only:** Writes money. Does not send messages.
 
 ### `modules.payment_workflow`
@@ -49,7 +49,7 @@
 - **Main APIs (no HTTP routes):** `create_escort_payment_draft(...)` (`:46`), `create_advance_request_draft(...)` (`:231`), `finalize_payment(draft_id, approved_amount, method)` (`:315`), `is_advance_request(text)` (`:439`).
 - **DB tables used:** `fazle_payment_drafts`, `fpe_cash_transactions`, `wbom_employees`, `wbom_escort_programs`.
 - **Critical dependencies:** `app.database`, `modules.fazle_payroll_engine.accounting/employee/models/payment_event`.
-- **Risk level:** Critical — `finalize_payment` writes `fpe_cash_transactions` via FPE's canonical transaction creator.
+- **Risk level:** Critical — `finalize_payment` writes `fpe_cash_transactions` via FPE's canonical transaction creator. **Certification finding (2026-07-09):** `create_escort_payment_draft`'s `basic_salary/30` formula has never resulted in a completed payment in production — all 47 `escort_payment` drafts ever created are `status='expired'`. Real `PAID` commands bypass this draft's suggested amount entirely (admin types a free amount). See `docs/PRODUCTION_CERTIFICATION_v1.0.md` Finance Status.
 - **Writes money / sends messages / read-only:** Writes money. Does not send messages itself (produces drafts).
 
 ### `modules.payment_ingest`
@@ -60,6 +60,25 @@
 - **Critical dependencies:** `app.database`, `modules.fazle_payroll_engine.accounting/employee/models/normalizer/payment_event`, `shared.phone`.
 - **Risk level:** Critical — creates canonical `fpe_cash_transactions` rows.
 - **Writes money / sends messages / read-only:** Writes money. Does not send messages.
+
+### `modules.billing` (2026-07-09, Phase 2B Commit A)
+- **Purpose:** Invoice numbering only (`AQS-YYYY-NNNNNN`). Client billing profile data lives in `modules.client_billing` (below), kept separate per this codebase's one-module-one-responsibility convention.
+- **Key files:** `__init__.py` (module docstring only), `invoice_numbering.py` (43 lines).
+- **Main APIs (no HTTP routes yet):** `next_invoice_number(year=None, conn=None)` → `AQS-YYYY-NNNNNN` string.
+- **DB tables used:** `invoice_number_counters` (`db/migrations/033_invoice_number_counters.sql`) via the `next_invoice_number()` Postgres function. **Not yet applied to production** (validated only, awaiting a separate Owner approval from the Client Billing Profile work below). Does not yet touch `wbom_billing_records`.
+- **Critical dependencies:** `app.database`.
+- **Risk level:** Low — a pure counter, no money/client data touched.
+- **Writes money / sends messages / read-only:** Neither yet — reserves a number only.
+
+### `modules.client_billing` (new, 2026-07-09, Phase 2B — implemented and applied)
+- **Purpose:** Client Settings — per-client billing rates (General/24H/12H/Monthly), deployed-employee-wage estimates, VAT/Tax/Other Charges (flat, profit-estimation-only this phase), and commercial contact details (Contact Person/Chairman/Managing Member). The revenue-side counterpart to every cost/payroll module on this page — explicitly disconnected from the real payroll formula.
+- **Key files:** `__init__.py` (docstring), `profiles.py` (CRUD, ~185 lines), `routes.py` (FastAPI router, ~130 lines).
+- **Main APIs:** `GET/POST /admin/client-billing-profiles`, `GET/PUT/DELETE /admin/client-billing-profiles/{client_id}`, `GET /admin/escort-clients/authorized-numbers` (read-only view of the `ESCORT_CLIENT_PHONES` list, for the Contact Person Mobile dropdown).
+- **DB tables used:** `wbom_client_billing_profiles` (new, `db/migrations/034_client_billing_profiles.sql`, **applied to production**), reads `wbom_contacts` (FK validation) and the live `ESCORT_CLIENT_PHONES` `.env` value (via `modules.escort_roster.routes`'s existing helpers, reused not duplicated — never writes to it).
+- **Critical dependencies:** `app.database`, `modules.escort_roster.routes` (`_require_key`, `_resolve_actor`, `_normalize_client_phone`, `_escort_client_phone_list`, `_API_KEY_HEADER`).
+- **Risk level:** Medium — commercially sensitive rate/wage data, but no money movement (no write path to `fpe_cash_transactions` or any ledger exists here or anywhere downstream yet).
+- **Writes money / sends messages / read-only:** Writes commercial configuration data, not money. Does not send messages.
+- **RBAC:** Add/Edit/List/View at `admin` tier; Delete (soft — `is_active=false`, never a hard `DELETE`) at `superadmin` tier.
 
 ### `modules.admin_transactions`
 - **Purpose:** Admin-facing CRUD API (Phase 19) for `fpe_cash_transactions` — add/edit/soft-delete transactions plus smart fuzzy employee matching. Never hard-deletes; uses `deleted_at`/`deleted_by`.
