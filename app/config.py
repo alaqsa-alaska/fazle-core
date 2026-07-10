@@ -128,6 +128,15 @@ class Settings(BaseSettings):
     # Operational/admin notifications are independent from customer auto-reply.
     internal_notifications_enabled: bool = True
 
+    # Office Payroll Hardening (Owner decision, 2026-07-11): job_daily_payroll
+    # must not create authoritative payroll for every active employee until
+    # the Owner explicitly signs off on the new attendance-based eligibility
+    # pipeline. Default False = dry-run-only (job still runs and logs a
+    # preview summary, but calls compute_all_for_period only in dry-run mode,
+    # never posting real wbom_payroll_runs rows for office staff). Flip to
+    # True only after Owner sign-off per docs/NEXT_IMPLEMENTATION_QUEUE.md.
+    office_payroll_authoritative_enabled: bool = False
+
     # Batch 11 — per-intent auto-reply allow-list.
     # When auto_reply_enabled=False, recruitment messages from non-admin
     # senders (job-trigger keyword OR active intake session) still auto-reply.

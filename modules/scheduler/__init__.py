@@ -129,10 +129,41 @@ async def trigger_job(name: str) -> dict:
 
 # ── Job implementations ───────────────────────────────────────────────────────
 async def job_daily_payroll() -> dict:
-    """B16.2 — compute payroll for current month for all active employees."""
-    from modules.payroll import compute_all_for_period
+    """B16.2 — compute payroll for current month.
+
+    Office Payroll Hardening (Owner decision, 2026-07-11): guarded behind
+    settings.office_payroll_authoritative_enabled (default False) pending
+    Owner sign-off on the new attendance-based eligibility pipeline. While
+    disabled, this job runs a non-authoritative dry-run preview only -- it
+    creates no wbom_payroll_runs rows, no cash transactions, no ledger
+    entries, and does not call compute_all_for_period at all. Escort payroll
+    is entirely unaffected either way -- this job has never computed escort
+    release pay (that is modules.payment_workflow's separate, real-time
+    flow triggered on release, not this scheduled job).
+    """
+    from app.config import get_settings
+    settings = get_settings()
     now = datetime.now()
-    r = await compute_all_for_period(now.year, now.month, "scheduler")
+
+    if not settings.office_payroll_authoritative_enabled:
+        from modules.payroll.dry_run import payroll_dry_run
+        preview = await payroll_dry_run(now.year, now.month)
+        payable = sum(1 for row in preview if row.get("included"))
+        admin = _admin_number()
+        if admin:
+            from modules import outbound
+            key = f"payroll-dryrun-{now.strftime('%Y%m%d')}"
+            msg = (
+                f"📊 Office payroll dry-run (guarded, not authoritative) "
+                f"{now.year}-{now.month:02d}: {payable} payable / {len(preview)} employees checked. "
+                f"Automatic posting is OFF pending Owner sign-off."
+            )
+            await outbound.enqueue(admin, msg, source_bridge="bridge1", fallback_channel="bridge2",
+                                   purpose="payroll-daily-dryrun", idempotency_key=key)
+        return {"status": "ok", "mode": "dry_run_guarded", "payable_count": payable, "checked_count": len(preview)}
+
+    from modules.payroll import compute_all_for_period_office_only
+    r = await compute_all_for_period_office_only(now.year, now.month, "scheduler")
     # Notify owner with one-line summary (idempotent per-day key)
     admin = _admin_number()
     if admin and isinstance(r, dict):

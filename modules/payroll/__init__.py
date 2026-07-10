@@ -211,6 +211,45 @@ async def compute_all_for_period(
             "failed": failed, "total": len(rows), "run_ids": run_ids}
 
 
+async def compute_all_for_period_office_only(
+    period_year: int, period_month: int, computed_by: str,
+) -> dict:
+    """Office Payroll Hardening (Owner decision, 2026-07-11): same as
+    compute_all_for_period, but filtered to structurally-eligible office
+    staff only (modules.payroll.eligibility.classify_office_staff) -- escort
+    employees must never enter office payroll. Guarded behind
+    settings.office_payroll_authoritative_enabled in modules.scheduler's
+    job_daily_payroll; not called anywhere while that flag is False (the
+    default). Note: compute_run()'s own internal formula (basic_salary +
+    escort-program day-count allowance) has not been rewritten to the new
+    calendar-days/attendance-based formula yet -- that rewrite is still
+    needed before this path could be safely enabled, tracked separately in
+    docs/NEXT_IMPLEMENTATION_QUEUE.md."""
+    from modules.payroll.eligibility import classify_office_staff
+
+    rows = await fetch_all(
+        "SELECT employee_id, employee_name, designation, status, basic_salary FROM wbom_employees "
+        "WHERE COALESCE(status,'Active')='Active' ORDER BY employee_id"
+    )
+    created = 0; existing = 0; failed = 0; skipped = 0
+    run_ids = []
+    for r in rows:
+        classification = classify_office_staff(dict(r))
+        if not classification["eligible"]:
+            skipped += 1
+            continue
+        result = await compute_run(int(r["employee_id"]), period_year, period_month, computed_by)
+        if not result.get("ok"):
+            failed += 1; continue
+        if result.get("already_exists"):
+            existing += 1
+        else:
+            created += 1
+        run_ids.append(result["run_id"])
+    return {"ok": True, "created": created, "existing": existing, "failed": failed,
+            "skipped_ineligible": skipped, "total": len(rows), "run_ids": run_ids}
+
+
 # ── Transitions ───────────────────────────────────────────────────────────────
 
 async def _transition(
