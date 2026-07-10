@@ -561,15 +561,27 @@ async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
         source = row.get("source", "bridge1")
         intent = row.get("intent", "")
 
+        # Attendance drafts: shared finalization service (Owner decision,
+        # 2026-07-11) -- validates, resolves the employee, and saves
+        # atomically with marking the draft approved. Never marks approved
+        # if finalization fails, unlike the old inline flow. Also used by
+        # modules.drafts.routes.approve_draft (frontend Review Queue) so
+        # both channels share one implementation.
+        if intent == "attendance":
+            from modules.attendance import finalize_attendance_draft
+            result = await finalize_attendance_draft(draft_id, channel="whatsapp_message", actor=admin_phone)
+            if not result.get("ok"):
+                return f"❌ Draft #{draft_id} হাজিরা নিশ্চিত করা যায়নি: {result.get('error')}"
+            if not result.get("already_approved"):
+                await _send_attendance_confirmation(result, source)
+                return f"✅ হাজিরা draft #{draft_id} অনুমোদিত ও সংরক্ষিত হয়েছে।"
+            return f"ℹ️ Draft #{draft_id} ইতিমধ্যে অনুমোদিত ছিল (কোনো পরিবর্তন হয়নি)।"
+
         # Mark approved first
         await execute(
             "UPDATE fazle_draft_replies SET status='approved', admin_phone=$1, approved_at=NOW() WHERE id=$2",
             admin_phone, draft_id,
         )
-
-        # Attendance draft: write to wbom_attendance + send confirmation to sender
-        if intent == "attendance":
-            await _save_attendance_from_draft(draft_id, reply_text, recipient, admin_phone, source)
 
         # Attempt to deliver — import bridges here to avoid circular imports
         sent = False
@@ -961,126 +973,35 @@ async def _cmd_status() -> str:
         return f"❌ স্ট্যাটাস লোড ব্যর্থ: {e}"
 
 
-async def _save_attendance_from_draft(
-    draft_id: int,
-    draft_text: str,
-    sender_phone: str,
-    recorded_by: str,
-    source: str = "bridge1",
-):
+async def _send_attendance_confirmation(result: dict, source: str) -> None:
     """
-    Save attendance to wbom_attendance using draft meta JSON.
-    Auto-creates employee if not found. Sends confirmation to sender.
+    Send the "attendance confirmed" message to the original sender, after
+    modules.attendance.finalize_attendance_draft() has already committed the
+    attendance row. Never called if finalization failed (see _cmd_approve
+    and modules.drafts.routes.approve_draft) -- this replaces the old
+    _save_attendance_from_draft's inline confirmation send, now shared by
+    both approval channels via the one finalize_attendance_draft() result.
     """
-    import json as _json
-    from datetime import date as _date
-    from modules.attendance import save_attendance
-
+    shift_label = "Day" if result.get("shift") == "D" else "Night"
+    att_date = result.get("attendance_date")
+    date_str = att_date.strftime("%d/%m/%Y") if hasattr(att_date, "strftime") else str(att_date or "")
+    confirm_msg = (
+        f"✅ হাজিরা নিশ্চিত হয়েছে:\n"
+        f"কর্মী: {result.get('employee_name') or result.get('employee_id')}\n"
+        f"তারিখ: {date_str}\n"
+        f"শিফট: {shift_label}"
+    )
+    sender_phone = result.get("recipient") or ""
+    if not sender_phone:
+        return
     try:
-        # Load meta from DB (preferred over text parsing)
-        row = await fetch_one(
-            "SELECT meta, source FROM fazle_draft_replies WHERE id = $1", draft_id
-        )
-        meta: dict = {}
-        if row and row.get("meta"):
-            try:
-                meta = dict(row["meta"]) if isinstance(row["meta"], dict) else _json.loads(row["meta"])
-            except Exception as _e:
-                from app.error_log import record_error
-                await record_error("admin_commands.meta_parse", _e)
-        if row and row.get("source"):
-            source = row["source"]
-
-        emp_id       = meta.get("employee_id")
-        att_date_str = meta.get("att_date")
-        shift        = meta.get("shift", "D")
-        emp_name     = meta.get("employee_name") or ""
-        emp_mobile   = meta.get("employee_mobile") or ""
-
-        # ── Auto-create employee if not found ──────────────────────────────────
-        if not emp_id:
-            # Try one more DB lookup
-            emp = None
-            if emp_mobile:
-                emp = await fetch_one(
-                    "SELECT employee_id, employee_name FROM wbom_employees WHERE employee_mobile=$1",
-                    emp_mobile,
-                )
-            if not emp and emp_name:
-                emp = await fetch_one(
-                    "SELECT employee_id, employee_name FROM wbom_employees "
-                    "WHERE LOWER(employee_name) LIKE LOWER($1) AND status='Active' LIMIT 1",
-                    f"%{emp_name.split()[0]}%",
-                )
-            if emp:
-                emp_id   = emp["employee_id"]
-                emp_name = emp["employee_name"]
-            elif emp_name or emp_mobile:
-                # Auto-create minimal employee record
-                try:
-                    emp_id = await fetch_val(
-                        """INSERT INTO wbom_employees
-                               (employee_name, employee_mobile, designation, status, joining_date)
-                           VALUES ($1, $2, 'Staff', 'Active', CURRENT_DATE)
-                           RETURNING employee_id""",
-                        emp_name or "Unknown", emp_mobile or None,
-                    )
-                    log.info(f"[admin_cmd] auto-created employee: {emp_name} ({emp_mobile}), id={emp_id}")
-                except Exception as ce:
-                    log.warning(f"[admin_cmd] employee auto-create failed: {ce}")
-
-        if not emp_id:
-            log.warning(f"[admin_cmd] attendance draft #{draft_id}: cannot resolve employee — skipping DB save")
-            return
-
-        if not att_date_str:
-            att_date = _date.today()
-        else:
-            try:
-                att_date = _date.fromisoformat(att_date_str)
-            except Exception:
-                att_date = _date.today()
-
-        # ── Save to wbom_attendance ────────────────────────────────────────────
-        ok = await save_attendance(
-            employee_id=emp_id,
-            attendance_date=att_date,
-            status="Present",
-            location="",
-            recorded_by=recorded_by,
-            remarks=f"Shift:{shift} — Approved from draft #{draft_id}",
-        )
-        if ok:
-            log.info(f"[admin_cmd] attendance draft #{draft_id} → emp={emp_id} date={att_date} shift={shift}")
-            # Owner decision (2026-07-10): confirmed -> running fires on the
-            # first accepted escort attendance (this exact event), not a
-            # date-only background job. No-op for non-escort employees or a
-            # guard whose program already left 'confirmed'.
-            try:
-                from modules.escort_lifecycle import mark_program_running_on_attendance
-                await mark_program_running_on_attendance(emp_id)
-            except Exception as run_err:
-                log.warning(f"[admin_cmd] confirmed->running check failed for emp={emp_id}: {run_err}")
-
-        # ── Send confirmation to original sender ───────────────────────────────
-        shift_label = "Day" if shift == "D" else "Night"
-        confirm_msg = (
-            f"✅ হাজিরা নিশ্চিত হয়েছে:\n"
-            f"কর্মী: {emp_name or emp_id}\n"
-            f"তারিখ: {att_date.strftime('%d/%m/%Y')}\n"
-            f"শিফট: {shift_label}"
-        )
-        try:
-            from app.bridge import get_bridge1, get_bridge2
-            bridge = get_bridge1() if source in ("bridge1", "meta") else get_bridge2()
-            jid = sender_phone if "@" in sender_phone else f"{sender_phone}@s.whatsapp.net"
-            await bridge.send(jid, confirm_msg)
-            log.info(f"[admin_cmd] attendance confirmation sent to {sender_phone}")
-        except Exception as se:
-            log.warning(f"[admin_cmd] attendance confirmation send error: {se}")
-
-    except Exception as e:
-        log.error(f"[admin_cmd] attendance save error for draft #{draft_id}: {e}")
+        from app.bridge import get_bridge1, get_bridge2
+        bridge = get_bridge1() if source in ("bridge1", "meta") else get_bridge2()
+        jid = sender_phone if "@" in sender_phone else f"{sender_phone}@s.whatsapp.net"
+        await bridge.send(jid, confirm_msg)
+        log.info(f"[admin_cmd] attendance confirmation sent to {sender_phone}")
+    except Exception as se:
+        log.warning(f"[admin_cmd] attendance confirmation send error: {se}")
 
 
 async def list_payment_drafts(admin_phone: str) -> str:

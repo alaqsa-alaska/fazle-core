@@ -42,6 +42,24 @@ async def _require_api_key(key: str = Depends(_API_KEY_HEADER)) -> None:
     raise HTTPException(status_code=403, detail="Forbidden")
 
 
+async def _resolve_reviewer_identity(key: str) -> str:
+    """Best-effort reviewer identity for audit fields (approved_by, etc.) --
+    matches _require_api_key's own auth check so it never resolves an
+    identity for a key that wouldn't already have passed authorization."""
+    settings = _get_settings()
+    if key and key == settings.internal_api_key:
+        return "owner-internal-key"
+    if key:
+        try:
+            from modules import rbac
+            admin = await rbac.get_admin_by_api_key(key)
+            if admin:
+                return admin.get("phone") or admin.get("name") or f"admin-{admin.get('id')}"
+        except Exception:
+            pass
+    return "unknown-frontend-admin"
+
+
 # ── Request models ──────────────────────────────────────────────────────────
 class EditRequest(BaseModel):
     new_body: str
@@ -125,14 +143,40 @@ async def list_drafts(
 
 # ── POST /api/drafts/{id}/approve ──────────────────────────────────────────
 @router.post("/api/drafts/{draft_id}/approve")
-async def approve_draft(draft_id: int, _: None = Depends(_require_api_key)):
-    """Approve draft — mark approved, then enqueue for sending."""
+async def approve_draft(
+    draft_id: int,
+    _: None = Depends(_require_api_key),
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Approve draft — mark approved, then enqueue for sending.
+
+    Attendance-intent drafts (Owner decision, 2026-07-11) are handled by the
+    shared modules.attendance.finalize_attendance_draft() service instead --
+    the same function modules.admin_commands._cmd_approve uses for the
+    WhatsApp APPROVE <id> channel, so the two approval paths cannot drift.
+    Every other intent keeps this endpoint's original behavior unchanged.
+    """
     draft = await fetch_one(
-        "SELECT id, status, recipient, reply_text, source FROM fazle_draft_replies WHERE id = $1",
+        "SELECT id, status, recipient, reply_text, source, intent FROM fazle_draft_replies WHERE id = $1",
         draft_id,
     )
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+
+    if draft["intent"] == "attendance":
+        from modules.attendance import finalize_attendance_draft
+        actor = await _resolve_reviewer_identity(key)
+        result = await finalize_attendance_draft(draft_id, channel="frontend_review_queue", actor=actor)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "attendance finalize failed")
+        return {
+            "ok": True,
+            "draft_id": draft_id,
+            "status": "approved",
+            "already_approved": result.get("already_approved", False),
+            "employee_id": result.get("employee_id"),
+        }
+
     if draft["status"] not in ("pending", "pending_selfie", "edited"):
         raise HTTPException(
             status_code=400,

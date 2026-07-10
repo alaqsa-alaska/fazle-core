@@ -77,8 +77,9 @@ async def mark_program_running_on_attendance(employee_id: int, conn=None) -> Opt
     Owner decision (2026-07-10): the confirmed -> running transition fires on
     the first accepted (admin-approved) escort attendance record for that
     guard's active confirmed program -- not a date-only background job.
-    Called from modules.admin_commands._save_attendance_from_draft() right
-    after save_attendance() succeeds.
+    Called from modules.attendance.finalize_attendance_draft() (the shared
+    attendance-approval service, 2026-07-11) right after save_attendance()
+    succeeds, inside the same transaction.
 
     Idempotent: the UPDATE's WHERE status='confirmed' guard means calling
     this on every subsequent day's approved attendance for the same guard is
