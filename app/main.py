@@ -46,6 +46,7 @@ from modules.fazle_payroll_engine import start_fpe, stop_fpe
 from modules.fazle_payroll_engine.routes import router as fpe_router
 from modules.escort_roster.routes import router as escort_roster_router
 from modules.client_billing.routes import router as client_billing_router
+from modules.attendance.routes import router as attendance_router
 from modules.drafts.routes import router as drafts_router
 from modules.kb_upload.routes import router as kb_upload_router
 from modules.admin_employees import router as admin_employees_router
@@ -442,6 +443,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 app.include_router(fpe_router)
 app.include_router(escort_roster_router)
 app.include_router(client_billing_router)     # Phase 2B — Client Billing Profiles
+app.include_router(attendance_router)         # Office Payroll Hardening — Attendance CRUD
 app.include_router(kb_upload_router)
 app.include_router(admin_employees_router)   # Phase 18B — Admin Employee CRUD
 app.include_router(admin_transactions_router) # Phase 19 — Admin Transaction CRUD

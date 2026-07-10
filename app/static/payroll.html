@@ -486,6 +486,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <button data-tab="operator" onclick="navigate('operator')">Operator</button>
   <button data-tab="cash" onclick="navigate('cash')">Cash</button>
   <button data-tab="income" onclick="navigate('income')">Income</button>
+  <button data-tab="attendance-office" class="admin-only-nav" onclick="navigate('attendance-office')" hidden>Office Attendance</button>
   <button data-tab="admin" class="admin-only-nav" onclick="navigate('admin')" hidden>Admin</button>
 </nav>
 
@@ -508,6 +509,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     <button data-tab="operator" onclick="drawerNavigate('operator')">Operator</button>
     <button data-tab="cash" onclick="drawerNavigate('cash')">Cash</button>
     <button data-tab="income" onclick="drawerNavigate('income')">Income</button>
+    <button data-tab="attendance-office" class="admin-only-nav" onclick="drawerNavigate('attendance-office')" hidden>Office Attendance</button>
     <button data-tab="admin" class="admin-only-nav" onclick="drawerNavigate('admin')" hidden>Admin</button>
     <div class="sidebar-divider"></div>
     <button onclick="logout()">Logout</button>
@@ -1202,6 +1204,90 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     </div>
   </section>
 
+  <section id="tab-attendance-office" class="tab admin-only-section" hidden>
+    <div class="card">
+      <h2>Office Attendance</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+        Manual office-staff attendance only — separate from escort/vessel duty attendance.
+        Only manually-entered and admin-approved supervisor-submitted attendance count toward office payroll.
+      </p>
+      <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+        <button class="btn" onclick="openAttendanceForm(false)">Add Attendance</button>
+        <button class="btn sm secondary" onclick="loadOfficeAttendanceList()">Refresh</button>
+        <div><label>Search (name/mobile)</label><input id="attSearch" type="search" oninput="loadOfficeAttendanceList()"></div>
+        <div><label>From</label><input id="attDateFrom" type="date" onchange="loadOfficeAttendanceList()"></div>
+        <div><label>To</label><input id="attDateTo" type="date" onchange="loadOfficeAttendanceList()"></div>
+        <div><label>Source</label>
+          <select id="attSourceFilter" onchange="loadOfficeAttendanceList()">
+            <option value="">(any)</option>
+            <option value="manual_office">Manual</option>
+            <option value="message_parser">Parser (approved)</option>
+            <option value="whatsapp_escort">WhatsApp self-report (escort only)</option>
+            <option value="escort_release">Escort release backfill</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="attFormBox" class="card" style="margin-top:12px;display:none;background:var(--bg-alt,rgba(255,255,255,.03))">
+        <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+          <div style="position:relative">
+            <label>Employee ID</label>
+            <input id="attEmpId" type="text" oninput="attLookupById()" autocomplete="off">
+          </div>
+          <div style="position:relative">
+            <label>Employee Name</label>
+            <input id="attEmpName" type="text" oninput="attSuggestByName()" autocomplete="off">
+            <div id="attNameSuggestions" class="tbl-wrap" style="position:absolute;z-index:20;display:none;max-height:220px;overflow:auto;background:var(--card,#1a1a1a);width:260px"></div>
+          </div>
+          <div><label>Mobile</label><input id="attEmpMobile" type="text" disabled></div>
+          <div><label>Designation</label><input id="attEmpDesignation" type="text" disabled></div>
+        </div>
+        <div class="row" style="align-items:flex-end;flex-wrap:wrap">
+          <div><label>Address</label><input id="attEmpAddress" type="text" disabled style="width:260px"></div>
+          <div><label>Attendance Date</label><input id="attDate" type="date"></div>
+          <div><label>Duty Status</label>
+            <select id="attDutyStatus">
+              <option value="Present">Present</option>
+              <option value="Half Day">Half Day</option>
+              <option value="Absent">Absent</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div style="flex:1"><label>Remarks</label><textarea id="attRemarks" rows="2" style="width:100%"></textarea></div>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="saveOfficeAttendance()">Save</button>
+          <button class="btn sm secondary" onclick="closeAttendanceForm()">Cancel</button>
+        </div>
+        <div id="attFormError" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+      </div>
+
+      <div id="attListBox" class="tbl-wrap" style="margin-top:12px"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
+      <div class="pager" id="attPager" style="flex-wrap:wrap;gap:6px">
+        <span id="attPagerInfo"></span>
+        <button class="btn sm secondary" id="attPrev" onclick="attPageStep(-1)">Prev</button>
+        <button class="btn sm secondary" id="attNext" onclick="attPageStep(1)">Next</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Payroll Eligibility Preview</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+        Read-only — creates no payroll rows. Shows the office-payroll eligibility result for every employee for the selected month.
+      </p>
+      <div class="row" style="align-items:flex-end">
+        <div><label>Year</label><input id="eligYear" type="number" style="width:90px"></div>
+        <div><label>Month</label><input id="eligMonth" type="number" min="1" max="12" style="width:70px"></div>
+        <button class="btn" onclick="loadEligibilityPreview()">Run Preview</button>
+        <button class="btn sm secondary" onclick="loadPayrollDryRun()">Run Dry Run</button>
+        <button class="btn sm secondary" onclick="loadReconciliation()">Run Reconciliation</button>
+      </div>
+      <div id="eligSummary" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
+      <div id="eligBox" class="tbl-wrap"><div class="empty"><div class="icon">📋</div>Run a preview to see results.</div></div>
+    </div>
+  </section>
+
   <section id="tab-admin" class="tab admin-only-section" hidden>
     <div class="card">
       <h2>Admin Console</h2>
@@ -1771,7 +1857,7 @@ function pickManualEmployee(idx) {
 }
 
 // ── Tab Switching / SPA Routing ──────────────────────────────────────────────
-const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','operator','cash','income','admin'];
+const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','operator','cash','income','attendance-office','admin'];
 
 function tabFromPath() {
   const p = location.pathname.replace(/\/+$/, '');
@@ -1786,7 +1872,7 @@ function pathForTab(name) {
 }
 
 function activateTab(name) {
-  if (name === 'admin' && !canAccessAdminMenu()) {
+  if ((name === 'admin' || name === 'attendance-office') && !canAccessAdminMenu()) {
     name = 'overview';
     if (location.pathname !== pathForTab('overview')) {
       history.replaceState({tab: 'overview'}, '', pathForTab('overview'));
@@ -1832,6 +1918,7 @@ function loadTab(name) {
   if (name === 'sync')          loadSync();
   if (name === 'cash')          { cashCurrentPage = 1; stagingCurrentPage = 1; loadCash(true); loadStagingPayments(true); }
   if (name === 'income')        { incomeCurrentPage = 1; incomeEntryResetDate(); loadIncome(true); }
+  if (name === 'attendance-office' && canAccessAdminMenu()) loadOfficeAttendanceTab();
   if (name === 'admin' && canAccessAdminMenu()) loadAdminTab();
 }
 
@@ -2270,6 +2357,278 @@ async function loadBillsList() {
       <th>Bill Number</th><th>Client</th><th>Program</th><th>Bill Date</th>
       <th>Service Charge</th><th>Other Charges</th><th>Total</th><th>Status</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Office Attendance (Owner decision, 2026-07-11) ──────────────────────────
+// Dedicated fetch helper, same rationale as clientBillingFetch — avoids any
+// risk of touching this file's other, ambiguous fetch/api() conventions.
+async function attendanceFetch(path, opts = {}) {
+  const headers = { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  const r = await fetch('/admin' + path, { ...opts, headers });
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch (_) {}
+    throw new Error(detail || r.statusText);
+  }
+  return r.json();
+}
+
+let _attEditingId = null;
+let _attPage = 1;
+const _attPageSize = 25;
+
+function loadOfficeAttendanceTab() {
+  if (!canAccessAdminMenu()) return;
+  const now = new Date();
+  if (!document.getElementById('eligYear').value) document.getElementById('eligYear').value = now.getFullYear();
+  if (!document.getElementById('eligMonth').value) document.getElementById('eligMonth').value = now.getMonth() + 1;
+  loadOfficeAttendanceList();
+}
+
+function openAttendanceForm(isEdit, attendanceId) {
+  document.getElementById('attFormError').textContent = '';
+  _attEditingId = isEdit ? attendanceId : null;
+  ['attEmpId', 'attEmpName', 'attEmpMobile', 'attEmpDesignation', 'attEmpAddress', 'attRemarks'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('attDate').value = '';
+  document.getElementById('attDutyStatus').value = 'Present';
+  document.getElementById('attEmpId').disabled = isEdit;
+  document.getElementById('attEmpName').disabled = isEdit;
+  document.getElementById('attDate').disabled = isEdit;
+  document.getElementById('attFormBox').style.display = 'block';
+
+  if (isEdit && attendanceId) {
+    attendanceFetch('/attendance/' + attendanceId).then(row => {
+      document.getElementById('attEmpId').value = row.employee_id;
+      document.getElementById('attEmpName').value = row.employee_name || '';
+      document.getElementById('attEmpDesignation').value = row.designation || '';
+      document.getElementById('attDate').value = row.attendance_date;
+      document.getElementById('attDutyStatus').value = row.status;
+      document.getElementById('attRemarks').value = row.remarks || '';
+    }).catch(e => { document.getElementById('attFormError').textContent = 'Failed to load: ' + e.message; });
+  }
+}
+
+function closeAttendanceForm() {
+  document.getElementById('attFormBox').style.display = 'none';
+  document.getElementById('attNameSuggestions').style.display = 'none';
+  _attEditingId = null;
+}
+
+function _attFillEmployee(emp) {
+  document.getElementById('attEmpId').value = emp.employee_id;
+  document.getElementById('attEmpName').value = emp.employee_name || '';
+  document.getElementById('attEmpMobile').value = emp.employee_mobile || '';
+  document.getElementById('attEmpDesignation').value = emp.designation || '';
+  document.getElementById('attEmpAddress').value = emp.address || '';
+}
+
+let _attLookupTimer = null;
+
+function attLookupById() {
+  clearTimeout(_attLookupTimer);
+  const id = document.getElementById('attEmpId').value.trim();
+  if (!id) return;
+  _attLookupTimer = setTimeout(async () => {
+    try {
+      const emp = await attendanceFetch('/attendance/lookup/by-id/' + encodeURIComponent(id));
+      _attFillEmployee(emp);
+    } catch (e) { /* not found yet while typing — ignore */ }
+  }, 300);
+}
+
+function attSuggestByName() {
+  clearTimeout(_attLookupTimer);
+  const q = document.getElementById('attEmpName').value.trim();
+  const box = document.getElementById('attNameSuggestions');
+  if (q.length < 2) { box.style.display = 'none'; return; }
+  _attLookupTimer = setTimeout(async () => {
+    try {
+      const data = await attendanceFetch('/attendance/lookup/suggest?q=' + encodeURIComponent(q));
+      const results = data.results || [];
+      if (!results.length) { box.style.display = 'none'; return; }
+      box.innerHTML = results.map(emp => `
+        <div style="padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--border)"
+             onclick='attPickSuggestion(${JSON.stringify(emp).replace(/'/g, "&apos;")})'>
+          <b>${esc(emp.employee_name)}</b> — ID ${emp.employee_id} — ${esc(emp.designation || '')}
+          ${emp.status !== 'Active' ? ' <span style="color:var(--err)">(Inactive)</span>' : ''}
+        </div>`).join('');
+      box.style.display = 'block';
+    } catch (e) { box.style.display = 'none'; }
+  }, 250);
+}
+
+function attPickSuggestion(emp) {
+  _attFillEmployee(emp);
+  document.getElementById('attNameSuggestions').style.display = 'none';
+}
+
+async function saveOfficeAttendance() {
+  const errBox = document.getElementById('attFormError');
+  errBox.textContent = '';
+  const employeeId = Number(document.getElementById('attEmpId').value);
+  if (!employeeId) { errBox.textContent = 'Employee ID is required (use lookup to confirm it resolves).'; return; }
+  const body = {
+    duty_status: document.getElementById('attDutyStatus').value,
+    remarks: document.getElementById('attRemarks').value || null,
+  };
+  try {
+    if (_attEditingId) {
+      await attendanceFetch('/attendance/' + _attEditingId, { method: 'PUT', body: JSON.stringify(body) });
+      showToast('Attendance updated', 'ok');
+    } else {
+      const attDate = document.getElementById('attDate').value;
+      if (!attDate) { errBox.textContent = 'Attendance date is required.'; return; }
+      await attendanceFetch('/attendance', {
+        method: 'POST',
+        body: JSON.stringify({ employee_id: employeeId, attendance_date: attDate, ...body }),
+      });
+      showToast('Attendance saved', 'ok');
+    }
+    closeAttendanceForm();
+    await loadOfficeAttendanceList();
+  } catch (e) {
+    errBox.textContent = e.message;
+  }
+}
+
+async function deleteOfficeAttendance(attendanceId) {
+  if (!confirm('Delete this attendance record? This cannot be undone.')) return;
+  try {
+    await attendanceFetch('/attendance/' + attendanceId, { method: 'DELETE' });
+    showToast('Attendance deleted', 'ok');
+    await loadOfficeAttendanceList();
+  } catch (e) {
+    showToast('Failed: ' + e.message, 'err');
+  }
+}
+
+function attPageStep(delta) {
+  _attPage = Math.max(1, _attPage + delta);
+  loadOfficeAttendanceList();
+}
+
+async function loadOfficeAttendanceList() {
+  if (!canAccessAdminMenu()) return;
+  const box = document.getElementById('attListBox');
+  if (!box) return;
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const params = new URLSearchParams({ page: _attPage, page_size: _attPageSize });
+    const search = document.getElementById('attSearch').value.trim();
+    const dateFrom = document.getElementById('attDateFrom').value;
+    const dateTo = document.getElementById('attDateTo').value;
+    const source = document.getElementById('attSourceFilter').value;
+    if (search) params.set('search', search);
+    if (dateFrom) params.set('date_from', dateFrom);
+    if (dateTo) params.set('date_to', dateTo);
+    if (source) params.set('entry_source', source);
+
+    const data = await attendanceFetch('/attendance?' + params.toString());
+    const items = data.items || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="empty"><div class="icon">📋</div>No attendance records found.</div>';
+    } else {
+      const rows = items.map(a => `
+        <tr>
+          <td>${esc(a.employee_name)} (#${a.employee_id})</td>
+          <td>${esc(a.attendance_date)}</td>
+          <td>${esc(a.status)}</td>
+          <td>${esc(a.entry_source)}</td>
+          <td>${esc(a.approval_channel || '')}</td>
+          <td>${esc(a.approved_by || '')}</td>
+          <td>
+            <button class="btn sm secondary" onclick="openAttendanceForm(true, ${a.attendance_id})" title="Edit">✏️</button>
+            <button class="btn sm secondary" onclick="deleteOfficeAttendance(${a.attendance_id})" title="Delete">🗑</button>
+          </td>
+        </tr>`).join('');
+      box.innerHTML = `<table><thead><tr>
+        <th>Employee</th><th>Date</th><th>Status</th><th>Source</th><th>Channel</th><th>Approved By</th><th>Actions</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+    }
+    document.getElementById('attPagerInfo').textContent = `Page ${data.page} of ${data.pages || 1} (${data.total} total)`;
+    document.getElementById('attPrev').disabled = data.page <= 1;
+    document.getElementById('attNext').disabled = data.page >= (data.pages || 1);
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
+}
+
+function _eligReasonColor(row) {
+  return row.included ? 'var(--ok, #2a8)' : 'var(--muted)';
+}
+
+function _renderEligibilityRows(rows, extraCols) {
+  return rows.map(r => `
+    <tr>
+      <td>${r.employee_id}</td>
+      <td>${esc(r.employee_name)}</td>
+      <td>${esc(r.designation || '')}</td>
+      <td>${r.basic_salary != null ? '৳' + fmtNum(r.basic_salary) : ''}</td>
+      <td>${r.approved_manual_days ?? 0}</td>
+      <td>${r.approved_parser_days ?? 0}</td>
+      <td>${r.total_duty_days ?? 0}</td>
+      ${extraCols ? extraCols(r) : ''}
+      <td>${r.included ? '✅' : '—'}</td>
+      <td style="color:${_eligReasonColor(r)};font-size:12px">${esc(r.reason || '')}</td>
+    </tr>`).join('');
+}
+
+async function loadEligibilityPreview() {
+  const year = document.getElementById('eligYear').value;
+  const month = document.getElementById('eligMonth').value;
+  const box = document.getElementById('eligBox');
+  const summary = document.getElementById('eligSummary');
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const data = await attendanceFetch(`/payroll/eligibility-preview?year=${year}&month=${month}`);
+    summary.textContent = `${data.payable_count} payable / ${data.rows.length} employees checked for ${year}-${String(month).padStart(2,'0')}.`;
+    box.innerHTML = `<table><thead><tr>
+      <th>ID</th><th>Name</th><th>Designation</th><th>Salary</th><th>Manual Days</th><th>Parser Days</th><th>Total Duty Days</th><th>Included</th><th>Reason</th>
+    </tr></thead><tbody>${_renderEligibilityRows(data.rows)}</tbody></table>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
+}
+
+async function loadPayrollDryRun() {
+  const year = document.getElementById('eligYear').value;
+  const month = document.getElementById('eligMonth').value;
+  const box = document.getElementById('eligBox');
+  const summary = document.getElementById('eligSummary');
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const data = await attendanceFetch(`/payroll/dry-run?year=${year}&month=${month}`);
+    summary.textContent = `Dry run (non-destructive): ${data.payable_count} payable / ${data.rows.length} checked for ${year}-${String(month).padStart(2,'0')}.`;
+    const extra = r => `<td>${r.calendar_days ?? ''}</td><td>${r.daily_rate != null ? '৳'+fmtNum(r.daily_rate) : ''}</td><td>${r.calculated_salary != null ? '৳'+fmtNum(r.calculated_salary) : ''}</td>`;
+    box.innerHTML = `<table><thead><tr>
+      <th>ID</th><th>Name</th><th>Designation</th><th>Salary</th><th>Manual Days</th><th>Parser Days</th><th>Total Duty Days</th>
+      <th>Calendar Days</th><th>Daily Rate</th><th>Calculated Salary</th><th>Included</th><th>Reason</th>
+    </tr></thead><tbody>${_renderEligibilityRows(data.rows, extra)}</tbody></table>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
+}
+
+async function loadReconciliation() {
+  const year = document.getElementById('eligYear').value;
+  const month = document.getElementById('eligMonth').value;
+  const box = document.getElementById('eligBox');
+  const summary = document.getElementById('eligSummary');
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const data = await attendanceFetch(`/payroll/reconciliation?year=${year}&month=${month}`);
+    summary.innerHTML = `Status: <b>${data.status}</b> — ${data.warnings.length} warning(s) for ${year}-${String(month).padStart(2,'0')}.` +
+      (data.warnings.length ? '<ul style="margin:6px 0 0 18px">' + data.warnings.map(w => `<li>${esc(w)}</li>`).join('') + '</ul>' : '');
+    const extra = r => `<td>${r.calendar_days ?? ''}</td><td>${r.calculated_salary != null ? '৳'+fmtNum(r.calculated_salary) : ''}</td><td>${r.pending_parser_drafts||0}</td><td>${r.rejected_parser_drafts||0}</td>`;
+    box.innerHTML = `<table><thead><tr>
+      <th>ID</th><th>Name</th><th>Designation</th><th>Salary</th><th>Manual Days</th><th>Parser Days</th><th>Total Duty Days</th>
+      <th>Calendar Days</th><th>Calculated Salary</th><th>Pending Drafts</th><th>Rejected Drafts</th><th>Included</th><th>Reason</th>
+    </tr></thead><tbody>${_renderEligibilityRows(data.rows, extra)}</tbody></table>`;
   } catch (e) {
     box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
   }
