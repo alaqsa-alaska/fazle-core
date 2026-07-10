@@ -179,13 +179,13 @@ class TestDbInvariants:
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
                 UPDATE wbom_escort_programs
-                SET status='Completed', day_count=5
+                SET status='completed', day_count=5
                 WHERE program_id=$1
             """, seed_escort_program["program_id"])
 
             bad = await conn.fetchval("""
                 SELECT COUNT(*) FROM wbom_escort_programs
-                WHERE status='Completed' AND (day_count IS NULL OR day_count <= 0)
+                WHERE status='completed' AND (day_count IS NULL OR day_count <= 0)
             """)
         assert bad == 0
 

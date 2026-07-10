@@ -107,22 +107,34 @@ class TestEscortFullWorkflow:
             )
         assert att_draft is not None, "Attendance draft should be created"
 
-        # ── Step 4: Guard signals release ─────────────────────────────────────
-        # Use admin RELEASE command for deterministic test
-        release_payload = make_bridge_payload(
-            ADMIN_PHONE,
-            f"RELEASE {program_id} 2026-05-05 D Ctg Port days=5",
+        # ── Step 4: Admin sends [RELEASE CONFIRMED] ───────────────────────────
+        # The admin-typed RELEASE <id> command was deliberately deprecated
+        # (2026-06-19, modules/admin_commands/__init__.py::_cmd_release) in
+        # favor of this admin-confirmation-gated flow. It's normally triggered
+        # by bridge_poller detecting an is_from_me=1 outbound [RELEASE
+        # CONFIRMED] message (modules/bridge_poller/__init__.py ~line 1151) —
+        # calling handle_admin_release_confirmation() directly here exercises
+        # the same real production entry point without needing to fake the
+        # SQLite outbound-message polling layer.
+        from modules.escort_lifecycle import handle_admin_release_confirmation
+
+        release_result = await handle_admin_release_confirmation(
+            "[RELEASE CONFIRMED]\n"
+            "End Date: 2026-05-05\n"
+            "Shift: D\n"
+            "Days: 5\n"
+            "Release Point: Ctg Port",
+            f"{guard_mobile}@s.whatsapp.net",
             source="bridge2",
         )
-        r = await client.post("/webhook/mcp2", json=release_payload)
-        assert r.status_code in (200, 202)
+        assert release_result["ok"] is True, release_result
 
         async with test_db_pool.acquire() as conn:
             updated = await conn.fetchrow(
                 "SELECT status, day_count FROM wbom_escort_programs WHERE program_id=$1",
                 program_id,
             )
-        assert updated["status"] == "Completed"
+        assert updated["status"] == "completed"
         assert updated["day_count"] == pytest.approx(5.0)
 
         # ── Step 5: Check payment draft created ───────────────────────────────
@@ -259,7 +271,7 @@ class TestPayrollWorkflow:
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
                 UPDATE wbom_escort_programs
-                SET status='Completed', day_count=5,
+                SET status='completed', day_count=5,
                     program_date='2026-05-01', end_date='2026-05-05'
                 WHERE program_id=$1
             """, program_id)

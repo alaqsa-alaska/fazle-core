@@ -224,7 +224,7 @@ async def job_stale_escort_reminder() -> dict:
         """SELECT program_id, mother_vessel, lighter_vessel, escort_employee_id,
                   COALESCE(start_date, program_date) AS started
              FROM wbom_escort_programs
-            WHERE status IN ('Active','Assigned')
+            WHERE status IN ('confirmed','running')
               AND COALESCE(start_date, program_date) < CURRENT_DATE - $1::int""",
         days,
     )

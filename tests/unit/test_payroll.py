@@ -24,7 +24,7 @@ class TestPayrollCompute:
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
                 UPDATE wbom_escort_programs
-                SET status='Completed', day_count=5,
+                SET status='completed', day_count=5,
                     program_date='2026-05-01', end_date='2026-05-05'
                 WHERE program_id=$1
             """, program_id)
@@ -54,7 +54,7 @@ class TestPayrollCompute:
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
                 UPDATE wbom_escort_programs
-                SET status='Completed', day_count=3,
+                SET status='completed', day_count=3,
                     program_date='2026-05-01', end_date='2026-05-03'
                 WHERE program_id=$1
             """, program_id)

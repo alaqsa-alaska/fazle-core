@@ -92,7 +92,7 @@ async def _qall(pool, sql, *args):
     return [dict(r) for r in rows]
 
 
-async def _insert_program(pool, employee, *, status="Running",
+async def _insert_program(pool, employee, *, status="running",
                            program_date=None, end_date=None, day_count=None):
     """Insert an escort program row directly. Returns dict."""
     pd = program_date or date(PERIOD_YEAR, PERIOD_MONTH, 1)
@@ -188,7 +188,7 @@ async def flow_accountant(test_db_pool):
 @pytest_asyncio.fixture
 async def running_program(test_db_pool, flow_employee):
     """A Running escort program — simulates Steps 1+2 already done."""
-    return await _insert_program(test_db_pool, flow_employee, status="Running")
+    return await _insert_program(test_db_pool, flow_employee, status="running")
 
 
 @pytest_asyncio.fixture
@@ -196,7 +196,7 @@ async def completed_program(test_db_pool, flow_employee):
     """A Completed program (5 days) — simulates Steps 1–4 already done."""
     return await _insert_program(
         test_db_pool, flow_employee,
-        status="Completed",
+        status="completed",
         program_date=date(PERIOD_YEAR, PERIOD_MONTH, 1),
         end_date=date(PERIOD_YEAR, PERIOD_MONTH, 5),
         day_count=5.0,
@@ -255,8 +255,8 @@ class TestFullEscortPaymentFlow:
         self, test_db_pool, flow_employee
     ):
         """Step 2: Admin can create a program via the DB (lifecycle fixture)."""
-        prog = await _insert_program(test_db_pool, flow_employee, status="Running")
-        assert prog["status"] == "Running"
+        prog = await _insert_program(test_db_pool, flow_employee, status="running")
+        assert prog["status"] == "running"
         assert prog["escort_employee_id"] == flow_employee["employee_id"]
 
     async def test_step3_escort_active_visible_via_api(
@@ -290,10 +290,15 @@ class TestFullEscortPaymentFlow:
             extracted={"end_date": "2026-05-05", "end_shift": "D",
                         "day_count": 5.0, "release_point": "Ctg Port"},
             source="test-release",
+            admin_confirmed=True,
         )
         assert result["ok"] is True, result
         assert result["status"] == "closed"
-        assert result["day_count"] == pytest.approx(5.0)
+        # 2026-05-01 D -> 2026-05-05 D = 9 shifts = 4.5 days (shift-based
+        # counting, modules/escort_roster/calculations.py::count_shifts/
+        # shifts_to_days — see that module's docstring for worked examples).
+        # Not a plain calendar-day span.
+        assert result["day_count"] == pytest.approx(4.5)
 
         prog = await _qrow(
             test_db_pool,
@@ -301,8 +306,8 @@ class TestFullEscortPaymentFlow:
             "WHERE program_id=$1",
             running_program["program_id"],
         )
-        assert prog["status"] == "Completed"
-        assert float(prog["day_count"]) == pytest.approx(5.0)
+        assert prog["status"] == "completed"
+        assert float(prog["day_count"]) == pytest.approx(4.5)
 
     async def test_step5_attendance_backfill(
         self, test_db_pool, running_program, flow_employee
@@ -351,6 +356,7 @@ class TestFullEscortPaymentFlow:
             employee_id=flow_employee["employee_id"],
             extracted={"end_date": "2026-05-05", "day_count": 5.0},
             source="test",
+            admin_confirmed=True,
         )
         assert result.get("draft_id") is not None, result
 
@@ -362,7 +368,9 @@ class TestFullEscortPaymentFlow:
         assert draft["status"] == "pending"
         assert draft["draft_type"] == "escort_payment"
         assert draft["employee_id"] == flow_employee["employee_id"]
-        assert float(draft["duty_days"]) == pytest.approx(5.0)
+        # 2026-05-01 D -> 2026-05-05 D = 9 shifts = 4.5 days, see
+        # test_step4_guard_release_closes_program's comment above.
+        assert float(draft["duty_days"]) == pytest.approx(4.5)
 
         # API visibility
         r = await client.get("/admin/payment-drafts")
@@ -890,6 +898,7 @@ class TestIdempotency:
             flow_employee["employee_id"],
             extracted={"end_date": "2026-05-05", "day_count": 5.0},
             source="retry-test",
+            admin_confirmed=True,
         )
         assert r1["ok"] is True
         assert r1["status"] == "closed"
@@ -898,6 +907,7 @@ class TestIdempotency:
             flow_employee["employee_id"],
             extracted={"end_date": "2026-05-06", "day_count": 6.0},  # different data
             source="retry-test",
+            admin_confirmed=True,
         )
         # handle_release_event returns ok=False, status='no_active_program' when program already Completed
         assert r2["status"] in ("already_closed", "no_active_program"), (
@@ -974,7 +984,7 @@ class TestFinalConsistency:
         eid = flow_employee["employee_id"]
         prog = await _insert_program(
             test_db_pool, flow_employee,
-            status="Running",
+            status="running",
             program_date=date(2026, 5, 2),
         )
         pid = prog["program_id"]
@@ -990,6 +1000,7 @@ class TestFinalConsistency:
                 "release_point": "Ctg Port",
             },
             source="consistency-test",
+            admin_confirmed=True,
         )
         assert rel["ok"] is True
         draft_id = rel["draft_id"]
@@ -1018,8 +1029,10 @@ class TestFinalConsistency:
             test_db_pool,
             "SELECT status, day_count FROM wbom_escort_programs WHERE program_id=$1", pid,
         )
-        assert prog_row["status"] == "Completed"
-        assert float(prog_row["day_count"]) == pytest.approx(5.0)
+        assert prog_row["status"] == "completed"
+        # 2026-05-02 D -> 2026-05-06 D = 9 shifts = 4.5 days, see
+        # test_step4_guard_release_closes_program's comment above.
+        assert float(prog_row["day_count"]) == pytest.approx(4.5)
 
         # 2. Attendance rows match day_count
         att_count = await _qval(
@@ -1037,9 +1050,11 @@ class TestFinalConsistency:
         assert draft_row["accountant_msg"] is not None
 
         # 4. One cash transaction exists
+        # Real payments write to fpe_cash_transactions (modules/fazle_payroll_engine/
+        # accounting.py) — wbom_cash_transactions is never written by any code path.
         txn_count = await _qval(
             test_db_pool,
-            "SELECT COUNT(*) FROM wbom_cash_transactions WHERE employee_id=$1", eid,
+            "SELECT COUNT(*) FROM fpe_cash_transactions WHERE employee_id=$1", eid,
         )
         assert txn_count == 1
 
@@ -1116,7 +1131,7 @@ class TestFinalConsistency:
         # Program only for emp1
         await _insert_program(
             test_db_pool, emp1,
-            status="Completed",
+            status="completed",
             program_date=date(2026, 5, 1),
             end_date=date(2026, 5, 3),
             day_count=3.0,
@@ -1151,6 +1166,7 @@ class TestFailureInjection:
             flow_employee["employee_id"],
             extracted={},
             source="failure-test",
+            admin_confirmed=True,
         )
         assert result["ok"] is False
         assert result["status"] == "no_active_program"
@@ -1418,6 +1434,7 @@ class TestRaceConditions:
                 flow_employee["employee_id"],
                 extracted={"end_date": "2026-05-05", "day_count": 5.0},
                 source=f"race-{_i}",
+                admin_confirmed=True,
             )
 
         results = await asyncio.gather(*[_do_release(i) for i in range(10)])
@@ -1432,7 +1449,7 @@ class TestRaceConditions:
             "SELECT status FROM wbom_escort_programs WHERE program_id=$1",
             running_program["program_id"],
         )
-        assert prog["status"] == "Completed"
+        assert prog["status"] == "completed"
 
         # At least 1 draft exists (concurrent releases may create duplicates
         # since close_program uses application-level check, not DB UNIQUE)

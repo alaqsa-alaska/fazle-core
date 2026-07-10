@@ -92,7 +92,7 @@ class TestReleaseAuthorization:
                 "SELECT * FROM escort_roster_entries WHERE program_id=$1",
                 seed_escort_program["program_id"],
             )
-        assert program["status"] == "Completed"
+        assert program["status"] == "completed"
         assert attendance == 2
         assert draft is not None
         assert roster is not None
@@ -125,7 +125,7 @@ class TestCloseProgram:
                 "SELECT status, day_count FROM wbom_escort_programs WHERE program_id=$1",
                 program_id,
             )
-        assert row["status"] == "Completed"
+        assert row["status"] == "completed"
 
     async def test_day_count_computed_correctly(
         self, test_db_pool, seed_escort_program
@@ -229,7 +229,7 @@ class TestAttendanceBackfill:
             await conn.execute("""
                 UPDATE wbom_escort_programs
                 SET start_date='2026-05-01', end_date='2026-05-05',
-                    status='Completed', day_count=5
+                    status='completed', day_count=5
                 WHERE program_id=$1
             """, program_id)
 
@@ -257,7 +257,7 @@ class TestAttendanceBackfill:
             await conn.execute("""
                 UPDATE wbom_escort_programs
                 SET start_date='2026-05-01', end_date='2026-05-03',
-                    status='Completed', day_count=3
+                    status='completed', day_count=3
                 WHERE program_id=$1
             """, program_id)
             # Pre-insert 2026-05-02 with Absent manually
@@ -292,7 +292,7 @@ class TestAttendanceBackfill:
             await conn.execute("""
                 UPDATE wbom_escort_programs
                 SET start_date='2026-05-01', end_date='2026-05-02',
-                    status='Completed'
+                    status='completed'
                 WHERE program_id=$1
             """, program_id)
 
@@ -305,3 +305,109 @@ class TestAttendanceBackfill:
             )
         for row in rows:
             assert row["recorded_by"] == "escort-lifecycle"
+
+
+class TestMarkProgramRunningOnAttendance:
+    """Owner decision 2026-07-10: confirmed -> running fires on the first
+    accepted escort attendance, not a date-only background job."""
+
+    async def test_confirmed_program_transitions_to_running(
+        self, test_db_pool, seed_employee, seed_escort_program
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.escort_lifecycle import mark_program_running_on_attendance
+
+        program_id = seed_escort_program["program_id"]
+        employee_id = seed_employee["employee_id"]
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE wbom_escort_programs SET status='confirmed' WHERE program_id=$1",
+                program_id,
+            )
+
+        result = await mark_program_running_on_attendance(employee_id)
+        assert result is not None
+        assert result["status"] == "running"
+        assert result["program_id"] == program_id
+
+        async with test_db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status FROM wbom_escort_programs WHERE program_id=$1",
+                program_id,
+            )
+        assert row["status"] == "running"
+
+    async def test_idempotent_on_repeated_attendance(
+        self, test_db_pool, seed_employee, seed_escort_program
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.escort_lifecycle import mark_program_running_on_attendance
+
+        program_id = seed_escort_program["program_id"]
+        employee_id = seed_employee["employee_id"]
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE wbom_escort_programs SET status='confirmed' WHERE program_id=$1",
+                program_id,
+            )
+
+        first = await mark_program_running_on_attendance(employee_id)
+        assert first is not None and first["status"] == "running"
+
+        # Second (and any later) accepted attendance for the same guard must
+        # be a harmless no-op -- the program stays running, no error, no
+        # second "transition" event.
+        second = await mark_program_running_on_attendance(employee_id)
+        assert second is None
+
+        async with test_db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status FROM wbom_escort_programs WHERE program_id=$1",
+                program_id,
+            )
+        assert row["status"] == "running"
+
+    async def test_no_active_confirmed_program_is_noop(
+        self, test_db_pool, seed_employee, seed_escort_program
+    ):
+        """seed_escort_program defaults to 'running' already -- no 'confirmed'
+        program exists for this employee, so the call must no-op."""
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.escort_lifecycle import mark_program_running_on_attendance
+
+        employee_id = seed_employee["employee_id"]
+        result = await mark_program_running_on_attendance(employee_id)
+        assert result is None
+
+    async def test_completed_program_not_reopened(
+        self, test_db_pool, seed_employee, seed_escort_program
+    ):
+        """An attendance approval arriving after release must never revert
+        a completed program back to running."""
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.escort_lifecycle import mark_program_running_on_attendance
+
+        program_id = seed_escort_program["program_id"]
+        employee_id = seed_employee["employee_id"]
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE wbom_escort_programs SET status='completed' WHERE program_id=$1",
+                program_id,
+            )
+
+        result = await mark_program_running_on_attendance(employee_id)
+        assert result is None
+
+        async with test_db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status FROM wbom_escort_programs WHERE program_id=$1",
+                program_id,
+            )
+        assert row["status"] == "completed"

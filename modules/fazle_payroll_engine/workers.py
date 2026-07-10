@@ -629,7 +629,7 @@ async def _handle_escort_payment(msg_id: int, pdata: dict, row: dict) -> None:
                 SELECT program_id FROM wbom_escort_programs
                 WHERE program_date = $1
                   AND ($2::text IS NULL OR shift = $2)
-                  AND status != 'Cancelled'
+                  AND status != 'cancelled'
                 ORDER BY assignment_time DESC
                 LIMIT 1
                 """,

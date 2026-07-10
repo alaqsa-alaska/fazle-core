@@ -91,7 +91,7 @@ async def compute_run(
                   mother_vessel
            FROM wbom_escort_programs
            WHERE escort_employee_id=$1
-             AND status='Completed'
+             AND status='completed'
              AND COALESCE(end_date, program_date) BETWEEN $2 AND $3""",
         employee_id, period_start, period_end,
     )

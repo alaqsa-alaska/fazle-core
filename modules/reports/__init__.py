@@ -96,8 +96,8 @@ async def _b_daily_summary(date: Optional[date] = None) -> dict:  # noqa: A002
     programs = await fetch_one(
         """SELECT
               COUNT(*)                                                    AS total,
-              COUNT(*) FILTER (WHERE status IN ('Active','Assigned'))     AS active,
-              COUNT(*) FILTER (WHERE status='Completed')                  AS completed
+              COUNT(*) FILTER (WHERE status IN ('confirmed','running'))    AS active,
+              COUNT(*) FILTER (WHERE status='completed')                  AS completed
            FROM wbom_escort_programs
            WHERE program_date = $1""",
         d,
@@ -189,7 +189,7 @@ async def _b_escort_utilization(start: date, end: date) -> dict:
     rows = await fetch_all(
         """SELECT p.escort_employee_id, e.employee_name,
                   COUNT(*) AS programs,
-                  COUNT(*) FILTER (WHERE p.status='Completed') AS completed,
+                  COUNT(*) FILTER (WHERE p.status='completed') AS completed,
                   COALESCE(SUM(p.day_count), 0)   AS total_days,
                   COALESCE(SUM(p.conveyance), 0)  AS total_conveyance
            FROM wbom_escort_programs p

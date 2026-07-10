@@ -487,7 +487,7 @@ async def api_reconcile_drafts():
         """
         SELECT lighter_vessel, mother_vessel
         FROM wbom_escort_programs
-        WHERE status IN ('confirmed', 'Assigned', 'Running', 'Completed')
+        WHERE status IN ('confirmed', 'running', 'completed')
           AND lighter_vessel IS NOT NULL AND TRIM(lighter_vessel) != ''
         ORDER BY program_id DESC
         """

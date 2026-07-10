@@ -93,7 +93,7 @@ _MOBILE_FMT_RE = re.compile(
 
 _MV_LABEL_RE = re.compile(
     r"(?:m\.?v\.?|এমভি|mother\s*vessel)\s*[:\s.]*"
-    r"([A-Za-z][A-Za-z0-9\s.\-]{1,40}?)(?=\s*[,\n/]|$)",
+    r"([A-Za-z][A-Za-z0-9\s.\-]{1,40}?)(?=\s*[,\n/]|\s+lighter\b|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 _IMPORTER_RE = re.compile(
@@ -1520,7 +1520,7 @@ async def _create_confirmed_from_admin(
             """
             SELECT program_id
             FROM wbom_escort_programs
-            WHERE status IN ('confirmed', 'Assigned')
+            WHERE status = 'confirmed'
               AND COALESCE(start_date, program_date) = COALESCE($1::date, COALESCE(start_date, program_date))
               AND UPPER(TRIM(COALESCE(mother_vessel, ''))) = UPPER(TRIM($2))
               AND UPPER(TRIM(COALESCE(lighter_vessel, ''))) = UPPER(TRIM($3))
@@ -1568,7 +1568,7 @@ async def _create_confirmed_from_admin(
                  AND ($2::text = '' OR LOWER(lighter_vessel) = LOWER($2))
                  AND ($3::text = '' OR COALESCE(master_mobile, '') = $3)
                  AND ($4::date IS NULL OR program_date = $4)
-                 AND status IN ('confirmed', 'Assigned', 'Running', 'Completed')
+                 AND status IN ('confirmed', 'running', 'completed')
                ORDER BY program_id DESC LIMIT 1""",
             mv_clean, lv, draft.get("master_mobile") or "", program_date,
         )
@@ -1594,7 +1594,7 @@ async def _create_confirmed_from_admin(
                 """SELECT program_id FROM wbom_escort_programs
                    WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                      AND LOWER(escort_name) = LOWER($2)
-                     AND status IN ('confirmed', 'Assigned')
+                     AND status = 'confirmed'
                    ORDER BY program_id DESC LIMIT 1""",
                 mv_clean, escort_name,
             )
@@ -1649,7 +1649,7 @@ async def _create_confirmed_from_admin(
             escort_mobile,
             emp_id,
             shift,
-            "Assigned",
+            "confirmed",
             program_date,
             json.dumps(remarks_data, ensure_ascii=False),
         ]

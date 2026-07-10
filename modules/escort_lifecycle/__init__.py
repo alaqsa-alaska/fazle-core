@@ -63,13 +63,56 @@ async def find_active_program_for_employee(
                   end_shift, release_point, day_count, conveyance, destination
            FROM wbom_escort_programs
            WHERE escort_employee_id = $1
-             AND COALESCE(status,'') NOT IN ('Completed','Cancelled')
+             AND COALESCE(status,'') NOT IN ('completed','cancelled')
              AND program_date <= $2
            ORDER BY program_date DESC, program_id DESC
            LIMIT 1""",
         employee_id, ref, conn=conn,
     )
     return dict(row) if row else None
+
+
+async def mark_program_running_on_attendance(employee_id: int, conn=None) -> Optional[dict]:
+    """
+    Owner decision (2026-07-10): the confirmed -> running transition fires on
+    the first accepted (admin-approved) escort attendance record for that
+    guard's active confirmed program -- not a date-only background job.
+    Called from modules.admin_commands._save_attendance_from_draft() right
+    after save_attendance() succeeds.
+
+    Idempotent: the UPDATE's WHERE status='confirmed' guard means calling
+    this on every subsequent day's approved attendance for the same guard is
+    a harmless no-op once the program is already 'running' (or any other
+    state) -- no separate "already transitioned" check is needed.
+
+    Returns the updated program row, or None if the guard had no program
+    currently in 'confirmed' state (the common case for non-escort
+    employees, or an escort guard whose program already transitioned).
+    """
+    row = await fetch_one(
+        """SELECT program_id, mother_vessel, program_date
+           FROM wbom_escort_programs
+           WHERE escort_employee_id = $1 AND status = 'confirmed'
+           ORDER BY program_date DESC, program_id DESC
+           LIMIT 1""",
+        employee_id, conn=conn,
+    )
+    if not row:
+        return None
+
+    updated = await fetch_one(
+        """UPDATE wbom_escort_programs
+           SET status = 'running'
+           WHERE program_id = $1 AND status = 'confirmed'
+           RETURNING program_id, mother_vessel, status""",
+        row["program_id"], conn=conn,
+    )
+    if updated:
+        log.info(
+            f"[escort-lifecycle] program {updated['program_id']} confirmed -> running "
+            f"(first accepted attendance, employee_id={employee_id})"
+        )
+    return dict(updated) if updated else None
 
 
 async def find_existing_draft_for_program(program_id: int, conn=None) -> Optional[dict]:
@@ -127,7 +170,7 @@ async def close_program(
 
     await execute(
         """UPDATE wbom_escort_programs
-           SET status='Completed',
+           SET status='completed',
                completion_time=NOW(),
                end_date=$2,
                end_shift=$3,
@@ -645,7 +688,7 @@ async def handle_admin_release_confirmation(
         emp_row = await fetch_one(
             """SELECT escort_employee_id AS employee_id
                FROM wbom_escort_programs
-               WHERE escort_mobile = $1 AND status NOT IN ('Completed', 'Cancelled')
+               WHERE escort_mobile = $1 AND status NOT IN ('completed', 'cancelled')
                ORDER BY program_date DESC LIMIT 1""",
             phone,
         )
@@ -683,7 +726,7 @@ async def _lookup_active_program_by_phone(phone: str) -> Optional[dict]:
                LEFT JOIN wbom_employees emp ON emp.employee_id = ep.escort_employee_id
                WHERE regexp_replace(ep.escort_mobile, '\\D', '', 'g')
                      LIKE '%' || RIGHT(regexp_replace($1, '\\D', '', 'g'), 11)
-               AND ep.status NOT IN ('Completed', 'Cancelled')
+               AND ep.status NOT IN ('completed', 'cancelled')
                ORDER BY ep.program_date DESC LIMIT 1""",
             phone,
         )
@@ -709,7 +752,7 @@ async def _lookup_active_program_by_slip(ocr_result: dict) -> Optional[dict]:
                       ep.master_mobile AS lighter_master_mobile
                FROM wbom_escort_programs ep
                LEFT JOIN wbom_employees emp ON emp.employee_id = ep.escort_employee_id
-               WHERE ep.status NOT IN ('Completed', 'Cancelled')
+               WHERE ep.status NOT IN ('completed', 'cancelled')
                  AND (
                       ($1 <> '' AND (
                           ep.lighter_vessel ILIKE '%' || $1 || '%'

@@ -865,36 +865,27 @@ async def _cmd_escort_confirm(
         if not program:
             return (f"❌ Escort program #{program_id} পাওয়া যায়নি।", None)
 
+        # Resolve (or auto-create) the wbom_employees row for this escort and
+        # link it via escort_employee_id. Without this, find_active_program_
+        # for_employee() (modules/escort_lifecycle) can never find this
+        # program for the guard's own attendance/release messages, since it
+        # filters strictly on escort_employee_id, not the JSONB remarks blob.
+        from modules.escort import _resolve_escort_employee_id
+        emp_id = await _resolve_escort_employee_id(escort_mobile, escort_name, auto_create=True)
+
         # Update program with escort details
         await _ex(
             """UPDATE wbom_escort_programs
-               SET status = 'Assigned', shift = $2,
+               SET status = 'confirmed', shift = $2,
+                   escort_employee_id = COALESCE($6, escort_employee_id),
                    remarks = remarks::jsonb || jsonb_build_object(
                        'escort_name', $3::text,
                        'escort_mobile', $4::text,
                        'confirmed_by', $5::text
                    )
                WHERE program_id = $1""",
-            program_id, shift, escort_name, escort_mobile, admin_phone,
+            program_id, shift, escort_name, escort_mobile, admin_phone, emp_id,
         )
-
-        # Auto-create employee if escort mobile not in DB
-        escort_norm = escort_mobile.replace("+", "").replace("-", "").strip()
-        existing = await _fo(
-            "SELECT employee_id FROM wbom_employees WHERE employee_mobile = $1",
-            escort_norm,
-        )
-        if not existing:
-            try:
-                await _ex(
-                    """INSERT INTO wbom_employees
-                           (employee_name, employee_mobile, designation, status, joining_date)
-                       VALUES ($1, $2, 'Escort', 'Active', CURRENT_DATE)""",
-                    escort_name, escort_norm,
-                )
-                log.info(f"[admin_cmd] auto-created escort employee: {escort_name} ({escort_norm})")
-            except Exception as emp_err:
-                log.warning(f"[admin_cmd] escort employee auto-create failed: {emp_err}")
 
         # Build final slip
         mv = program.get("mother_vessel", "—")
@@ -1061,6 +1052,15 @@ async def _save_attendance_from_draft(
         )
         if ok:
             log.info(f"[admin_cmd] attendance draft #{draft_id} → emp={emp_id} date={att_date} shift={shift}")
+            # Owner decision (2026-07-10): confirmed -> running fires on the
+            # first accepted escort attendance (this exact event), not a
+            # date-only background job. No-op for non-escort employees or a
+            # guard whose program already left 'confirmed'.
+            try:
+                from modules.escort_lifecycle import mark_program_running_on_attendance
+                await mark_program_running_on_attendance(emp_id)
+            except Exception as run_err:
+                log.warning(f"[admin_cmd] confirmed->running check failed for emp={emp_id}: {run_err}")
 
         # ── Send confirmation to original sender ───────────────────────────────
         shift_label = "Day" if shift == "D" else "Night"
