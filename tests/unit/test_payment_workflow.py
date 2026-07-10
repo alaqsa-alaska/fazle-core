@@ -57,7 +57,7 @@ class TestCreateEscortPaymentDraft:
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
                 UPDATE wbom_escort_programs
-                SET end_date='2026-05-05', day_count=5, status='Completed'
+                SET end_date='2026-05-05', day_count=5, status='completed'
                 WHERE program_id=$1
             """, program_id)
 
@@ -77,8 +77,9 @@ class TestCreateEscortPaymentDraft:
             )
         assert draft is not None
         assert draft["duty_days"] == 5.0
-        # basic_salary=9000, daily_rate=9000/30=300, expected=5*300=1500
-        assert float(draft["expected_amount"]) == pytest.approx(1500.0)
+        # Formula 1 (Owner decision, 2026-07-10): flat 400tk/day, independent
+        # of basic_salary. 5 days * 400 = 2000. No food/conveyance here.
+        assert float(draft["expected_amount"]) == pytest.approx(2000.0)
 
     async def test_uses_shift_column_and_current_program_month_deductions(
         self, test_db_pool, seed_employee, seed_fpe_employee, seed_escort_program
@@ -93,7 +94,7 @@ class TestCreateEscortPaymentDraft:
         async with test_db_pool.acquire() as conn:
             await conn.execute(
                 """UPDATE wbom_escort_programs
-                   SET end_date=CURRENT_DATE, day_count=2, status='Completed',
+                   SET end_date=CURRENT_DATE, day_count=2, status='completed',
                        food_bill=100, conveyance=200
                    WHERE program_id=$1""",
                 program_id,
@@ -112,8 +113,9 @@ class TestCreateEscortPaymentDraft:
             override_days=2,
         )
         assert result["draft_id"]
-        # basic_salary 9000 / 30 * 2 - food 100 - conveyance 200 - advance 300
-        assert result["expected_amount"] == pytest.approx(0.0)
+        # Formula 1: 2 days * 400 = 800 gross - food 100 + conveyance 200
+        # (added, not deducted -- Owner decision) - advance 300 = 600
+        assert result["expected_amount"] == pytest.approx(600.0)
 
     async def test_advances_deducted_from_payment(
         self, test_db_pool, seed_employee, seed_fpe_employee, seed_escort_program
@@ -138,7 +140,7 @@ class TestCreateEscortPaymentDraft:
             """, f"test-adv-{employee_id}", fpe_employee_id)
             await conn.execute("""
                 UPDATE wbom_escort_programs
-                SET end_date='2026-05-05', day_count=5, status='Completed'
+                SET end_date='2026-05-05', day_count=5, status='completed'
                 WHERE program_id=$1
             """, program_id)
 

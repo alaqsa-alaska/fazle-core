@@ -10,7 +10,7 @@ Source business logic: resources/Cash Payment Accountant-Admin.txt
 Flow (Escort Payment):
   Employee sends release slip photo
   → System verifies duty record exists
-  → Calculates expected payment (daily_rate × duty_days - advances)
+  → Calculates expected payment (400tk/day flat rate × duty_days + conveyance - food_bill - advances)
   → Creates payment draft in fazle_payment_drafts
   → Sends draft to admin WhatsApp (suppressed in safe mode)
   → Admin sends PAID <id> <amount> <method>
@@ -97,11 +97,18 @@ async def create_escort_payment_draft(
         if duty_days is None:
             duty_days = 1.0
 
-        # Authoritative settlement:
-        # (basic_salary / 30 * roster duty_days) - food - conveyance -
-        # advances for this escort program in the current payroll month.
-        daily_rate = float(emp.get("basic_salary") or DEFAULT_DAILY_RATE) / 30
-        gross_amount = round(duty_days * daily_rate, 2)
+        # Authoritative settlement (Owner decision, 2026-07-10 -- Formula 1):
+        # escort/vessel-duty pay is a flat, shift-based rate -- 24h (D+N) =
+        # 400tk, 12h (one shift) = 200tk -- independent of the guard's own
+        # basic_salary. duty_days already arrives in these day units (0.5 per
+        # shift; see modules/escort_lifecycle's count_shifts()/shifts_to_days()
+        # call, matching modules/escort_roster/calculations.py::calculate_pay's
+        # identical shift-rate model), so gross = duty_days * 400tk/day.
+        # Conveyance is ADDED to pay (Owner decision), not deducted -- it is a
+        # transport reimbursement paid to the guard, not a cost charged against
+        # their duty pay. Food bill remains a deduction (advance-style
+        # employer-covered expense), unchanged from the prior formula.
+        gross_amount = round(duty_days * DEFAULT_DAILY_RATE, 2)
         food_bill = float(prog.get("food_bill") or 0)
         conveyance = float(prog.get("conveyance") or 0)
 
@@ -118,7 +125,7 @@ async def create_escort_payment_draft(
             employee_id, escort_program_id,
             conn=conn,
         ) or 0.0
-        net_payable = max(gross_amount - food_bill - conveyance - float(advances), 0)
+        net_payable = max(gross_amount - food_bill + conveyance - float(advances), 0)
 
         bkash = emp.get("bkash_number") or emp.get("nagad_number") or "?"
 
