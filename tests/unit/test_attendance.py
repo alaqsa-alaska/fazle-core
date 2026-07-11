@@ -358,6 +358,53 @@ class TestFinalizeAttendanceDraft:
         assert result["ok"] is True
         assert result["employee_id"] == seed_employee["employee_id"]
 
+    async def test_office_assistant_draft_maps_to_message_parser_entry_source(self, test_db_pool, seed_employee):
+        """office_assistant's manually-typed draft (Owner decision, 2026-07-11)
+        gets the same approval-gated entry_source as a parser draft -- both
+        need admin sign-off before counting toward office payroll (see
+        payroll/dry_run.py's OFFICE_PAYROLL_SOURCES)."""
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.attendance import finalize_attendance_draft
+
+        draft_id = await _insert_attendance_draft(
+            test_db_pool,
+            context={"employee_id": seed_employee["employee_id"], "att_date": "2026-05-05", "duty_status": "Half Day"},
+            source_module="office_assistant_manual",
+        )
+        result = await finalize_attendance_draft(draft_id, channel="frontend_review_queue", actor="admin1")
+        assert result["ok"] is True
+
+        async with test_db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, entry_source FROM wbom_attendance WHERE employee_id=$1",
+                seed_employee["employee_id"],
+            )
+        assert row["entry_source"] == "message_parser"
+        assert row["status"] == "Half Day"
+
+    async def test_draft_without_duty_status_still_defaults_to_present(self, test_db_pool, seed_employee):
+        """Backward compatibility: older parser/self-report drafts never
+        carried a duty_status field and always meant a plain presence
+        confirmation -- must keep defaulting to Present."""
+        import app.database as db_module
+        db_module._pool = test_db_pool
+        from modules.attendance import finalize_attendance_draft
+
+        draft_id = await _insert_attendance_draft(
+            test_db_pool,
+            context={"employee_id": seed_employee["employee_id"], "att_date": "2026-05-05", "shift": "D"},
+            source_module="attendance_parser",
+        )
+        result = await finalize_attendance_draft(draft_id, channel="whatsapp_message", actor="admin1")
+        assert result["ok"] is True
+
+        async with test_db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status FROM wbom_attendance WHERE employee_id=$1", seed_employee["employee_id"],
+            )
+        assert row["status"] == "Present"
+
 
 class TestOfficePayrollEligibility:
     """Owner decision 2026-07-10/11: centralized office-staff classification."""

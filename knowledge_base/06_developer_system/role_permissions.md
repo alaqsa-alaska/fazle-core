@@ -26,21 +26,22 @@ View, add, edit, delete/deactivate, merge, verify, and promote unknown roles mus
 ## RBAC Hierarchy (Admin Command System)
 
 ### Purpose
-All 37 WhatsApp admin commands are gated by a five-level role hierarchy. A user must have a role at or above the required level to execute a command.
+All 37 WhatsApp admin commands are gated by a role hierarchy (`fazle_roles`, numeric `level` column). A user must have a role at or above the required level to execute a command.
 
 ### Role Level Order (ascending)
 
 ```
-viewer < operator < accountant < admin < superadmin
+viewer(10) < office_assistant(20) < operator(30) < accountant(50) < admin(70) < superadmin(100)
 ```
 
 | Level | Role | Can Execute |
 |---|---|---|
-| 1 | viewer | Read-only commands: STATUS, DRAFTS, ESCORTLIST, ESCORTDETAIL, REPORT *, PAYROLL LIST, SCHEDULE STATUS, USER LIST, BACKUP STATUS, BACKUP LIST |
-| 2 | operator | Draft management: APPROVE, REJECT, EDIT; Escort: ESCORTCONFIRM, ESCORTCANCEL |
-| 3 | accountant | Payment finalization: PAID, ADVANCE; Payroll: PAYROLL COMPUTE/SUBMIT/APPROVE/LOCK/PAID/CANCEL; BACKUP NOW |
-| 4 | admin | Manual job trigger: RUN JOB |
-| 5 | superadmin | User management: USER ADD, USER ROLE, USER REMOVE, USER APIKEY |
+| 10 | viewer | Read-only commands: STATUS, DRAFTS, ESCORTLIST, ESCORTDETAIL, REPORT *, PAYROLL LIST, SCHEDULE STATUS, USER LIST, BACKUP STATUS, BACKUP LIST |
+| 20 | office_assistant | View attendance list/own records; submit an attendance draft entry only (`attendance_draft_submit`) — no review, approve, edit, or salary/payroll visibility. Formalized migration 043 (Owner decision, 2026-07-11), replacing an ad-hoc name-string check (`_OFFICE_ASSISTANT_NAMES`) previously in `modules/admin_transactions`. |
+| 30 | operator | Draft management: APPROVE, REJECT, EDIT; Escort: ESCORTCONFIRM, ESCORTCANCEL |
+| 50 | accountant | Payment finalization: PAID, ADVANCE; Payroll: PAYROLL COMPUTE/SUBMIT/APPROVE/LOCK/PAID/CANCEL; BACKUP NOW |
+| 70 | admin | Manual job trigger: RUN JOB; approve/edit/delete/reverse actions and salary/payroll visibility across `fazle_payroll_engine` (full endpoint audit, 2026-07-11) |
+| 100 | superadmin | User management: USER ADD, USER ROLE, USER REMOVE, USER APIKEY |
 
 **Business Rule:** A user with role=operator can APPROVE and REJECT drafts but cannot execute PAID or any PAYROLL command. The RBAC check is enforced by `modules/rbac` before any command logic runs.
 

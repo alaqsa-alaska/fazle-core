@@ -35,6 +35,7 @@ from app.config import get_settings as _get_settings
 from modules.escort_roster.routes import _resolve_actor
 
 from .crud import (
+    create_attendance_draft_entry,
     create_manual_attendance,
     delete_manual_attendance,
     get_attendance,
@@ -80,6 +81,23 @@ async def _require_viewer_or_above(key: str = Depends(_API_KEY_HEADER)) -> dict:
     if check.get("allowed"):
         return actor
     raise HTTPException(status_code=403, detail="viewer role or above required")
+
+
+async def _require_office_assistant_or_above(key: str = Depends(_API_KEY_HEADER)) -> dict:
+    """
+    office_assistant or above — for submitting a pending attendance draft
+    entry (never a final row; office_assistant has no approve/edit power).
+    Reuses the real role-level hierarchy (office_assistant=20, above viewer's
+    10, below operator's 30) via modules.rbac, not a name-string check.
+    """
+    actor = await _resolve_actor(key)
+    if actor.get("is_internal"):
+        return actor
+    from modules import rbac
+    check = await rbac.check_permission(api_key=actor.get("api_key"), command="attendance_draft_submit")
+    if check.get("allowed"):
+        return actor
+    raise HTTPException(status_code=403, detail="office_assistant role or above required")
 
 
 def _actor_identity(actor: dict) -> str:
@@ -138,6 +156,23 @@ async def api_get_attendance(attendance_id: int):
 @router.post("/admin/attendance")
 async def api_create_attendance(body: AttendanceCreateIn, actor: dict = Depends(_require_admin_or_above)):
     return await create_manual_attendance(
+        employee_id=body.employee_id,
+        attendance_date=body.attendance_date,
+        duty_status=body.duty_status,
+        remarks=body.remarks,
+        actor=_actor_identity(actor),
+    )
+
+
+@router.post("/admin/attendance/draft")
+async def api_create_attendance_draft(body: AttendanceCreateIn, actor: dict = Depends(_require_office_assistant_or_above)):
+    """
+    office_assistant's entry point — always a PENDING draft, never a final
+    row (office_assistant has no approve/edit power). Admin/superadmin must
+    approve it via the existing Review Queue (finalize_attendance_draft),
+    same as a WhatsApp-parsed attendance draft.
+    """
+    return await create_attendance_draft_entry(
         employee_id=body.employee_id,
         attendance_date=body.attendance_date,
         duty_status=body.duty_status,

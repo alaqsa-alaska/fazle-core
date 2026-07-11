@@ -130,6 +130,67 @@ async def delete_manual_attendance(attendance_id: int, actor: str) -> dict:
     return dict(existing)
 
 
+async def create_attendance_draft_entry(
+    employee_id: int,
+    attendance_date: date,
+    duty_status: str,
+    remarks: Optional[str],
+    actor: str,
+) -> dict:
+    """
+    office_assistant's manual entry — creates a PENDING draft, never a final
+    wbom_attendance row directly (Owner decision: office_assistant has no
+    approve/edit power). An admin/superadmin must approve it via the
+    existing shared finalize_attendance_draft() service (same path already
+    used for WhatsApp APPROVE and the frontend Review Queue), which is what
+    actually writes wbom_attendance with entry_source='message_parser'
+    (approval-gated office payroll — see modules.attendance's
+    finalize_attendance_draft docstring for why office_assistant_manual maps
+    to that entry_source, not a new one).
+    """
+    import json as _json
+
+    emp = await _validate_employee(employee_id)
+    derive_duty_days(duty_status)
+
+    context = _json.dumps({
+        "employee_id": employee_id,
+        "att_date": attendance_date.isoformat(),
+        "duty_status": duty_status,
+    })
+    meta = _json.dumps({
+        "role": "office_assistant",
+        "context": context,
+        "source_module": "office_assistant_manual",
+    })
+    draft_text = (
+        f"Attendance draft: {emp.get('employee_name')} (#{employee_id}) "
+        f"{attendance_date.isoformat()} — {duty_status}"
+    )
+    row = await fetch_one(
+        """
+        INSERT INTO fazle_draft_replies
+            (source, recipient, reply_text, intent, draft_only, status, draft_type, meta)
+        VALUES ('office_assistant', $1, $2, 'attendance', true, 'pending', 'attendance', $3::jsonb)
+        RETURNING id, status, created_at
+        """,
+        actor, draft_text, meta,
+    )
+    log.info(
+        f"[attendance-crud] draft created id={row['id']} emp={employee_id} "
+        f"date={attendance_date} status={duty_status} actor={actor} — pending admin approval"
+    )
+    return {
+        "draft_id": row["id"],
+        "status": row["status"],
+        "employee_id": employee_id,
+        "employee_name": emp.get("employee_name"),
+        "attendance_date": attendance_date,
+        "duty_status": duty_status,
+        "created_at": row["created_at"],
+    }
+
+
 async def get_attendance(attendance_id: int) -> Optional[dict]:
     row = await fetch_one(
         """SELECT a.*, e.employee_name, e.designation

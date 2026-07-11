@@ -14,7 +14,7 @@ class TestCommandRoleMapping:
     def test_command_roles_are_valid(self):
         from modules.rbac import COMMAND_ROLE
 
-        valid_roles = {"viewer", "operator", "accountant", "admin", "superadmin"}
+        valid_roles = {"viewer", "office_assistant", "operator", "accountant", "admin", "superadmin"}
         for cmd, role in COMMAND_ROLE.items():
             assert role in valid_roles, f"Command '{cmd}' has invalid role '{role}'"
 

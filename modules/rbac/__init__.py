@@ -45,6 +45,8 @@ COMMAND_ROLE: dict[str, str] = {
     "backup_status":       "viewer",
     "backup_list":         "viewer",
     "payroll_list":        "viewer",
+    # office_assistant (view attendance list/own records + create draft entries only)
+    "attendance_draft_submit": "office_assistant",
     # operator
     "approve":             "operator",
     "reject":              "operator",

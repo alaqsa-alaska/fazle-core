@@ -77,6 +77,71 @@ class TestCreateManualAttendance:
         assert exc.value.status_code == 400
 
 
+class TestCreateAttendanceDraftEntry:
+    """office_assistant's entry point (Owner decision, 2026-07-11) — always a
+    PENDING draft, never a final wbom_attendance row (no approve/edit power)."""
+
+    async def test_creates_pending_draft_not_final_row(self, test_db_pool, seed_employee):
+        _use_pool(test_db_pool)
+        from modules.attendance.crud import create_attendance_draft_entry
+
+        result = await create_attendance_draft_entry(
+            seed_employee["employee_id"], date(2026, 5, 6), "Present", "office_assistant note", "officeassistant01",
+        )
+        assert result["status"] == "pending"
+        assert result["employee_id"] == seed_employee["employee_id"]
+        assert result["duty_status"] == "Present"
+
+        async with test_db_pool.acquire() as conn:
+            wbom_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM wbom_attendance WHERE employee_id=$1", seed_employee["employee_id"],
+            )
+            draft = await conn.fetchrow(
+                "SELECT intent, status, draft_only, meta FROM fazle_draft_replies WHERE id=$1",
+                result["draft_id"],
+            )
+        assert wbom_count == 0, "Draft creation must never write a final attendance row directly"
+        assert draft["intent"] == "attendance"
+        assert draft["status"] == "pending"
+        assert draft["draft_only"] is True
+
+    async def test_draft_meta_shape_is_compatible_with_finalize(self, test_db_pool, seed_employee):
+        """The created draft must be finalizable by the existing shared
+        service without any special-casing on the read side."""
+        _use_pool(test_db_pool)
+        from modules.attendance.crud import create_attendance_draft_entry
+        from modules.attendance import finalize_attendance_draft
+
+        created = await create_attendance_draft_entry(
+            seed_employee["employee_id"], date(2026, 5, 7), "Absent", None, "officeassistant02",
+        )
+        result = await finalize_attendance_draft(
+            created["draft_id"], channel="frontend_review_queue", actor="admin1",
+        )
+        assert result["ok"] is True
+        assert result["employee_id"] == seed_employee["employee_id"]
+
+    async def test_invalid_duty_status_rejected(self, test_db_pool, seed_employee):
+        _use_pool(test_db_pool)
+        from fastapi import HTTPException
+        from modules.attendance.crud import create_attendance_draft_entry
+
+        with pytest.raises(HTTPException) as exc:
+            await create_attendance_draft_entry(
+                seed_employee["employee_id"], date(2026, 5, 6), "Not A Real Status", None, "officeassistant01",
+            )
+        assert exc.value.status_code == 400
+
+    async def test_invalid_employee_rejected(self, test_db_pool):
+        _use_pool(test_db_pool)
+        from fastapi import HTTPException
+        from modules.attendance.crud import create_attendance_draft_entry
+
+        with pytest.raises(HTTPException) as exc:
+            await create_attendance_draft_entry(999999, date(2026, 5, 6), "Present", None, "officeassistant01")
+        assert exc.value.status_code == 400
+
+
 class TestUpdateManualAttendance:
     async def test_edit_updates_status_and_audit_fields(self, test_db_pool, seed_employee):
         _use_pool(test_db_pool)
@@ -257,4 +322,55 @@ class TestAttendanceViewerOrAbove:
             return_value={"is_internal": True, "roles": ["owner", "superadmin"]},
         ):
             actor = await _require_viewer_or_above("internal-key")
+        assert actor["is_internal"] is True
+
+
+class TestAttendanceOfficeAssistantOrAbove:
+    """
+    office_assistant is a real RBAC role (fazle_roles, migration 043,
+    level 20 -- above viewer's 10, below operator's 30), used only to gate
+    the draft-entry submission endpoint. This replaces the old ad-hoc
+    name-string check (_OFFICE_ASSISTANT_NAMES) that used to live in
+    modules.admin_transactions.
+    """
+
+    async def test_viewer_role_rejected(self):
+        from unittest.mock import patch, AsyncMock
+        from fastapi import HTTPException
+        from modules.attendance.routes import _require_office_assistant_or_above
+
+        with patch(
+            "modules.attendance.routes._resolve_actor",
+            return_value={"is_internal": False, "roles": ["viewer"], "api_key": "fake-viewer-key"},
+        ), patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": False}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _require_office_assistant_or_above("fake-viewer-key")
+        assert exc.value.status_code == 403
+
+    async def test_office_assistant_role_accepted(self):
+        from unittest.mock import patch, AsyncMock
+        from modules.attendance.routes import _require_office_assistant_or_above
+
+        with patch(
+            "modules.attendance.routes._resolve_actor",
+            return_value={"is_internal": False, "roles": ["office_assistant"], "api_key": "fake-oa-key"},
+        ), patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": True}),
+        ):
+            actor = await _require_office_assistant_or_above("fake-oa-key")
+        assert actor["roles"] == ["office_assistant"]
+
+    async def test_internal_key_accepted(self):
+        from unittest.mock import patch
+        from modules.attendance.routes import _require_office_assistant_or_above
+
+        with patch(
+            "modules.attendance.routes._resolve_actor",
+            return_value={"is_internal": True, "roles": ["owner", "superadmin"]},
+        ):
+            actor = await _require_office_assistant_or_above("internal-key")
         assert actor["is_internal"] is True

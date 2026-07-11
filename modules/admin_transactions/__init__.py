@@ -64,15 +64,8 @@ async def _require_api_key(key: str = Depends(_API_KEY_HEADER)):
     raise HTTPException(status_code=403, detail="Unauthorized")
 
 
-_OFFICE_ASSISTANT_NAMES = {"officeassistant01", "officeassistant02"}
-
-
 def _normalize_identity(value: Optional[str]) -> str:
     return str(value or "").strip().lower()
-
-
-def _is_restricted_office_assistant_name(name: Optional[str]) -> bool:
-    return _normalize_identity(name) in _OFFICE_ASSISTANT_NAMES
 
 
 async def _get_actor_context(api_key: str) -> dict:
@@ -133,7 +126,11 @@ async def _get_actor_context(api_key: str) -> dict:
         can_change_role = await rbac.check_permission(api_key=api_key, command="user_role")
         can_deactivate_user = await rbac.check_permission(api_key=api_key, command="user_remove")
         can_reset_login = await rbac.check_permission(api_key=api_key, command="user_apikey")
-        is_restricted_office_assistant = _is_restricted_office_assistant_name(admin.get("name"))
+        # office_assistant is now a formal role (fazle_roles, migration 043)
+        # instead of a name-string match; the "edit" command already requires
+        # operator+ (level 30 > office_assistant's 20), so can_edit naturally
+        # excludes office_assistant without any special-casing here.
+        is_restricted_office_assistant = "office_assistant" in normalized_roles
         return {
             "id": admin.get("id"),
             "name": admin.get("name") or "",
@@ -144,7 +141,7 @@ async def _get_actor_context(api_key: str) -> dict:
             "normalized_roles": normalized_roles,
             "is_restricted_office_assistant": is_restricted_office_assistant,
             "can_manage_admin": can_manage_admin,
-            "can_edit_delete_transactions": bool(can_edit.get("allowed")) and not is_restricted_office_assistant,
+            "can_edit_delete_transactions": bool(can_edit.get("allowed")),
             "permissions": {
                 "can_view_admin_users": bool(can_view_users.get("allowed")),
                 "can_add_user": bool(can_add_user.get("allowed")),

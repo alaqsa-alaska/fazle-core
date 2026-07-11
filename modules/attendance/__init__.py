@@ -385,12 +385,28 @@ async def finalize_attendance_draft(
                 except Exception:
                     raw_meta = {}
             source_module = (raw_meta or {}).get("source_module") or ""
-            entry_source = "message_parser" if source_module == "attendance_parser" else "whatsapp_escort"
+            # office_assistant_manual: an office_assistant's manually-typed draft
+            # entry, pending admin approval -- same "needs review before it
+            # counts" semantics as a message-parser draft, so it maps to the
+            # same entry_source (payroll/dry_run.py's OFFICE_PAYROLL_SOURCES
+            # already reads message_parser as approval-gated office payroll).
+            entry_source = (
+                "message_parser"
+                if source_module in ("attendance_parser", "office_assistant_manual")
+                else "whatsapp_escort"
+            )
+
+            # duty_status: office_assistant drafts carry an explicit choice
+            # (Present/Half Day/Absent); older parser/self-report drafts have
+            # no such field and always meant a simple presence confirmation.
+            from .crud import DUTY_STATUS_VALUES
+            draft_status = fields.get("duty_status")
+            status = draft_status if draft_status in DUTY_STATUS_VALUES else "Present"
 
             saved = await save_attendance(
                 employee_id=emp["employee_id"],
                 attendance_date=att_date,
-                status="Present",
+                status=status,
                 location="",
                 recorded_by=actor,
                 remarks=f"Shift:{shift} — approved via {channel}, draft #{draft_id}",
