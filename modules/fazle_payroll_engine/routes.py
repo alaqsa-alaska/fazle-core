@@ -97,6 +97,46 @@ async def _require_admin_role(key: str = Depends(_API_KEY_HEADER)) -> str:
     raise HTTPException(status_code=403, detail="admin or superadmin required")
 
 
+async def _require_viewer_or_above(key: str = Depends(_API_KEY_HEADER)) -> str:
+    """Read-only listing/detail endpoints (no salary figures) — any real role
+    (viewer/operator/accountant/admin/superadmin), not just "any active
+    admin account" (_require_api_key's weaker bar)."""
+    settings = get_settings()
+    if key and key == settings.internal_api_key:
+        return key
+    from modules import rbac
+    check = await rbac.check_permission(api_key=key or "", command="status")
+    if check.get("allowed"):
+        return key
+    raise HTTPException(status_code=403, detail="viewer role or above required")
+
+
+async def _require_operator_or_above(key: str = Depends(_API_KEY_HEADER)) -> str:
+    """Submit/draft actions that create a pending row without touching the
+    ledger (e.g. operator submissions) — operator/accountant/admin/superadmin."""
+    settings = get_settings()
+    if key and key == settings.internal_api_key:
+        return key
+    from modules import rbac
+    check = await rbac.check_permission(api_key=key or "", command="approve")
+    if check.get("allowed"):
+        return key
+    raise HTTPException(status_code=403, detail="operator role or above required")
+
+
+async def _require_accountant_or_above(key: str = Depends(_API_KEY_HEADER)) -> str:
+    """Payment-review actions that flag/annotate but don't post to the ledger
+    (e.g. marking an unmatched message reviewed) — accountant/admin/superadmin."""
+    settings = get_settings()
+    if key and key == settings.internal_api_key:
+        return key
+    from modules import rbac
+    check = await rbac.check_permission(api_key=key or "", command="payimport")
+    if check.get("allowed"):
+        return key
+    raise HTTPException(status_code=403, detail="accountant role or above required")
+
+
 def _review_queue_candidate_sql(alias: str = "u") -> str:
     """
     Rows eligible for the accounting review queue.
@@ -301,7 +341,7 @@ async def ingest(req: IngestionRequest):
 
 # ── Transactions ──────────────────────────────────────────────────────────────
 
-@router.get("/transactions", dependencies=[Depends(_require_api_key)])
+@router.get("/transactions", dependencies=[Depends(_require_viewer_or_above)])
 async def list_transactions(
     employee_id: Optional[int] = Query(None),
     period: Optional[str] = Query(None, description="YYYY-MM"),
@@ -423,7 +463,7 @@ async def list_transactions(
     }
 
 
-@router.get("/transactions/{txn_id}", dependencies=[Depends(_require_api_key)])
+@router.get("/transactions/{txn_id}", dependencies=[Depends(_require_viewer_or_above)])
 async def get_transaction(txn_id: int):
     row = await fetch_one(
         """
@@ -450,7 +490,7 @@ async def get_transaction(txn_id: int):
     return dict(row)
 
 
-@router.post("/transactions/{txn_id}/reverse", dependencies=[Depends(_require_api_key)])
+@router.post("/transactions/{txn_id}/reverse", dependencies=[Depends(_require_admin_role)])
 async def reverse_txn(txn_id: int, req: ReversalRequest):
     try:
         txn = await reverse_transaction(txn_id, req.reason, req.created_by)
@@ -459,7 +499,7 @@ async def reverse_txn(txn_id: int, req: ReversalRequest):
     return {"status": "reversed", "reversal": txn.model_dump()}
 
 
-@router.post("/transactions/manual", dependencies=[Depends(_require_api_key)])
+@router.post("/transactions/manual", dependencies=[Depends(_require_admin_role)])
 async def create_manual_txn(req: ManualTxnRequest):
     emp = await fetch_one(
         "SELECT id, status FROM fpe_employees WHERE id = $1",
@@ -513,7 +553,7 @@ def _pick_best_name(*candidates: Optional[str]) -> Optional[str]:
     return valid[0]
 
 
-@router.get("/employees", dependencies=[Depends(_require_api_key)])
+@router.get("/employees", dependencies=[Depends(_require_admin_role)])
 async def list_employees(
     status: str = Query("active"),
     q: Optional[str] = Query(None, description="search by name / phone / id_phone"),
@@ -674,7 +714,7 @@ async def list_employees(
     }
 
 
-@router.post("/employees", dependencies=[Depends(_require_api_key)])
+@router.post("/employees", dependencies=[Depends(_require_admin_role)])
 async def create_employee(payload: dict):
     """Create a new FPE employee from the protected payroll SPA."""
     try:
@@ -689,7 +729,7 @@ async def create_employee(payload: dict):
     return {"status": "created", "employee": employee}
 
 
-@router.get("/employees/search", dependencies=[Depends(_require_api_key)])
+@router.get("/employees/search", dependencies=[Depends(_require_viewer_or_above)])
 async def search_employees(
     q: str = Query(..., min_length=1, max_length=100),
     limit: int = Query(20, ge=1, le=50),
@@ -806,7 +846,7 @@ async def search_employees(
 
 
 # ── Type-Ahead Suggest (READ-ONLY, fuzzy, alias-aware) ────────────────────────
-@router.get("/employees/suggest", dependencies=[Depends(_require_api_key)])
+@router.get("/employees/suggest", dependencies=[Depends(_require_viewer_or_above)])
 async def suggest_employees(
     q: str = Query(..., min_length=1, max_length=80),
     limit: int = Query(8, ge=1, le=20),
@@ -1164,7 +1204,7 @@ async def suggest_employees(
     }
 
 
-@router.get("/employees/{emp_id}", dependencies=[Depends(_require_api_key)])
+@router.get("/employees/{emp_id}", dependencies=[Depends(_require_admin_role)])
 async def get_employee(emp_id: int):
     emp = await fetch_one("SELECT * FROM fpe_employees WHERE id = $1", emp_id)
     if not emp:
@@ -1234,7 +1274,7 @@ async def get_employee(emp_id: int):
     }
 
 
-@router.patch("/employees/{emp_id}", dependencies=[Depends(_require_api_key)])
+@router.patch("/employees/{emp_id}", dependencies=[Depends(_require_admin_role)])
 async def update_employee(emp_id: int, payload: dict):
     """Edit employee profile metadata (mutable) with safe canonical merge.
 
@@ -1413,7 +1453,7 @@ async def _collect_canonical_profile(canon_id: int) -> Optional[dict]:
     }
 
 
-@router.get("/employees/{emp_id}/transactions", dependencies=[Depends(_require_api_key)])
+@router.get("/employees/{emp_id}/transactions", dependencies=[Depends(_require_viewer_or_above)])
 async def employee_transaction_history(
     emp_id: int,
     page: int = Query(1, ge=1),
@@ -1547,7 +1587,7 @@ async def employee_transaction_history(
 
 # ── Ledger ────────────────────────────────────────────────────────────────────
 
-@router.get("/ledger/{emp_id}", dependencies=[Depends(_require_api_key)])
+@router.get("/ledger/{emp_id}", dependencies=[Depends(_require_viewer_or_above)])
 async def get_ledger(emp_id: int, periods: int = Query(12, le=36)):
     rows = await fetch_all(
         """
@@ -1565,7 +1605,7 @@ async def get_ledger(emp_id: int, periods: int = Query(12, le=36)):
 
 # ── Unmatched messages ────────────────────────────────────────────────────────
 
-@router.get("/unmatched", dependencies=[Depends(_require_api_key)])
+@router.get("/unmatched", dependencies=[Depends(_require_viewer_or_above)])
 async def list_unmatched(reviewed: bool = Query(False), limit: int = Query(50, le=200)):
     await _cleanup_stale_review_queue_rows()
     rows = await fetch_all(
@@ -1583,7 +1623,7 @@ async def list_unmatched(reviewed: bool = Query(False), limit: int = Query(50, l
     return {"unmatched": [dict(r) for r in rows]}
 
 
-@router.post("/unmatched/{unmatched_id}/mark-reviewed", dependencies=[Depends(_require_api_key)])
+@router.post("/unmatched/{unmatched_id}/mark-reviewed", dependencies=[Depends(_require_accountant_or_above)])
 async def mark_reviewed(unmatched_id: int):
     await execute(
         "UPDATE fpe_unmatched_messages SET reviewed=TRUE, reviewed_at=NOW() WHERE id=$1",
@@ -1594,7 +1634,7 @@ async def mark_reviewed(unmatched_id: int):
 
 # ── Sync ──────────────────────────────────────────────────────────────────────
 
-@router.get("/sync/status", dependencies=[Depends(_require_api_key)])
+@router.get("/sync/status", dependencies=[Depends(_require_viewer_or_above)])
 async def sync_status():
     rows = await fetch_all(
         """
@@ -1607,7 +1647,7 @@ async def sync_status():
     return {"checkpoints": [dict(r) for r in rows]}
 
 
-@router.post("/sync/trigger", dependencies=[Depends(_require_api_key)])
+@router.post("/sync/trigger", dependencies=[Depends(_require_admin_role)])
 async def trigger_sync(chat_jids: Optional[list[str]] = None):
     """Trigger an immediate historical sync pass (runs in the background)."""
     import asyncio
@@ -1625,7 +1665,7 @@ async def trigger_sync(chat_jids: Optional[list[str]] = None):
 
 # ── Pipeline stats ────────────────────────────────────────────────────────────
 
-@router.get("/stats", dependencies=[Depends(_require_api_key)])
+@router.get("/stats", dependencies=[Depends(_require_viewer_or_above)])
 async def pipeline_stats():
     status_counts = await fetch_all(
         """
@@ -1652,13 +1692,13 @@ async def pipeline_stats():
 
 # ── Safe identity normalization ──────────────────────────────────────────────
 
-@router.get("/normalization/summary", dependencies=[Depends(_require_api_key)])
+@router.get("/normalization/summary", dependencies=[Depends(_require_viewer_or_above)])
 async def normalization_summary_route():
     from .normalization import normalization_summary
     return await normalization_summary()
 
 
-@router.get("/normalization/review", dependencies=[Depends(_require_api_key)])
+@router.get("/normalization/review", dependencies=[Depends(_require_viewer_or_above)])
 async def normalization_review_list(limit: int = Query(100, ge=1, le=500)):
     from .normalization import list_pending_reviews
     return {"reviews": await list_pending_reviews(limit=limit)}
@@ -1666,7 +1706,7 @@ async def normalization_review_list(limit: int = Query(100, ge=1, le=500)):
 
 @router.post(
     "/normalization/review/{review_id}/resolve",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_admin_role)],
 )
 async def normalization_review_resolve(
     review_id: int,
@@ -1683,7 +1723,7 @@ async def normalization_review_resolve(
 
 @router.post(
     "/normalization/employees/{employee_id}/link-canonical",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_admin_role)],
 )
 async def normalization_link_canonical(
     employee_id: int,
@@ -1707,7 +1747,7 @@ async def normalization_link_canonical(
 
 @router.post(
     "/normalization/employees/{employee_id}/aliases",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_admin_role)],
 )
 async def normalization_add_alias(
     employee_id: int,
@@ -1723,7 +1763,7 @@ async def normalization_add_alias(
 
 @router.post(
     "/normalization/employees/{employee_id}/inactivate",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_admin_role)],
 )
 async def normalization_inactivate(
     employee_id: int,
@@ -1739,7 +1779,7 @@ async def normalization_inactivate(
 
 @router.get(
     "/normalization/employees/{employee_id}/canonical",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_viewer_or_above)],
 )
 async def normalization_canonical(employee_id: int):
     from .normalization import resolve_to_canonical
@@ -1792,7 +1832,7 @@ async def _audit_log(
         log.warning("[fpe.audit] failed to log %s by=%s: %s", action, actor, exc)
 
 
-@router.get("/admin/reconcile", dependencies=[Depends(_require_api_key)])
+@router.get("/admin/reconcile", dependencies=[Depends(_require_viewer_or_above)])
 async def admin_reconcile(
     period: Optional[str] = Query(None, regex=r"^\d{4}-\d{2}$"),
     source: Optional[str] = Query(None, regex=r"^(bridge1|bridge2|meta)$"),
@@ -1802,7 +1842,7 @@ async def admin_reconcile(
     return await compute_reconciliation(period=period, source=source)
 
 
-@router.get("/admin/needs-review", dependencies=[Depends(_require_api_key)])
+@router.get("/admin/needs-review", dependencies=[Depends(_require_viewer_or_above)])
 async def admin_needs_review(
     status: str = Query("pending", regex="^(pending|promoted|dismissed|duplicate)$"),
     reason: Optional[str] = Query(None),
@@ -2102,7 +2142,7 @@ async def admin_needs_review_dismiss(
     return {"status": new_status, "unmatched_id": unmatched_id}
 
 
-@router.get("/admin/dlq", dependencies=[Depends(_require_api_key)])
+@router.get("/admin/dlq", dependencies=[Depends(_require_viewer_or_above)])
 async def admin_dlq(limit: int = Query(50, ge=1, le=500)):
     """Dead-letter queue — messages the worker has stopped retrying."""
     rows = await fetch_all(
@@ -2176,7 +2216,7 @@ async def admin_dlq_requeue(
     }
 
 
-@router.post("/admin/gap-scan/trigger", dependencies=[Depends(_require_api_key)])
+@router.post("/admin/gap-scan/trigger", dependencies=[Depends(_require_admin_role)])
 async def admin_gap_scan_trigger(chat_jids: Optional[list[str]] = None):
     """Run an immediate ID-based gap scan across all bridges."""
     runs = await run_gap_scan_once(chat_jids)
@@ -2190,7 +2230,7 @@ async def admin_gap_scan_trigger(chat_jids: Optional[list[str]] = None):
     }
 
 
-@router.get("/admin/gap-scan/runs", dependencies=[Depends(_require_api_key)])
+@router.get("/admin/gap-scan/runs", dependencies=[Depends(_require_viewer_or_above)])
 async def admin_gap_scan_runs(limit: int = Query(50, ge=1, le=500)):
     rows = await fetch_all(
         """
@@ -2206,7 +2246,7 @@ async def admin_gap_scan_runs(limit: int = Query(50, ge=1, le=500)):
     return {"runs": [dict(r) for r in rows]}
 
 
-@router.get("/admin/review-summary", dependencies=[Depends(_require_api_key)])
+@router.get("/admin/review-summary", dependencies=[Depends(_require_viewer_or_above)])
 async def admin_review_summary():
     """Dashboard cards for /payroll/review."""
     await _cleanup_stale_review_queue_rows()
@@ -2314,7 +2354,7 @@ async def admin_apply_uniform_salary(payload: dict):
     }
 
 
-@router.get("/admin/audit", dependencies=[Depends(_require_api_key)])
+@router.get("/admin/audit", dependencies=[Depends(_require_admin_role)])
 async def admin_audit_list(
     review_item_id: Optional[int] = Query(None),
     action: Optional[str] = Query(None),
@@ -2351,7 +2391,7 @@ async def admin_audit_list(
 
 # ── Cash Transactions (dashboard view) ───────────────────────────────────────
 
-@router.get("/cash", dependencies=[Depends(_require_api_key)])
+@router.get("/cash", dependencies=[Depends(_require_viewer_or_above)])
 async def list_cash_transactions(
     employee_id: Optional[int] = Query(None),
     q: Optional[str] = Query(None, description="Search by name, phone, sender, or ref"),
@@ -2445,7 +2485,7 @@ async def list_cash_transactions(
     }
 
 
-@router.get("/cash/{txn_id}", dependencies=[Depends(_require_api_key)])
+@router.get("/cash/{txn_id}", dependencies=[Depends(_require_viewer_or_above)])
 async def get_cash_transaction(txn_id: int):
     """Get a single cash transaction with full employee detail."""
     row = await fetch_one(
@@ -2467,7 +2507,7 @@ async def get_cash_transaction(txn_id: int):
 
 # ── Shorthand / Staging Payments ─────────────────────────────────────────────
 
-@router.get("/staging-payments", dependencies=[Depends(_require_api_key)])
+@router.get("/staging-payments", dependencies=[Depends(_require_viewer_or_above)])
 async def list_staging_payments(
     status: Optional[str] = Query(None, description="pending|auto_approved|unmatched"),
     q: Optional[str] = Query(None, description="Search by name or mobile"),
@@ -2539,7 +2579,7 @@ async def list_staging_payments(
 
 # ── Income Transactions ───────────────────────────────────────────────────────
 
-@router.get("/income", dependencies=[Depends(_require_api_key)])
+@router.get("/income", dependencies=[Depends(_require_viewer_or_above)])
 async def list_income_transactions(
     employee_id: Optional[int] = Query(None),
     q: Optional[str] = Query(None, description="Search by name, phone, ref, or message"),
@@ -2647,7 +2687,7 @@ async def list_income_transactions(
     }
 
 
-@router.get("/income/{income_id}", dependencies=[Depends(_require_api_key)])
+@router.get("/income/{income_id}", dependencies=[Depends(_require_viewer_or_above)])
 async def get_income_transaction(income_id: int):
     """Get a single income transaction with full detail."""
     row = await fetch_one(
@@ -2669,7 +2709,7 @@ async def get_income_transaction(income_id: int):
     return dict(row)
 
 
-@router.post("/income", dependencies=[Depends(_require_api_key)])
+@router.post("/income", dependencies=[Depends(_require_admin_role)])
 async def create_income_transaction(req: IncomeCreateRequest):
     """Manually create an income transaction using existing table columns."""
     # Validate date format
@@ -2841,7 +2881,7 @@ class OperatorSubmitRequest(_BM):
     notes: Optional[str] = None
 
 
-@router.post("/operator/submit", dependencies=[Depends(_require_api_key)])
+@router.post("/operator/submit", dependencies=[Depends(_require_operator_or_above)])
 async def operator_submit(req: OperatorSubmitRequest):
     """
     Operator submits a pending transaction entry.
@@ -2972,7 +3012,7 @@ async def operator_submit(req: OperatorSubmitRequest):
     }
 
 
-@router.get("/operator/pending", dependencies=[Depends(_require_api_key)])
+@router.get("/operator/pending", dependencies=[Depends(_require_viewer_or_above)])
 async def operator_pending_list(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -3006,7 +3046,7 @@ async def operator_pending_list(
     }
 
 
-@router.post("/operator/{pending_id}/approve", dependencies=[Depends(_require_api_key)])
+@router.post("/operator/{pending_id}/approve", dependencies=[Depends(_require_admin_role)])
 async def operator_approve(
     pending_id: int,
     employee_id: int = Query(..., gt=0),
@@ -3158,7 +3198,7 @@ async def operator_approve(
     }
 
 
-@router.post("/operator/{pending_id}/reject", dependencies=[Depends(_require_api_key)])
+@router.post("/operator/{pending_id}/reject", dependencies=[Depends(_require_admin_role)])
 async def operator_reject(
     pending_id: int,
     reviewer: str = Query(..., min_length=1, max_length=128),

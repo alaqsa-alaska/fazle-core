@@ -498,3 +498,111 @@ class TestRequireAdminRole:
         internal_key = get_settings().internal_api_key
         result = await _require_admin_role(internal_key)
         assert result == internal_key
+
+
+class TestFazlePayrollEngineTierGates:
+    """
+    Full RBAC audit of fazle_payroll_engine/routes.py: read-only listing ->
+    viewer, operator submissions -> operator, payment-review annotations ->
+    accountant, approve/edit/delete/salary -> admin. Each gate reuses the
+    existing rbac.check_permission level hierarchy (viewer=10 < operator=30
+    < accountant=50 < admin=70 <= superadmin=100), not a hand-rolled role list.
+    """
+
+    async def test_viewer_gate_rejects_below_viewer(self):
+        from fastapi import HTTPException
+        from modules.fazle_payroll_engine.routes import _require_viewer_or_above
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": False}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _require_viewer_or_above("fake-key")
+        assert exc.value.status_code == 403
+
+    async def test_viewer_gate_accepts_viewer(self):
+        from modules.fazle_payroll_engine.routes import _require_viewer_or_above
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": True}),
+        ):
+            result = await _require_viewer_or_above("fake-viewer-key")
+        assert result == "fake-viewer-key"
+
+    async def test_operator_gate_rejects_viewer_only(self):
+        from fastapi import HTTPException
+        from modules.fazle_payroll_engine.routes import _require_operator_or_above
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": False}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _require_operator_or_above("fake-viewer-key")
+        assert exc.value.status_code == 403
+
+    async def test_operator_gate_accepts_operator(self):
+        from modules.fazle_payroll_engine.routes import _require_operator_or_above
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": True}),
+        ):
+            result = await _require_operator_or_above("fake-operator-key")
+        assert result == "fake-operator-key"
+
+    async def test_accountant_gate_rejects_operator_only(self):
+        from fastapi import HTTPException
+        from modules.fazle_payroll_engine.routes import _require_accountant_or_above
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": False}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _require_accountant_or_above("fake-operator-key")
+        assert exc.value.status_code == 403
+
+    async def test_accountant_gate_accepts_accountant(self):
+        from modules.fazle_payroll_engine.routes import _require_accountant_or_above
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": True}),
+        ):
+            result = await _require_accountant_or_above("fake-accountant-key")
+        assert result == "fake-accountant-key"
+
+    async def test_all_three_gates_accept_internal_key(self):
+        from app.config import get_settings
+        from modules.fazle_payroll_engine.routes import (
+            _require_viewer_or_above,
+            _require_operator_or_above,
+            _require_accountant_or_above,
+        )
+
+        internal_key = get_settings().internal_api_key
+        for gate in (_require_viewer_or_above, _require_operator_or_above, _require_accountant_or_above):
+            assert await gate(internal_key) == internal_key
+
+    async def test_only_ingest_remains_on_weak_gate(self):
+        """
+        /ingest is a system/webhook endpoint (bridge infrastructure posting
+        messages), not a human RBAC action -- it's the sole deliberate
+        exception left on _require_api_key (any active admin account, no
+        role-level check) after the full endpoint audit.
+        """
+        import inspect
+        from modules.fazle_payroll_engine import routes as fpe_routes
+
+        source = inspect.getsource(fpe_routes)
+        # Every dependencies=[Depends(_require_api_key)] left in the file
+        # must be immediately followed by the /ingest route registration.
+        import re
+        for m in re.finditer(r'dependencies=\[Depends\(_require_api_key\)\]', source):
+            line_start = source.rfind("\n", 0, m.start()) + 1
+            line_end = source.find("\n", m.end())
+            line = source[line_start:line_end]
+            assert '"/ingest"' in line, f"unexpected weak gate: {line}"
