@@ -323,8 +323,8 @@ async def _lookup_contact(phone: str) -> Optional[dict]:
         return None
     row = await fetch_one(
         """SELECT c.contact_id,
-                  c.contact_name AS display_name,
-                  COALESCE(c.contact_type, 'repeat_client') AS relation_name
+                  c.display_name,
+                  COALESCE(c.relation, 'repeat_client') AS relation_name
               FROM wbom_contacts c
               WHERE c.whatsapp_number = ANY($1)
            ORDER BY c.contact_id DESC
