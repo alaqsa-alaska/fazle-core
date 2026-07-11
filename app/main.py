@@ -1068,6 +1068,28 @@ async def rag_rebuild(_key: str = Depends(require_api_key)):
     """
     try:
         from modules import rag
+
+        # Idempotency guard (2026-07-11): a rebuild trigger fired while a
+        # previous one was still mid-embed used to queue silently behind the
+        # same lock and re-run the entire ~30+ min pass a second time for no
+        # reason — this is what caused the extended live-verification delay
+        # during Phase 6. Refuse instead of queuing.
+        if rag.is_rebuilding():
+            return {
+                "status": "skipped",
+                "reason": "rebuild_in_progress",
+                "message": "Rebuild চলছে। শেষ হলে আবার চেষ্টা করুন।",
+                "ts": time.time(),
+            }
+        _age = rag.last_built_seconds_ago()
+        if _age is not None and _age < 600:
+            return {
+                "status": "skipped",
+                "reason": f"index_fresh_{int(_age)}s_old",
+                "message": f"Index {int(_age)}s আগে build হয়েছে। প্রয়োজন নেই।",
+                "ts": time.time(),
+            }
+
         qdrant_before = await rag.qdrant_status()
         stats = await rag.rebuild_index()
         qdrant_after = await rag.qdrant_status()

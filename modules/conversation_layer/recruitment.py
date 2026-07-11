@@ -27,7 +27,7 @@ async def _safe_kb_reply(text: str, intent: str = "recruitment") -> str | None:
 async def _safe_rag_context(text: str) -> tuple[str | None, list[dict[str, Any]]]:
     try:
         from modules import rag
-        result = await rag.answer(text, k=2, min_score=2.0)
+        result = await rag.safe_answer(text, k=2, min_score=2.0)
         if not result:
             return None, []
         return result.get("answer"), result.get("citations") or []

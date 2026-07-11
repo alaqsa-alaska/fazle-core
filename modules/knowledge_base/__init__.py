@@ -253,7 +253,7 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
         try:
             from modules import rag
             from app.ollama import generate_reply as _llm_reply
-            res = await rag.answer(text, k=2, min_score=4.0)
+            res = await rag.safe_answer(text, k=2, min_score=4.0)
             if res and res.get("top_score", 0) >= 4.0:
                 raw_context = res.get("answer", "")
                 _POISON_PATTERNS = (

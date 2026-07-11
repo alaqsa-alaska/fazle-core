@@ -805,7 +805,7 @@ async def process_message(
     db_ctx = await get_contact_context(sender)
     # Phase 4 — Hybrid RAG enrichment: enrich general queries with KB context
     try:
-        from modules.rag import search as _rag_search
+        from modules.rag import safe_search as _rag_search
         _rag_hits = await _rag_search(text, k=3, role=role_str)
         if _rag_hits:
             _rag_lines = [

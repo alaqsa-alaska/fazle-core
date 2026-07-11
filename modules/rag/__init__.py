@@ -781,6 +781,23 @@ async def ensure_index() -> None:
         await build_index()
 
 
+def is_rebuilding() -> bool:
+    """Non-blocking check: True while build_index()/rebuild_index() holds
+    _IDX.lock (e.g. mid hybrid-embedding pass). Used by /api/rag/rebuild's
+    idempotency guard so a second trigger doesn't queue a redundant rebuild
+    behind the first — reading .locked() never blocks."""
+    return _IDX.lock.locked()
+
+
+def last_built_seconds_ago() -> Optional[float]:
+    """Non-blocking staleness check. None if the index has never been built.
+    Reads _IDX.built_at without acquiring the lock — a benign race (worst
+    case a slightly stale read), acceptable for this diagnostic use."""
+    if _IDX.built_at is None:
+        return None
+    return time.time() - _IDX.built_at
+
+
 # ── BM25 scoring ───────────────────────────────────────────────────────────────
 def _bm25_score(q_tokens: list[str], doc: dict[str, Any], n_docs: int) -> float:
     if not q_tokens or not doc["tokens"]:
@@ -1119,6 +1136,46 @@ async def answer(q: str, k: int = 3, min_score: float = 1.0) -> Optional[dict[st
         "citations": citations,
         "top_score": hits[0]["score"],
     }
+
+
+# ── Timeout-guarded wrappers for customer-facing reply paths ──────────────────
+# search()/answer() can race ensure_index() into a fresh build_index() call
+# during the narrow window right after a rebuild starts _IDX.reset() (built_at
+# briefly None) — that would block behind _IDX.lock for the full duration of
+# whatever build is in flight. These wrappers make sure a customer-facing
+# reply never blocks on that: on timeout/any error, callers get an empty
+# result and reply without RAG context instead.
+async def safe_search(
+    q: str,
+    k: int = 5,
+    min_score: float = 0.0,
+    role: str = "candidate",
+    timeout: float = 4.0,
+) -> list[dict[str, Any]]:
+    try:
+        return await asyncio.wait_for(search(q, k=k, min_score=min_score, role=role), timeout=timeout)
+    except asyncio.TimeoutError:
+        log.warning("[rag] safe_search timeout after %.1fs q=%r — returning empty results", timeout, q[:80])
+        return []
+    except Exception as exc:
+        log.warning("[rag] safe_search failed: %s — returning empty results", exc)
+        return []
+
+
+async def safe_answer(
+    q: str,
+    k: int = 3,
+    min_score: float = 1.0,
+    timeout: float = 4.0,
+) -> Optional[dict[str, Any]]:
+    try:
+        return await asyncio.wait_for(answer(q, k=k, min_score=min_score), timeout=timeout)
+    except asyncio.TimeoutError:
+        log.warning("[rag] safe_answer timeout after %.1fs q=%r — returning None", timeout, q[:80])
+        return None
+    except Exception as exc:
+        log.warning("[rag] safe_answer failed: %s — returning None", exc)
+        return None
 
 
 # ── Stats ──────────────────────────────────────────────────────────────────────
