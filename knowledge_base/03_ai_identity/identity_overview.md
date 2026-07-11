@@ -59,9 +59,10 @@ The production identity engine resolves each contact to a single role using an 1
 
 ### Ordered Resolution Steps
 
+**Removed (Owner decision, 2026-07-11):** A step 0 pre-check (`blocked` role, hard silent-skip) previously existed here. There is no "blocked number" concept in this system — a sender is either a known role below or unknown. See migration 042.
+
 | Step | Resolved Role | Evidence Source | Table |
 |---|---|---|---|
-| 0 (pre-check) | blocked | `fazle_contact_roles` where role='blocked' | Hard silent-skip; no further processing |
 | 1 | admin | `fazle_admins` OR `fazle_contact_roles` where role='admin' | `fazle_admins`, `fazle_contact_roles` |
 | 2 | family | `fazle_contact_roles` where role='family' | `fazle_contact_roles` |
 | 3 | accountant | `fazle_contact_roles` where role='accountant' | `fazle_contact_roles` |

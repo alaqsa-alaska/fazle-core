@@ -52,14 +52,34 @@ _API_KEY_HEADER = APIKeyHeader(name="X-Internal-Key", auto_error=False)
 
 
 async def _require_admin_or_above(key: str = Depends(_API_KEY_HEADER)) -> dict:
-    """Attendance + payroll data includes basic_salary and duty calculations
-    — admin or superadmin only, matching modules.client_billing.routes's
+    """Mutating attendance actions and any salary/payroll figures — admin or
+    superadmin only (payment_business_rules.md / Payment Parser Canonical
+    Spec section 18.2/18.3), matching modules.client_billing.routes's
     precedent for equally sensitive data."""
     actor = await _resolve_actor(key)
     roles = {str(r or "").strip().lower() for r in actor.get("roles", [])}
     if actor.get("is_internal") or roles.intersection({"admin", "superadmin", "owner"}):
         return actor
     raise HTTPException(status_code=403, detail="admin or superadmin required")
+
+
+async def _require_viewer_or_above(key: str = Depends(_API_KEY_HEADER)) -> dict:
+    """
+    Broad view access for attendance records (section 18.1 — all roles may
+    view attendance records: viewer, operator, accountant, admin, superadmin).
+    This never returns basic_salary or any payroll figure — see
+    modules.attendance.crud.list_attendance/get_attendance, which select
+    attendance + name/designation only, and _LOOKUP_FIELDS (used only by the
+    admin-gated lookup endpoints below), which is where salary lives.
+    """
+    actor = await _resolve_actor(key)
+    if actor.get("is_internal"):
+        return actor
+    from modules import rbac
+    check = await rbac.check_permission(api_key=actor.get("api_key"), command="status")
+    if check.get("allowed"):
+        return actor
+    raise HTTPException(status_code=403, detail="viewer role or above required")
 
 
 def _actor_identity(actor: dict) -> str:
@@ -78,7 +98,7 @@ class AttendanceUpdateIn(BaseModel):
     remarks: Optional[str] = None
 
 
-@router.get("/admin/attendance", dependencies=[Depends(_require_admin_or_above)])
+@router.get("/admin/attendance", dependencies=[Depends(_require_viewer_or_above)])
 async def api_list_attendance(
     employee_id: Optional[int] = None,
     search: Optional[str] = None,
@@ -107,7 +127,7 @@ async def api_suggest_by_name(q: str = Query(..., min_length=1), limit: int = Qu
     return {"results": await suggest_employees_by_name(q, limit=limit)}
 
 
-@router.get("/admin/attendance/{attendance_id}", dependencies=[Depends(_require_admin_or_above)])
+@router.get("/admin/attendance/{attendance_id}", dependencies=[Depends(_require_viewer_or_above)])
 async def api_get_attendance(attendance_id: int):
     row = await get_attendance(attendance_id)
     if not row:

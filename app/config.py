@@ -239,7 +239,7 @@ class Settings(BaseSettings):
         known_roles = {
             "accountant", "client_escort_buyer", "vip_client", "repeat_client",
             "admin", "family", "vendor", "employee", "supervisor", "candidate",
-            "unknown", "blocked",
+            "unknown",
         }
         return [
             r.strip().lower()

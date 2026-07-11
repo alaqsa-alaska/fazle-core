@@ -24,7 +24,92 @@ from modules.fazle_payroll_engine.reconcile import compute_reconciliation
 from modules.fazle_payroll_engine.routes import (
     _cleanup_stale_review_queue_rows,
     _mark_stale_employees_inactive,
+    _review_queue_candidate_sql,
 )
+from modules.fazle_payroll_engine.parser import parse_message
+
+
+# ── _extract_name() line-layout regression (2026-07-10 silent-drop incident) ─
+
+class TestExtractNameLineLayouts:
+    """
+    2026-07-10: 8 real admin->accountant payment instructions were silently
+    dropped because _extract_name() only found a name when it shared a line
+    with the payout phone. When "ID:<phone> <Name>" sits on one line and
+    "<payout>(method) amount/-" sits on the next, the name was lost. These
+    are the real messages that failed, plus the layouts from
+    payment_business_rules.md / the Payment Parser Canonical Spec.
+    """
+
+    def test_id_and_name_together_payout_on_next_line(self):
+        text = "ID:01805668850 Junaid Islam Shami\n01773055387(B) 500/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Junaid Islam Shami"
+        assert r.payment.payout_phone == "01773055387"
+        assert r.payment.amount == Decimal("500")
+
+    def test_id_and_name_together_trailing_space_before_newline(self):
+        text = "ID:01625219710 Oshama Karim \n01625219710(N) 200/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Oshama Karim"
+
+    def test_id_with_space_before_colon(self):
+        text = "ID : 01811528446 Washim Akram \n01811528446(N) 2500/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Washim Akram"
+
+    def test_same_id_and_payout_prefix_different_suffix(self):
+        text = "ID: 01624874043 Md Alamgir \n01848600028(B) 400/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Md Alamgir"
+        assert r.payment.payout_phone == "01848600028"
+
+    def test_repeated_employee_different_payout_numbers(self):
+        first = parse_message(
+            "ID:01823265742 Ridoyan Khan Rida\n01940125166(B) 4500/-", date(2026, 7, 10)
+        )
+        second = parse_message(
+            "ID:01823265742 Ridoyan Khan Rida\n01831697307(B) 500/-", date(2026, 7, 10)
+        )
+        assert first.payment.employee_name_raw == "Ridoyan Khan Rida"
+        assert second.payment.employee_name_raw == "Ridoyan Khan Rida"
+        assert first.payment.payout_phone != second.payment.payout_phone
+
+    # ── Regression: previously-working layouts must remain unaffected ───────
+
+    def test_single_line_unaffected(self):
+        text = "ID: 01710730696 Md. Obaidur Rahman 01707273498(B) 4500/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Md. Obaidur Rahman"
+
+    def test_id_only_line_then_name_and_payout_together_unaffected(self):
+        text = "ID: 01786178090\nAnis- 01786178090(B) 3000/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Anis"
+
+    def test_three_line_id_name_payout_amount_unaffected(self):
+        text = "Id: 01871796723\nSumir 01871796723 (B) \n200/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Sumir"
+
+    def test_dash_separator_no_id_label_unaffected(self):
+        text = "Debashish SG - 01891969914 ( N )  = 3000/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Debashish SG"
+
+    def test_cash_method_word_unaffected(self):
+        text = "ID: 01710730696 Md. Obaidur Rahman 01710730696(Cash) 1530/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Md. Obaidur Rahman"
+        assert r.payment.payout_method.value == "cash"
+
+    def test_no_id_prefix_payout_becomes_lookup_key(self):
+        """payment_business_rules.md: without ID:, payout mobile is the lookup key."""
+        text = "Manik Mea 01789123456(N) 200/-"
+        r = parse_message(text, date(2026, 7, 10))
+        assert r.payment.employee_name_raw == "Manik Mea"
+        assert r.payment.payout_phone == "01789123456"
+        assert r.payment.employee_id_phone == "01789123456"
 
 
 # ── Pure validation / eligibility rules ──────────────────────────────────────
@@ -32,13 +117,20 @@ from modules.fazle_payroll_engine.routes import (
 class TestReviewQueueEligibility:
     """Incomplete parsed items must not enter the Review Queue."""
 
-    def test_missing_name_excluded(self):
+    def test_missing_name_still_eligible(self):
+        """
+        A name-extraction miss must never make a payment-shaped message
+        disappear (2026-07-10 silent-drop incident). Mobile-based lookup is
+        the authoritative employee identity (payment_business_rules.md),
+        so amount + payout_phone + payout_method alone is enough to queue
+        the item for review even when no name was resolved.
+        """
         pdata = {
             "payout_phone": "01712345678",
             "payout_method": "bkash",
             "amount": "5000",
         }
-        assert not _eligible_for_accounting_review(pdata)
+        assert _eligible_for_accounting_review(pdata)
 
     def test_missing_payout_phone_excluded(self):
         pdata = {
@@ -90,6 +182,28 @@ class TestReviewQueueEligibility:
             "amount": "5000",
         }
         assert _eligible_for_accounting_review(pdata)
+
+
+class TestReviewQueueCandidateSql:
+    """
+    _review_queue_candidate_sql() gates which fpe_unmatched_messages rows are
+    visible in /admin/needs-review, /admin/review-summary, and the payroll
+    page review UI. It must stay in lockstep with _eligible_for_accounting_review
+    (workers.py) — a row that clears one gate but not the other is a row that
+    gets silently written but never shown, which is the same class of bug as
+    the 2026-07-10 incident, just one layer further down the pipeline.
+    """
+
+    def test_does_not_require_employee_name(self):
+        sql = _review_queue_candidate_sql("u")
+        assert "detected_employee_name" not in sql
+
+    def test_still_requires_amount_phone_and_known_method(self):
+        sql = _review_queue_candidate_sql("u")
+        assert "u.detected_amount IS NOT NULL" in sql
+        assert "u.detected_payout_phone" in sql
+        assert "u.detected_payout_method" in sql
+        assert "'unknown'" in sql
 
 
 class TestValidationForAccounting:
@@ -346,3 +460,41 @@ class TestMarkStaleEmployeesInactive:
         count = await _mark_stale_employees_inactive()
         assert count == 0
         assert not mock_execute.called
+
+
+class TestRequireAdminRole:
+    """
+    Section 18.3 — promote/dismiss/DLQ-requeue/salary endpoints must require
+    admin/superadmin specifically, not just "any active admin account with
+    any role" (which is all _require_api_key alone checked for).
+    """
+
+    async def test_non_admin_role_rejected(self):
+        from fastapi import HTTPException
+        from modules.fazle_payroll_engine.routes import _require_admin_role
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": False, "reason": "need admin (level 3) have level 1"}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _require_admin_role("fake-viewer-key")
+        assert exc.value.status_code == 403
+
+    async def test_admin_role_accepted(self):
+        from modules.fazle_payroll_engine.routes import _require_admin_role
+
+        with patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": True}),
+        ):
+            result = await _require_admin_role("fake-admin-key")
+        assert result == "fake-admin-key"
+
+    async def test_internal_key_accepted(self):
+        from modules.fazle_payroll_engine.routes import _require_admin_role
+        from app.config import get_settings
+
+        internal_key = get_settings().internal_api_key
+        result = await _require_admin_role(internal_key)
+        assert result == internal_key

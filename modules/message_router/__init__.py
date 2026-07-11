@@ -319,12 +319,17 @@ def _admin_review_note(
 
 
 async def _should_silent_skip(sender: str) -> tuple[bool, str]:
-    """Return (should_skip, reason) for blocked or draft-only contacts.
+    """Return (should_skip, reason) for accountant-routed or draft-only contacts.
 
     Rules:
       1. sender == ACCOUNTANT_PHONE → skip
       2. configured draft-always display_name match → caller creates admin draft
-      3. blocked contact role → skip
+
+    Note: there is no "blocked number" concept in this system (Owner
+    decision, 2026-07-11) — a sender is either a known role or unknown;
+    unknown senders simply do not trigger business actions. A prior
+    'blocked' role check + identity_conflict tracking existed here and has
+    been fully removed (see migration 042).
     """
     settings = get_settings()
     sender = normalize_phone(sender) or sender.strip()
@@ -357,20 +362,6 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
                     return True, f"display_name starts with '{prefix}' ({contact['display_name']!r})"
     except Exception as _e:
         log.debug("[SILENT_SKIP] contact lookup error for %s: %s", sender, _e)
-
-    # blocked role — admin dashboard থেকে block করা নম্বর
-    try:
-        for v in _phone_variants(sender):
-            _role_row = await fetch_one(
-                "SELECT role FROM fazle_contact_roles"
-                " WHERE phone = $1 AND is_active = true"
-                " ORDER BY priority DESC LIMIT 1",
-                v,
-            )
-            if _role_row and _role_row.get("role") == "blocked":
-                return True, f"phone blocked by admin ({sender})"
-    except Exception as _be:
-        log.debug("[SILENT_SKIP] blocked role check error for %s: %s", sender, _be)
 
     return False, ""
 

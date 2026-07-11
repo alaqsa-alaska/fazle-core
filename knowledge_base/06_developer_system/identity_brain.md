@@ -45,7 +45,7 @@ The identity brain resolves every contact to exactly one role using an ordered, 
 
 **Business Rule:** The first step to match wins. Lower-step roles always take precedence over higher-step roles.
 
-**Special Case — blocked:** Contacts with `role='blocked'` in `fazle_contact_roles` are hard-silently-skipped before step 1. No reply, no draft, no log entry.
+**Removed (Owner decision, 2026-07-11):** A "blocked" special case previously existed here (hard-silent-skip before step 1). It has been permanently removed along with all related code, routes, UI, and the short-lived `fpe_identity_anomalies` tracking table (migrations 041/042). There is no "blocked number" concept in this system — a sender is either a known role or unknown; unknown senders trigger no business action but are not tracked or specially skipped.
 
 **Employee secondary evidence (Step 8):**
 When the primary phone lookup in `wbom_employees` fails, the system tries four secondary evidence sources in order:
@@ -167,15 +167,9 @@ Actual values from code (source: `detect_identity()` call sites in `modules/iden
 
 ---
 
-## Blocked Role Behavior
+## Blocked Role Behavior — REMOVED (Owner decision, 2026-07-11)
 
-**Business Rule:** Contacts with `role='blocked'` in `fazle_contact_roles` receive no reply, no draft, and no audit log entry. The message is silently discarded at step 0 before any routing occurs.
-
-**Validation:** Blocked check runs before the 11-step algorithm and before any LLM call.
-
-**Source Module:** `app/message_router`
-**Source Function:** `_should_silent_skip()`
-**PKCA Report:** 10_hidden_rule_coverage_report.md (HK-02)
+This section previously documented a `role='blocked'` hard-silent-skip step. The "blocked number" concept has been permanently removed from this system's business logic — there is no scenario in which a phone number should be blocked at the pipeline level. A sender is either a known role or unknown; unknown senders simply do not trigger business actions. See migration 042 for the corresponding DB cleanup and `modules/message_router/__init__.py::_should_silent_skip()` for the current (accountant-phone-routing + draft-always-name-match only) behavior.
 
 ---
 
@@ -292,7 +286,7 @@ Each resolved role injects a Bangla language-style directive into the LLM system
 
 ## Visibility and AI Exposure Rules
 
-**Visibility:** Developer (all implementation details), Admin (role resolution behavior, blocked contact behavior)
+**Visibility:** Developer (all implementation details), Admin (role resolution behavior)
 **AI Exposure:** The role resolution algorithm, priority steps, confidence scores, Bangla prompt injection text, memory facts stored in `user_memory`, and the `role_classifier` module internals must NEVER be disclosed to candidates, employees, or clients. A contact should never learn they are being classified before their message is answered.
 
 ---

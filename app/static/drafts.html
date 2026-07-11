@@ -408,8 +408,7 @@ function actionBtns(d) {
   if (['pending','pending_selfie','edited'].indexOf(d.status) >= 0) {
     return '<button class="btn btn-success" onclick="approveDraft(' + d.id + ')">Approve</button> ' +
            '<button class="btn btn-primary" onclick="openEdit(' + d.id + ')">Edit</button> ' +
-           '<button class="btn btn-warning" onclick="deleteDraft(' + d.id + ')">Delete</button> ' +
-           '<button class="btn btn-danger"  onclick="blockNum(' + d.id + ',\'' + escAttr(d.recipient) + '\')">Block</button>';
+           '<button class="btn btn-warning" onclick="deleteDraft(' + d.id + ')">Delete</button>';
   }
   return '<span style="color:#9aa0a6;font-size:0.8rem;">' + d.status + '</span>';
 }
@@ -435,13 +434,6 @@ async function deleteDraft(id) {
   if (!confirm('এই draft মুছে দেবেন?')) return;
   var r = await api('/api/drafts/' + id + '/delete', {});
   if (r.ok) { showToast('মুছে ফেলা হয়েছে', 'success'); removeRow(id); }
-}
-
-async function blockNum(id, phone) {
-  var reason = prompt(phone + ' block করবেন?\nকারণ লিখুন (Enter = admin_block):');
-  if (reason === null) return;
-  var r = await api('/api/drafts/' + id + '/block', { reason: reason || 'admin_block' });
-  if (r.ok) { showToast(phone + ' blocked', 'success'); setTimeout(loadDrafts, 600); }
 }
 
 function openEdit(id) {

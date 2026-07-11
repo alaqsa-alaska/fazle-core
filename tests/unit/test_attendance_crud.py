@@ -208,3 +208,53 @@ class TestAttendanceRoleGate:
         ):
             actor = await _require_admin_or_above("fake-admin-key")
         assert actor["roles"] == ["admin"]
+
+
+class TestAttendanceViewerOrAbove:
+    """
+    Section 18.1 — broad view access for attendance records: viewer, operator,
+    accountant, admin, and superadmin may all list/view attendance, but only
+    admin/superadmin may create/edit/delete or see payroll salary figures
+    (that split stays on _require_admin_or_above, unchanged).
+    """
+
+    async def test_viewer_role_accepted(self):
+        from unittest.mock import patch, AsyncMock
+        from modules.attendance.routes import _require_viewer_or_above
+
+        with patch(
+            "modules.attendance.routes._resolve_actor",
+            return_value={"is_internal": False, "roles": ["viewer"], "api_key": "fake-viewer-key"},
+        ), patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": True}),
+        ):
+            actor = await _require_viewer_or_above("fake-viewer-key")
+        assert actor["roles"] == ["viewer"]
+
+    async def test_no_role_rejected(self):
+        from unittest.mock import patch, AsyncMock
+        from fastapi import HTTPException
+        from modules.attendance.routes import _require_viewer_or_above
+
+        with patch(
+            "modules.attendance.routes._resolve_actor",
+            return_value={"is_internal": False, "roles": [], "api_key": "fake-noroles-key"},
+        ), patch(
+            "modules.rbac.check_permission",
+            new=AsyncMock(return_value={"allowed": False, "reason": "need viewer (level 1) have level 0"}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _require_viewer_or_above("fake-noroles-key")
+        assert exc.value.status_code == 403
+
+    async def test_internal_key_accepted(self):
+        from unittest.mock import patch
+        from modules.attendance.routes import _require_viewer_or_above
+
+        with patch(
+            "modules.attendance.routes._resolve_actor",
+            return_value={"is_internal": True, "roles": ["owner", "superadmin"]},
+        ):
+            actor = await _require_viewer_or_above("internal-key")
+        assert actor["is_internal"] is True

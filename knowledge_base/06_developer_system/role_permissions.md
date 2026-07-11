@@ -90,7 +90,8 @@ The following gate behaviors are enforced at the `bridge_poller` level, before A
 | supervisor | No | No | No |
 | candidate | No | No | No (this IS recruitment) |
 | unknown | No | No | No |
-| blocked | N/A | Yes (hard) | N/A |
+
+**Removed (Owner decision, 2026-07-11):** A `blocked` role/row previously existed here with a hard silent-skip. There is no "blocked number" concept in this system — a sender is either a known role above or unknown. See migration 042.
 
 **Source Module:** `app/bridge_poller`
 **Source Function:** `_is_draft_always()`, `_should_silent_skip()`

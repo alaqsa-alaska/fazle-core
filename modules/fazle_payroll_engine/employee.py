@@ -1,9 +1,12 @@
 """
 Fazle Payroll Engine — Employee matching & auto-creation.
 
-Matching priority:
-  1. Exact primary_phone match (fastest, most reliable)
-  2. Exact employee_id_phone match (from "ID: 01XXXXXXXXX" prefix)
+Matching priority (payment_business_rules.md / Payment Parser Canonical Spec
+section 7.2/9.1 — "ID:" mobile is the employee lookup key; the payout mobile
+is where money is transferred and is NOT authoritative identity on its own):
+  1. Exact employee_id_phone match (from "ID: 01XXXXXXXXX" prefix)
+  2. Exact primary_phone match (covers the common case where no ID: is
+     given, so the payout phone doubles as the lookup key)
   3. Alias phone lookup (fpe_employee_aliases where alias_type='phone')
   4. Exact normalized-name match
   5. Fuzzy name match (rapidfuzz, threshold 0.80)
@@ -104,20 +107,10 @@ async def match_or_create_employee(
     (canonical_employee_id IS NOT NULL), we transparently resolve to the
     canonical employee. The duplicate row itself is never deleted or mutated.
     """
-    # 1. Exact primary_phone match
-    if payout_phone:
-        row = await fetch_one(
-            "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
-            "FROM fpe_employees "
-            "WHERE primary_phone = $1 AND status = 'active'",
-            payout_phone,
-        )
-        if row:
-            row = await _resolve_canonical(row)
-            await _maybe_enrich_full_name(row["id"], row.get("full_name"), name_raw)
-            return _make_result(row, "exact_phone")
-
-    # 2. Exact employee_id_phone match
+    # 1. Exact employee_id_phone match — the "ID:" mobile is the authoritative
+    #    employee identity per business rule; it must win over payout_phone,
+    #    which is merely where the money is transferred and may legitimately
+    #    coincide with a completely different employee's registered phone.
     if employee_id_phone:
         row = await fetch_one(
             "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
@@ -130,8 +123,22 @@ async def match_or_create_employee(
             await _maybe_enrich_full_name(row["id"], row.get("full_name"), name_raw)
             return _make_result(row, "exact_id_phone")
 
+    # 2. Exact primary_phone match — used when there is no ID: prefix, so the
+    #    payout phone doubles as the employee lookup key (business rule 7.3).
+    if payout_phone:
+        row = await fetch_one(
+            "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
+            "FROM fpe_employees "
+            "WHERE primary_phone = $1 AND status = 'active'",
+            payout_phone,
+        )
+        if row:
+            row = await _resolve_canonical(row)
+            await _maybe_enrich_full_name(row["id"], row.get("full_name"), name_raw)
+            return _make_result(row, "exact_phone")
+
     # 3. Alias phone lookup
-    for phone in filter(None, [payout_phone, employee_id_phone]):
+    for phone in filter(None, [employee_id_phone, payout_phone]):
         alias_row = await fetch_one(
             """
             SELECT e.id, e.employee_code, e.full_name, e.primary_phone,
@@ -151,7 +158,7 @@ async def match_or_create_employee(
     # 3b. WBOM cross-lookup: check bkash_number / nagad_number / employee_mobile
     # This bridges WBOM employee records into FPE when a number is known in
     # one system but not the other.
-    for phone in filter(None, [payout_phone, employee_id_phone]):
+    for phone in filter(None, [employee_id_phone, payout_phone]):
         wbom_row = await fetch_one(
             "SELECT employee_id, employee_name, employee_mobile "
             "FROM wbom_employees "

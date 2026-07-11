@@ -467,9 +467,11 @@ def _extract_name(text: str, id_match: Optional[re.Match]) -> Optional[str]:
     # but KEEP the rest of that line for name extraction.
     working_lines = []
     id_span_text = id_match.group(0) if id_match else None
+    id_stripped_line: Optional[str] = None
     for l in lines:
         if id_span_text and id_span_text in l:
             l = l.replace(id_span_text, "", 1)
+            id_stripped_line = l
         working_lines.append(l)
 
     # Search each remaining line for name before phone
@@ -494,5 +496,15 @@ def _extract_name(text: str, id_match: Optional[re.Match]) -> Optional[str]:
             candidate = re.sub(r"^[Ii][Dd]\s*[:：]\s*\S+\s*", "", candidate).strip()
             if _is_valid_human_name(candidate):
                 return candidate
+
+    # Fallback: "ID:<phone> <Name>" written together on one line, with the
+    # payout phone/method/amount on a following line instead of the same one
+    # (e.g. "ID:01805668850 Junaid Islam Shami\n01773055387(B) 500/-").
+    # Once the ID phone is stripped, nothing else on that line is a phone —
+    # so whatever text remains, if it has no digits at all, is the name.
+    if id_stripped_line is not None:
+        candidate = id_stripped_line.strip().rstrip("-– ")
+        if candidate and not re.search(r"\d", candidate) and _is_valid_human_name(candidate):
+            return candidate
 
     return None

@@ -486,7 +486,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   <button data-tab="operator" onclick="navigate('operator')">Operator</button>
   <button data-tab="cash" onclick="navigate('cash')">Cash</button>
   <button data-tab="income" onclick="navigate('income')">Income</button>
-  <button data-tab="attendance-office" class="admin-only-nav" onclick="navigate('attendance-office')" hidden>Office Attendance</button>
+  <button data-tab="attendance-office" class="viewer-only-nav" onclick="navigate('attendance-office')" hidden>Office Attendance</button>
   <button data-tab="admin" class="admin-only-nav" onclick="navigate('admin')" hidden>Admin</button>
 </nav>
 
@@ -509,7 +509,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     <button data-tab="operator" onclick="drawerNavigate('operator')">Operator</button>
     <button data-tab="cash" onclick="drawerNavigate('cash')">Cash</button>
     <button data-tab="income" onclick="drawerNavigate('income')">Income</button>
-    <button data-tab="attendance-office" class="admin-only-nav" onclick="drawerNavigate('attendance-office')" hidden>Office Attendance</button>
+    <button data-tab="attendance-office" class="viewer-only-nav" onclick="drawerNavigate('attendance-office')" hidden>Office Attendance</button>
     <button data-tab="admin" class="admin-only-nav" onclick="drawerNavigate('admin')" hidden>Admin</button>
     <div class="sidebar-divider"></div>
     <button onclick="logout()">Logout</button>
@@ -1204,7 +1204,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     </div>
   </section>
 
-  <section id="tab-attendance-office" class="tab admin-only-section" hidden>
+  <section id="tab-attendance-office" class="tab viewer-only-section" hidden>
     <div class="card">
       <h2>Office Attendance</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
@@ -1212,7 +1212,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
         Only manually-entered and admin-approved supervisor-submitted attendance count toward office payroll.
       </p>
       <div class="row" style="align-items:flex-end;flex-wrap:wrap">
-        <button class="btn" onclick="openAttendanceForm(false)">Add Attendance</button>
+        <button class="btn admin-only-section" onclick="openAttendanceForm(false)">Add Attendance</button>
         <button class="btn sm secondary" onclick="loadOfficeAttendanceList()">Refresh</button>
         <div><label>Search (name/mobile)</label><input id="attSearch" type="search" oninput="loadOfficeAttendanceList()"></div>
         <div><label>From</label><input id="attDateFrom" type="date" onchange="loadOfficeAttendanceList()"></div>
@@ -1228,7 +1228,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
         </div>
       </div>
 
-      <div id="attFormBox" class="card" style="margin-top:12px;display:none;background:var(--bg-alt,rgba(255,255,255,.03))">
+      <div id="attFormBox" class="card admin-only-section" style="margin-top:12px;display:none;background:var(--bg-alt,rgba(255,255,255,.03))">
         <div class="row" style="align-items:flex-end;flex-wrap:wrap">
           <div style="position:relative">
             <label>Employee ID</label>
@@ -1271,7 +1271,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       </div>
     </div>
 
-    <div class="card">
+    <div class="card admin-only-section">
       <h2>Payroll Eligibility Preview</h2>
       <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
         Read-only — creates no payroll rows. Shows the office-payroll eligibility result for every employee for the selected month.
@@ -1519,12 +1519,26 @@ function hasPermission(flag) {
   return !!(USER_ACCESS.permissions && USER_ACCESS.permissions[flag]);
 }
 
+// Section 18.1 — any recognized role (viewer/operator/accountant/admin/
+// superadmin) may view attendance records; admin/superadmin retains that
+// PLUS create/edit/delete and payroll salary figures via canAccessAdminMenu().
+function canViewAttendance() {
+  if (canAccessAdminMenu()) return true;
+  const roles = USER_ACCESS.normalizedRoles || [];
+  return roles.some(r => ['viewer', 'operator', 'accountant', 'admin', 'superadmin', 'owner'].includes(r));
+}
+
 function syncAdminUiVisibility() {
   const showAdmin = canAccessAdminMenu();
+  const showViewer = canViewAttendance();
   document.querySelectorAll('.admin-only-nav, .admin-only-section').forEach(el => {
     el.hidden = !showAdmin;
   });
+  document.querySelectorAll('.viewer-only-nav, .viewer-only-section').forEach(el => {
+    el.hidden = !showViewer;
+  });
   if (!showAdmin && currentTab === 'admin') navigate('overview', true);
+  if (!showViewer && currentTab === 'attendance-office') navigate('overview', true);
 }
 
 async function resolveUserAccess(apiKey) {
@@ -1872,7 +1886,13 @@ function pathForTab(name) {
 }
 
 function activateTab(name) {
-  if ((name === 'admin' || name === 'attendance-office') && !canAccessAdminMenu()) {
+  if (name === 'admin' && !canAccessAdminMenu()) {
+    name = 'overview';
+    if (location.pathname !== pathForTab('overview')) {
+      history.replaceState({tab: 'overview'}, '', pathForTab('overview'));
+    }
+  }
+  if (name === 'attendance-office' && !canViewAttendance()) {
     name = 'overview';
     if (location.pathname !== pathForTab('overview')) {
       history.replaceState({tab: 'overview'}, '', pathForTab('overview'));
@@ -1918,7 +1938,7 @@ function loadTab(name) {
   if (name === 'sync')          loadSync();
   if (name === 'cash')          { cashCurrentPage = 1; stagingCurrentPage = 1; loadCash(true); loadStagingPayments(true); }
   if (name === 'income')        { incomeCurrentPage = 1; incomeEntryResetDate(); loadIncome(true); }
-  if (name === 'attendance-office' && canAccessAdminMenu()) loadOfficeAttendanceTab();
+  if (name === 'attendance-office' && canViewAttendance()) loadOfficeAttendanceTab();
   if (name === 'admin' && canAccessAdminMenu()) loadAdminTab();
 }
 
@@ -2381,14 +2401,24 @@ let _attPage = 1;
 const _attPageSize = 25;
 
 function loadOfficeAttendanceTab() {
-  if (!canAccessAdminMenu()) return;
-  const now = new Date();
-  if (!document.getElementById('eligYear').value) document.getElementById('eligYear').value = now.getFullYear();
-  if (!document.getElementById('eligMonth').value) document.getElementById('eligMonth').value = now.getMonth() + 1;
+  if (!canViewAttendance()) return;
+  if (canAccessAdminMenu()) {
+    const now = new Date();
+    if (!document.getElementById('eligYear').value) document.getElementById('eligYear').value = now.getFullYear();
+    if (!document.getElementById('eligMonth').value) document.getElementById('eligMonth').value = now.getMonth() + 1;
+  }
   loadOfficeAttendanceList();
 }
 
 function openAttendanceForm(isEdit, attendanceId) {
+  // Defense in depth: the "Add Attendance" button and #attFormBox are both
+  // admin-only-section (hidden for non-admin), but openAttendanceForm() sets
+  // an inline style.display which takes precedence over the [hidden]
+  // attribute's UA stylesheet rule — so this function must refuse to run
+  // for non-admin even if invoked directly (e.g. from the console). The real
+  // security boundary is the backend RBAC gate on POST/PUT /admin/attendance,
+  // which already rejects non-admin regardless of this check.
+  if (!canAccessAdminMenu()) return;
   document.getElementById('attFormError').textContent = '';
   _attEditingId = isEdit ? attendanceId : null;
   ['attEmpId', 'attEmpName', 'attEmpMobile', 'attEmpDesignation', 'attEmpAddress', 'attRemarks'].forEach(id => {
@@ -2468,6 +2498,7 @@ function attPickSuggestion(emp) {
 }
 
 async function saveOfficeAttendance() {
+  if (!canAccessAdminMenu()) return; // defense in depth — see openAttendanceForm()
   const errBox = document.getElementById('attFormError');
   errBox.textContent = '';
   const employeeId = Number(document.getElementById('attEmpId').value);
@@ -2497,6 +2528,7 @@ async function saveOfficeAttendance() {
 }
 
 async function deleteOfficeAttendance(attendanceId) {
+  if (!canAccessAdminMenu()) return; // defense in depth — see openAttendanceForm()
   if (!confirm('Delete this attendance record? This cannot be undone.')) return;
   try {
     await attendanceFetch('/attendance/' + attendanceId, { method: 'DELETE' });
@@ -2513,7 +2545,7 @@ function attPageStep(delta) {
 }
 
 async function loadOfficeAttendanceList() {
-  if (!canAccessAdminMenu()) return;
+  if (!canViewAttendance()) return;
   const box = document.getElementById('attListBox');
   if (!box) return;
   box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
@@ -2533,6 +2565,7 @@ async function loadOfficeAttendanceList() {
     if (!items.length) {
       box.innerHTML = '<div class="empty"><div class="icon">📋</div>No attendance records found.</div>';
     } else {
+      const canEdit = canAccessAdminMenu();
       const rows = items.map(a => `
         <tr>
           <td>${esc(a.employee_name)} (#${a.employee_id})</td>
@@ -2542,8 +2575,10 @@ async function loadOfficeAttendanceList() {
           <td>${esc(a.approval_channel || '')}</td>
           <td>${esc(a.approved_by || '')}</td>
           <td>
+            ${canEdit ? `
             <button class="btn sm secondary" onclick="openAttendanceForm(true, ${a.attendance_id})" title="Edit">✏️</button>
             <button class="btn sm secondary" onclick="deleteOfficeAttendance(${a.attendance_id})" title="Delete">🗑</button>
+            ` : `<span style="color:var(--muted);font-size:11px">view only</span>`}
           </td>
         </tr>`).join('');
       box.innerHTML = `<table><thead><tr>
@@ -4724,6 +4759,7 @@ async function rvOpenDetail(id){
   document.getElementById('detailPanel').classList.add('open');
   document.getElementById('panelBg').style.display = 'block';
 }
+
 
 function rvGetReviewer() {
   const reviewer = (localStorage.getItem('fpe_reviewer') || rvReviewerCache || 'admin').trim() || 'admin';

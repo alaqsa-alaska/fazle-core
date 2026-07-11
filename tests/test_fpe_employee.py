@@ -66,25 +66,73 @@ class TestEmployeeMatching:
             assert result.match_type == "auto_created"
 
     @pytest.mark.asyncio
-    async def test_none_returned_when_no_name_no_phone(self):
-        """Without any identifying info, employee is auto-created as 'Unknown'."""
+    async def test_employee_id_phone_wins_over_colliding_payout_phone(self):
+        """
+        Regression test for the 2026-07-10 misattribution bug: the "ID:"
+        mobile is the authoritative employee identity (payment_business_rules.md
+        7.2/9.1) and must be checked BEFORE payout_phone. Real incident: a
+        message with ID: 01805668850 (Junaid Islam Shami) paid out to
+        01773055387, a phone that unrelated employee "Ahsan" already had
+        registered as primary_phone. Before the fix, step-1 (payout_phone)
+        matched Ahsan first and returned him, silently misattributing the
+        payment. This must resolve to the employee_id_phone owner instead.
+        """
         from modules.fazle_payroll_engine.employee import match_or_create_employee
 
-        new_emp = {
-            "id": 99,
-            "employee_code": "EMP-00099",
-            "full_name": "Unknown",
-            "primary_phone": None,
+        correct_employee = {
+            "id": 1274,
+            "employee_code": "EMP-01274",
+            "full_name": "Junaid Islam",
+            "primary_phone": "01716797411",
+            "employee_id_phone": "01805668850",
+            "status": "active",
+        }
+        wrong_employee_by_payout_phone = {
+            "id": 7,
+            "employee_code": "EMP-00007",
+            "full_name": "Ahsan",
+            "primary_phone": "01773055387",
             "employee_id_phone": None,
             "status": "active",
         }
 
+        async def fetch_one_side_effect(query, *args, **kwargs):
+            if "employee_id_phone = $1" in query:
+                return correct_employee if args and args[0] == "01805668850" else None
+            if "primary_phone = $1" in query:
+                return wrong_employee_by_payout_phone if args and args[0] == "01773055387" else None
+            return None
+
+        with patch("modules.fazle_payroll_engine.employee.fetch_one", new=AsyncMock(side_effect=fetch_one_side_effect)), \
+             patch("modules.fazle_payroll_engine.employee.fetch_all", new_callable=AsyncMock) as mock_fetch_all, \
+             patch("modules.fazle_payroll_engine.employee.execute", new_callable=AsyncMock):
+            mock_fetch_all.return_value = []
+
+            result = await match_or_create_employee(
+                name_raw="Junaid Islam Shami",
+                payout_phone="01773055387",
+                employee_id_phone="01805668850",
+            )
+            assert result is not None
+            assert result.employee_id == 1274
+            assert result.match_type == "exact_id_phone"
+
+    @pytest.mark.asyncio
+    async def test_none_returned_when_no_name_no_phone(self):
+        """
+        With no phone and no name at all, the function must return None rather
+        than auto-create a phantom employee (employee.py step 6 safety guard —
+        "A phone-less, name-less call can never produce a useful employee
+        record"). This test previously asserted the opposite of the function's
+        own documented/logged behavior; corrected to match reality.
+        """
+        from modules.fazle_payroll_engine.employee import match_or_create_employee
+
         with patch("modules.fazle_payroll_engine.employee.fetch_one", new_callable=AsyncMock) as mock_fetch_one, \
              patch("modules.fazle_payroll_engine.employee.fetch_all", new_callable=AsyncMock) as mock_fetch_all, \
-             patch("modules.fazle_payroll_engine.employee.fetch_val", new_callable=AsyncMock) as mock_fetch_val, \
+             patch("modules.fazle_payroll_engine.employee.fetch_val", new_callable=AsyncMock), \
              patch("modules.fazle_payroll_engine.employee.execute", new_callable=AsyncMock), \
              patch("modules.fazle_payroll_engine.employee.add_alias", new_callable=AsyncMock):
-            mock_fetch_val.return_value = 99  # auto-create returns new id
             mock_fetch_one.return_value = None
             mock_fetch_all.return_value = []
 
@@ -93,9 +141,7 @@ class TestEmployeeMatching:
                 payout_phone=None,
                 employee_id_phone=None,
             )
-            # Auto-creates an "Unknown" employee
-            assert result is not None
-            assert result.match_type == "auto_created"
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_fuzzy_name_match(self):

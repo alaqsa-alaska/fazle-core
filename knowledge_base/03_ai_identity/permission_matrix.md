@@ -61,7 +61,8 @@ These gate behaviors are enforced at the bridge_poller level before any AI or LL
 | supervisor | No | No | No | Limited (safe intents) |
 | candidate | No | No | No | Yes (recruitment safe) |
 | unknown | No | No | No | Yes (greeting + recruitment safe) |
-| blocked | N/A | Hard-yes (no log) | N/A | None |
+
+**Removed (Owner decision, 2026-07-11):** A `blocked` role previously existed here with a hard silent-skip. There is no "blocked number" concept in this system — a sender is either a known role above or unknown. See migration 042.
 
 **Business Rule — draft-always:** Roles marked draft-always will NEVER auto-send regardless of intent. Admin must APPROVE each response.
 

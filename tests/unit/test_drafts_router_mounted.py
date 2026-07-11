@@ -29,15 +29,16 @@ async def test_drafts_routes_are_mounted_and_auth_gated():
         assert no_auth_list.status_code != 404
         assert no_auth_list.status_code == 403
 
-        # approve/edit/delete/block must also be routable (not 404) even
-        # though a fake draft id will fail downstream with 404 from the
-        # *handler* logic — we only care that routing itself works, so
-        # assert the auth gate (403) fires before any handler-level 404.
+        # approve/edit/delete must also be routable (not 404) even though a
+        # fake draft id will fail downstream with 404 from the *handler*
+        # logic — we only care that routing itself works, so assert the
+        # auth gate (403) fires before any handler-level 404.
+        # Note: /block was permanently removed (Owner decision, 2026-07-11 —
+        # the "blocked number" concept no longer exists; see migration 042).
         for method, path in [
             ("post", "/api/drafts/999999999/approve"),
             ("post", "/api/drafts/999999999/edit"),
             ("post", "/api/drafts/999999999/delete"),
-            ("post", "/api/drafts/999999999/block"),
         ]:
             resp = await ac.request(method, path, json={})
             assert resp.status_code == 403, (

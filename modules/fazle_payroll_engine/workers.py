@@ -101,8 +101,18 @@ def _should_skip_payroll_parse(row: dict, content: str) -> tuple[bool, str]:
 
 
 def _eligible_for_accounting_review(pdata: dict) -> bool:
-    """Only complete money/payment parses may enter the Accounting Review queue."""
-    name_raw = (pdata.get("employee_name_raw") or "").strip()
+    """
+    Money/payment parses may enter the Accounting Review queue.
+
+    employee_name_raw is intentionally NOT required here: mobile-based lookup
+    is the authoritative employee identity (see match_or_create_employee()),
+    and a name-extraction miss must never be a reason a payment-shaped
+    message disappears with no visible record (payment_business_rules.md
+    "Source Of Truth" — accountant handoff is the completion trigger, not a
+    system-side review gate). Any message with a real payout phone, a known
+    method, and a positive amount is unambiguously payment-shaped and must
+    always be queued for review, even when the name could not be resolved.
+    """
     payout_phone = normalize_bd_phone(pdata.get("payout_phone") or "")
     payout_method = (pdata.get("payout_method") or "").strip().lower()
     amount_raw = pdata.get("amount")
@@ -111,8 +121,7 @@ def _eligible_for_accounting_review(pdata: dict) -> bool:
     except Exception:
         amount = None
     return bool(
-        name_raw
-        and payout_phone
+        payout_phone
         and payout_method
         and payout_method != "unknown"
         and amount is not None

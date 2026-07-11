@@ -78,11 +78,38 @@ async def _require_api_key(key: str = Depends(_API_KEY_HEADER)):
     raise HTTPException(status_code=403, detail="Unauthorized")
 
 
+async def _require_admin_role(key: str = Depends(_API_KEY_HEADER)) -> str:
+    """
+    Admin/superadmin only — for actions that approve/edit the ledger
+    (promote, dismiss, DLQ requeue) or expose salary/payroll figures
+    (section 18.2/18.3). _require_api_key alone only checks for an active
+    admin account with ANY role (including plain 'viewer'); this adds the
+    actual role-level check on top of it via the existing level hierarchy
+    in modules.rbac, rather than a second, separate gate.
+    """
+    settings = get_settings()
+    if key and key == settings.internal_api_key:
+        return key
+    from modules import rbac
+    check = await rbac.check_permission(api_key=key or "", command="schedule_run")
+    if check.get("allowed"):
+        return key
+    raise HTTPException(status_code=403, detail="admin or superadmin required")
+
+
 def _review_queue_candidate_sql(alias: str = "u") -> str:
-    """Rows eligible for the accounting review queue."""
+    """
+    Rows eligible for the accounting review queue.
+
+    detected_employee_name is intentionally NOT required (payment_business_rules.md:
+    mobile-based lookup is the authoritative employee identity, not the name —
+    see modules.fazle_payroll_engine.workers._eligible_for_accounting_review,
+    which this must stay consistent with). A name-extraction miss must never
+    make a payment-shaped item invisible in the review queue on top of not
+    being auto-posted — that was the 2026-07-10 silent-drop incident.
+    """
     return (
         f"{alias}.detected_amount IS NOT NULL "
-        f"AND COALESCE(BTRIM({alias}.detected_employee_name), '') <> '' "
         f"AND COALESCE(BTRIM({alias}.detected_payout_phone), '') <> '' "
         f"AND COALESCE(BTRIM({alias}.detected_payout_method), '') <> '' "
         f"AND LOWER({alias}.detected_payout_method) <> 'unknown'"
@@ -1909,7 +1936,7 @@ async def admin_needs_review(
 
 @router.post(
     "/admin/needs-review/{unmatched_id}/promote",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_admin_role)],
 )
 async def admin_needs_review_promote(
     unmatched_id: int,
@@ -2033,7 +2060,7 @@ async def admin_needs_review_promote(
 
 @router.post(
     "/admin/needs-review/{unmatched_id}/dismiss",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_admin_role)],
 )
 async def admin_needs_review_dismiss(
     unmatched_id: int,
@@ -2101,7 +2128,7 @@ async def admin_dlq(limit: int = Query(50, ge=1, le=500)):
 
 @router.post(
     "/admin/dlq/{fpe_wa_message_id}/requeue",
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[Depends(_require_admin_role)],
 )
 async def admin_dlq_requeue(
     fpe_wa_message_id: int,
@@ -2223,7 +2250,7 @@ async def admin_review_summary():
     }
 
 
-@router.get("/admin/salary/summary", dependencies=[Depends(_require_api_key)])
+@router.get("/admin/salary/summary", dependencies=[Depends(_require_admin_role)])
 async def admin_salary_summary():
     """Return salary baseline summary for payroll admin controls."""
     row = await fetch_one(
@@ -2246,7 +2273,7 @@ async def admin_salary_summary():
     }
 
 
-@router.post("/admin/salary/apply-uniform", dependencies=[Depends(_require_api_key)])
+@router.post("/admin/salary/apply-uniform", dependencies=[Depends(_require_admin_role)])
 async def admin_apply_uniform_salary(payload: dict):
     """Set one salary value for all employees and record an audit event."""
     amount = Decimal(str(payload.get("amount", "10000")))

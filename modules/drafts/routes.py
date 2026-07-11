@@ -5,7 +5,11 @@ GET  /api/drafts/stats    → status counts
 POST /api/drafts/{id}/approve → approve draft
 POST /api/drafts/{id}/edit    → edit draft body
 POST /api/drafts/{id}/delete  → soft delete
-POST /api/drafts/{id}/block   → block number + delete all drafts
+
+Note: the "blocked number" concept (POST /api/drafts/{id}/block) was
+permanently removed by Owner decision, 2026-07-11 — see migration 042.
+There is no scenario in which a phone number should be blocked at the
+pipeline level; unknown senders simply trigger no business action.
 """
 from __future__ import annotations
 import json as _json
@@ -64,9 +68,6 @@ async def _resolve_reviewer_identity(key: str) -> str:
 class EditRequest(BaseModel):
     new_body: str
     admin_note: Optional[str] = None
-
-class BlockRequest(BaseModel):
-    reason: Optional[str] = "admin_block"
 
 
 # ── GET /api/drafts/stats ───────────────────────────────────────────────────
@@ -281,58 +282,3 @@ async def delete_draft(draft_id: int, _: None = Depends(_require_api_key)):
     )
     log.info("Draft %d deleted for %s", draft_id, draft["recipient"])
     return {"ok": True, "draft_id": draft_id, "status": "deleted"}
-
-
-# ── POST /api/drafts/{id}/block ────────────────────────────────────────────
-@router.post("/api/drafts/{draft_id}/block")
-async def block_number(draft_id: int, req: BlockRequest, _: None = Depends(_require_api_key)):
-    """Block sender number + delete all pending drafts from that number."""
-    draft = await fetch_one(
-        "SELECT id, recipient FROM fazle_draft_replies WHERE id = $1",
-        draft_id,
-    )
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
-
-    phone = draft["recipient"]
-    note = f"Blocked via draft dashboard: {req.reason}"
-
-    # ON CONFLICT (phone, platform) — correct unique constraint
-    await execute(
-        """
-        INSERT INTO fazle_contact_roles
-          (phone, platform, name, role, sub_role,
-           priority, source, is_active, confidence, notes)
-        VALUES ($1, 'whatsapp', 'Blocked', 'blocked', $2,
-                999, 'admin_block', true, 100, $3)
-        ON CONFLICT (phone, platform) DO UPDATE
-          SET role       = 'blocked',
-              sub_role   = $2,
-              is_active  = true,
-              source     = 'admin_block',
-              notes      = $3,
-              updated_at = NOW()
-        """,
-        phone,
-        req.reason,
-        note,
-    )
-
-    await execute(
-        """
-        UPDATE fazle_draft_replies
-        SET status   = 'deleted',
-            reviewed = true
-        WHERE recipient = $1
-          AND status IN ('pending', 'pending_selfie', 'edited', 'approved')
-        """,
-        phone,
-    )
-
-    log.info("Number %s blocked, drafts deleted (draft_id=%d)", phone, draft_id)
-    return {
-        "ok": True,
-        "phone": phone,
-        "status": "blocked",
-        "reason": req.reason,
-    }
