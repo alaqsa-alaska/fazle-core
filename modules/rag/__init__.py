@@ -531,6 +531,58 @@ def _load_resource_files() -> list[tuple[str, str, str, bool, frozenset[str]]]:
     return out
 
 
+# Directory relative to the repo root holding the curated governance/business-
+# rules/developer-system documentation tree. Never indexed for customers —
+# several of these files are explicitly marked "Visibility: Developer/Admin
+# only" in their own headers (e.g. identity_brain.md, role_permissions.md).
+KNOWLEDGE_BASE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "knowledge_base",
+)
+# Historical, point-in-time audit reports — not living documentation of
+# current behavior; excluded to keep the corpus focused and non-misleading.
+_KB_EXCLUDED_DIRS: frozenset = frozenset({"07_archived"})
+_KB_ADMIN_ONLY_ROLES: frozenset[str] = frozenset({"admin", "developer"})
+
+
+def _load_knowledge_base_files() -> list[tuple[str, str, str, bool, frozenset[str]]]:
+    """
+    Return list of (source_id, title, text, safe_for_customer, allowed_roles)
+    for the knowledge_base/ markdown tree.
+
+    IMPORTANT — admin/developer only: safe_for_customer=True here means
+    "not purged as an internal-reasoning-leak chunk" (see _is_chunk_safe()),
+    NOT "safe to show a candidate". Actual visibility is gated entirely by
+    allowed_roles=_KB_ADMIN_ONLY_ROLES — the same mechanism the existing
+    "internal"/"admin"/"fpe" KB-row categories already use (_CATEGORY_ROLE_MAP
+    above). A candidate/employee-role search() call will never see this
+    content; only role="admin"/"developer" callers (the admin AI console)
+    can retrieve it.
+    """
+    out: list[tuple[str, str, str, bool, frozenset[str]]] = []
+    if not os.path.isdir(KNOWLEDGE_BASE_DIR):
+        log.warning(f"[rag] knowledge_base dir missing: {KNOWLEDGE_BASE_DIR}")
+        return out
+    for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
+        dirs[:] = [d for d in dirs if d not in _KB_EXCLUDED_DIRS and not d.startswith(".")]
+        for name in sorted(files):
+            if not name.lower().endswith(".md"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except Exception as e:
+                log.warning(f"[rag] failed to read {path}: {e}")
+                continue
+            if not text.strip():
+                continue
+            rel = os.path.relpath(path, KNOWLEDGE_BASE_DIR)
+            title = name.rsplit(".", 1)[0]
+            out.append((f"kb_file:{rel}", title, text, True, _KB_ADMIN_ONLY_ROLES))
+    return out
+
+
 async def _load_kb_rows() -> list[tuple[str, str, str, bool, frozenset[str]]]:
     """Return list of (source_id, title, text, safe_for_customer, allowed_roles) for KB rows."""
     out: list[tuple[str, str, str, bool, frozenset[str]]] = []
@@ -722,6 +774,7 @@ async def build_index() -> dict[str, Any]:
 
         sources: list[tuple[str, str, str, bool, frozenset[str]]] = []
         sources.extend(_load_resource_files())
+        sources.extend(_load_knowledge_base_files())
         sources.extend(await _load_kb_rows())
 
         safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
@@ -1121,9 +1174,16 @@ async def search(
 
 
 # ── Templated answer (extractive, no LLM) ─────────────────────────────────────
-async def answer(q: str, k: int = 3, min_score: float = 1.0) -> Optional[dict[str, Any]]:
-    """Build an extractive answer from top-k chunks. Returns None if no good hit."""
-    hits = await search(q, k=k, min_score=min_score)
+async def answer(q: str, k: int = 3, min_score: float = 1.0, role: str = "candidate") -> Optional[dict[str, Any]]:
+    """
+    Build an extractive answer from top-k chunks. Returns None if no good hit.
+
+    role defaults to "candidate" (most restrictive, preserving prior behavior
+    for every existing caller that doesn't pass it) — the admin AI console
+    must pass role="admin" explicitly to retrieve knowledge_base/ content
+    (see modules.admin_chat_lab's call site).
+    """
+    hits = await search(q, k=k, min_score=min_score, role=role)
     if not hits:
         return None
     parts = []
@@ -1141,10 +1201,11 @@ async def answer(q: str, k: int = 3, min_score: float = 1.0) -> Optional[dict[st
 # ── Timeout-guarded wrappers for customer-facing reply paths ──────────────────
 # search()/answer() can race ensure_index() into a fresh build_index() call
 # during the narrow window right after a rebuild starts _IDX.reset() (built_at
-# briefly None) — that would block behind _IDX.lock for the full duration of
-# whatever build is in flight. These wrappers make sure a customer-facing
-# reply never blocks on that: on timeout/any error, callers get an empty
-# result and reply without RAG context instead.
+# briefly None) — that would block behind _IDX.lock for the full ~30+ min
+# hybrid embedding pass (2026-07-11: corpus roughly doubled after indexing
+# knowledge_base/*.md, making this wait long enough to matter). These wrappers
+# make sure a customer-facing reply never blocks on that: on timeout/any
+# error, callers get an empty result and reply without RAG context instead.
 async def safe_search(
     q: str,
     k: int = 5,
@@ -1166,10 +1227,11 @@ async def safe_answer(
     q: str,
     k: int = 3,
     min_score: float = 1.0,
+    role: str = "candidate",
     timeout: float = 4.0,
 ) -> Optional[dict[str, Any]]:
     try:
-        return await asyncio.wait_for(answer(q, k=k, min_score=min_score), timeout=timeout)
+        return await asyncio.wait_for(answer(q, k=k, min_score=min_score, role=role), timeout=timeout)
     except asyncio.TimeoutError:
         log.warning("[rag] safe_answer timeout after %.1fs q=%r — returning None", timeout, q[:80])
         return None
@@ -1218,6 +1280,7 @@ async def rebuild_index() -> dict[str, Any]:
         t0 = time.monotonic()
         sources: list[tuple[str, str, str, bool, frozenset[str]]] = []
         sources.extend(_load_resource_files())
+        sources.extend(_load_knowledge_base_files())
         sources.extend(await _load_kb_rows())
         safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
         unsafe_count = 0

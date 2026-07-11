@@ -104,6 +104,20 @@ ALREADY_APPLIED_MSG: str = (
     "আমাদের টিম শীঘ্রই যোগাযোগ করবে।"
 )
 
+# Soft-ask prepended to the first recruitment reply only when identity_brain
+# found NO signal at all for this number (role="unknown" -- distinct from
+# role="candidate", which already means an explicit job-related keyword
+# matched). Covers the narrow case of an existing employee texting from a
+# genuinely new number with zero prior cash/attendance/escort/contact
+# history on it -- identity_brain's phone-only secondary-evidence lookups
+# (already run before this point) would have resolved a known number to
+# "employee" already, so this only fires for a true first-ever contact.
+# This is a soft ask, not a gate -- the funnel proceeds either way.
+UNKNOWN_SENDER_SOFT_ASK: str = (
+    "আপনাকে চিনতে পারছি না। আপনি কি আমাদের পুরনো employee?\n"
+    "হলে দয়া করে আপনার নাম এবং পুরনো নম্বর জানান।\n\n"
+)
+
 
 # ── Parsers ────────────────────────────────────────────────────────────────────
 
@@ -200,9 +214,14 @@ async def _update_session(phone: str, fields: dict) -> None:
 
 # ── Main intake function ───────────────────────────────────────────────────────
 
-async def intake_message(phone: str, message: str, source: str = "whatsapp") -> dict:
+async def intake_message(phone: str, message: str, source: str = "whatsapp", role: str = "unknown") -> dict:
     """
     Process one inbound WhatsApp message for recruitment funnel.
+
+    role: identity_brain's resolved role for this sender, e.g. "unknown" or
+    "candidate". Only used to decide whether to prepend a soft ask to the
+    very first reply for a brand-new session (see UNKNOWN_SENDER_SOFT_ASK) --
+    never changes funnel behavior otherwise.
 
     Returns:
       {
@@ -224,6 +243,16 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp") -> 
 
         sid = await _create_session(phone, text, source)
         reply = STEP_QUESTIONS["name"]
+        if (role or "").strip().lower() == "unknown":
+            reply = UNKNOWN_SENDER_SOFT_ASK + reply
+            # KNOWN GAP (2026-07-11): we send a soft-ask but do NOT
+            # automatically cross-reference against employee records.
+            # An existing employee texting from a new SIM is
+            # indistinguishable from a stranger until admin manually
+            # links the number. To fix: implement
+            # secondary_evidence_match() in identity_brain that checks
+            # cash_transactions/attendance/escort_roster by name hint
+            # from the soft-ask reply. Tracked as a separate task.
         return {"reply": reply, "action": "created", "session_id": sid}
 
     # ── Already past collection ────────────────────────────────────────────────
@@ -334,6 +363,34 @@ async def get_active_session(phone: str) -> Optional[dict]:
     return session
 
 
+# Moved from modules.recruitment_ai (2026-07-11) — this was the only live
+# import from that module; recruitment_ai's own reply-generation pipeline
+# (generate_recruitment_reply etc.) is superseded by
+# modules.conversation_layer.recruitment, called below via
+# route_recruitment_message(). recruitment_ai has no live callers left.
+_QUESTION_HINTS = (
+    "who are you",
+    "who r u",
+    "আপনি কে",
+    "তুমি কে",
+    "কেন",
+    "why",
+    "am i asked for job",
+    "asked for job",
+    "lok lagbe",
+    "লোক লাগবে",
+    "কাজ আছে",
+    "job ache",
+)
+
+
+def looks_like_recruitment_followup(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    if not lower:
+        return False
+    return any(hint in lower for hint in _QUESTION_HINTS)
+
+
 async def recruitment_eligibility(
     phone: str,
     text: str,
@@ -342,8 +399,6 @@ async def recruitment_eligibility(
     intent: str = "unknown",
 ) -> dict:
     """Return the single recruitment routing/delivery decision."""
-    from modules.recruitment_ai import looks_like_recruitment_followup
-
     role = (role or "unknown").lower()
     intent = (intent or "unknown").lower()
     explicit = is_recruitment_trigger(text)
@@ -361,6 +416,24 @@ async def recruitment_eligibility(
     if active_session and looks_like_recruitment_followup(text):
         return {"eligible": True, "autosend": False, "reason": "session_followup_draft",
                 "active_session": active_session}
+
+    # 3-layer detector (2026-07-11): catches natural phrasing the flat
+    # is_recruitment_trigger() keyword set above misses (e.g. "ভাই সুযোগ
+    # দেন", "আমি available"). Conservative: only the fast, deterministic
+    # entity layer autosends; the intent/context layers are lower-confidence
+    # and go to draft review instead, same as session_followup_draft above.
+    from modules.recruitment_detector import detect_recruitment_intent
+
+    detector = await detect_recruitment_intent(text=text, phone=phone, intent=intent)
+    if detector["is_recruitment"]:
+        return {
+            "eligible": True,
+            "autosend": detector["layer"] == "entity",
+            "reason": f"detector_{detector['layer']}",
+            "active_session": active_session,
+            "detector": detector,
+        }
+
     return {"eligible": False, "autosend": False, "reason": "no_recruitment_context",
             "active_session": active_session}
 
@@ -401,7 +474,7 @@ async def route_recruitment_message(
         if step:
             reply = STEP_QUESTIONS.get(step, STEP_QUESTIONS["name"])
         else:
-            intake = await intake_message(phone, text, source)
+            intake = await intake_message(phone, text, source, role=role)
             reply = (intake.get("reply") or "").strip() or STEP_QUESTIONS["name"]
 
     return {

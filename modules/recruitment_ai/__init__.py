@@ -1,4 +1,36 @@
-"""Restricted recruitment AI reply brain."""
+"""
+Restricted recruitment AI reply brain.
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  MODULE STATUS (updated 2026-07-11): fully superseded, zero live    ║
+║  callers.                                                           ║
+║                                                                     ║
+║  _QUESTION_HINTS and looks_like_recruitment_followup() — the last   ║
+║  live symbols — were moved to modules/recruitment_flow/__init__.py  ║
+║  (their only caller) on 2026-07-11. Nothing in this file is called  ║
+║  from the live router anymore.                                      ║
+║                                                                     ║
+║  Remaining functions (generate_recruitment_reply(),                 ║
+║  enforce_recruitment_reply_policy(), build_recruitment_source_context(),║
+║  clean_recruitment_reply(), _safe_rag_chunks(), _deterministic_fact_reply(),║
+║  _looks_like_fee_question(), _looks_like_contact_question(), _tokens())║
+║  have zero callers outside this file and its own tests               ║
+║  (tests/unit/test_recruitment_ai_restricted.py exercises this in     ║
+║  isolation; that is not proof of live routing):                     ║
+║    → replaced in the live router by                                 ║
+║      modules/conversation_layer/recruitment.py's                    ║
+║      generate_recruitment_reply() (KB → RAG → Ollama → safety       ║
+║      filter), called via recruitment_flow.route_recruitment_message.║
+║    → shared/reply_policy.py:212 independently reimplements the      ║
+║      same safety-cleaning idea for the live path, rather than       ║
+║      calling this file's version.                                   ║
+║                                                                     ║
+║  Do NOT delete this file's contents in this pass — kept for its own ║
+║  test coverage and as reference. Do NOT edit expecting it to affect ║
+║  production behavior — edit modules/conversation_layer/recruitment.py║
+║  instead. If you add a new recruitment reply feature, add it there. ║
+╚═══════════════════════════════════════════════════════════════════╝
+"""
 from __future__ import annotations
 
 import logging
@@ -29,22 +61,6 @@ _FEE_PHRASES = (
     "application fee", "form fee", "ডিপোজিট", "deposit", "টাকা লাগবে", "টাকা লাগে",
 )
 
-_QUESTION_HINTS = (
-    "who are you",
-    "who r u",
-    "আপনি কে",
-    "তুমি কে",
-    "কেন",
-    "why",
-    "am i asked for job",
-    "asked for job",
-    "lok lagbe",
-    "লোক লাগবে",
-    "কাজ আছে",
-    "job ache",
-)
-
-
 def _tokens(text: str) -> set[str]:
     return {t for t in re.split(r"[\s,.;:!?।()\[\]{}<>/\\|\"'`~\-]+", text.lower()) if len(t) >= 2}
 
@@ -73,13 +89,6 @@ def _deterministic_fact_reply(text: str) -> str:
     if any(p in lower for p in ("বয়সসীমা", "বয়সসীমা", "age limit")):
         return _AGE_REPLY
     return ""
-
-
-def looks_like_recruitment_followup(text: str) -> bool:
-    lower = (text or "").strip().lower()
-    if not lower:
-        return False
-    return any(hint in lower for hint in _QUESTION_HINTS)
 
 
 def build_recruitment_source_context(message: str = "") -> str:

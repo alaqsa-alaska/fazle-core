@@ -606,7 +606,8 @@ async def process_message(
         if kb_reply:
             return kb_reply, None
         db_ctx = await get_contact_context(sender)
-        reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
+        history = "\n".join(await get_recent_history(sender))
+        reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
         return reply, None
 
     # ── 7/8. Recruitment — one eligibility decision for every unknown/candidate ─
@@ -731,7 +732,8 @@ async def process_message(
         if intent in ("salary_query", "payment_due") and emp_id:
             payroll = await get_payroll_summary(emp_id)
             db_ctx = format_payroll_context(payroll)
-            reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
+            history = "\n".join(await get_recent_history(sender))
+            reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
             return reply, None
 
     # ── 11. ADVANCE/PAYMENT REQUEST (any role not already handled) ───────────
@@ -818,7 +820,8 @@ async def process_message(
                 log.info("[router] RAG enrichment added hits=%d sender=%s", len(_rag_hits), sender)
     except Exception as _rag_err:
         log.debug("[router] rag enrichment skipped: %s", _rag_err)
-    reply = await ai.generate_reply(text, intent, db_ctx, role=role_str, source=source)
+    history = "\n".join(await get_recent_history(sender))
+    reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
     # Phase 4 Step 4 — strip artifact prefixes from structured prompt output
     from shared.reply_policy import clean_general_reply as _clean_reply
     return _clean_reply(reply), None

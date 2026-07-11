@@ -452,7 +452,12 @@ async def _load_rag_context(*, question: str, enabled: bool, logger: Any) -> tup
     try:
         from modules import rag
 
-        res = await rag.answer(question, k=4, min_score=0.8)
+        # role="admin": this is the internal admin chat console, not a
+        # customer-facing reply -- without this it defaulted to role=
+        # "candidate" (rag.answer()'s most-restrictive default), meaning the
+        # admin console could never see knowledge_base/ content even after
+        # it's indexed (see modules.rag._load_knowledge_base_files).
+        res = await rag.answer(question, k=4, min_score=0.8, role="admin")
         if res:
             rag_context = res.get("answer", "")
             citations = res.get("citations", [])

@@ -103,6 +103,32 @@ def test_general_policy_truncates_long_message():
     assert "ক" * 401 not in prompt  # truncated at 400
 
 
+def test_general_policy_injects_history_when_provided():
+    """2026-07-11: message_router now populates history for general replies
+    (previously always empty) -- this confirms the existing Conversation
+    section actually renders it when given."""
+    prompt = build_whatsapp_reply_policy(
+        source="bridge1",
+        user_message="আবার কবে আসবেন?",
+        history="user: গতকাল কথা হয়েছিল\nfazle: হ্যাঁ মনে আছে",
+    )
+    assert "কথোপকথন" in prompt
+    assert "গতকাল কথা হয়েছিল" in prompt
+
+
+def test_general_policy_no_conversation_block_when_history_empty():
+    prompt = build_whatsapp_reply_policy(source="bridge1", user_message="hi", history="")
+    assert "কথোপকথন" not in prompt
+
+
+def test_general_policy_contains_bangla_nuance_note():
+    """2026-07-11 addition: colloquial/Banglish recognition + formality
+    matching, on top of the pre-existing 'reply in same language' rule."""
+    prompt = build_whatsapp_reply_policy(source="bridge1", user_message="hi")
+    assert "বাংলিশ" in prompt
+    assert "আনুষ্ঠানিকতার মাত্রা" in prompt
+
+
 # ── Recruitment reply policy ───────────────────────────────────────────────────
 
 def test_recruitment_policy_identical_across_all_whatsapp_channels():
@@ -139,6 +165,14 @@ def test_recruitment_policy_contains_system_rules():
     assert "ভূমিকা" in prompt          # ভূমিকা (Role) section header
     assert "ব্যবসায়িক নিয়ম" in prompt  # Business Rules section
     assert "নিয়োগ সহকারী" in prompt   # recruitment assistant identity
+
+
+def test_recruitment_policy_contains_bangla_nuance_note():
+    prompt = build_whatsapp_recruitment_policy(source="bridge1", user_message="job?", kb_context="")
+    assert "বাংলিশ" in prompt
+    assert "আনুষ্ঠানিকতার মাত্রা" in prompt
+
+
 def test_recruitment_policy_fallback_when_kb_empty():
     import unicodedata
     prompt = build_whatsapp_recruitment_policy(
