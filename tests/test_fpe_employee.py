@@ -5,9 +5,43 @@ Uses mocked DB helpers — no real DB connection required.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
+
+
+class _FakeConn:
+    """Minimal stand-in for the asyncpg.Connection _auto_create_employee()
+    uses via db_conn() — a raw `async with db_conn() as con:` block, not the
+    execute/fetch_one/fetch_val wrappers this file already patches. Every
+    other test in this file only exercises match_or_create_employee()'s
+    match paths (which stay on the wrappers); only the auto-create path
+    reaches into db_conn() directly, which is why this needed its own mock."""
+
+    def __init__(self, new_id: int = 42):
+        self._new_id = new_id
+
+    async def execute(self, *a, **kw):
+        return None
+
+    async def fetchrow(self, *a, **kw):
+        return None  # no pre-existing employee found by lock re-check
+
+    async def fetchval(self, *a, **kw):
+        return self._new_id
+
+    def transaction(self):
+        @asynccontextmanager
+        async def _tx():
+            yield
+        return _tx()
+
+
+@asynccontextmanager
+async def _fake_db_conn(new_id: int = 42):
+    yield _FakeConn(new_id)
 
 
 class TestEmployeeMatching:
@@ -45,14 +79,28 @@ class TestEmployeeMatching:
 
     @pytest.mark.asyncio
     async def test_auto_create_when_no_match(self):
-        """When no existing employee matches, auto-create should return a new employee."""
+        """
+        When no existing employee matches, auto-create should return a new
+        employee.
+
+        Regression note: this test used to be order-dependent (passed in
+        isolation, failed when run after tests that reset app.database._pool
+        to None). Root cause: _auto_create_employee() writes via a raw
+        `async with db_conn() as con:` block, not the fetch_one/fetch_val/
+        execute wrappers this test patches -- db_conn() falls back to a real
+        asyncpg.connect(settings.database_url) whenever _pool is None, which
+        fails outside a real DB environment. Fixed by also patching db_conn
+        with a fake connection (see _fake_db_conn above) so this test no
+        longer depends on unrelated global pool state from other tests.
+        """
         from modules.fazle_payroll_engine.employee import match_or_create_employee
 
         with patch("modules.fazle_payroll_engine.employee.fetch_one", new_callable=AsyncMock) as mock_fetch_one, \
              patch("modules.fazle_payroll_engine.employee.fetch_all", new_callable=AsyncMock) as mock_fetch_all, \
              patch("modules.fazle_payroll_engine.employee.fetch_val", new_callable=AsyncMock) as mock_fetch_val, \
              patch("modules.fazle_payroll_engine.employee.execute", new_callable=AsyncMock), \
-             patch("modules.fazle_payroll_engine.employee.add_alias", new_callable=AsyncMock):
+             patch("modules.fazle_payroll_engine.employee.add_alias", new_callable=AsyncMock), \
+             patch("modules.fazle_payroll_engine.employee.db_conn", lambda: _fake_db_conn(new_id=42)):
             mock_fetch_one.return_value = None  # no match on any phone/name lookup
             mock_fetch_all.return_value = []     # no fuzzy candidates
             mock_fetch_val.return_value = 42     # auto-create inserts, returns id=42
