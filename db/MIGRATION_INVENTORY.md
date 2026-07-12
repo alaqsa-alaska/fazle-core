@@ -76,7 +76,17 @@
 
 **Next available number for new work: `046`.**
 
-**Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory. Not yet reconciled.
+**Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
+
+**Re-investigated 2026-07-13, table by table (full file:line detail available on request) — good news: no actual data-corrupting conflicts found in any of the 5.** Every cross-directory overlap is one of two harmless shapes:
+- **Redundant-but-idempotent**: two directories independently add the *same* column/constraint/index (e.g. `fpe_cash_transactions.deleted_at/deleted_by/updated_at` — added by both `fazle_payroll_engine/migrations/010` and `db/migrations/023_c0d_001`, identical definitions, both `IF NOT EXISTS`-guarded; `fazle_payment_drafts.expires_at` — added by both `fpe/009` and `db/021`, `db/021`'s own comment even says *"already exists from migration 009; ensure it is present for safety"*, i.e. already a known, deliberate duplicate).
+- **Additive-but-uncoordinated**: different directories add genuinely *different* columns/indexes to the same table with no overlap at all (e.g. `escort_roster_entries` — `migrations/`'s `expires_at`, `db/018`'s `food_bill`/`advance_deduction`/`net_payable`, `db/020`'s `escort_employee_id`, all disjoint; `wbom_escort_programs` — `db/018`'s `food_bill` vs `fazle_payroll_engine/009`'s `is_historical`, disjoint).
+
+`fazle_payroll_engine/migrations/` is confirmed **not dead code** — `start_fpe()` (`modules/fazle_payroll_engine/__init__.py:25-38`) is called from `app/main.py`'s startup lifespan and re-runs that whole directory's SQL on every restart; its cross-directory touches above are live, not theoretical.
+
+**One separate, unrelated re-run hazard found during this pass** (not a cross-directory collision — a fragility risk *within* `db/migrations/003c_schema_align.sql` alone): that file's 8 `ALTER TABLE ... DROP CONSTRAINT x, ADD CONSTRAINT x ...` blocks (lines 54-120) and its 2 `RENAME COLUMN` statements (lines 11-16) have no idempotency guard — Postgres has no `DROP CONSTRAINT IF EXISTS ... ADD CONSTRAINT` single-statement equivalent, and a second `RENAME COLUMN` on an already-renamed column errors outright. Already applied to production once (migration 003c, long predates this inventory), so this is a *replay* risk, not a current-state risk — it would only bite if `db/migrate.py`'s stale `schema_migrations` tracking (see above) were ever reconciled and the file replayed, or in a from-scratch disaster-recovery rebuild. **Not fixed this pass** — deliberately not editing an already-applied historical migration file without an explicit Owner decision on whether that's an acceptable thing to do in this repo's conventions (vs. treating applied migration files as immutable record and instead writing a fresh idempotent migration if the file ever genuinely needs to be replayed).
+
+**Verdict: the cross-directory "collision" risk is downgraded from "unreconciled, unknown severity" to "confirmed harmless, just messy."** Actually consolidating the 3 directories into one remains worthwhile for maintainability (still tracked as this Tier 2 item), but is no longer an urgent correctness concern.
 
 ---
 

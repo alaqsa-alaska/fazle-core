@@ -63,9 +63,15 @@ These three remain as historical, unreconciled sources until a dedicated reconci
 
 **Rule going forward:** filename is the uniqueness key, not the leading number. Never assume the numeric prefix alone identifies a migration or that gaps must be filled.
 
-### Known cross-directory schema-collision risk (documented, not yet fixed)
+### Known cross-directory schema-collision risk — re-investigated 2026-07-13, downgraded from "unknown severity" to "confirmed harmless"
 
-`SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 4 found genuine `ALTER TABLE` collisions across the three governed directories on `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, and `fazle_payment_drafts`, plus a fully duplicated schema definition for all 8 `social_auto_reply` tables (identical in both `db/migrations/013_social_auto_reply.sql` and the inline DDL in `modules/social_auto_reply/__init__.py`). These are **documented here as known risk, not resolved by this task** — resolving them safely requires the dedicated reconciliation pass below, since several may have already been applied to production under their current form.
+`SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 4 found `ALTER TABLE` touches on the same 5 tables (`fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts`) from more than one of the three governed directories, plus a fully duplicated schema definition for all 8 `social_auto_reply` tables (identical in both `db/migrations/013_social_auto_reply.sql` and the inline DDL in `modules/social_auto_reply/__init__.py`).
+
+A table-by-table, file:line re-audit (2026-07-13, full detail in `db/MIGRATION_INVENTORY.md`) found **zero actually-conflicting statements** — every overlap is either the *same* column/constraint added twice, both idempotent (harmless, e.g. `fazle_payment_drafts.expires_at`, added by both `fazle_payroll_engine/migrations/009` and `db/migrations/021`, the latter's own comment already acknowledging the duplication), or *different*, non-overlapping columns added by different directories to the same table (harmless, just uncoordinated). `fazle_payroll_engine/migrations/` is confirmed live (re-run every restart via `start_fpe()`), not dead code, so these touches are real but not dangerous.
+
+**One separate, unrelated finding from the same pass**: `db/migrations/003c_schema_align.sql` itself (not a cross-directory issue) has 8 non-idempotent `DROP CONSTRAINT`/`ADD CONSTRAINT` pairs and 2 unguarded `RENAME COLUMN` statements — would error if ever replayed against a database where it already ran. Already applied to production once; this is a replay/disaster-recovery-rebuild risk, not a current-state risk. Not fixed — deliberately left as an Owner decision (retrofit old migration files for idempotency, or treat them as immutable historical record and handle replay differently) rather than unilaterally edited.
+
+**Practical takeaway: the reconciliation checklist below remains worth doing for maintainability, but is no longer an urgent correctness fire** — nothing here has been found to actually corrupt data or diverge in a way that matters, only to be messier than ideal.
 
 ### Checklist for future migration reconciliation (not started — tracked here for whoever picks it up)
 
