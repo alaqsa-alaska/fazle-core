@@ -264,3 +264,23 @@ All pages live in `/home/azim/core/app/static/*.html`, served both via dedicated
 - **Phase 1 — Consolidation** (in progress): make the Owner's own `BUSINESS-CONSTITUTION.md` Article VII freeze real — migration consolidation, duplicate-logic cleanup, deployment gate, secret rotation.
 - **Phase 2 — Dispatch/scheduling + Accounting/GL + Client Billing:** availability/conflict-detection for guard assignments (Owner-prioritized first); a real chart-of-accounts/debit-credit layer on top of the existing cash ledger; client billing, invoicing, and accounts receivable (Owner-decided scope addition, 2026-07-08).
 - **Phase 3 — AI Operating Console unification:** runtime-ingest the curated `knowledge_base/` tree into RAG (today it only indexes `resources/*.txt`); extend `ai_readonly_tools`/`ai_console` with safe read-only tools over the new dispatch/GL data; a single natural-language, evidence-backed query surface in `open-chat.html` across payroll, escort, accounting, and dispatch.
+
+---
+
+## K — Testing
+
+**Never combine `tests/e2e/` (Playwright) with any other test directory in the same `pytest` invocation.** Found 2026-07-09: e2e tests corrupt the shared asyncio event loop for every async DB test that runs after them in the same process, cascading into ~350 false failures in unrelated `tests/unit`/`tests/workflows` tests — not a flaky-test problem, a real process-isolation bug in how Playwright's event loop interacts with everything else.
+
+Always run these as two separate invocations:
+```bash
+pytest tests/unit tests/integration tests/db tests/workflows tests/resilience
+pytest tests/e2e
+```
+
+This is enforced mechanically, not just documented — `tests/conftest.py`'s `pytest_collection_modifyitems` hook raises `pytest.UsageError` (exit code 4, before any test runs) if both e2e and non-e2e tests are collected in the same session, regardless of how you invoke pytest (bare `pytest`, `pytest tests/`, explicit combined paths — all three would otherwise reproduce the bug). CI (`.github/workflows/ci-test.yml`) already runs each test directory as its own `pytest` step and was not affected; the gap this closes is local/manual invocation and any future AI-agent session running tests.
+
+**Two pytest config files exist, both scoped correctly, neither redundant:**
+- `pytest.ini` (repo root) — used when pytest is invoked bare (`pytest`, `pytest .`) from `/home/azim/core`. `testpaths` deliberately excludes `tests/e2e` so a plain `pytest` with no args never touches it.
+- `tests/pytest.ini` — used when invoked with `tests/`-prefixed args (`pytest tests/unit`, etc.) — pytest's ini-file discovery finds the nearest ancestor ini to the given args, so this one wins whenever `tests/` is part of the path. Has `testpaths = .` (everything under `tests/`, including e2e) because testpaths is only consulted when *no* args are given — in practice you always pass explicit paths with this one, so it doesn't matter; the conftest guard is the real backstop either way.
+
+Both set `asyncio_mode = auto` (pytest-asyncio) — without it, every bare `async def test_*` function in this suite (the norm here, not `@pytest.mark.asyncio`-decorated) would silently not run under `strict` mode, pytest-asyncio's default.

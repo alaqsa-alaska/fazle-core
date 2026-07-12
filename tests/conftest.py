@@ -89,6 +89,46 @@ def pytest_configure(config):
         # Don't exit — let tests that don't need DB still run
 
 
+def pytest_collection_modifyitems(config, items):
+    """Fail fast (before any test runs, not just eventually) if tests/e2e/
+    (Playwright) tests are collected together with anything else in the
+    same pytest invocation.
+
+    Found 2026-07-09: e2e tests corrupt the shared asyncio event loop for
+    every async DB test that runs after them in the same process, cascading
+    into ~350 false failures in unrelated tests/unit and tests/workflows
+    tests. e2e must always run as its own separate `pytest tests/e2e/`
+    invocation.
+
+    This is a collection-time guard rather than relying on tests/pytest.ini
+    or CI config alone, because neither is bulletproof on its own: a bare
+    `pytest` invoked from the repo root doesn't find tests/pytest.ini at
+    all (ini-file discovery only searches upward from the given args/cwd,
+    never downward into tests/), and `pytest tests/` (whole directory,
+    explicit args) finds it but testpaths is only consulted when NO args
+    are given, so it doesn't help either. This hook lives in conftest.py,
+    which pytest always loads for anything under tests/ regardless of
+    which ini file (if any) was found — the one guard that can't be
+    bypassed by invocation style.
+    """
+    def _is_e2e(item) -> bool:
+        return "/e2e/" in item.nodeid or item.nodeid.startswith("e2e/")
+
+    has_e2e = any(_is_e2e(item) for item in items)
+    has_non_e2e = any(not _is_e2e(item) for item in items)
+    if has_e2e and has_non_e2e:
+        raise pytest.UsageError(
+            "\n\nRefusing to run: tests/e2e/ (Playwright) tests were collected "
+            "together with other tests in the same pytest invocation.\n"
+            "e2e tests corrupt the shared asyncio event loop for every async "
+            "test that runs after them in the same process, causing hundreds "
+            "of unrelated false failures. See docs/DEVELOPER_GUIDE.md.\n\n"
+            "Run them separately:\n"
+            "  pytest tests/unit tests/integration tests/db tests/workflows tests/resilience\n"
+            "  pytest tests/e2e\n"
+        )
+
+
 @pytest.fixture(scope="session", autouse=False)
 def _setup_test_schema(override_env):
     """Marker fixture — schema is already set up by pytest_configure.
