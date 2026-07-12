@@ -625,6 +625,7 @@ td.actions{white-space:nowrap;text-align:center}
 <!-- ── Toast Zone ────────────────────────────────────────────────────── -->
 <div id="toastZone"></div>
 
+<script src="/static/shared-auth-fetch.js"></script>
 <script>
 // ─────────────────────────────────────────────────────────────────────────
 // State
@@ -698,40 +699,28 @@ document.getElementById('passwordInput').addEventListener('keydown', e => { if(e
 // ─────────────────────────────────────────────────────────────────────────
 // API wrapper
 // ─────────────────────────────────────────────────────────────────────────
+// Thin page-specific wrappers over shared-auth-fetch.js — same external
+// names/signatures/behavior as before 2026-07-13, just no longer
+// duplicating the header-building/error-parsing boilerplate that 5 other
+// dashboard pages each independently reimplemented too.
 function apiFetch(path, opts={}) {
-  const headers = {'X-Internal-Key': API_KEY, 'Content-Type': 'application/json', ...(opts.headers||{})};
-  return fetch(BASE + path, {...opts, headers});
+  return FazleAuthFetch.fetch(BASE + path, API_KEY, opts);
 }
 
 async function readApiError(r) {
-  const text = await r.text();
-  if (!text) return `${r.status} ${r.statusText}`.trim();
-  try {
-    const data = JSON.parse(text);
-    if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail.trim();
-    if (Array.isArray(data?.detail) && data.detail.length) {
-      return data.detail.map(item => item?.msg || item?.message || JSON.stringify(item)).join('; ');
-    }
-  } catch (_) {}
-  return text;
+  return FazleAuthFetch.readError(r);
 }
 
 async function apiGet(path) {
-  const r = await apiFetch(path);
-  if (!r.ok) throw new Error(await readApiError(r));
-  return r.json();
+  return FazleAuthFetch.getJson(BASE + path, API_KEY);
 }
 
 async function apiPost(path, body) {
-  const r = await apiFetch(path, {method:'POST', body: JSON.stringify(body)});
-  if (!r.ok) throw new Error(await readApiError(r));
-  return r.json();
+  return FazleAuthFetch.postJson(BASE + path, API_KEY, body);
 }
 
 async function apiPatch(path, body) {
-  const r = await apiFetch(path, {method:'PATCH', body: JSON.stringify(body)});
-  if (!r.ok) throw new Error(await readApiError(r));
-  return r.json();
+  return FazleAuthFetch.patchJson(BASE + path, API_KEY, body);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
