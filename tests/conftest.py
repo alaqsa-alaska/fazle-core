@@ -23,7 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Module-level imports in test files (e.g. from modules.fazle_payroll_engine.routes)
 # trigger get_settings() during collection, before the override_env fixture runs.
 # Set safe defaults here so collection never fails with ValidationError.
-os.environ.setdefault("DATABASE_URL", os.getenv("TEST_DATABASE_URL", "postgresql://postgres:3UTioVfpNwVgcZ2VtlEr9XDR5C8PSOb@172.20.0.6:5432/fazle_test"))
+_early_test_db_pass = os.getenv("TEST_DB_PASSWORD", "changeme-set-TEST_DB_PASSWORD")
+os.environ.setdefault("DATABASE_URL", os.getenv("TEST_DATABASE_URL", f"postgresql://postgres:{_early_test_db_pass}@172.20.0.6:5432/fazle_test"))
 os.environ.setdefault("INTERNAL_API_KEY", "test-internal-key-fixture-only")
 os.environ.setdefault("AUTO_REPLY_ENABLED", "false")
 os.environ.setdefault("RECRUITMENT_AUTOREPLY_ENABLED", "false")
@@ -714,7 +715,7 @@ def _validate_test_db_url(url: str) -> str:
 _TEST_DB_HOST = os.getenv("TEST_DB_HOST", "172.20.0.6")
 _TEST_DB_PORT = os.getenv("TEST_DB_PORT", "5432")
 _TEST_DB_USER = os.getenv("TEST_DB_USER", "postgres")
-_TEST_DB_PASS = os.getenv("TEST_DB_PASSWORD", "3UTioVfpNwVgcZ2VtlEr9XDR5C8PSOb")
+_TEST_DB_PASS = os.getenv("TEST_DB_PASSWORD", "changeme-set-TEST_DB_PASSWORD")
 _TEST_DB_NAME = "fazle_test"  # hardcoded — never overridable
 TEST_DB_URL = os.getenv("TEST_DATABASE_URL") or f"postgresql://{_TEST_DB_USER}:{_TEST_DB_PASS}@{_TEST_DB_HOST}:{_TEST_DB_PORT}/{_TEST_DB_NAME}"
 _validate_test_db_url(TEST_DB_URL)

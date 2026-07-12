@@ -6,7 +6,7 @@
 PYTHON      ?= python3
 PIP         ?= pip3
 PYTEST      ?= python -m pytest
-TEST_DB_URL ?= postgresql://postgres:3UTioVfpNwVgcZ2VtlEr9XDR5C8PSOb@172.20.0.3:5432/fazle_test
+TEST_DB_URL ?= postgresql://postgres:$(TEST_DB_PASSWORD)@172.20.0.3:5432/fazle_test
 
 # Pytest base args (coverage always collected)
 BASE_ARGS = \
