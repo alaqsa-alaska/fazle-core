@@ -34,6 +34,16 @@ why this is a manual admin action rather than an automatic hook):
   GET    /admin/bills/{bill_id}                        — view one bill (admin+/superadmin)
   POST   /admin/bills/generate                         — generate a bill (admin+/superadmin)
 
+Phase 2B Commit D — payment recording (payments.py):
+
+  POST   /admin/bills/{bill_id}/mark-paid              — record payment,
+                                                         idempotent-rejects if
+                                                         already Paid (admin+/superadmin)
+  GET    /admin/bills/{bill_id}/payment-log             — audit trail for one bill (admin+/superadmin)
+  GET    /admin/bills/outstanding                       — pending bills, optional ?contact_id= (admin+/superadmin)
+  GET    /admin/bills/outstanding/summary                — per-client outstanding totals (admin+/superadmin)
+  GET    /admin/bills/dashboard-summary                  — aggregate totals for the admin overview (admin+/superadmin)
+
 Registered in app/main.py:
   from modules.client_billing.routes import router as client_billing_router
   app.include_router(client_billing_router)
@@ -53,6 +63,13 @@ from modules.escort_roster.routes import (
 )
 
 from .bills import generate_bill, get_bill, list_bills, list_billable_programs
+from .payments import (
+    get_bill_payment_log,
+    get_billing_dashboard_summary,
+    get_outstanding_balance_summary,
+    list_outstanding_bills,
+    mark_bill_paid,
+)
 from .profiles import (
     create_client_billing_profile,
     delete_client_billing_profile,
@@ -187,12 +204,56 @@ async def api_list_bills():
     return {"bills": await list_bills()}
 
 
+# NOTE: these static-path routes must be registered before the dynamic
+# /admin/bills/{bill_id} route below — FastAPI matches path templates in
+# registration order, and "outstanding"/"dashboard-summary" would otherwise
+# be swallowed as an attempted (and failing) bill_id path parameter.
+@router.get("/admin/bills/outstanding", dependencies=[Depends(_require_admin_or_above)])
+async def api_list_outstanding_bills(contact_id: Optional[int] = None):
+    return {"bills": await list_outstanding_bills(contact_id=contact_id)}
+
+
+@router.get("/admin/bills/outstanding/summary", dependencies=[Depends(_require_admin_or_above)])
+async def api_outstanding_balance_summary():
+    return {"summary": await get_outstanding_balance_summary()}
+
+
+@router.get("/admin/bills/dashboard-summary", dependencies=[Depends(_require_admin_or_above)])
+async def api_billing_dashboard_summary():
+    return await get_billing_dashboard_summary()
+
+
 @router.get("/admin/bills/{bill_id}", dependencies=[Depends(_require_admin_or_above)])
 async def api_get_bill(bill_id: int):
     bill = await get_bill(bill_id)
     if not bill:
         raise HTTPException(status_code=404, detail=f"bill_id {bill_id} not found")
     return bill
+
+
+@router.get("/admin/bills/{bill_id}/payment-log", dependencies=[Depends(_require_admin_or_above)])
+async def api_bill_payment_log(bill_id: int):
+    return {"log": await get_bill_payment_log(bill_id)}
+
+
+class MarkBillPaidIn(BaseModel):
+    payment_method: Optional[str] = None
+    payment_reference: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+@router.post("/admin/bills/{bill_id}/mark-paid")
+async def api_mark_bill_paid(
+    bill_id: int, body: MarkBillPaidIn, actor: dict = Depends(_require_admin_or_above)
+):
+    actor_label = actor.get("name") or actor.get("phone") or "unknown"
+    return await mark_bill_paid(
+        bill_id,
+        actor_label,
+        payment_method=body.payment_method,
+        payment_reference=body.payment_reference,
+        remarks=body.remarks,
+    )
 
 
 @router.post("/admin/bills/generate", dependencies=[Depends(_require_admin_or_above)])

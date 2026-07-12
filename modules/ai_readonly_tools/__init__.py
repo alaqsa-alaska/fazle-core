@@ -180,6 +180,16 @@ async def get_payment_summary(
     return await _fetch(sql, *params)
 
 
+async def get_billing_outstanding_balance(client_name: Optional[str] = None) -> list[dict]:
+    """Return unpaid client bills (Phase 2B Commit D), optionally filtered by client name."""
+    if client_name:
+        return await _fetch(
+            "SELECT * FROM ai_read_billing_outstanding WHERE LOWER(client_name) LIKE $1",
+            f"%{client_name.lower()}%",
+        )
+    return await _fetch("SELECT * FROM ai_read_billing_outstanding")
+
+
 async def get_escort_program_status(
     vessel: Optional[str] = None,
     date_str: Optional[str] = None,
@@ -682,6 +692,10 @@ _TOOL_PATTERNS: dict[str, list[str]] = {
     "get_payroll_run_status": [
         "payroll", "salary", "বেতন", "মাসিক", "payment summary", "run status",
     ],
+    "get_billing_outstanding_balance": [
+        "outstanding", "unpaid", "due", "bill", "invoice", "receivable",
+        "বকেয়া", "বিল", "ইনভয়েস", "পাওনা",
+    ],
     "get_recruitment_leads": [
         "recruit", "candidate", "নিয়োগ", "প্রার্থী", "applicant",
     ],
@@ -815,6 +829,12 @@ async def run_tool(tool_name: str, question: str) -> dict[str, Any]:
 
         elif tool_name == "get_payroll_run_status":
             data = await get_payroll_run_status()
+            return {"tool": tool_name, "data": data, "count": len(data)}
+
+        elif tool_name == "get_billing_outstanding_balance":
+            client_match = re.search(r"(?:client|customer|company|ক্লায়েন্ট)\s+([A-Za-z0-9 &.]+)", question)
+            client_name = client_match.group(1).strip() if client_match else None
+            data = await get_billing_outstanding_balance(client_name=client_name)
             return {"tool": tool_name, "data": data, "count": len(data)}
 
         elif tool_name == "get_recruitment_leads":

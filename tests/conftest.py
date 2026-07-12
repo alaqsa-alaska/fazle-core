@@ -121,13 +121,25 @@ CREATE TABLE IF NOT EXISTS wbom_employees (
     updated_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Matches db/migrations/029's real production schema (contact_name/
+-- contact_type never existed in production -- this stub previously guessed
+-- wrong column names, the same class of bug fixed in identity_brain's
+-- _lookup_contact() on 2026-07-11; it shadows 029's CREATE TABLE IF NOT
+-- EXISTS since this bootstrap runs first, so keeping it wrong here means
+-- every test silently ran against a schema production never had).
 CREATE TABLE IF NOT EXISTS wbom_contacts (
-    contact_id    SERIAL PRIMARY KEY,
-    contact_phone VARCHAR(20) UNIQUE,
-    whatsapp_number VARCHAR(30),
-    contact_name  VARCHAR(100),
-    contact_type  VARCHAR(30),
-    created_at    TIMESTAMPTZ DEFAULT NOW()
+    contact_id      SERIAL PRIMARY KEY,
+    whatsapp_number VARCHAR(50) NOT NULL,
+    display_name    VARCHAR(200) NOT NULL DEFAULT '',
+    company_name    VARCHAR(300),
+    relation_type_id INT,
+    business_type_id INT,
+    is_active       BOOLEAN DEFAULT TRUE,
+    relation        VARCHAR(100) DEFAULT 'unknown',
+    platform        VARCHAR(20) DEFAULT 'whatsapp',
+    notes           TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS wbom_escort_programs (

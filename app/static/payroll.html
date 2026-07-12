@@ -1432,6 +1432,14 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
       <div id="generateBillError" style="color:var(--err);font-size:12px;margin-top:6px"></div>
       <div id="billsBox" class="tbl-wrap" style="margin-top:12px"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
     </div>
+
+    <div class="card">
+      <h2>Outstanding Balance</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">
+        Unpaid bills grouped by client (Phase 2B, Commit D).
+      </p>
+      <div id="outstandingBalanceBox" class="tbl-wrap"><div class="empty"><div class="icon">⏳</div>Loading…</div></div>
+    </div>
   </section>
 
 </main>
@@ -2314,7 +2322,7 @@ async function deleteClientBillingProfile(clientId) {
 // why this is not an automatic hook on program completion.
 async function loadBillingSection() {
   if (!canAccessAdminMenu()) return;
-  await Promise.all([loadBillableProgramsSelect(), loadBillsList()]);
+  await Promise.all([loadBillableProgramsSelect(), loadBillsList(), loadOutstandingBalance()]);
 }
 
 async function loadBillableProgramsSelect() {
@@ -2371,11 +2379,56 @@ async function loadBillsList() {
         <td>৳${fmtNum(b.service_charge)}</td>
         <td>৳${fmtNum(b.other_charges)}</td>
         <td>৳${fmtNum(b.total_amount)}</td>
-        <td>${esc(b.payment_status || '')}</td>
+        <td>${esc(b.payment_status || '')}${b.payment_status === 'Paid' && b.payment_date ? ' (' + esc(b.payment_date) + ')' : ''}</td>
+        <td>${b.payment_status === 'Pending'
+              ? `<button class="btn sm" onclick="markBillPaid(${b.bill_id})">Mark Paid</button>`
+              : (b.payment_method ? esc(b.payment_method) + (b.payment_reference ? ' / ' + esc(b.payment_reference) : '') : '')}</td>
       </tr>`).join('');
     box.innerHTML = `<table><thead><tr>
       <th>Bill Number</th><th>Client</th><th>Program</th><th>Bill Date</th>
-      <th>Service Charge</th><th>Other Charges</th><th>Total</th><th>Status</th>
+      <th>Service Charge</th><th>Other Charges</th><th>Total</th><th>Status</th><th>Payment</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;
+  }
+}
+
+async function markBillPaid(billId) {
+  const method = prompt('Payment method (e.g. Bkash / Nagad / Cash / Bank):', 'Bkash');
+  if (method === null) return;
+  const reference = prompt('Payment reference / transaction ID (optional):', '') || null;
+  try {
+    await clientBillingFetch('/bills/' + billId + '/mark-paid', {
+      method: 'POST',
+      body: JSON.stringify({ payment_method: method || null, payment_reference: reference }),
+    });
+    showToast('Bill #' + billId + ' marked Paid', 'ok');
+    await loadBillingSection();
+  } catch (e) {
+    showToast('Failed: ' + e.message, 'err');
+  }
+}
+
+async function loadOutstandingBalance() {
+  const box = document.getElementById('outstandingBalanceBox');
+  if (!box) return;
+  box.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const data = await clientBillingFetch('/bills/outstanding/summary');
+    const summary = data.summary || [];
+    if (!summary.length) {
+      box.innerHTML = '<div class="empty"><div class="icon">✅</div>No outstanding balances.</div>';
+      return;
+    }
+    const rows = summary.map(s => `
+      <tr>
+        <td>${esc(s.client_name || '')}</td>
+        <td>${s.pending_bill_count}</td>
+        <td>৳${fmtNum(s.outstanding_amount)}</td>
+        <td>${esc(s.oldest_pending_bill_date || '')}</td>
+      </tr>`).join('');
+    box.innerHTML = `<table><thead><tr>
+      <th>Client</th><th>Pending Bills</th><th>Outstanding</th><th>Oldest Pending Since</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
   } catch (e) {
     box.innerHTML = `<span style="color:var(--err)">Failed: ${esc(e.message)}</span>`;

@@ -2949,6 +2949,14 @@ async def b20_overview():
         out["counts"] = {}
         out["errors"].append(f"counts: {e}")
 
+    # billing (Phase 2B Commit D)
+    try:
+        from modules.client_billing.payments import get_billing_dashboard_summary
+        out["billing"] = await get_billing_dashboard_summary()
+    except Exception as e:
+        out["billing"] = {}
+        out["errors"].append(f"billing: {e}")
+
     # scheduler
     try:
         from modules import scheduler as fazle_scheduler

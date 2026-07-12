@@ -11,7 +11,11 @@
 
 **Updated 2026-07-12** (deployment-restart-gate implementation): added the 15 files below (`029`-`043`) that had accumulated since this inventory was first written 2026-07-08 without a corresponding update — found by `scripts/restart_gate.sh` check 5 on its first real run. No files renamed/renumbered by this update either, same as the original policy.
 
-## ✅ `db/migrations/` (canonical, 50 files) — tracked in `schema_migrations` via `db/migrate.py`
+**Updated again 2026-07-12/13** (Phase 2B Commit D): added `044_billing_payment_recording.sql` and `045_ai_read_billing_outstanding.sql`. Both applied directly to production (not via `db/migrate.py` — see the note below about `schema_migrations` being stale since `028`).
+
+**Known gap found while applying 044/045**: `db/migrate.py`'s own `schema_migrations` tracking table has not recorded anything past `028_assistant_ext_location_audit.sql` — migrations `029` through `045` were all applied to production via direct execution (matching the pattern already used for `029`-`043` per their own "Done" entries in `NEXT_IMPLEMENTATION_QUEUE.md`), bypassing `migrate.py`'s bookkeeping entirely. Running `db/migrate.py` for real (not `--dry-run`) today would attempt to re-apply all of `029`-`045`, which is risky since not every one of those files is idempotent. Not fixed in this pass — tracked under Tier 2 "Cross-directory migration collision cleanup."
+
+## ✅ `db/migrations/` (canonical, 52 files) — tracked in `schema_migrations` via `db/migrate.py`
 
 ```
 001_safe_mode_and_escort_extractor.sql
@@ -64,11 +68,13 @@
 041_identity_conflict_anomalies.sql
 042_remove_blocked_number_concept.sql
 043_office_assistant_role.sql
+044_billing_payment_recording.sql
+045_ai_read_billing_outstanding.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
 
-**Next available number for new work: `044`.**
+**Next available number for new work: `046`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory. Not yet reconciled.
 
