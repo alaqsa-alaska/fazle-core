@@ -17,6 +17,8 @@ from calendar import monthrange
 from datetime import date
 from typing import Optional
 
+import asyncpg
+
 from app.database import fetch_one, fetch_all, execute, fetch_val, get_pool
 import asyncpg
 
@@ -36,6 +38,26 @@ ALLOWED_TRANSITIONS = {
 
 # ── Compute ───────────────────────────────────────────────────────────────────
 
+async def _existing_active_run(employee_id: int, period_year: int, period_month: int) -> Optional[dict]:
+    row = await fetch_one(
+        """SELECT run_id, status, net_salary, total_programs, gross_salary
+           FROM wbom_payroll_runs
+           WHERE employee_id=$1 AND period_year=$2 AND period_month=$3
+             AND status <> 'cancelled'""",
+        employee_id, period_year, period_month,
+    )
+    if not row:
+        return None
+    return {
+        "ok": True, "already_exists": True,
+        "run_id": int(row["run_id"]),
+        "status": row["status"],
+        "net_salary": float(row["net_salary"]),
+        "total_programs": int(row["total_programs"]),
+        "gross_salary": float(row["gross_salary"]),
+    }
+
+
 async def compute_run(
     employee_id: int,
     period_year: int,
@@ -51,22 +73,9 @@ async def compute_run(
         return {"ok": False, "error": "invalid period_month"}
 
     # Idempotency: existing active run
-    existing = await fetch_one(
-        """SELECT run_id, status, net_salary, total_programs, gross_salary
-           FROM wbom_payroll_runs
-           WHERE employee_id=$1 AND period_year=$2 AND period_month=$3
-             AND status <> 'cancelled'""",
-        employee_id, period_year, period_month,
-    )
+    existing = await _existing_active_run(employee_id, period_year, period_month)
     if existing:
-        return {
-            "ok": True, "already_exists": True,
-            "run_id": int(existing["run_id"]),
-            "status": existing["status"],
-            "net_salary": float(existing["net_salary"]),
-            "total_programs": int(existing["total_programs"]),
-            "gross_salary": float(existing["gross_salary"]),
-        }
+        return existing
 
     emp = await fetch_one(
         "SELECT employee_id, employee_name, designation, basic_salary, status "
@@ -115,63 +124,83 @@ async def compute_run(
     gross = round(basic_salary + program_allowance + other_allowance, 2)
     net = round(max(gross - total_advances - total_deductions, 0), 2)
 
-    # Insert atomically
+    # Insert atomically. Two concurrent calls for the same employee/period
+    # both pass the idempotency check above (neither has committed yet) and
+    # both reach this INSERT — the DB's own idx_payroll_runs_unique_active
+    # partial unique index is the real race-safety mechanism (an advisory
+    # lock would just move the race to a different primitive). The loser
+    # catches UniqueViolationError and returns the winner's now-committed
+    # row in the same shape as the idempotency early-return above, instead
+    # of propagating a raw DB exception (found 2026-07-09, test_concurrent_payroll_compute).
     pool = get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            run_id = await conn.fetchval(
-                """INSERT INTO wbom_payroll_runs
-                      (employee_id, period_year, period_month, status,
-                       basic_salary, total_programs, per_program_rate,
-                       program_allowance, other_allowance, total_advances,
-                       total_deductions, gross_salary, net_salary,
-                       computed_by, created_at, updated_at)
-                   VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10,
-                           $11, $12, $13, NOW(), NOW())
-                   RETURNING run_id""",
-                employee_id, period_year, period_month,
-                basic_salary, total_programs, rate,
-                program_allowance, other_allowance, total_advances,
-                total_deductions, gross, net, computed_by,
-            )
-            # Items: basic, programs, advances
-            await conn.execute(
-                """INSERT INTO wbom_payroll_run_items
-                      (run_id, component_type, component_label, amount, sign, source_table, notes)
-                   VALUES ($1, 'basic', 'Basic Salary', $2, '+', 'wbom_employees', $3)""",
-                run_id, basic_salary, f"emp:{employee_id}",
-            )
-            for pr in prog_rows:
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                run_id = await conn.fetchval(
+                    """INSERT INTO wbom_payroll_runs
+                          (employee_id, period_year, period_month, status,
+                           basic_salary, total_programs, per_program_rate,
+                           program_allowance, other_allowance, total_advances,
+                           total_deductions, gross_salary, net_salary,
+                           computed_by, created_at, updated_at)
+                       VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10,
+                               $11, $12, $13, NOW(), NOW())
+                       RETURNING run_id""",
+                    employee_id, period_year, period_month,
+                    basic_salary, total_programs, rate,
+                    program_allowance, other_allowance, total_advances,
+                    total_deductions, gross, net, computed_by,
+                )
+                # Items: basic, programs, advances
                 await conn.execute(
                     """INSERT INTO wbom_payroll_run_items
-                          (run_id, component_type, component_label, amount, sign,
-                           source_table, source_id, notes)
-                       VALUES ($1, 'program', $2, $3, '+',
-                               'wbom_escort_programs', $4, $5)""",
-                    run_id,
-                    f"Program @ {rate}/day × {float(pr['days']):.1f}",
-                    round(float(pr["days"]) * rate, 2),
-                    int(pr["program_id"]),
-                    pr["mother_vessel"],
+                          (run_id, component_type, component_label, amount, sign, source_table, notes)
+                       VALUES ($1, 'basic', 'Basic Salary', $2, '+', 'wbom_employees', $3)""",
+                    run_id, basic_salary, f"emp:{employee_id}",
                 )
-            if total_advances > 0:
+                for pr in prog_rows:
+                    await conn.execute(
+                        """INSERT INTO wbom_payroll_run_items
+                              (run_id, component_type, component_label, amount, sign,
+                               source_table, source_id, notes)
+                           VALUES ($1, 'program', $2, $3, '+',
+                                   'wbom_escort_programs', $4, $5)""",
+                        run_id,
+                        f"Program @ {rate}/day × {float(pr['days']):.1f}",
+                        round(float(pr["days"]) * rate, 2),
+                        int(pr["program_id"]),
+                        pr["mother_vessel"],
+                    )
+                if total_advances > 0:
+                    await conn.execute(
+                        """INSERT INTO wbom_payroll_run_items
+                              (run_id, component_type, component_label, amount, sign,
+                               source_table, notes)
+                           VALUES ($1, 'advance', 'Advances Adjusted', $2, '-',
+                                   'fpe_cash_transactions',
+                                   'sum within period')""",
+                        run_id, total_advances,
+                    )
                 await conn.execute(
-                    """INSERT INTO wbom_payroll_run_items
-                          (run_id, component_type, component_label, amount, sign,
-                           source_table, notes)
-                       VALUES ($1, 'advance', 'Advances Adjusted', $2, '-',
-                               'fpe_cash_transactions',
-                               'sum within period')""",
-                    run_id, total_advances,
+                    """INSERT INTO wbom_payroll_approval_log
+                          (run_id, action, actor, from_status, to_status, payload_json)
+                       VALUES ($1, 'compute', $2, NULL, 'draft',
+                               $3::jsonb)""",
+                    run_id, computed_by,
+                    f'{{"total_programs":{total_programs},"net_salary":{net}}}',
                 )
-            await conn.execute(
-                """INSERT INTO wbom_payroll_approval_log
-                      (run_id, action, actor, from_status, to_status, payload_json)
-                   VALUES ($1, 'compute', $2, NULL, 'draft',
-                           $3::jsonb)""",
-                run_id, computed_by,
-                f'{{"total_programs":{total_programs},"net_salary":{net}}}',
+    except asyncpg.UniqueViolationError:
+        # Lost the race — another concurrent compute_run() call for this
+        # exact employee/period committed first. Return its row instead of
+        # raising, matching the idempotency early-return above.
+        winner = await _existing_active_run(employee_id, period_year, period_month)
+        if winner:
+            log.info(
+                f"[payroll] compute_run race: employee={employee_id} "
+                f"{period_year}-{period_month:02d} lost to concurrent run_id={winner['run_id']}"
             )
+            return winner
+        raise  # extremely unlikely: winner's row vanished between conflict and re-select
 
     log.info(f"[payroll] computed run {run_id} emp={employee_id} {period_year}-{period_month:02d} "
              f"days={total_days} net={net}")
