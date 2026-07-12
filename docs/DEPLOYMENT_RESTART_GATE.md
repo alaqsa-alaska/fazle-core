@@ -1,6 +1,12 @@
 # Deployment / Restart Gate — Design
 
-**Status:** DESIGN ONLY — not implemented as a hard-blocking systemd hook yet, per explicit instruction. This document specifies what the gate should check and how, so it can be implemented (as a pre-restart script, then optionally wired into `ExecStartPre=` or a wrapper around `systemctl restart`) once approved.
+**Status:** IMPLEMENTED as a manual script — `scripts/restart_gate.sh` (all 9 checks below) — as of 2026-07-12. **Not** wired into `ExecStartPre=` (Owner decision 2026-07-12: manual-only for now, to avoid a script bug hard-blocking every future restart before it's proven itself over real use). Run it by hand, or by an AI agent under explicit instruction, before requesting a restart:
+```
+scripts/restart_gate.sh --check-only   # checks 1-7 only
+scripts/restart_gate.sh --restart      # checks 1-7, then (if PASS) restarts fazle-core.service and runs checks 8-9
+scripts/restart_gate.sh --ack-flags    # re-baseline db/.env_flags_acknowledged after a reviewed .env flag change
+```
+Supporting files created alongside it: `db/.restart_gate_manifest` (check 1), `db/.xfail_baseline` (check 3, seeded at 13), `db/.env_flags_acknowledged` (check 6), `scripts/secret_scan.sh` (check 2, also reused by the new `.git/hooks/pre-commit` local hook for the "before commit" version of the same scan + migration-path check). `db/MIGRATION_INVENTORY.md` was also brought current (15 files it was missing) so check 5 doesn't false-block on day one.
 
 **Why this exists:** `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 8 Risk #2 ("working-tree deployment") found that `fazle-core.service` runs directly off the git working tree with no build/artifact step — any restart loads whatever is currently on disk, reviewed or not. This gate is the smallest mechanical fix for that risk without requiring a full build/artifact pipeline.
 

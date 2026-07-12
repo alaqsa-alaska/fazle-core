@@ -9,7 +9,9 @@
 
 ---
 
-## ✅ `db/migrations/` (canonical, 35 files) — tracked in `schema_migrations` via `db/migrate.py`
+**Updated 2026-07-12** (deployment-restart-gate implementation): added the 15 files below (`029`-`043`) that had accumulated since this inventory was first written 2026-07-08 without a corresponding update — found by `scripts/restart_gate.sh` check 5 on its first real run. No files renamed/renumbered by this update either, same as the original policy.
+
+## ✅ `db/migrations/` (canonical, 50 files) — tracked in `schema_migrations` via `db/migrate.py`
 
 ```
 001_safe_mode_and_escort_extractor.sql
@@ -47,11 +49,26 @@
 026_escort_roster_change_requests.sql
 027_assistant_feature_flags.sql
 028_assistant_ext_location_audit.sql
+029_bootstrap_core_tables_schema_record.sql
+030_reconcile_drift_columns_payment_drafts_replies.sql
+031_client_domain_reconciliation.sql
+032_client_tier_status_model.sql
+033_invoice_number_counters.sql
+034_client_billing_profiles.sql
+035_client_billing_wage_general.sql
+036_billing_records_program_uniqueness.sql
+037_billing_payment_status_constraint.sql
+038_escort_program_status_lowercase.sql
+039_schema_reconciliation_active_tables.sql
+040_attendance_entry_source_and_approval.sql
+041_identity_conflict_anomalies.sql
+042_remove_blocked_number_concept.sql
+043_office_assistant_role.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
 
-**Next available number for new work: `029`.**
+**Next available number for new work: `044`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory. Not yet reconciled.
 
@@ -122,3 +139,5 @@ Treated as a deliberate idempotent-bootstrap pattern for now, not a restructurin
 
 - **`db/merge_preview.sql`** — pure read-only inspection script (`SELECT`/`\d` only), explicitly self-labeled "Nothing is dropped." Harmless; `db/migrate.py`'s glob only scans `db/migrations/`, never `db/` itself.
 - **`db/new_tables.sql`** — a standalone "run once, safe to re-run" bootstrap script that `CREATE TABLE IF NOT EXISTS`'s 3 tables also created by numbered migrations, then does an `INSERT ... ON CONFLICT (key) DO UPDATE` KB seed. **Risk if re-run today:** the `ON CONFLICT DO UPDATE` would silently overwrite any `fazle_knowledge_base` rows edited since. Not deleted by this task — flagged here so nobody re-runs it by accident.
+- **`scripts/backfill_skipped_failed_to_review.sql`** (found 2026-07-12) — one-off, idempotent (`WHERE NOT EXISTS` guarded) backfill of skipped/failed messages into `fpe_unmatched_messages`. Never touches the ledger. Not a schema migration.
+- **`scripts/seed_recruitment_kb.sql`** (found 2026-07-12) — idempotent (`delete + insert by key`) KB seed for recruitment triggers/replies. Not a schema migration.

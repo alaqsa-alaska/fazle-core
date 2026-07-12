@@ -1,0 +1,14 @@
+# Restart Gate — approved-dirty-file manifest
+#
+# One path per line (relative to repo root), listing files that are
+# *currently* expected to show up in `git status --porcelain` when the
+# restart gate runs. Anything dirty that is NOT listed here is treated as
+# an unreviewed change and blocks the gate (see docs/DEPLOYMENT_RESTART_GATE.md
+# check 1).
+#
+# Adding a path here is itself a reviewable change — do it deliberately,
+# with a reason, not as a silent side effect of some other edit.
+#
+# Empty as of 2026-07-12 (working tree was clean when this manifest was
+# created) — add entries here only when genuine multi-day in-flight work
+# needs to sit uncommitted across a restart.
