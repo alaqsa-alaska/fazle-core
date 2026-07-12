@@ -194,6 +194,14 @@ _DEFAULT_ALLOWED: frozenset[str] = frozenset({
 _encoder_instance = None        # SentenceTransformer; loaded once, stays resident
 _qdrant_client_instance = None  # QdrantClient; server or embedded, opened once
 
+# Separate from _IDX.lock (2026-07-13 fix): the slow, CPU-bound Qdrant
+# embedding/upsert pass no longer runs under _IDX.lock, so it no longer
+# blocks rag.search()/BM25 reads for its whole duration. This lock guards
+# only the Qdrant phase itself, so is_rebuilding()'s idempotency guard
+# (added 2026-07-11, see /api/rag/rebuild) still correctly reports "busy"
+# for the entire rebuild, not just the fast BM25 portion.
+_QDRANT_BUILD_LOCK = asyncio.Lock()
+
 
 def _get_encoder():
     """
@@ -607,6 +615,24 @@ async def _load_kb_rows() -> list[tuple[str, str, str, bool, frozenset[str]]]:
 
 # ── HYBRID RAG — Milestone 2: Vector Index Build Path ─────────────────────────
 
+def _chunk_content_hash(text: str) -> str:
+    """Short, deterministic hash of chunk text — stored in each point's
+    payload so a later build can tell 'unchanged' from 'edited' without
+    re-encoding. Not a security hash; collision resistance at 16 hex chars
+    (64 bits) is far more than needed for this corpus size."""
+    import hashlib  # noqa: PLC0415
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _chunk_point_id(chunk: dict[str, Any]) -> str:
+    """Deterministic UUID: same source+chunk_idx always → same point ID.
+    This is what makes the incremental skip in _build_qdrant_index possible
+    — a point's identity survives across rebuilds even when its content
+    (and therefore its vector) doesn't need to."""
+    import uuid as _uuid  # noqa: PLC0415
+    return str(_uuid.uuid5(_uuid.NAMESPACE_DNS, f"{chunk['source']}:{chunk['chunk_idx']}"))
+
+
 async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
     """
     Build the Qdrant vector index from BM25-verified safe chunks.
@@ -614,160 +640,199 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
     CONTRACT:
       - Called ONLY after BM25 build has already succeeded.
       - Called ONLY when HYBRID_SEARCH_ENABLED=True.
+      - Called by build_index() OUTSIDE _IDX.lock (2026-07-13) — this
+        function's own duration must never block rag.search()/BM25 reads.
+        Guards itself with _QDRANT_BUILD_LOCK instead, so is_rebuilding()
+        still reports busy for the idempotency guard.
       - Never raises — all exceptions are caught, logged, and swallowed.
       - BM25 search continues uninterrupted if this function fails at any point.
-      - Runs under the caller's _IDX.lock for index consistency.
       - All heavy imports are deferred (no import-time side effects).
       - Temporary allocations (texts, vectors, points) are explicitly released.
 
-    Sequence:
-      1. Validate input
-      2. Load encoder singleton via thread-pool executor (non-blocking)
-      3. Encode all chunk texts via thread-pool executor (CPU-bound)
-      4. Drop existing Qdrant collection only if it exists (never delete blindly)
-      5. Recreate collection fresh
-      6. Build PointStruct list with deterministic UUIDs
-      7. Upsert in batches of _QDRANT_UPSERT_BATCH
-      8. Release temporary allocations
-      9. Log completion metrics
+    Sequence (rewritten 2026-07-13 for incremental upsert — was: unconditionally
+    drop+recreate the collection and re-encode all chunks on every call,
+    holding _IDX.lock for the full ~15-36 min duration):
+      1. Validate input; ensure collection exists (create-if-missing, never drop)
+      2. Compute each chunk's point_id + content_hash
+      3. Batched-retrieve existing points' content_hash by ID; anything whose
+         hash still matches needs no re-encoding — skip it entirely
+      4. Load encoder + encode ONLY the new/changed chunks
+      5. Upsert only those points (in batches of _QDRANT_UPSERT_BATCH)
+      6. Delete any existing point whose ID is no longer in the current
+         corpus (source removed/renamed) — keeps the collection exactly in
+         sync with the corpus without ever dropping it wholesale
+      7. Log completion metrics
     """
     if not safe_chunks:
         log.info("[HYBRID] no safe chunks available — Qdrant build skipped")
         return
 
-    t_start: float = time.monotonic()
-    log.info("[HYBRID] Build started — chunks=%d", len(safe_chunks))
+    async with _QDRANT_BUILD_LOCK:
+        t_start: float = time.monotonic()
+        log.info("[HYBRID] Build started — chunks=%d", len(safe_chunks))
 
-    try:
-        loop = asyncio.get_running_loop()
+        try:
+            loop = asyncio.get_running_loop()
+            client = _get_qdrant_client()
+            _qdrant_ensure_collection()  # create-if-missing only — never drops
 
-        # ── Step 1: Load encoder singleton ────────────────────────────────────
-        # _get_encoder() is blocking (may load ~118 MB model on first call).
-        # Uses dedicated _encoding_executor (1 thread) — same thread as query
-        # encoding so the model stays warm and no context switch occurs.
-        encoder = await loop.run_in_executor(_encoding_executor, _get_encoder)
-        t_encoder_done: float = time.monotonic()
-        log.info(
-            "[HYBRID] Encoder loaded — elapsed_ms=%d",
-            int((t_encoder_done - t_start) * 1000),
-        )
+            # ── Step 1: Compute point_id + content_hash for every current chunk ──
+            current: list[tuple[dict[str, Any], str, str]] = [
+                (chunk, _chunk_point_id(chunk), _chunk_content_hash(chunk["text"]))
+                for chunk in safe_chunks
+            ]
+            current_ids = [pid for _, pid, _ in current]
 
-        # ── Step 2: Encode all chunk texts (CPU-bound) ─────────────────────────
-        texts: list[str] = [c["text"] for c in safe_chunks]
+            # ── Step 2: Batched-retrieve existing hashes, diff, skip unchanged ──
+            def _retrieve_hashes_sync() -> dict[str, str]:
+                existing: dict[str, str] = {}
+                for i in range(0, len(current_ids), _QDRANT_UPSERT_BATCH):
+                    batch_ids = current_ids[i : i + _QDRANT_UPSERT_BATCH]
+                    for pt in client.retrieve(
+                        collection_name=QDRANT_COLLECTION_NAME,
+                        ids=batch_ids,
+                        with_payload=["content_hash"],
+                        with_vectors=False,
+                    ):
+                        h = (pt.payload or {}).get("content_hash")
+                        if h:
+                            existing[str(pt.id)] = h
+                return existing
 
-        def _encode_sync(enc: Any, chunk_texts: list[str]) -> Any:
-            """Synchronous encode helper — executed in thread-pool executor."""
-            return enc.encode(
-                chunk_texts,
-                batch_size=32,
-                show_progress_bar=False,
-                convert_to_numpy=True,
+            existing_hashes = await loop.run_in_executor(_encoding_executor, _retrieve_hashes_sync)
+            to_encode = [
+                (chunk, pid, chash) for chunk, pid, chash in current
+                if existing_hashes.get(pid) != chash
+            ]
+            skipped_count = len(current) - len(to_encode)
+            log.info(
+                "[HYBRID] Diff complete — total=%d unchanged_skipped=%d to_encode=%d",
+                len(current), skipped_count, len(to_encode),
             )
 
-        vectors = await loop.run_in_executor(_encoding_executor, _encode_sync, encoder, texts)
-        del texts  # release string list; vectors now held in numpy array
-        t_encode_done: float = time.monotonic()
-        log.info(
-            "[HYBRID] Encoding complete — chunks=%d shape=%s encode_ms=%d",
-            len(safe_chunks),
-            list(vectors.shape),
-            int((t_encode_done - t_encoder_done) * 1000),
-        )
+            if not to_encode:
+                log.info("[HYBRID] Nothing changed — Qdrant already in sync, no encoding needed")
+            else:
+                # ── Step 3: Load encoder + encode only changed/new chunks ────────
+                encoder = await loop.run_in_executor(_encoding_executor, _get_encoder)
+                t_encoder_done: float = time.monotonic()
+                log.info(
+                    "[HYBRID] Encoder loaded — elapsed_ms=%d",
+                    int((t_encoder_done - t_start) * 1000),
+                )
 
-        # ── Step 3: Safe Qdrant collection rebuild ─────────────────────────────
-        log.info("[HYBRID] Qdrant rebuild started")
-        client = _get_qdrant_client()
+                texts: list[str] = [chunk["text"] for chunk, _, _ in to_encode]
 
-        # Verify collection exists BEFORE deleting — never delete accidentally.
-        existing_names: list[str] = [
-            c.name for c in client.get_collections().collections
-        ]
-        if QDRANT_COLLECTION_NAME in existing_names:
-            client.delete_collection(QDRANT_COLLECTION_NAME)
-            log.info("[HYBRID] Qdrant collection dropped — rebuilding fresh")
+                def _encode_sync(enc: Any, chunk_texts: list[str]) -> Any:
+                    return enc.encode(
+                        chunk_texts, batch_size=32, show_progress_bar=False, convert_to_numpy=True,
+                    )
 
-        _qdrant_ensure_collection()
-        log.info("[HYBRID] Qdrant collection ready")
+                vectors = await loop.run_in_executor(_encoding_executor, _encode_sync, encoder, texts)
+                del texts
+                t_encode_done: float = time.monotonic()
+                log.info(
+                    "[HYBRID] Encoding complete — chunks=%d shape=%s encode_ms=%d",
+                    len(to_encode), list(vectors.shape),
+                    int((t_encode_done - t_encoder_done) * 1000),
+                )
 
-        # ── Step 4: Build PointStruct list with deterministic UUIDs ───────────
-        # Deferred imports — only executed when HYBRID_SEARCH_ENABLED=True.
-        from qdrant_client.models import PointStruct  # noqa: PLC0415
-        import uuid as _uuid                           # noqa: PLC0415
+                from qdrant_client.models import PointStruct  # noqa: PLC0415
 
-        indexed_at: float = time.time()
-        points: list[PointStruct] = []
+                indexed_at: float = time.time()
+                points: list[PointStruct] = []
+                for (chunk, point_id, content_hash), vec in zip(to_encode, vectors):
+                    points.append(PointStruct(
+                        id=point_id,
+                        vector=vec.tolist(),
+                        payload={
+                            "source":            chunk["source"],
+                            "title":             chunk["title"],
+                            "chunk_idx":         chunk["chunk_idx"],
+                            "text":              chunk["text"],
+                            "safe_for_customer": True,
+                            "source_kind":       chunk["source"].split(":", 1)[0],
+                            "indexed_at":        indexed_at,
+                            "allowed_roles":     sorted(chunk.get("allowed_roles", _DEFAULT_ALLOWED)),
+                            "content_hash":      content_hash,
+                        },
+                    ))
+                total_points: int = len(points)
+                del vectors
 
-        for chunk, vec in zip(safe_chunks, vectors):
-            # Deterministic UUID: same source+chunk_idx always → same UUID.
-            # Enables upsert semantics and future incremental sync.
-            point_id: str = str(_uuid.uuid5(
-                _uuid.NAMESPACE_DNS,
-                f"{chunk['source']}:{chunk['chunk_idx']}",
-            ))
-            points.append(PointStruct(
-                id=point_id,
-                vector=vec.tolist(),  # numpy float32 row → Python list[float]
-                payload={
-                    "source":            chunk["source"],
-                    "title":             chunk["title"],
-                    "chunk_idx":         chunk["chunk_idx"],
-                    "text":              chunk["text"],
-                    "safe_for_customer": True,           # invariant: unsafe chunks never reach here
-                    "source_kind":       chunk["source"].split(":", 1)[0],  # "file" | "kb"
-                    "indexed_at":        indexed_at,
-                    "allowed_roles":     sorted(chunk.get("allowed_roles", _DEFAULT_ALLOWED)),  # Phase 3
-                },
-            ))
+                t_upsert_start: float = time.monotonic()
+                for i in range(0, total_points, _QDRANT_UPSERT_BATCH):
+                    client.upsert(
+                        collection_name=QDRANT_COLLECTION_NAME,
+                        points=points[i : i + _QDRANT_UPSERT_BATCH],
+                    )
+                t_upsert_done: float = time.monotonic()
+                log.info(
+                    "[HYBRID] Upsert completed — points=%d upsert_ms=%d",
+                    total_points, int((t_upsert_done - t_upsert_start) * 1000),
+                )
+                del points
 
-        total_points: int = len(points)
-        del vectors  # release numpy array — payload data now serialised in points list
+            # ── Step 4: Delete points whose source chunk no longer exists ───────
+            def _cleanup_stale_sync() -> int:
+                current_id_set = set(current_ids)
+                stale_ids: list[str] = []
+                offset = None
+                while True:
+                    records, offset = client.scroll(
+                        collection_name=QDRANT_COLLECTION_NAME,
+                        with_payload=False,
+                        with_vectors=False,
+                        limit=500,
+                        offset=offset,
+                    )
+                    for r in records:
+                        if str(r.id) not in current_id_set:
+                            stale_ids.append(r.id)
+                    if offset is None:
+                        break
+                if stale_ids:
+                    client.delete(collection_name=QDRANT_COLLECTION_NAME, points_selector=stale_ids)
+                return len(stale_ids)
 
-        # ── Step 5: Upsert in batches ──────────────────────────────────────────
-        t_upsert_start: float = time.monotonic()
-        for i in range(0, total_points, _QDRANT_UPSERT_BATCH):
-            client.upsert(
-                collection_name=QDRANT_COLLECTION_NAME,
-                points=points[i : i + _QDRANT_UPSERT_BATCH],
+            stale_deleted = await loop.run_in_executor(_encoding_executor, _cleanup_stale_sync)
+            if stale_deleted:
+                log.info("[HYBRID] Cleaned up %d stale point(s) (source removed/renamed)", stale_deleted)
+
+            log.info(
+                "[HYBRID] Build completed — total_chunks=%d encoded=%d skipped=%d stale_removed=%d total_ms=%d",
+                len(current), len(to_encode), skipped_count, stale_deleted,
+                int((time.monotonic() - t_start) * 1000),
             )
-        t_upsert_done: float = time.monotonic()
-        log.info(
-            "[HYBRID] Upsert completed — points=%d upsert_ms=%d",
-            total_points,
-            int((t_upsert_done - t_upsert_start) * 1000),
-        )
 
-        del points  # release serialised point list
+            # Encoder is already warm (if it was loaded); seeding adds <500ms and
+            # ensures zero cold-encoding latency for the first production request.
+            if to_encode:
+                await _seed_embedding_cache()
 
-        # ── Step 6: Final metrics ──────────────────────────────────────────────
-        log.info(
-            "[HYBRID] Build completed — points=%d total_ms=%d "
-            "encode_ms=%d upsert_ms=%d",
-            total_points,
-            int((time.monotonic() - t_start) * 1000),
-            int((t_encode_done - t_encoder_done) * 1000),
-            int((t_upsert_done - t_upsert_start) * 1000),
-        )
-
-        # ── Step 7: Seed embedding cache with common queries ───────────────────
-        # Encoder is already warm; seeding adds <500ms at build time and ensures
-        # zero cold-encoding latency for the first production request.
-        await _seed_embedding_cache()
-
-    except Exception as exc:
-        # Hybrid failure is non-fatal. BM25 is already committed.
-        # Log full error type and message for diagnosis; never crash production.
-        log.error(
-            "[HYBRID] FAILED — BM25 index still active and serving requests. "
-            "error_type=%s error=%s",
-            type(exc).__name__,
-            exc,
-        )
+        except Exception as exc:
+            # Hybrid failure is non-fatal. BM25 is already committed.
+            log.error(
+                "[HYBRID] FAILED — BM25 index still active and serving requests. "
+                "error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+            )
 
 # ── END HYBRID RAG Milestone 2: Vector Index Build Path ───────────────────────
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 async def build_index() -> dict[str, Any]:
-    """(Re)build the in-memory RAG index. Safe under concurrency."""
+    """(Re)build the in-memory RAG index. Safe under concurrency.
+
+    2026-07-13: the slow Qdrant embedding pass (_build_qdrant_index) now
+    runs AFTER _IDX.lock is released, not inside it — it doesn't touch
+    _IDX state at all (safe_chunks is passed by reference), and the old
+    code held _IDX.lock for the whole ~15-36 min rebuild, blocking every
+    concurrent rag.search()/BM25 read for that entire duration. It guards
+    itself with _QDRANT_BUILD_LOCK instead (see is_rebuilding()).
+    """
+    safe_chunks: list[dict[str, Any]] = []
     async with _IDX.lock:
         t0 = time.monotonic()
         _IDX.reset()
@@ -777,7 +842,6 @@ async def build_index() -> dict[str, Any]:
         sources.extend(_load_knowledge_base_files())
         sources.extend(await _load_kb_rows())
 
-        safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
         unsafe_count = 0
         for source_id, title, text, source_safe, allowed_roles in sources:
             for idx, chunk in enumerate(_chunk_text(text)):
@@ -821,12 +885,15 @@ async def build_index() -> dict[str, Any]:
             f"unsafe={unsafe_count} vocab={len(_IDX.df)} "
             f"avgdl={_IDX.avgdl:.1f} in {_IDX.build_ms}ms"
         )
-        # BM25 build is complete and committed. Attempt Hybrid vector build only
-        # if the flag is enabled. If Hybrid fails, BM25 serves requests normally.
-        if HYBRID_SEARCH_ENABLED:
-            await _build_qdrant_index(safe_chunks)
-        del safe_chunks  # release list container; dicts remain in _IDX.docs
-        return await _stats_locked()
+        stats_result = await _stats_locked()
+
+    # BM25 build is complete and committed (lock released above). Attempt
+    # Hybrid vector build only if the flag is enabled — outside _IDX.lock,
+    # so it no longer blocks rag.search() for its full duration. If Hybrid
+    # fails, BM25 serves requests normally.
+    if HYBRID_SEARCH_ENABLED:
+        await _build_qdrant_index(safe_chunks)
+    return stats_result
 
 
 async def ensure_index() -> None:
@@ -835,11 +902,12 @@ async def ensure_index() -> None:
 
 
 def is_rebuilding() -> bool:
-    """Non-blocking check: True while build_index()/rebuild_index() holds
-    _IDX.lock (e.g. mid hybrid-embedding pass). Used by /api/rag/rebuild's
-    idempotency guard so a second trigger doesn't queue a redundant rebuild
-    behind the first — reading .locked() never blocks."""
-    return _IDX.lock.locked()
+    """Non-blocking check: True while build_index() holds _IDX.lock (the
+    fast BM25 phase) OR _QDRANT_BUILD_LOCK (the slow embedding phase, which
+    runs after _IDX.lock is released — see build_index()). Used by
+    /api/rag/rebuild's idempotency guard so a second trigger doesn't queue
+    a redundant rebuild behind the first — reading .locked() never blocks."""
+    return _IDX.lock.locked() or _QDRANT_BUILD_LOCK.locked()
 
 
 def last_built_seconds_ago() -> Optional[float]:
@@ -1272,9 +1340,13 @@ async def stats() -> dict[str, Any]:
 
 
 async def rebuild_index() -> dict[str, Any]:
-    """PATCH 6: Force full index rebuild. Holds lock continuously from wipe through rebuild
-    to prevent ensure_index() from triggering a concurrent build during the gap."""
+    """PATCH 6: Force full index rebuild. Holds _IDX.lock continuously from
+    wipe through the BM25 rebuild to prevent ensure_index() from triggering
+    a concurrent build during the gap. 2026-07-13: the Qdrant phase runs
+    after this lock is released (same fix as build_index() — see its
+    docstring), guarded by _QDRANT_BUILD_LOCK instead."""
     log.warning("[rag] [RAG_REBUILD] Forced index rebuild requested — clearing poisoned index")
+    safe_chunks: list[dict[str, Any]] = []
     async with _IDX.lock:
         _IDX.reset()
         t0 = time.monotonic()
@@ -1282,7 +1354,6 @@ async def rebuild_index() -> dict[str, Any]:
         sources.extend(_load_resource_files())
         sources.extend(_load_knowledge_base_files())
         sources.extend(await _load_kb_rows())
-        safe_chunks: list[dict[str, Any]] = []  # collected for Hybrid vector build
         unsafe_count = 0
         for source_id, title, text, source_safe, allowed_roles in sources:
             for idx, chunk in enumerate(_chunk_text(text)):
@@ -1321,12 +1392,15 @@ async def rebuild_index() -> dict[str, Any]:
             f"[rag] rebuild done docs={len(_IDX.docs)} safe={safe_count} "
             f"unsafe={unsafe_count} vocab={len(_IDX.df)} in {_IDX.build_ms}ms"
         )
-        # BM25 rebuild is complete and committed. Attempt Hybrid vector rebuild only
-        # if the flag is enabled. If Hybrid fails, BM25 serves requests normally.
-        if HYBRID_SEARCH_ENABLED:
-            await _build_qdrant_index(safe_chunks)
-        del safe_chunks  # release list container; dicts remain in _IDX.docs
-        return await _stats_locked()
+        stats_result = await _stats_locked()
+
+    # BM25 rebuild is complete and committed (lock released above). Attempt
+    # Hybrid vector rebuild only if the flag is enabled — outside _IDX.lock,
+    # so it no longer blocks rag.search() for its full duration. If Hybrid
+    # fails, BM25 serves requests normally.
+    if HYBRID_SEARCH_ENABLED:
+        await _build_qdrant_index(safe_chunks)
+    return stats_result
 
 
 async def recent_searches() -> list[dict]:
