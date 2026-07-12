@@ -33,6 +33,7 @@ from typing import Optional, TypedDict
 
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_val, fetch_all
+from modules.identity_brain import _phone_variants
 
 log = logging.getLogger("fazle.escort")
 _ESCORT_PROGRAM_COLUMNS_CACHE: Optional[set[str]] = None
@@ -1014,11 +1015,39 @@ def build_final_slip(draft: CompletedDraft, db_destination: Optional[str] = None
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
 async def _get_contact_id(phone: str) -> Optional[int]:
+    """Resolve a raw phone string to wbom_contacts.contact_id via normalized
+    variants (0XXXXXXXXXX / 880XXXXXXXXXX / +880XXXXXXXXXX), matching the
+    same lookup identity_brain._lookup_contact() uses — a raw un-normalized
+    exact-string match silently misses any format drift between however the
+    phone arrived here and however whatsapp_number was originally stored.
+    """
+    variants = _phone_variants(phone or "")
+    if not variants:
+        return None
     row = await fetch_one(
-        "SELECT contact_id FROM wbom_contacts WHERE whatsapp_number = $1 LIMIT 1",
-        phone,
+        "SELECT contact_id FROM wbom_contacts WHERE whatsapp_number = ANY($1) ORDER BY contact_id DESC LIMIT 1",
+        variants,
     )
     return row["contact_id"] if row else None
+
+
+async def _backfill_contact_id_if_missing(program_id: int, phone: Optional[str]) -> None:
+    """Best-effort: resolve and set contact_id on an existing program row
+    only if it doesn't already have one — never overwrites a resolved value.
+    """
+    if not phone:
+        return
+    contact_id = await _get_contact_id(phone)
+    if not contact_id:
+        return
+    try:
+        await execute(
+            "UPDATE wbom_escort_programs SET contact_id = $2 WHERE program_id = $1 AND contact_id IS NULL",
+            program_id,
+            contact_id,
+        )
+    except Exception as e:
+        log.warning(f"[escort] contact_id backfill failed for program_id={program_id}: {e}")
 
 
 async def save_escort_programs(
@@ -1505,6 +1534,7 @@ async def _create_confirmed_from_admin(
         cargo_type = draft.get("cargo_type") or ""
         importer = draft.get("importer") or ""
         capacity = draft.get("capacity") or ""
+        contact_id = await _get_contact_id(client_phone) if client_phone else None
 
         # Resolve escort_employee_id from mobile
         emp_id = await _resolve_escort_employee_id(escort_mobile, escort_name, auto_create=True)
@@ -1557,6 +1587,7 @@ async def _create_confirmed_from_admin(
                 importer=importer,
                 capacity=capacity,
             )
+            await _backfill_contact_id_if_missing(pid, client_phone)
             await _sync_roster_after_confirm(pid)
             return pid
 
@@ -1585,6 +1616,7 @@ async def _create_confirmed_from_admin(
                 destination=normalized_destination, master_mobile=draft.get("master_mobile"),
                 cargo_type=cargo_type, importer=importer, capacity=capacity,
             )
+            await _backfill_contact_id_if_missing(pid, client_phone)
             await _sync_roster_after_confirm(pid)
             return pid
 
@@ -1604,15 +1636,16 @@ async def _create_confirmed_from_admin(
                     f"[escort] assigned record already exists (program_id={pid}) "
                     f"— updating missing fields from admin msg"
                 )
-            await _update_program_confirmed(
-                pid, escort_name, escort_mobile,
-                lighter_vessel=lv, shift=shift, program_date=program_date,
-                escort_employee_id=emp_id, mother_vessel=mv,
-                destination=normalized_destination, master_mobile=draft.get("master_mobile"),
-                cargo_type=cargo_type, importer=importer, capacity=capacity,
-            )
-            await _sync_roster_after_confirm(pid)
-            return pid
+                await _update_program_confirmed(
+                    pid, escort_name, escort_mobile,
+                    lighter_vessel=lv, shift=shift, program_date=program_date,
+                    escort_employee_id=emp_id, mother_vessel=mv,
+                    destination=normalized_destination, master_mobile=draft.get("master_mobile"),
+                    cargo_type=cargo_type, importer=importer, capacity=capacity,
+                )
+                await _backfill_contact_id_if_missing(pid, client_phone)
+                await _sync_roster_after_confirm(pid)
+                return pid
 
         remarks_data = {
             "auto_created": True,
@@ -1639,6 +1672,7 @@ async def _create_confirmed_from_admin(
             "status",
             "program_date",
             "remarks",
+            "contact_id",
         ]
         values: list[object] = [
             mv,
@@ -1652,6 +1686,7 @@ async def _create_confirmed_from_admin(
             "confirmed",
             program_date,
             json.dumps(remarks_data, ensure_ascii=False),
+            contact_id,
         ]
         if "capacity" in columns:
             insert_cols.insert(4, "capacity")

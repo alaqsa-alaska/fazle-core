@@ -260,3 +260,99 @@ class TestHandleEscortClientMessage:
         result = await handle_escort_client_message(text, sender, source="bridge1")
 
         assert result is not None
+
+
+def _use_pool(test_db_pool):
+    import app.database as db_module
+    db_module._pool = test_db_pool
+
+
+class TestContactIdResolution:
+    """Regression coverage for the 2026-07-12 contact_id adoption fix."""
+
+    async def test_get_contact_id_matches_across_phone_formats(self, test_db_pool):
+        _use_pool(test_db_pool)
+        from modules.escort import _get_contact_id
+
+        async with test_db_pool.acquire() as conn:
+            contact_id = await conn.fetchval(
+                "INSERT INTO wbom_contacts (whatsapp_number) VALUES ($1) RETURNING contact_id",
+                "8801711000111",
+            )
+
+        # Same underlying number, three different formats a sender might
+        # actually arrive as — the pre-fix raw exact-string match would
+        # only have matched the '880...' form.
+        assert await _get_contact_id("8801711000111") == contact_id
+        assert await _get_contact_id("01711000111") == contact_id
+        assert await _get_contact_id("+8801711000111") == contact_id
+        assert await _get_contact_id("01799999999") is None
+        assert await _get_contact_id("") is None
+
+    async def test_create_confirmed_from_admin_sets_contact_id(self, test_db_pool, monkeypatch):
+        _use_pool(test_db_pool)
+        from modules.escort import _create_confirmed_from_admin
+
+        async with test_db_pool.acquire() as conn:
+            contact_id = await conn.fetchval(
+                "INSERT INTO wbom_contacts (whatsapp_number) VALUES ($1) RETURNING contact_id",
+                "8801722000222",
+            )
+
+        async def _fake_resolve_employee(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(
+            "modules.escort._resolve_escort_employee_id", _fake_resolve_employee
+        )
+
+        draft = {
+            "mother_vessel": "MV CONTACTFIX",
+            "lighter_vessel": "LV-1",
+            "escort_name": "Test Escort",
+            "escort_mobile": "01911111111",
+            "shift": "D",
+            "date_str": None,
+            "destination": "",
+            "cargo_type": "",
+            "importer": "",
+            "capacity": "",
+            "master_mobile": "01922222222",
+        }
+
+        pid = await _create_confirmed_from_admin(draft, "bridge2", client_phone="01722000222")
+
+        assert pid is not None
+        async with test_db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT contact_id FROM wbom_escort_programs WHERE program_id = $1", pid
+            )
+        assert row["contact_id"] == contact_id
+
+    async def test_backfill_never_overwrites_existing_contact_id(self, test_db_pool):
+        _use_pool(test_db_pool)
+        from modules.escort import _backfill_contact_id_if_missing
+
+        async with test_db_pool.acquire() as conn:
+            original_contact = await conn.fetchval(
+                "INSERT INTO wbom_contacts (whatsapp_number) VALUES ($1) RETURNING contact_id",
+                "8801733000333",
+            )
+            other_contact = await conn.fetchval(
+                "INSERT INTO wbom_contacts (whatsapp_number) VALUES ($1) RETURNING contact_id",
+                "8801744000444",
+            )
+            pid = await conn.fetchval(
+                "INSERT INTO wbom_escort_programs (status, contact_id) VALUES ('confirmed', $1) "
+                "RETURNING program_id",
+                original_contact,
+            )
+
+        await _backfill_contact_id_if_missing(pid, "01744000444")
+
+        async with test_db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT contact_id FROM wbom_escort_programs WHERE program_id = $1", pid
+            )
+        assert row["contact_id"] == original_contact
+        assert row["contact_id"] != other_contact
