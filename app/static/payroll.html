@@ -80,6 +80,23 @@ nav button{background:none;border:none;padding:14px 20px;cursor:pointer;font-siz
 nav button:hover{color:var(--accent2)}
 nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 
+/* Grouped top nav (Change A) — additive, does not alter rules above.
+   .nav-top / .nav-sub items are still plain <button> elements nested inside
+   <nav>, so they already inherit "nav button" above (and its @media
+   overrides for mobile padding/font-size/min-height) via the descendant
+   selector — intentionally NOT re-declared here to avoid out-specificity-ing
+   those responsive rules and breaking mobile touch sizing. Only genuinely
+   new properties (dropdown positioning, the group-active indicator) live
+   in this block. */
+nav .nav-group{position:relative;display:flex}
+nav .nav-group.active-group>.nav-top{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+nav .nav-caret{font-size:10px;margin-left:4px}
+nav .nav-group .nav-sub{display:none;position:absolute;top:100%;left:0;background:#fff;
+  border:1px solid var(--border);border-radius:0 0 10px 10px;box-shadow:0 8px 20px rgba(15,23,42,.12);
+  flex-direction:column;min-width:180px;z-index:110}
+nav .nav-group.open .nav-sub{display:flex}
+nav .nav-group .nav-sub button{text-align:left;border-bottom:none}
+
 .sidebar-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.42);opacity:0;pointer-events:none;transition:opacity .2s ease;z-index:899}
 .sidebar-backdrop.open{opacity:1;pointer-events:auto}
 .sidebar-drawer{position:fixed;top:0;bottom:0;left:0;width:min(85vw,320px);background:#fff;z-index:900;transform:translateX(-100%);transition:transform .22s ease;box-shadow:8px 0 28px rgba(15,23,42,.2);display:flex;flex-direction:column;overflow:auto}
@@ -90,6 +107,15 @@ nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-wei
 .sidebar-menu{padding:10px}
 .sidebar-menu button{width:100%;display:block;text-align:left;border:1px solid transparent;background:#fff;color:var(--text);padding:13px 14px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer}
 .sidebar-menu button:hover,.sidebar-menu button.active{background:rgba(253,49,1,.08);border-color:rgba(253,49,1,.16);color:var(--accent)}
+
+/* Grouped drawer nav (Change A) — additive, does not alter rules above.
+   Same rationale as the topNav block: .nav-top / .nav-sub buttons inherit
+   ".sidebar-menu button" above by descendant selector, so only the new
+   dropdown/active-state properties are added here. */
+.sidebar-menu .nav-group{margin-bottom:2px}
+.sidebar-menu .nav-group.active-group>.nav-top{background:rgba(253,49,1,.08);border-color:rgba(253,49,1,.16);color:var(--accent)}
+.sidebar-menu .nav-group .nav-sub{display:none;flex-direction:column;padding-left:10px}
+.sidebar-menu .nav-group.open .nav-sub{display:flex}
 .sidebar-divider{height:1px;background:var(--border);margin:10px 0}
 .sidebar-social{padding:0 10px 14px;display:flex;flex-wrap:wrap;gap:8px}
 .sidebar-social a{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;background:#fff;border:1px solid var(--border)}
@@ -473,22 +499,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   </div>
 </header>
 
-<nav>
-  <button class="active" data-tab="overview" onclick="navigate('overview')">Overview</button>
-  <button data-tab="transactions" onclick="navigate('transactions')">Transactions</button>
-  <button data-tab="search" onclick="navigate('search')">Search</button>
-  <button data-tab="employees" onclick="navigate('employees')">Employees</button>
-  <button data-tab="addemployee" onclick="navigate('addemployee')">Add Employee</button>
-  <button data-tab="unmatched" onclick="navigate('unmatched')">Unmatched</button>
-  <button data-tab="review" onclick="navigate('review')">Review Queue</button>
-  <button data-tab="sync" onclick="navigate('sync')">Sync</button>
-  <button data-tab="manual" onclick="navigate('manual')">Manual Entry</button>
-  <button data-tab="operator" onclick="navigate('operator')">Operator</button>
-  <button data-tab="cash" onclick="navigate('cash')">Cash</button>
-  <button data-tab="income" onclick="navigate('income')">Income</button>
-  <button data-tab="attendance-office" class="viewer-only-nav" onclick="navigate('attendance-office')" hidden>Office Attendance</button>
-  <button data-tab="admin" class="admin-only-nav" onclick="navigate('admin')" hidden>Admin</button>
-</nav>
+<nav id="topNav"></nav>
 
 <div id="sidebarBackdrop" class="sidebar-backdrop" onclick="closeSidebar()"></div>
 <aside id="sidebarDrawer" class="sidebar-drawer" aria-hidden="true">
@@ -497,20 +508,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     <button type="button" class="sidebar-close" onclick="closeSidebar()" aria-label="Close menu">Close</button>
   </div>
   <div class="sidebar-menu">
-    <button data-tab="overview" onclick="drawerNavigate('overview')">Overview</button>
-    <button data-tab="transactions" onclick="drawerNavigate('transactions')">Transactions</button>
-    <button data-tab="search" onclick="drawerNavigate('search')">Search</button>
-    <button data-tab="employees" onclick="drawerNavigate('employees')">Employees</button>
-    <button data-tab="addemployee" onclick="drawerNavigate('addemployee')">Add Employee</button>
-    <button data-tab="unmatched" onclick="drawerNavigate('unmatched')">Unmatched</button>
-    <button data-tab="review" onclick="drawerNavigate('review')">Review Queue</button>
-    <button data-tab="sync" onclick="drawerNavigate('sync')">Sync</button>
-    <button data-tab="manual" onclick="drawerNavigate('manual')">Manual Entry</button>
-    <button data-tab="operator" onclick="drawerNavigate('operator')">Operator</button>
-    <button data-tab="cash" onclick="drawerNavigate('cash')">Cash</button>
-    <button data-tab="income" onclick="drawerNavigate('income')">Income</button>
-    <button data-tab="attendance-office" class="viewer-only-nav" onclick="drawerNavigate('attendance-office')" hidden>Office Attendance</button>
-    <button data-tab="admin" class="admin-only-nav" onclick="drawerNavigate('admin')" hidden>Admin</button>
+    <div id="drawerNavGroups"></div>
     <div class="sidebar-divider"></div>
     <button onclick="logout()">Logout</button>
   </div>
@@ -1540,10 +1538,17 @@ function canViewAttendance() {
 function syncAdminUiVisibility() {
   const showAdmin = canAccessAdminMenu();
   const showViewer = canViewAttendance();
+  if (!showAdmin) {
+    // Scoped to the Admin nav entry + the Admin tab content only — other tabs
+    // (e.g. Office Attendance) reuse .admin-only-section for narrower widgets
+    // that must stay hidden-but-present (see openAttendanceForm() comment),
+    // not removed, so that class is intentionally left out of this selector.
+    document.querySelectorAll('[data-admin-gate], #tab-admin').forEach(el => el.remove());
+  }
   document.querySelectorAll('.admin-only-nav, .admin-only-section').forEach(el => {
     el.hidden = !showAdmin;
   });
-  document.querySelectorAll('.viewer-only-nav, .viewer-only-section').forEach(el => {
+  document.querySelectorAll('.viewer-only-nav, .viewer-only-section, [data-viewer-gate]').forEach(el => {
     el.hidden = !showViewer;
   });
   if (!showAdmin && currentTab === 'admin') navigate('overview', true);
@@ -1882,6 +1887,86 @@ function pickManualEmployee(idx) {
 // ── Tab Switching / SPA Routing ──────────────────────────────────────────────
 const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','operator','cash','income','attendance-office','admin'];
 
+// ── Grouped navigation (Change A) ────────────────────────────────────────────
+// Labels copied verbatim from the flat nav buttons this replaces.
+const TAB_LABELS = {
+  overview: 'Overview',
+  transactions: 'Transactions',
+  search: 'Search',
+  employees: 'Employees',
+  addemployee: 'Add Employee',
+  unmatched: 'Unmatched',
+  review: 'Review Queue',
+  sync: 'Sync',
+  manual: 'Manual Entry',
+  operator: 'Operator',
+  cash: 'Cash',
+  income: 'Income',
+  'attendance-office': 'Office Attendance',
+  admin: 'Admin',
+};
+
+const NAV_GROUPS = [
+  { key: 'overview',    label: 'Overview',          tabs: ['overview','transactions','unmatched','review','cash','income','sync'] },
+  { key: 'employee',    label: 'Employee',           tabs: ['employees','addemployee','search','manual','operator'] },
+  { key: 'attendance',  label: 'Office Attendance',  tabs: ['attendance-office'], viewerGate: true },
+  { key: 'escort',      label: 'Escort Program',     external: '/escort-roster' },
+  { key: 'admin',       label: 'Admin',              tabs: ['admin'], adminGate: true },
+];
+
+function renderNavGroups(container, isDrawer) {
+  if (!container) return;
+  const navFn = isDrawer ? 'drawerNavigate' : 'navigate';
+  container.innerHTML = NAV_GROUPS.map(g => {
+    if (g.external) {
+      return `<button class="nav-top" onclick="goToExternal('${g.external}')">${esc(g.label)}</button>`;
+    }
+    const gateAttr = g.adminGate ? ' data-admin-gate' : (g.viewerGate ? ' data-viewer-gate' : '');
+    const hiddenAttr = (g.adminGate || g.viewerGate) ? ' hidden' : '';
+    if (g.tabs.length === 1) {
+      const t = g.tabs[0];
+      return `<div class="nav-group single" data-group="${g.key}"${gateAttr}${hiddenAttr}><button class="nav-top" data-tab="${t}" onclick="${navFn}('${t}')">${esc(g.label)}</button></div>`;
+    }
+    const subBtns = g.tabs.map(t =>
+      `<button data-tab="${t}" onclick="${navFn}('${t}')">${esc(TAB_LABELS[t] || t)}</button>`
+    ).join('');
+    return `<div class="nav-group" data-group="${g.key}"${gateAttr}${hiddenAttr}>
+      <button class="nav-top" onclick="toggleNavGroup('${g.key}', ${isDrawer})">${esc(g.label)} <span class="nav-caret">▾</span></button>
+      <div class="nav-sub">${subBtns}</div>
+    </div>`;
+  }).join('');
+}
+
+function goToExternal(url) {
+  window.location.href = url;
+}
+
+function toggleNavGroup(key, isDrawer) {
+  const group = NAV_GROUPS.find(g => g.key === key);
+  if (!group || !group.tabs) return;
+  const scope = isDrawer ? document.getElementById('drawerNavGroups') : document.getElementById('topNav');
+  if (scope) {
+    scope.querySelectorAll('.nav-group').forEach(el => {
+      if (el.dataset.group !== key) el.classList.remove('open');
+    });
+    const el = scope.querySelector(`.nav-group[data-group="${key}"]`);
+    if (el) el.classList.add('open');
+  }
+  navigate(group.tabs[0]);
+}
+
+function highlightActiveGroup(name) {
+  const group = NAV_GROUPS.find(g => g.tabs && g.tabs.includes(name));
+  document.querySelectorAll('.nav-group').forEach(el => el.classList.remove('open', 'active-group'));
+  if (!group) return;
+  document.querySelectorAll(`.nav-group[data-group="${group.key}"]`).forEach(el => {
+    el.classList.add('open', 'active-group');
+  });
+}
+
+renderNavGroups(document.getElementById('topNav'), false);
+renderNavGroups(document.getElementById('drawerNavGroups'), true);
+
 function tabFromPath() {
   const p = location.pathname.replace(/\/+$/, '');
   if (p === '' || p === '/payroll') return 'overview';
@@ -1920,6 +2005,7 @@ function activateTab(name) {
   currentTab = name;
   closeSidebar();
   loadTab(name);
+  highlightActiveGroup(name);
 }
 
 function navigate(name, replace = false) {
