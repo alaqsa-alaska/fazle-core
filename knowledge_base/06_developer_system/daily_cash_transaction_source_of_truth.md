@@ -2,7 +2,7 @@
 title: Daily Cash Transaction Source Of Truth
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-07-05
+last_verified: 2026-07-13
 runtime_index: true
 source_modules: modules/payment_ingest, modules/payment_workflow, modules/accountant_summary, modules/fazle_payroll_engine
 ---
@@ -80,7 +80,8 @@ Manik Mea 01789123456(N) 200/-
 Rules:
 - `ID:` mobile is the employee lookup key.
 - Without `ID:`, payout mobile is the employee lookup key.
-- `(B)` = bkash, `(N)` = nagad, `(C)` = cash, `(Bank)` = bank.
+- `(B)` = bkash, `(N)` = nagad, `(C)` = cash, `(R)` = rocket, `(BANK)` = bank.
+- **Updated 2026-07-13**: `modules.payment_ingest._SHORTHAND_RE` also accepts full-word variants (`Cash`, `Nagad`, `Bkash`/`Bikash`, `Rocket`, `Bank`), case-insensitive, on the *input* side. `modules.draft_approval.build_accountant_message()` — the function that generates this exact format for the admin→accountant handoff — always emits the canonical single-letter/`BANK` codes above, never a full word.
 - If employee does not exist, create a minimal active employee in `fpe_employees` via `match_or_create_employee()`, using `employee_id_phone` or `primary_phone` as the lookup key.
 - Insert a final row in `fpe_cash_transactions` via `create_transaction()`.
 - Use WhatsApp message identity/timestamp for duplicate protection when available.

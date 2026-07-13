@@ -2,7 +2,7 @@
 title: Payment Business Rules
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-07-13
 runtime_index: true
 ---
 
@@ -37,7 +37,8 @@ Manik Mea 01789123456(N) 200/-
 Rules:
 - `ID:` mobile is the employee lookup key.
 - Without `ID:`, payout mobile becomes the employee lookup key.
-- `(B)` = bKash, `(N)` = Nagad, `(C)` = Cash, `(Bank)` = Bank Transfer.
+- `(B)` = bKash, `(N)` = Nagad, `(C)` = Cash, `(R)` = Rocket, `(BANK)` = Bank Transfer.
+- **Updated 2026-07-13**: the parser (`modules.payment_ingest._SHORTHAND_RE`) accepts full-word variants too, case-insensitive — `(Cash)`/`(cash)`, `(Nagad)`, `(Bkash)`/`(bKash)`/`(Bikash)`, `(Rocket)`, `(Bank)` all parse identically to their single-letter codes. This is input flexibility only — every *outbound* message the system generates (`modules.draft_approval.build_accountant_message()`) always emits the canonical single-letter/`BANK` codes shown above, never a full word, so a system-authored message never depends on this leniency; it exists for admin-typed messages.
 - If employee is not found, create a minimal active employee in `fpe_employees` via `match_or_create_employee()`.
 - Write exactly one final transaction row for a distinct WhatsApp instruction.
 - Same employee/same amount can appear multiple times in one day if the WhatsApp message time/identity is different.

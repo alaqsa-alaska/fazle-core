@@ -491,6 +491,8 @@ An employee is Office Staff (and therefore eligible for Formula 3, never Formula
 
 **Canonical APIs:** `modules/fazle_payroll_engine/employee.py::match_or_create_employee(payout_phone, employee_id_phone, ...)` (resolves/creates on the FPE side). `shared/identity_map.py::resolve_employee()` (resolves on the `wbom_employees` side only — does **not** itself bridge to `fpe_employees`), `validate_payment_identity()`, `sender_to_employee()`.
 
+**Updated 2026-07-13 — display-consistency fix, not a schema/naming change:** `payroll.html`'s Add Attendance form did its employee lookup purely against `wbom_employees` (via `modules.attendance.crud`), unlike every other form on the page (Add Payment, Manual Entry, Search), which all resolve through `fpe_employees` and show `employee_id_phone`. `modules.attendance.crud.lookup_employee_by_id()`/`suggest_employees_by_name()` now also attach `employee_id_phone` via a read-only scalar subquery, preferring `fpe_employees.wbom_employee_id` (the cross-system link described above) when it already exists, falling back to matching `employee_mobile`/`bkash_number`/`nagad_number` against `fpe_employees.primary_phone`/`employee_id_phone`. This does not create or write any link — it is `NULL` when no `fpe_employees` row has ever been matched to that `wbom_employees` row (common for office staff who have never been through a payment flow).
+
 **Canonical Status Values:** `wbom_employees.status = 'Active'` (capitalized — see the casing note in the Attendance section; this is the same inconsistency, not a new one).
 
 ### Naming Rule — employee phone/mobile number (the single largest naming-drift finding in this pass)

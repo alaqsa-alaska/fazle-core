@@ -2,7 +2,7 @@
 title: Cash Workflow
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-07-13
 runtime_index: true
 ---
 
@@ -40,7 +40,7 @@ Manik Mea 01789123456(N) 200/-
 Parsing rules:
 - `ID:` mobile is the employee lookup key (`wbom_employees.employee_mobile`).
 - Without `ID:`, the payout mobile is also the employee lookup key.
-- `(B)` = bkash, `(N)` = nagad, `(C)` = cash, `(Bank)` = bank.
+- `(B)` = bkash, `(N)` = nagad, `(C)` = cash, `(R)` = rocket, `(BANK)` = bank. Full-word variants (`Cash`, `Nagad`, `Bkash`/`Bikash`, `Rocket`, `Bank`) are also accepted on input, case-insensitive, since 2026-07-13 — outbound system-generated messages always use the single-letter/`BANK` codes.
 - Missing employee is auto-created using existing `wbom_employees` columns only.
 - Final ledger row is stored in `fpe_cash_transactions` via `create_transaction()`; existing DB schema is not changed.
 
