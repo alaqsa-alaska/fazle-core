@@ -73,7 +73,40 @@ escort/AI code-path tracing, and known strengths/weaknesses/roadmap), see
 | Queue/cache | Redis-backed helpers plus PostgreSQL queues |
 | Local AI | Ollama, default model `qwen3:8b` |
 | Branch in this checkout | `main` |
-| Last README review | 2026-07-06 |
+| Last README review | 2026-07-13 |
+
+### Ports & Key Services
+
+| Service | Port | Notes |
+|---|---|---|
+| `fazle-core.service` (this app) | `8200` internal, proxied publicly via Nginx | `APP_PORT` in `.env` |
+| `fazle-agent.service` | `8300`, `127.0.0.1` only | Separate systemd service, `/home/azim/agent` |
+| Media processor (OCR/ASR sidecar) | `8090`, `127.0.0.1` only | `/home/azim/shared/media/media-processor/server.py`, not part of this repo |
+| PostgreSQL (`ai-postgres` container) | `5432` | Shared with `fazle-agent` and `open-webui`; resolved via `DATABASE_URL_TEMPLATE` + `generate_runtime_services_env.sh` |
+| Qdrant (vector search) | `6333`/`6334` | `fazle_rag_chunks` collection |
+| Redis | `6379` | `ai-redis` container |
+| Ollama (local LLM) | `11434` | Models: `phi4-mini` (default), `qwen3:8b`, plus cloud-proxied `kimi`/`glm`/`minimax` models |
+
+### RBAC Role Hierarchy
+
+Source of truth is the live `fazle_roles` table, not a hardcoded Python dict:
+
+| Level | Role | Scope |
+|---|---|---|
+| 10 | `viewer` | Read-only: status/list/report/backup-status |
+| 20 | `office_assistant` | View attendance list/own records; create attendance draft entries only — no review/approve/edit/salary |
+| 30 | `operator` | Approve/reject drafts, escort confirm, mark paid |
+| 50 | `accountant` | Payroll + payment ingest + cash reconciliation |
+| 70 | `admin` | Backup now, scheduler run, user management |
+| 100 | `superadmin` | Full control including role assignment + delete |
+
+All 48 `fazle_payroll_engine` API endpoints are individually tiered by this hierarchy (audited 2026-07-11), not gated by a blanket "any admin key" check.
+
+### Auth Mechanism
+
+- **Header:** `X-Internal-Key: <key>` on every admin/mutation endpoint — either the master `INTERNAL_API_KEY` (`.env`, rotated 2026-07-12) or an active admin's individually-issued key (`fazle_admins`, checked via `modules.rbac.get_admin_by_api_key()`).
+- **Frontend storage:** each dashboard page stores its key in `localStorage` under its own key name — **4 different names across 7 pages, not unified**: `fazle_api_key` (`dashboard.html`, `open-chat.html`, `wa_chat.html`), `fpe_api_key` (`payroll.html`, `escort-roster.html`), `drafts_api_key` (`drafts.html`), `kb_api_key` (`kb.html`). See `app/static/shared-auth-fetch.js` (added 2026-07-13) for the one page (`escort-roster.html`) migrated to a shared fetch helper so far — it kept its own `fpe_api_key` name/variable, only the header-building/error-parsing logic moved.
+- There is no separate username/password login — API key only.
 
 ## Operating Mode
 
@@ -316,6 +349,34 @@ Focused verification evidence:
 - `pytest -q tests/unit/test_chat_exact_db_tools.py tests/unit/test_chat_message_smoke.py tests/unit/test_phase8a_chat_integration.py tests/unit/test_phase8c_structured_evidence.py tests/unit/test_recruitment_ai_restricted.py tests/unit/test_message_router_identity_seed.py -ra`
    - Result: 27 passed, no async teardown warnings in this run
 
+## Deterministic Hardening Update (2026-07-13)
+
+- **Deployment restart gate is now implemented**, not just designed —
+  `scripts/restart_gate.sh` runs all 9 checks from `docs/DEPLOYMENT_RESTART_GATE.md`
+  (working-tree cleanliness, secret scan, no-new-xfail, targeted tests, migration
+  inventory/path enforcement, `.env` critical-flag ack, backup freshness,
+  pre/post-restart health). Manual script, not wired into `ExecStartPre` (Owner
+  decision) — run `scripts/restart_gate.sh --restart` before every production
+  restart instead of a bare `systemctl restart`.
+- **Production Postgres password rotated** (2026-07-12) after the new secret
+  scanner found the real superuser password hardcoded in `Makefile` and
+  `tests/conftest.py` (the `Makefile` copy had been on GitHub since ~2026-05-30).
+  All 3 real consumers (`fazle-core.service`, `fazle-agent.service`, the
+  `open-webui` container) updated; test fixtures now require `TEST_DB_PASSWORD`.
+- **Client billing is now feature-complete** (Phase 2B Commit D): payment
+  recording, outstanding-balance view, mark-paid action, audit log
+  (`wbom_billing_payment_log`), an AI read-only tool, and a dashboard summary.
+  Bills, once generated, can now be tracked through to payment.
+- **RAG rebuild no longer holds the search lock for 15-36 minutes.** The Qdrant
+  embedding phase moved outside `_IDX.lock` (guards itself with a separate lock
+  instead), and unchanged chunks are skipped via a content-hash comparison
+  instead of always re-encoding the full 8,878-chunk corpus.
+- **e2e/non-e2e test isolation is mechanically enforced**, not just documented —
+  a `tests/conftest.py` collection-time guard hard-fails (exit 4) any pytest
+  invocation that mixes `tests/e2e/` with anything else.
+- RBAC's plain "valid key or not" check (`_require_api_key`) — previously
+  copy-pasted across 5 route files — now lives in one place, `shared/auth_deps.py`.
+
 ## Running Locally Or On The VPS
 
 Production is managed by systemd:
@@ -405,7 +466,7 @@ Use targeted tests for risky changes:
 |---|---|
 | `docs/DEVELOPER_GUIDE.md` | Runtime/infra detail, frontend page APIs/forms/search fields, finance/employee/escort/AI code-flow tracing, strengths/weaknesses/roadmap (2026-07-09) |
 | `docs/MODULE_MAP.md` | Module-by-module purpose/APIs/tables/dependencies/risk level for 26 core backend modules (2026-07-09) |
-| `docs/NEXT_IMPLEMENTATION_QUEUE.md` | Prioritized queue of what to work on next, Tier 0 through Phase 3 |
+| `docs/NEXT_IMPLEMENTATION_QUEUE.md` | Prioritized queue of what to work on next, Tier 0 through Phase 3. As of 2026-07-13: P0/P1/P2 and 4/5 Tier 2 items done; only Phase 2 (dispatch engine, GL) and Phase 3 (AI console unification) remain, both deliberately not started — large, undesigned business systems needing an Owner scope conversation first |
 | `docs/PRODUCTION_CERTIFICATION_v1.0.md` | Phase 1.5 evidence-based production certification (2026-07-09) — is this actually ready for Phase 2? |
 | `docs/PHASE2_ENTRY_GATE.md` | The GO/NO-GO checklist for Phase 2a (dispatch) and Phase 2b (billing/GL) |
 | `knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md` | Second-highest-priority doc after the Constitution — the single source of truth for business rules, canonical naming (e.g. which of 7 phone-column names means what), and known formula/status conflicts |

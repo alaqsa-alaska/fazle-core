@@ -39,7 +39,7 @@ Fazle Core is the production WhatsApp-first operations backend for **Al-Aqsa Sec
 | "What are the unbreakable rules for financial code?" | [`BUSINESS-CONSTITUTION.md`](BUSINESS-CONSTITUTION.md) — Article VII currently governs whether new features are even allowed (see §5 below) |
 | "What's the long-term roadmap and feasibility verdict?" | `~/.claude/plans/now-you-are-in-squishy-chipmunk.md` |
 | "Which migration directory do I add a new schema change to?" | [`db/MIGRATION_INVENTORY.md`](db/MIGRATION_INVENTORY.md) and [`knowledge_base/06_developer_system/database_rules.md`](knowledge_base/06_developer_system/database_rules.md)'s Migration Governance section — **always `db/migrations/`, never the other two legacy paths** |
-| "How do I safely restart production?" | [`docs/DEPLOYMENT_RESTART_GATE.md`](docs/DEPLOYMENT_RESTART_GATE.md) (designed, not yet mechanically enforced) |
+| "How do I safely restart production?" | `scripts/restart_gate.sh --restart` (implemented 2026-07-12, see [`docs/DEPLOYMENT_RESTART_GATE.md`](docs/DEPLOYMENT_RESTART_GATE.md) for what it checks) — manual script per Owner decision, not wired into `ExecStartPre` |
 | "What's the organizational/AI-behavior knowledge base?" | `knowledge_base/00_governance/` (governance/decisions), `knowledge_base/06_developer_system/` (developer-facing KB articles) — this is a separate, older knowledge system with its own governance culture; this Atlas is the newer, code-verified layer on top of it, not a replacement |
 
 ---
