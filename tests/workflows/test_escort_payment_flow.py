@@ -805,15 +805,24 @@ class TestOutboundQueue:
         assert after == before + 2
 
     async def test_sweep_once_stub_mode(self, test_db_pool):
-        """sweep_once in stub mode (OUTBOUND_ENABLED=false) marks rows sent."""
+        """sweep_once() is a hard no-op when OUTBOUND_ENABLED=false (the test
+        default — no test anywhere sets it true). There is no "stub mode"
+        that processes rows without sending — modules.outbound.sweep_once()
+        short-circuits to {picked: 0, paused: True} before touching the
+        queue at all when disabled (app/modules/outbound/__init__.py:139-142).
+        This test's original assertion (picked >= 1, rows "marked sent" in
+        stub mode) described a stub-processing behavior that doesn't exist
+        in the current code — updated 2026-07-13 to match the real,
+        deliberately-safe behavior (don't touch the outbound queue at all
+        while the master switch is off) rather than the code."""
         await self._setup(test_db_pool)
 
         from modules.outbound import enqueue, sweep_once
 
-        await enqueue(ADMIN_PHONE, "sweep test", idempotency_key="sweep-001")
+        await enqueue(ADMIN_PHONE, "sweep test", idempotency_key="sweep-002")
         result = await sweep_once(limit=5)
-        # In stub mode all rows should be sent
-        assert result["picked"] >= 1
+        assert result["paused"] is True
+        assert result["picked"] == 0
         assert result["dlq"] == 0
 
     async def test_enqueue_admin_notification_after_payment(
