@@ -1241,6 +1241,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
           </div>
           <div><label>Mobile</label><input id="attEmpMobile" type="text" disabled></div>
           <div><label>Designation</label><input id="attEmpDesignation" type="text" disabled></div>
+          <div><label>Employee ID Phone</label><input id="attEmpIdPhone" type="text" disabled placeholder="(not linked in fpe_employees yet)"></div>
         </div>
         <div class="row" style="align-items:flex-end;flex-wrap:wrap">
           <div><label>Address</label><input id="attEmpAddress" type="text" disabled style="width:260px"></div>
@@ -2474,7 +2475,7 @@ function openAttendanceForm(isEdit, attendanceId) {
   if (!canAccessAdminMenu()) return;
   document.getElementById('attFormError').textContent = '';
   _attEditingId = isEdit ? attendanceId : null;
-  ['attEmpId', 'attEmpName', 'attEmpMobile', 'attEmpDesignation', 'attEmpAddress', 'attRemarks'].forEach(id => {
+  ['attEmpId', 'attEmpName', 'attEmpMobile', 'attEmpDesignation', 'attEmpAddress', 'attEmpIdPhone', 'attRemarks'].forEach(id => {
     document.getElementById(id).value = '';
   });
   document.getElementById('attDate').value = '';
@@ -2508,6 +2509,7 @@ function _attFillEmployee(emp) {
   document.getElementById('attEmpMobile').value = emp.employee_mobile || '';
   document.getElementById('attEmpDesignation').value = emp.designation || '';
   document.getElementById('attEmpAddress').value = emp.address || '';
+  document.getElementById('attEmpIdPhone').value = emp.employee_id_phone || '';
 }
 
 let _attLookupTimer = null;
@@ -2538,6 +2540,7 @@ function attSuggestByName() {
         <div style="padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--border)"
              onclick='attPickSuggestion(${JSON.stringify(emp).replace(/'/g, "&apos;")})'>
           <b>${esc(emp.employee_name)}</b> — ID ${emp.employee_id} — ${esc(emp.designation || '')}
+          ${emp.employee_id_phone ? ` — <span style="color:var(--muted)">${esc(emp.employee_id_phone)}</span>` : ''}
           ${emp.status !== 'Active' ? ' <span style="color:var(--err)">(Inactive)</span>' : ''}
         </div>`).join('');
       box.style.display = 'block';

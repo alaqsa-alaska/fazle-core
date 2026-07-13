@@ -428,12 +428,16 @@ _SHORTHAND_RE = re.compile(
     rf"^\s*(?:ID\s*[:\-]?\s*(?P<employee_id_mobile>{_ADMIN_PHONE_PAT})\s+)?"
     r"(?P<name>.+?)\s+"
     rf"(?P<payout_mobile>{_ADMIN_PHONE_PAT})"
-    r"\s*\(\s*(?P<method>N|B|C|R|BANK)\s*\)"
+    r"\s*\(\s*(?P<method>Nagad|N|Bikash|Bkash|B|Cash|C|Rocket|R|BANK)\s*\)"
     r"[\s,]*(?P<amount>[\d,]+)\s*/-",
     re.IGNORECASE,
 )
 _SHORTHAND_METHOD: dict[str, str] = {
-    "n": "nagad", "b": "bkash", "c": "cash", "r": "rocket", "bank": "bank",
+    "n": "nagad", "nagad": "nagad",
+    "b": "bkash", "bkash": "bkash", "bikash": "bkash",
+    "c": "cash", "cash": "cash",
+    "r": "rocket", "rocket": "rocket",
+    "bank": "bank",
 }
 
 

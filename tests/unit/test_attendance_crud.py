@@ -245,6 +245,56 @@ class TestEmployeeLookup:
         assert seed_employee["employee_id"] in ids
         assert seed_employee2["employee_id"] in ids
 
+    async def test_lookup_by_id_attaches_employee_id_phone_via_fk_link(self, test_db_pool, seed_employee):
+        """2026-07-13 audit Fix #3: employee_id_phone comes from fpe_employees,
+        preferring the clean wbom_employee_id FK link when it exists."""
+        _use_pool(test_db_pool)
+        from modules.attendance.crud import lookup_employee_by_id
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO fpe_employees (full_name, name_normalized, employee_id_phone, wbom_employee_id) "
+                "VALUES ('Karim', 'karim', '01899999999', $1)",
+                seed_employee["employee_id"],
+            )
+        result = await lookup_employee_by_id(seed_employee["employee_id"])
+        assert result["employee_id_phone"] == "01899999999"
+
+    async def test_lookup_by_id_attaches_employee_id_phone_via_phone_fallback(self, test_db_pool, seed_employee):
+        """No wbom_employee_id link yet — falls back to matching on phone
+        (seed_employee's employee_mobile == '8801811111111')."""
+        _use_pool(test_db_pool)
+        from modules.attendance.crud import lookup_employee_by_id
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO fpe_employees (full_name, name_normalized, primary_phone, employee_id_phone) "
+                "VALUES ('Karim', 'karim', '8801811111111', '01888888888')"
+            )
+        result = await lookup_employee_by_id(seed_employee["employee_id"])
+        assert result["employee_id_phone"] == "01888888888"
+
+    async def test_lookup_by_id_employee_id_phone_null_when_no_fpe_match(self, test_db_pool, seed_employee):
+        _use_pool(test_db_pool)
+        from modules.attendance.crud import lookup_employee_by_id
+
+        result = await lookup_employee_by_id(seed_employee["employee_id"])
+        assert result["employee_id_phone"] is None
+
+    async def test_suggest_by_name_includes_employee_id_phone(self, test_db_pool, seed_employee):
+        _use_pool(test_db_pool)
+        from modules.attendance.crud import suggest_employees_by_name
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO fpe_employees (full_name, name_normalized, employee_id_phone, wbom_employee_id) "
+                "VALUES ('Karim', 'karim', '01899999999', $1)",
+                seed_employee["employee_id"],
+            )
+        results = await suggest_employees_by_name(seed_employee["employee_name"][:4])
+        match = next(r for r in results if r["employee_id"] == seed_employee["employee_id"])
+        assert match["employee_id_phone"] == "01899999999"
+
 
 class TestAttendanceRoleGate:
     """Attendance/payroll data includes basic_salary -- admin+superadmin

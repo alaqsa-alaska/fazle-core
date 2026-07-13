@@ -193,18 +193,20 @@ def build_accountant_message(draft: dict, amount: float, method: str) -> str:
     Canonical format (from parser.py observed patterns):
         ID: <payout_mobile> <employee_name> <payout_mobile>(<method_code>) <amount>/-
 
-    Method codes (parser-compatible):
+    Method codes (parser-compatible — canonical uppercase, matching
+    modules.payment_ingest._SHORTHAND_RE's method group exactly):
         bkash → B
         nagad → N
-        cash  → cash
+        cash  → C
         rocket → R
+        bank  → BANK
     """
     method_map = {
         "bkash": "B",
         "nagad": "N",
-        "cash": "cash",
+        "cash": "C",
         "rocket": "R",
-        "bank": "bank",
+        "bank": "BANK",
     }
     method_code = method_map.get(method.lower(), method.upper())
 

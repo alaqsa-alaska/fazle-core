@@ -258,11 +258,32 @@ async def list_attendance(
 # This is a plain, structured lookup against wbom_employees (the canonical
 # Employee DB) for the admin-facing form.
 
-_LOOKUP_FIELDS = "employee_id, employee_name, employee_mobile, address, designation, status, basic_salary"
+_LOOKUP_FIELDS = "w.employee_id, w.employee_name, w.employee_mobile, w.address, w.designation, w.status, w.basic_salary"
+
+# 2026-07-13 audit Fix #3: attach fpe_employees.employee_id_phone (the
+# identifier every OTHER payroll.html form already shows) via a scalar
+# subquery, not a JOIN -- a JOIN with these OR conditions could multiply
+# rows if more than one fpe_employees row matched. Prefers the clean
+# wbom_employee_id FK link (set as a "runtime repair" by
+# fazle_payroll_engine.employee.match_or_create_employee's step 3b)
+# over the phone-string fallback when both exist. Read-only: unlike that
+# step 3b logic, this never creates or links anything, just displays
+# whatever link already exists.
+_FPE_PHONE_SUBQUERY = """(
+    SELECT fpe.employee_id_phone FROM fpe_employees fpe
+    WHERE fpe.wbom_employee_id = w.employee_id
+       OR fpe.primary_phone IN (w.employee_mobile, w.bkash_number, w.nagad_number)
+       OR fpe.employee_id_phone IN (w.employee_mobile, w.bkash_number, w.nagad_number)
+    ORDER BY (fpe.wbom_employee_id = w.employee_id) DESC
+    LIMIT 1
+) AS employee_id_phone"""
 
 
 async def lookup_employee_by_id(employee_id: int) -> Optional[dict]:
-    row = await fetch_one(f"SELECT {_LOOKUP_FIELDS} FROM wbom_employees WHERE employee_id = $1", employee_id)
+    row = await fetch_one(
+        f"SELECT {_LOOKUP_FIELDS}, {_FPE_PHONE_SUBQUERY} FROM wbom_employees w WHERE w.employee_id = $1",
+        employee_id,
+    )
     return dict(row) if row else None
 
 
@@ -272,9 +293,9 @@ async def suggest_employees_by_name(query: str, limit: int = 8) -> list[dict]:
     if not query or not query.strip():
         return []
     rows = await fetch_all(
-        f"""SELECT {_LOOKUP_FIELDS} FROM wbom_employees
-            WHERE employee_name ILIKE $1
-            ORDER BY (status = 'Active') DESC, employee_name
+        f"""SELECT {_LOOKUP_FIELDS}, {_FPE_PHONE_SUBQUERY} FROM wbom_employees w
+            WHERE w.employee_name ILIKE $1
+            ORDER BY (w.status = 'Active') DESC, w.employee_name
             LIMIT $2""",
         f"%{query.strip()}%", limit,
     )

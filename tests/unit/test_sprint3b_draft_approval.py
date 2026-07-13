@@ -271,7 +271,11 @@ class Test6AccountantForward:
         assert "(N)" in msg_nagad
 
         msg_cash = build_accountant_message(draft, 1000.0, "cash")
-        assert "(cash)" in msg_cash
+        # (C), not (cash) — canonical uppercase code, matching bkash/nagad/rocket's
+        # pattern and payment_ingest._SHORTHAND_RE's method group exactly (2026-07-13
+        # audit Fix #2: the old "(cash)" output couldn't be re-parsed by the shorthand
+        # parser at the time this was written).
+        assert "(C)" in msg_cash
 
         msg_rocket = build_accountant_message(draft, 1000.0, "rocket")
         assert "(R)" in msg_rocket
