@@ -15,9 +15,8 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from app.config import get_settings
+from shared.auth_deps import require_api_key as _require_api_key
 
 log = logging.getLogger("fazle.kb_upload")
 router = APIRouter(tags=["kb_upload"])
@@ -26,23 +25,6 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".text", ".md", ".csv"}
 UPLOAD_DIR = "/home/azim/core/resources/uploads"
 RESOURCES_DIR = "/home/azim/core/resources"
-
-_KB_KEY_HEADER = APIKeyHeader(name="X-Internal-Key", auto_error=False)
-
-
-async def _require_api_key(key: str = Depends(_KB_KEY_HEADER)) -> None:
-    settings = get_settings()
-    if key and key == settings.internal_api_key:
-        return
-    if key:
-        try:
-            from modules import rbac
-            admin = await rbac.get_admin_by_api_key(key)
-            if admin and admin.get("status") == "active":
-                return
-        except Exception:
-            pass
-    raise HTTPException(status_code=403, detail="Forbidden")
 
 
 @router.post("/admin/kb/upload")

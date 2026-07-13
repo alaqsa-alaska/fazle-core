@@ -16,34 +16,13 @@ import json as _json
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from app.database import fetch_all, fetch_one, execute
 from app.config import get_settings as _get_settings
+from shared.auth_deps import API_KEY_HEADER as _API_KEY_HEADER, require_api_key as _require_api_key
 
 log = logging.getLogger("fazle.drafts")
 router = APIRouter(tags=["drafts"])
-
-# Local copy — avoids circular import (app.main → drafts → app.main)
-_API_KEY_HEADER = APIKeyHeader(name="X-Internal-Key", auto_error=False)
-
-
-async def _require_api_key(key: str = Depends(_API_KEY_HEADER)) -> None:
-    settings = _get_settings()
-    if key and key == settings.internal_api_key:
-        return
-    if key:
-        try:
-            from modules import rbac
-            admin = await rbac.get_admin_by_api_key(key)
-            if admin is not None and admin.get("status") == "active":
-                return
-        except Exception as e:
-            import logging
-            logging.getLogger("fazle.drafts.routes").warning(
-                f"Auth error for key {key[:10]}...: {e}"
-            )
-    raise HTTPException(status_code=403, detail="Forbidden")
 
 
 async def _resolve_reviewer_identity(key: str) -> str:

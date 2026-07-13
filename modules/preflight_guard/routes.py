@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.encoders import jsonable_encoder
-from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
 from app.database import fetch_all, fetch_one
 from modules.preflight_guard import (
     activate_feature,
@@ -21,27 +19,10 @@ from modules.location_adapter import (
     get_device_status,
     get_employee_location,
 )
+from shared.auth_deps import require_api_key as _require_api_key
 
 log = logging.getLogger("fazle.preflight_guard")
 router = APIRouter(tags=["preflight_guard"])
-
-_API_KEY_HEADER = APIKeyHeader(name="X-Internal-Key", auto_error=False)
-
-
-async def _require_api_key(key: str = Depends(_API_KEY_HEADER)) -> None:
-    settings = get_settings()
-    if key and key == settings.internal_api_key:
-        return
-    if key:
-        try:
-            from modules import rbac
-
-            admin = await rbac.get_admin_by_api_key(key)
-            if admin is not None and admin.get("status") == "active":
-                return
-        except Exception as exc:
-            log.warning("[auth] rbac lookup failed: %s", exc)
-    raise HTTPException(status_code=403, detail="Forbidden")
 
 
 class PreflightRequest(BaseModel):
