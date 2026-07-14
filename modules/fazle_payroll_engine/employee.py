@@ -519,6 +519,21 @@ async def _auto_create_employee(
                 code, new_id,
             )
 
+            # Link to an existing WBOM record if this phone already has one
+            # (mirrors _seed_fpe()'s WBOM->FPE link, reverse direction) --
+            # never creates a new wbom_employees row here, only links to one
+            # that already exists, to avoid the payroll-eligibility/bot-
+            # identity risks a fabricated stub row would carry.
+            wbom_match = await con.fetchrow(
+                "SELECT employee_id FROM wbom_employees WHERE employee_mobile = ANY($1::text[]) LIMIT 1",
+                [p for p in (eid_phone, payout_phone) if p],
+            )
+            if wbom_match:
+                await con.execute(
+                    "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2",
+                    wbom_match["employee_id"], new_id,
+                )
+
             # Aliases (idempotent via unique constraint)
             for ph in {p for p in (payout_phone, eid_phone) if p}:
                 await con.execute(

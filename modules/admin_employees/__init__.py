@@ -485,6 +485,85 @@ async def link_fpe_to_wbom(body: LinkFpeRequest):
     }
 
 
+class CreateAndLinkRequest(BaseModel):
+    fpe_id: int
+    designation: str
+    salary: float = 0
+    full_name: str
+
+    @field_validator("designation")
+    @classmethod
+    def _designation_required(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("designation is required")
+        if v.lower() == "unknown":
+            raise ValueError("designation cannot be 'Unknown' -- enter the employee's real designation")
+        return v
+
+    @field_validator("full_name")
+    @classmethod
+    def _name_required(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("full_name is required")
+        return v
+
+
+@router.post("/employees/create-and-link", dependencies=[Depends(_require_admin_role)])
+async def create_and_link_wbom(body: CreateAndLinkRequest):
+    """One-at-a-time tool for app/static/wbom-create-link.html -- creates a
+    real wbom_employees row (admin-provided designation, never a guessed
+    default) for an FPE employee that has no WBOM record at all, then links
+    it. Rejects 'Unknown' designation at the model level so this can't be
+    used to recreate migration 047's rejected bulk-fabrication approach one
+    row at a time."""
+    fpe = await fetch_one(
+        "SELECT id, full_name, primary_phone, employee_id_phone, wbom_employee_id, status "
+        "FROM fpe_employees WHERE id = $1",
+        body.fpe_id,
+    )
+    if not fpe:
+        raise HTTPException(404, f"fpe_employees.id={body.fpe_id} not found")
+    if fpe["wbom_employee_id"] is not None:
+        raise HTTPException(409, f"fpe_employees.id={body.fpe_id} already linked to wbom_employee_id={fpe['wbom_employee_id']}")
+
+    mobile = fpe["primary_phone"] or fpe["employee_id_phone"]
+    if not mobile:
+        raise HTTPException(400, f"fpe_employees.id={body.fpe_id} has no phone number -- cannot create a wbom_employees row (employee_mobile is required)")
+
+    existing = await fetch_one(
+        "SELECT employee_id FROM wbom_employees WHERE employee_mobile = $1", mobile
+    )
+    if existing:
+        raise HTTPException(409, f"wbom_employees already has a row for mobile {mobile} (employee_id={existing['employee_id']}) -- use link-fpe instead of create-and-link")
+
+    wbom_status = "Active" if fpe["status"] == "active" else "Inactive"
+    new_wbom_id = await fetch_val(
+        """INSERT INTO wbom_employees
+               (employee_name, employee_mobile, designation, basic_salary, status,
+                created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, now(), now())
+           RETURNING employee_id""",
+        body.full_name, mobile, body.designation, body.salary, wbom_status,
+    )
+
+    await execute(
+        "UPDATE fpe_employees SET wbom_employee_id = $1, updated_at = now() WHERE id = $2",
+        new_wbom_id, body.fpe_id,
+    )
+
+    log.info(
+        "[admin_employees] created+linked wbom_id=%d (%s, %s) <- fpe_id=%d",
+        new_wbom_id, body.full_name, body.designation, body.fpe_id,
+    )
+    return {
+        "ok": True,
+        "wbom_employee_id": new_wbom_id,
+        "message": f"Created WBOM #{new_wbom_id} ({body.full_name}, {body.designation}) and linked to FPE #{body.fpe_id}",
+    }
+
+
 @router.get("/debug/auth-check")
 async def debug_auth_check(key: str = Depends(_API_KEY_HEADER)):
     """Safe diagnostics endpoint — no auth required, returns auth analysis only."""

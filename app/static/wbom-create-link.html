@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WBOM Create + Link — one-time cleanup tool</title>
+<style>
+:root{--bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;--surface:#f8fafc;--text:#1e293b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:20px}
+h1{color:var(--accent);font-size:20px;margin-bottom:4px}
+p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+#loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
+#loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
+#loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
+#app{display:none;max-width:900px;margin:0 auto}
+#progress{font-size:13px;color:var(--muted);margin-bottom:14px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+#progress b{color:var(--accent2)}
+.card{background:#fff;border-radius:10px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:14px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.field label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+.field .val{font-size:14px;font-weight:600}
+.field input{width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:14px}
+.field input:focus{outline:none;border-color:var(--accent)}
+.actions{display:flex;gap:8px;margin-top:16px}
+.btn{padding:9px 16px;border-radius:7px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:13px;font-weight:600}
+.btn.create{background:var(--ok);color:#fff;border-color:var(--ok)}
+.btn.skip{background:var(--surface);color:var(--muted)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.status{margin-top:10px;font-size:13px}
+.status.ok{color:var(--ok)}
+.status.err{color:var(--err)}
+.done-empty{text-align:center;padding:60px 20px;color:var(--muted)}
+.hint{font-size:11px;color:var(--muted);margin-top:3px}
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>WBOM Create + Link</h1>
+  <p class="sub">One-time cleanup tool. Requires the same admin key as /payroll.</p>
+  <input id="keyInput" type="password" placeholder="API Key">
+  <button onclick="doLogin()">Continue</button>
+  <div id="loginErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+</div>
+
+<div id="app">
+  <h1>WBOM Create + Link — 180 employees</h1>
+  <p class="sub">Each of these 180 FPE employees has no WBOM record and no phone-matchable candidate. Enter the employee's real designation (required — "Unknown" is rejected by the server) and confirm salary, then Create + Link. Skip moves to the next one with no DB change. Already-linked rows (e.g. handled in another tab) are detected when you try to submit and skipped automatically.</p>
+  <div id="progress"></div>
+  <div id="cardHost"></div>
+</div>
+
+<script>
+let API_KEY = '';
+let idx = 0;
+
+const CANDIDATES = [
+  {fpe_id:3,full_name:"Rabbi Kazi",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01706597371",txn_count:6},
+  {fpe_id:4,full_name:"Iftekhar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01813740972",txn_count:1},
+  {fpe_id:5,full_name:"Safiul",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01342506069",txn_count:8},
+  {fpe_id:6,full_name:"Foysal",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01890160301",txn_count:5},
+  {fpe_id:8,full_name:"Wadur Rahman",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01309912481",txn_count:1},
+  {fpe_id:9,full_name:"Touhidul Islam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01863180424",txn_count:1},
+  {fpe_id:12,full_name:"Khaled Mehedi",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01975980734",txn_count:4},
+  {fpe_id:19,full_name:"Shonkor proshad Chakrabarty",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01854447537",txn_count:11},
+  {fpe_id:29,full_name:"Al-Amin",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01332423438",txn_count:38},
+  {fpe_id:30,full_name:"Safiul Sitakundha",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"0182368088",txn_count:1},
+  {fpe_id:33,full_name:"Shuvo K. Mehedi",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01743839999",txn_count:3},
+  {fpe_id:34,full_name:"Lebu",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01846456291",txn_count:1},
+  {fpe_id:37,full_name:"Hasan conv",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01984338184",txn_count:4},
+  {fpe_id:38,full_name:"Shuvo Sukani",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01787571096",txn_count:3},
+  {fpe_id:39,full_name:"Shuvo conv",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01720801617",txn_count:1},
+  {fpe_id:43,full_name:"01884593153",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01884593153",txn_count:1},
+  {fpe_id:45,full_name:"01921970774",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01921970774",txn_count:1},
+  {fpe_id:47,full_name:"Joy",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01404816823",txn_count:2},
+  {fpe_id:48,full_name:"Momin",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01625040465",txn_count:1},
+  {fpe_id:49,full_name:"Morshed",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01882777910",txn_count:1},
+  {fpe_id:50,full_name:"Kuldip",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01891637588",txn_count:1},
+  {fpe_id:51,full_name:"01890927366",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01890927366",txn_count:1},
+  {fpe_id:52,full_name:"Maruf",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01837419554",txn_count:5},
+  {fpe_id:53,full_name:"A. Rahim Nishad Lubna",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01971206097",txn_count:1},
+  {fpe_id:54,full_name:"Nishan",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01851054361",txn_count:2},
+  {fpe_id:55,full_name:"Amzad",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01344071651",txn_count:1},
+  {fpe_id:56,full_name:"Hanif",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01983877552",txn_count:1},
+  {fpe_id:57,full_name:"01814174272",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01814174272",txn_count:1},
+  {fpe_id:58,full_name:"Omar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01820718328",txn_count:3},
+  {fpe_id:59,full_name:"01915171707",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01915171707",txn_count:1},
+  {fpe_id:63,full_name:"01679292093",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01679292093",txn_count:1},
+  {fpe_id:64,full_name:"01815944326",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01815944326",txn_count:1},
+  {fpe_id:65,full_name:"01713666763",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01713666763",txn_count:1},
+  {fpe_id:66,full_name:"Joynal",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01316395979",txn_count:3},
+  {fpe_id:69,full_name:"Apon",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01304028552",txn_count:2},
+  {fpe_id:71,full_name:"01569186129",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01569186129",txn_count:1},
+  {fpe_id:76,full_name:"MD Sahabuddin conv",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01850106918",txn_count:2},
+  {fpe_id:78,full_name:"Tareq Mongla",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01625179465",txn_count:5},
+  {fpe_id:82,full_name:"Sanvir Mongla",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01710008713",txn_count:2},
+  {fpe_id:85,full_name:"Naiem",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01798844658",txn_count:3},
+  {fpe_id:88,full_name:"Delowar Briton",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01883548666",txn_count:2},
+  {fpe_id:90,full_name:"Samir",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01821480057",txn_count:3},
+  {fpe_id:91,full_name:"Monir",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01705763566",txn_count:9},
+  {fpe_id:92,full_name:"01314706789",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01314706789",txn_count:1},
+  {fpe_id:93,full_name:"01921764980",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01921764980",txn_count:1},
+  {fpe_id:95,full_name:"01832555567",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01832555567",txn_count:1},
+  {fpe_id:96,full_name:"Montasir jawad",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01998582279",txn_count:1},
+  {fpe_id:98,full_name:"Jibon",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01336982286",txn_count:4},
+  {fpe_id:99,full_name:"Samir",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01798458205",txn_count:2},
+  {fpe_id:101,full_name:"(Escort Breakfast) Dokandar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01749324825",txn_count:1},
+  {fpe_id:103,full_name:"01824586088",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01824586088",txn_count:1},
+  {fpe_id:105,full_name:"01934867020",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01934867020",txn_count:1},
+  {fpe_id:106,full_name:"01811813287",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01811813287",txn_count:1},
+  {fpe_id:108,full_name:"01920639436",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01920639436",txn_count:1},
+  {fpe_id:109,full_name:"Shariar Sukani Boat Rent",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01810659427",txn_count:3},
+  {fpe_id:111,full_name:"Shofiqul",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01857895973",txn_count:1},
+  {fpe_id:112,full_name:"01819570056",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01819570056",txn_count:1},
+  {fpe_id:114,full_name:"Abu bakar con",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01782414416",txn_count:2},
+  {fpe_id:115,full_name:"Hasan",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01929650771",txn_count:2},
+  {fpe_id:116,full_name:"Shanto Labor",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01710838872",txn_count:4},
+  {fpe_id:117,full_name:"Joyonto Convince send master",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01715840866",txn_count:3},
+  {fpe_id:118,full_name:"Robiul Food Bill Sukani",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01889353583",txn_count:4},
+  {fpe_id:119,full_name:"Minhaj:",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01890083247",txn_count:5},
+  {fpe_id:122,full_name:"Juwel Food Bill With Boat Bara Master",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01782129164",txn_count:3},
+  {fpe_id:123,full_name:"Juwel Convince",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01924879125",txn_count:1},
+  {fpe_id:126,full_name:"Hridoy Mongla",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01905248786",txn_count:4},
+  {fpe_id:152,full_name:"01861651482",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01861651482",txn_count:1},
+  {fpe_id:153,full_name:"Sagor",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01717099946",txn_count:1},
+  {fpe_id:155,full_name:"01858914940",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01858914940",txn_count:1},
+  {fpe_id:158,full_name:"minhaj (conv)",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01643668147",txn_count:2},
+  {fpe_id:159,full_name:"Id:",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01306930835",txn_count:1},
+  {fpe_id:168,full_name:"01974682803",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01974682803",txn_count:1},
+  {fpe_id:176,full_name:"Baten",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01577523045",txn_count:2},
+  {fpe_id:181,full_name:"Farouque Labor",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01943832087",txn_count:3},
+  {fpe_id:186,full_name:"Labor K-Block",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01817283888",txn_count:2},
+  {fpe_id:196,full_name:"Shakil Labor",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01922123004",txn_count:3},
+  {fpe_id:198,full_name:"Shafiul alam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01788513720",txn_count:2},
+  {fpe_id:199,full_name:"Shuvo food bil",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01892703267",txn_count:2},
+  {fpe_id:200,full_name:"Alamgir vai",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01969498616",txn_count:1},
+  {fpe_id:240,full_name:"01304135365",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01304135365",txn_count:1},
+  {fpe_id:260,full_name:"Mohsin Mea",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01821941868",txn_count:1},
+  {fpe_id:264,full_name:"Mohsin Mea",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01322703590",txn_count:5},
+  {fpe_id:266,full_name:"Amir Ali",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01407610289",txn_count:1},
+  {fpe_id:274,full_name:"Robin",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01708766069",txn_count:3},
+  {fpe_id:279,full_name:"Mohsin mea",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01818117703",txn_count:1},
+  {fpe_id:280,full_name:"Ari Ahmed",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01818456704",txn_count:2},
+  {fpe_id:281,full_name:"Khairul Islam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01620045217",txn_count:1},
+  {fpe_id:290,full_name:"Nirob",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01873419128",txn_count:3},
+  {fpe_id:291,full_name:"Dewan Jobayer-4",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01722161104",txn_count:1},
+  {fpe_id:292,full_name:"Towhid",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01610244952",txn_count:7},
+  {fpe_id:293,full_name:"Tarq Safe",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01858048268",txn_count:1},
+  {fpe_id:294,full_name:"Rafiq Safe",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01858475272",txn_count:1},
+  {fpe_id:295,full_name:"Raihanuddin Safe",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01625212361",txn_count:8},
+  {fpe_id:296,full_name:"Rakib Safe",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01893037242",txn_count:1},
+  {fpe_id:297,full_name:"Masud Rana",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01715318620",txn_count:10},
+  {fpe_id:298,full_name:"01818947496",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01818947496",txn_count:1},
+  {fpe_id:299,full_name:"Mahal/Titu",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01708966563",txn_count:1},
+  {fpe_id:300,full_name:"Rana",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01771843773",txn_count:15},
+  {fpe_id:301,full_name:"Zakir",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01301007211",txn_count:2},
+  {fpe_id:302,full_name:"Rasel Max",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01756510478",txn_count:5},
+  {fpe_id:303,full_name:"Rumon",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01781418190",txn_count:7},
+  {fpe_id:304,full_name:"Saiful Safe",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01874798751",txn_count:5},
+  {fpe_id:305,full_name:"Arafat Alamgir",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01806386052",txn_count:19},
+  {fpe_id:306,full_name:"Shohel halisahar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01884503217",txn_count:70},
+  {fpe_id:307,full_name:"A. Bakkar Safe",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01406479935",txn_count:1},
+  {fpe_id:308,full_name:"Internet",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01857759742",txn_count:3},
+  {fpe_id:309,full_name:"Shajin",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01964773255",txn_count:9},
+  {fpe_id:311,full_name:"Shipon Mansib",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01857113732",txn_count:1},
+  {fpe_id:318,full_name:"Hannan",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01716202030",txn_count:2},
+  {fpe_id:319,full_name:"Saiful Islam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01849258074",txn_count:2},
+  {fpe_id:320,full_name:"Shuvo",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01728832937",txn_count:1},
+  {fpe_id:321,full_name:"Max Day",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01714889072",txn_count:3},
+  {fpe_id:322,full_name:"Riaz Barristers",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01847063514",txn_count:4},
+  {fpe_id:323,full_name:"Sayem",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01819990008",txn_count:1},
+  {fpe_id:324,full_name:"Arman",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01815607057",txn_count:1},
+  {fpe_id:325,full_name:"Masud Pervez",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01642753780",txn_count:4},
+  {fpe_id:327,full_name:"01979910491",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01979910491",txn_count:3},
+  {fpe_id:328,full_name:"Shahin",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01632001655",txn_count:5},
+  {fpe_id:331,full_name:"Phase20 TestEmp",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01611999888",txn_count:1},
+  {fpe_id:332,full_name:"Afroza",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01958122311",txn_count:6},
+  {fpe_id:333,full_name:"Kusuma",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01958122327",txn_count:13},
+  {fpe_id:334,full_name:"Omor Lovely",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01810125062",txn_count:5},
+  {fpe_id:335,full_name:"Fahad",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01631422559",txn_count:5},
+  {fpe_id:336,full_name:"Safayet",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01338745280",txn_count:10},
+  {fpe_id:337,full_name:"Arif Mea",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01815104517",txn_count:1},
+  {fpe_id:338,full_name:"Al-Nafis",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01630989962",txn_count:8},
+  {fpe_id:339,full_name:"Mushfiqur Rahman",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01866183802",txn_count:1},
+  {fpe_id:340,full_name:"Babon",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01329877324",txn_count:3},
+  {fpe_id:341,full_name:"Momtaj",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01827522320",txn_count:5},
+  {fpe_id:342,full_name:"Noyon Halishahar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01317670728",txn_count:8},
+  {fpe_id:343,full_name:"Helal maghi chorpara",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01887220004",txn_count:1},
+  {fpe_id:344,full_name:"Didarul",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01774972565",txn_count:1},
+  {fpe_id:345,full_name:"Max Site",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01886351939",txn_count:1},
+  {fpe_id:346,full_name:"Bijoy",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01778083799",txn_count:4},
+  {fpe_id:347,full_name:"01773558211",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01773558211",txn_count:4},
+  {fpe_id:348,full_name:"Morsalin",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01941123204",txn_count:1},
+  {fpe_id:350,full_name:"Mosain Mea",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01339620136",txn_count:7},
+  {fpe_id:351,full_name:"Yasin Emon",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01629116091",txn_count:4},
+  {fpe_id:352,full_name:"Sizan",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01714988162",txn_count:2},
+  {fpe_id:353,full_name:"Ramzan Halishahar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01908828694",txn_count:3},
+  {fpe_id:355,full_name:"Tiplu Das",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01806730694",txn_count:28},
+  {fpe_id:356,full_name:"Rakibul Islam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01913976053",txn_count:15},
+  {fpe_id:357,full_name:"MD. Sayon",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01891967179",txn_count:28},
+  {fpe_id:358,full_name:"Rafiqu Islam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01609685544",txn_count:2},
+  {fpe_id:359,full_name:"Khalid",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01877313148",txn_count:4},
+  {fpe_id:362,full_name:"Mahbub Alam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01777164699",txn_count:18},
+  {fpe_id:365,full_name:"RBAC Verify Final",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01711122233",txn_count:1},
+  {fpe_id:366,full_name:"RBAC Verify Final2",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01711122244",txn_count:1},
+  {fpe_id:367,full_name:"Audit Verify",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01711199999",txn_count:1},
+  {fpe_id:368,full_name:"Hardening Matrix Seed",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01712345678",txn_count:3},
+  {fpe_id:369,full_name:"Probe",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01710000000",txn_count:18},
+  {fpe_id:371,full_name:"Audit Emp 60902 Edited",salary:10000.00,joining_date:null,created_source:"admin_manual_create",phone:"01756207986",txn_count:0},
+  {fpe_id:372,full_name:"Kayes Bin Kalam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01830612869",txn_count:1},
+  {fpe_id:373,full_name:"Controlled Test Employee",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01777099991",txn_count:4},
+  {fpe_id:374,full_name:"Golam Mustafa",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01959419421",txn_count:2},
+  {fpe_id:375,full_name:"Imtiaj",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01918733312",txn_count:4},
+  {fpe_id:378,full_name:"MD. Bella Hasan",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01885373539",txn_count:4},
+  {fpe_id:379,full_name:"Ekramul Karim",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01888557590",txn_count:2},
+  {fpe_id:380,full_name:"Mizanur Rahman",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01864470957",txn_count:2},
+  {fpe_id:460,full_name:"Abdur Sukkur",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01768329714",txn_count:4},
+  {fpe_id:462,full_name:"Abdul shukkur",salary:10000.00,joining_date:null,created_source:"admin_manual_create",phone:"01868870003",txn_count:0},
+  {fpe_id:464,full_name:"Tajbir Hosen",salary:10000.00,joining_date:null,created_source:"admin_manual_create",phone:"01864655988",txn_count:1},
+  {fpe_id:466,full_name:"Anik kumar Nath",salary:10000.00,joining_date:null,created_source:"admin_manual_create",phone:"01885886659",txn_count:1},
+  {fpe_id:468,full_name:"Priojit kor",salary:10000.00,joining_date:null,created_source:"admin_manual_create",phone:"01890304725",txn_count:1},
+  {fpe_id:469,full_name:"Kazi kalamor Rohoman",salary:10000.00,joining_date:null,created_source:"admin_manual_create",phone:"01858048427",txn_count:1},
+  {fpe_id:1271,full_name:"Rejaul Karim",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01886910644",txn_count:8},
+  {fpe_id:1272,full_name:"Shanto Sharif",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01611086092",txn_count:2},
+  {fpe_id:1276,full_name:"Bella Hossain",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01886393499",txn_count:2},
+  {fpe_id:1277,full_name:"\u09aa\u09cd\u09b0\u09c7\u09b0\u0995:",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01733364777",txn_count:2},
+  {fpe_id:1278,full_name:"Dipongkar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01828136899",txn_count:5},
+  {fpe_id:1280,full_name:"Wasim Akram",salary:10000.00,joining_date:null,created_source:"admin_manual",phone:"01811528446",txn_count:2},
+  {fpe_id:1281,full_name:"Md. Obaidur Rahman",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01707273498",txn_count:3},
+  {fpe_id:1283,full_name:"Rony Banik",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01620653945",txn_count:2},
+  {fpe_id:1284,full_name:"Ridoyan Khan Rida",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01940125166",txn_count:7},
+  {fpe_id:1285,full_name:"Shapon Nath",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01736410895",txn_count:2},
+  {fpe_id:1286,full_name:"Kazi md Jaber",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01815026907",txn_count:1},
+  {fpe_id:1287,full_name:"Asif Tallyman",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01633229327",txn_count:1},
+  {fpe_id:1289,full_name:"Ariful How",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01346765824",txn_count:4},
+  {fpe_id:1290,full_name:"Faruk Hossain",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01755627557",txn_count:2},
+  {fpe_id:1293,full_name:"Sajib Islam",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01916769176",txn_count:2}
+];
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function doLogin() {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  localStorage.setItem('fpe_api_key', key);
+  boot();
+}
+
+function updateProgress() {
+  document.getElementById('progress').innerHTML =
+    `<b>${idx}</b> of <b>${CANDIDATES.length}</b> processed`;
+}
+
+function renderCard() {
+  updateProgress();
+  const host = document.getElementById('cardHost');
+  if (idx >= CANDIDATES.length) {
+    host.innerHTML = '<div class="done-empty">✅ All 180 processed. Nothing left to review.</div>';
+    return;
+  }
+  const c = CANDIDATES[idx];
+  host.innerHTML = `
+    <div class="card">
+      <div class="row">
+        <div class="field"><label>FPE ID</label><div class="val">#${c.fpe_id}</div></div>
+        <div class="field"><label>Phone</label><div class="val mono">${esc(c.phone)}</div></div>
+        <div class="field"><label>Joining Date</label><div class="val">${esc(c.joining_date) || '—'}</div></div>
+        <div class="field"><label>Created Source</label><div class="val" style="font-size:12px;color:var(--muted)">${esc(c.created_source)}</div></div>
+        <div class="field"><label>Transaction Count</label><div class="val">${c.txn_count}</div></div>
+        <div class="field"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Name (editable)</label>
+          <input id="fName" type="text" value="${esc(c.full_name)}"></div>
+        <div class="field"><label>Designation (required)</label>
+          <input id="fDesig" type="text" placeholder="e.g. Guard, Labor, Office Assistant...">
+          <div class="hint">Cannot be blank or "Unknown"</div></div>
+        <div class="field"><label>Salary (৳)</label>
+          <input id="fSalary" type="number" min="0" step="0.01" value="${c.salary}"></div>
+      </div>
+      <div class="actions">
+        <button class="btn create" id="btnCreate" onclick="createAndLink()">Create WBOM + Link</button>
+        <button class="btn skip" id="btnSkip" onclick="skipCurrent()">Skip for now</button>
+      </div>
+      <div class="status" id="cardStatus"></div>
+    </div>
+  `;
+  document.getElementById('fDesig').focus();
+}
+
+function skipCurrent() {
+  idx++;
+  renderCard();
+}
+
+async function createAndLink() {
+  const c = CANDIDATES[idx];
+  const full_name = document.getElementById('fName').value.trim();
+  const designation = document.getElementById('fDesig').value.trim();
+  const salary = parseFloat(document.getElementById('fSalary').value) || 0;
+  const statusEl = document.getElementById('cardStatus');
+
+  if (!designation) {
+    statusEl.textContent = 'Designation is required.';
+    statusEl.className = 'status err';
+    return;
+  }
+  if (designation.toLowerCase() === 'unknown') {
+    statusEl.textContent = 'Designation cannot be "Unknown" — enter the real designation.';
+    statusEl.className = 'status err';
+    return;
+  }
+  if (!confirm(`Create a WBOM record for "${full_name}" (${designation}, ৳${salary}) and link it to FPE #${c.fpe_id}?`)) return;
+
+  document.getElementById('btnCreate').disabled = true;
+  document.getElementById('btnSkip').disabled = true;
+  statusEl.textContent = 'Creating…';
+  statusEl.className = 'status';
+
+  try {
+    const r = await fetch('/api/admin/employees/create-and-link', {
+      method: 'POST',
+      headers: { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fpe_id: c.fpe_id, designation, salary, full_name }),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      const detail = Array.isArray(d.detail) ? d.detail.map(x => x.msg).join('; ') : (d.detail || ('HTTP ' + r.status));
+      if (r.status === 409) {
+        // Already linked (e.g. handled in another tab) — treat as done, move on.
+        statusEl.textContent = 'Already linked elsewhere — skipping. (' + detail + ')';
+        statusEl.className = 'status';
+        setTimeout(() => { idx++; renderCard(); }, 900);
+        return;
+      }
+      throw new Error(detail);
+    }
+    statusEl.textContent = '✓ ' + d.message;
+    statusEl.className = 'status ok';
+    setTimeout(() => { idx++; renderCard(); }, 700);
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e.message;
+    statusEl.className = 'status err';
+    document.getElementById('btnCreate').disabled = false;
+    document.getElementById('btnSkip').disabled = false;
+  }
+}
+
+function boot() {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  renderCard();
+}
+
+(function () {
+  const saved = localStorage.getItem('fpe_api_key');
+  if (saved) {
+    API_KEY = saved;
+    boot();
+  }
+})();
+</script>
+</body>
+</html>
