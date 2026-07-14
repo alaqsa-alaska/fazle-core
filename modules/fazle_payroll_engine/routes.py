@@ -1204,6 +1204,39 @@ async def suggest_employees(
     }
 
 
+# Registered BEFORE /employees/{emp_id} (emp_id: int) -- same route-ordering
+# rule already documented in this codebase for escort-roster's
+# /escort-clients vs /{program_id} (see escort_roster_system.md): a literal
+# path segment must be declared ahead of a same-shape typed path param, or
+# FastAPI matches the typed route first and 422s trying to parse the literal
+# text as an int, instead of falling through to this route.
+@router.get("/employees/edit-requests", dependencies=[Depends(_require_viewer_or_above)])
+async def list_employee_edit_requests(status: Optional[str] = Query(None)):
+    where = ""
+    params: list = []
+    if status:
+        where = "WHERE r.status = $1"
+        params.append(status)
+    rows = await fetch_all(
+        f"""
+        SELECT r.id, r.employee_id, r.wbom_employee_id, r.requested_by, r.changes,
+               r.status, r.reject_reason, r.submitted_at, r.reviewed_by, r.reviewed_at,
+               COALESCE(e.full_name, e.employee_id_phone, e.primary_phone, '(unnamed)') AS employee_display_name
+        FROM fpe_employee_edit_requests r
+        LEFT JOIN fpe_employees e ON e.id = r.employee_id
+        {where}
+        ORDER BY r.submitted_at DESC
+        """,
+        *params,
+    )
+    items = []
+    for r in rows:
+        d = dict(r)
+        d["changes"] = json.loads(d["changes"]) if isinstance(d["changes"], str) else d["changes"]
+        items.append(d)
+    return {"items": items}
+
+
 @router.get("/employees/{emp_id}", dependencies=[Depends(_require_admin_role)])
 async def get_employee(emp_id: int):
     emp = await fetch_one("SELECT * FROM fpe_employees WHERE id = $1", emp_id)
@@ -3318,33 +3351,6 @@ async def submit_employee_edit_request(
         new_id, emp_id, requested_by, list(changes.keys()),
     )
     return {"status": "pending", "request_id": new_id}
-
-
-@router.get("/employees/edit-requests", dependencies=[Depends(_require_viewer_or_above)])
-async def list_employee_edit_requests(status: Optional[str] = Query(None)):
-    where = ""
-    params: list = []
-    if status:
-        where = "WHERE r.status = $1"
-        params.append(status)
-    rows = await fetch_all(
-        f"""
-        SELECT r.id, r.employee_id, r.wbom_employee_id, r.requested_by, r.changes,
-               r.status, r.reject_reason, r.submitted_at, r.reviewed_by, r.reviewed_at,
-               COALESCE(e.full_name, e.employee_id_phone, e.primary_phone, '(unnamed)') AS employee_display_name
-        FROM fpe_employee_edit_requests r
-        LEFT JOIN fpe_employees e ON e.id = r.employee_id
-        {where}
-        ORDER BY r.submitted_at DESC
-        """,
-        *params,
-    )
-    items = []
-    for r in rows:
-        d = dict(r)
-        d["changes"] = json.loads(d["changes"]) if isinstance(d["changes"], str) else d["changes"]
-        items.append(d)
-    return {"items": items}
 
 
 @router.post("/employees/edit-requests/{req_id}/approve", dependencies=[Depends(_require_admin_role)])
