@@ -1042,6 +1042,28 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
     </div>
   </section>
 
+  <!-- ══ EMPLOYEE EDIT REQUESTS ══ -->
+  <section id="tab-empeditreq" class="tab">
+    <div class="card">
+      <h2>Employee Edit Requests</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+        Profile-field edits submitted by non-admin roles, awaiting admin approval or rejection.
+        Admin/superadmin edits made directly from the Employees tab never appear here.
+      </p>
+      <div class="row" style="gap:8px;margin-bottom:10px">
+        <select id="eeReqStatus" onchange="loadEmpEditRequests(true)">
+          <option value="pending" selected>Pending</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
+        </select>
+        <button class="btn sm secondary" onclick="loadEmpEditRequests(true)">Refresh</button>
+      </div>
+      <div id="empEditReqTable" class="tbl-wrap">
+        <div class="empty"><div class="icon">📋</div>Loading…</div>
+      </div>
+    </div>
+  </section>
+
   <!-- ══ CASH ══ -->
   <section id="tab-cash" class="tab">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:8px;flex-wrap:wrap">
@@ -1928,7 +1950,7 @@ function pickManualEmployee(idx) {
 }
 
 // ── Tab Switching / SPA Routing ──────────────────────────────────────────────
-const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','operator','cash','income','attendance-office','admin'];
+const VALID_TABS = ['overview','transactions','search','employees','addemployee','unmatched','review','sync','manual','operator','cash','income','attendance-office','admin','empeditreq'];
 
 // ── Grouped navigation (Change A) ────────────────────────────────────────────
 // Labels copied verbatim from the flat nav buttons this replaces.
@@ -1947,11 +1969,12 @@ const TAB_LABELS = {
   income: 'Income',
   'attendance-office': 'Office Attendance',
   admin: 'Admin',
+  empeditreq: 'Edit Requests',
 };
 
 const NAV_GROUPS = [
   { key: 'overview',    label: 'Overview',          tabs: ['overview','transactions','unmatched','review','cash','income','sync'] },
-  { key: 'employee',    label: 'Employee',           tabs: ['employees','addemployee','search','manual','operator'] },
+  { key: 'employee',    label: 'Employee',           tabs: ['employees','addemployee','search','manual','operator','empeditreq'] },
   { key: 'attendance',  label: 'Office Attendance',  tabs: ['attendance-office'], viewerGate: true },
   { key: 'escort',      label: 'Escort Program',     external: '/escort-roster' },
   { key: 'admin',       label: 'Admin',              tabs: ['admin'], adminGate: true },
@@ -2109,6 +2132,7 @@ function loadTab(name) {
   if (name === 'income')        { incomeCurrentPage = 1; incomeEntryResetDate(); loadIncome(true); }
   if (name === 'attendance-office' && canViewAttendance()) loadOfficeAttendanceTab();
   if (name === 'admin' && canAccessAdminMenu()) loadAdminTab();
+  if (name === 'empeditreq')    loadEmpEditRequests(true);
 }
 
 function refreshCurrent() { loadTab(currentTab); loadHeaderStatus(); }
@@ -3591,93 +3615,8 @@ async function submitNewEmployeeFromTab() {
   } catch(e) { showToast('Create failed: ' + e.message, 'err'); }
 }
 
-// ── Phase 18B: Admin Ops Edit (wbom_employees fields) ────────────────────────
-async function openAdminEmpEdit(fpeId, phone) {
-  openPanel('⚙️ Edit Ops Data', '<div class="empty"><div class="icon">⏳</div>Loading…</div>');
-  // Resolve wbom employee by phone
-  let wbom = null;
-  if (phone) {
-    try {
-      const r = await fetch('/api/admin/employees/by-phone/' + encodeURIComponent(phone), {
-        headers: {'X-Internal-Key': API_KEY},
-      });
-      if (r.ok) { const d = await r.json(); wbom = d.employee; }
-    } catch(_) {}
-  }
-  if (!wbom) {
-    document.getElementById('panelBody').innerHTML = `
-      <div class="empty"><div class="icon">⚠️</div>No WBOM profile linked to this FPE employee (phone: ${esc(phone||'—')}).<br>
-      <small style="color:var(--muted)">The employee may have been auto-created from WhatsApp with no matching WBOM record.</small></div>
-      <div style="margin-top:14px"><button class="btn sm secondary" onclick="openEmpDetail(${fpeId})">Back</button></div>`;
-    return;
-  }
-  document.getElementById('panelTitle').textContent = '⚙️ Edit Ops — ' + esc(wbom.employee_name);
-  document.getElementById('panelBody').innerHTML = `
-    <form id="adminEditForm" onsubmit="event.preventDefault();saveAdminEmpEdit(${wbom.employee_id},${fpeId})">
-      <div style="font-size:11px;color:var(--muted);background:var(--surface);padding:6px 10px;border-radius:6px;border:1px solid var(--border);margin-bottom:10px">
-        ⓘ Editing WBOM operational record (ID: <strong>${wbom.employee_id}</strong>, Mobile: <strong>${esc(wbom.employee_mobile)}</strong>). Mobile is immutable.
-      </div>
-      <div style="display:grid;gap:10px">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>Full Name</label>
-            <input id="aeditName" type="text" value="${esc(wbom.employee_name||'')}" style="width:100%"></div>
-          <div><label>Designation</label>
-            <input id="aeditDesig" type="text" value="${esc(wbom.designation||'')}" style="width:100%"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>Joining Date</label>
-            <input id="aeditJoin" type="date" value="${wbom.joining_date||''}" style="width:100%"></div>
-          <div><label>Basic Salary (৳)</label>
-            <input id="aeditSalary" type="number" min="0" step="0.01" value="${wbom.basic_salary||''}" style="width:100%"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>bKash Number</label>
-            <input id="aeditBkash" type="text" value="${esc(wbom.bkash_number||'')}" style="width:100%"></div>
-          <div><label>Nagad Number</label>
-            <input id="aeditNagad" type="text" value="${esc(wbom.nagad_number||'')}" style="width:100%"></div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div><label>NID Number</label>
-            <input id="aeditNid" type="text" value="${esc(wbom.nid_number||'')}" style="width:100%"></div>
-          <div><label>Emergency Contact</label>
-            <input id="aeditEmerg" type="text" value="${esc(wbom.emergency_contact||'')}" style="width:100%"></div>
-        </div>
-        <div><label>Address</label>
-          <textarea id="aeditAddr" rows="2" style="width:100%;resize:vertical">${esc(wbom.address||'')}</textarea></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button type="submit" class="btn sm">Save</button>
-          <button type="button" class="btn sm secondary" onclick="closePanel()">Cancel</button>
-          <button type="button" class="btn sm secondary" onclick="openEmpDetail(${fpeId})">Back</button>
-        </div>
-      </div>
-    </form>`;
-}
-
-async function saveAdminEmpEdit(wbomId, fpeId) {
-  const body = {
-    employee_name: (document.getElementById('aeditName').value||'').trim()||null,
-    designation:   (document.getElementById('aeditDesig').value||'').trim()||null,
-    joining_date:  (document.getElementById('aeditJoin').value||'').trim()||null,
-    basic_salary:  parseFloat(document.getElementById('aeditSalary').value)||null,
-    bkash_number:  (document.getElementById('aeditBkash').value||'').trim()||null,
-    nagad_number:  (document.getElementById('aeditNagad').value||'').trim()||null,
-    nid_number:    (document.getElementById('aeditNid').value||'').trim()||null,
-    emergency_contact: (document.getElementById('aeditEmerg').value||'').trim()||null,
-    address:       (document.getElementById('aeditAddr').value||'').trim()||null,
-  };
-  try {
-    const r = await fetch('/api/admin/employees/' + wbomId, {
-      method: 'PUT',
-      headers: {'Content-Type':'application/json','X-Internal-Key': API_KEY},
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
-    showToast('Ops data updated', 'ok');
-    await loadEmployees();
-    openEmpDetail(fpeId);
-  } catch(e) { showToast('Save failed: ' + e.message, 'err'); }
-}
+// ── Phase 18B/19B: unified Edit modal (replaces the old separate FPE-only
+// and Ops-only modals) -- see openEmpEdit()/saveEmpEdit() further below.
 
 // ── Phase 18B: Deactivate Employee ────────────────────────────────────────────
 async function deactivateEmployee(fpeId, name) {
@@ -3991,8 +3930,11 @@ async function openEmpDetail(id) {
 
     document.getElementById('panelBody').innerHTML = `
       <div class="stat-grid compact" style="margin-bottom:12px">
-        <div class="stat"><div class="num">${fmtNum(t.total_transactions||0)}</div><div class="lbl">Total Tx</div></div>
+        <div class="stat clickable" title="View transaction history" onclick="openEmpTransactionHistory(${e.id})">
+          <div class="num">${fmtNum(t.total_transactions||0)} <span style="font-size:12px">📋</span></div><div class="lbl">Total Tx</div>
+        </div>
         <div class="stat"><div class="num">৳${fmtAmt(t.total_paid||0)}</div><div class="lbl">Total Paid</div></div>
+        <div class="stat"><div class="num" style="color:${(t.net_balance||0)<0?'var(--err)':'var(--ok)'}">৳${fmtAmt(t.net_balance||0)}</div><div class="lbl">Net Balance</div></div>
         <div class="stat"><div class="num" style="font-size:13px">${t.first_payment_date||'—'}</div><div class="lbl">First</div></div>
         <div class="stat"><div class="num" style="font-size:13px">${t.last_payment_date||'—'}</div><div class="lbl">Last</div></div>
       </div>
@@ -4009,8 +3951,7 @@ async function openEmpDetail(id) {
     `;
     document.getElementById('panelFooter').innerHTML = `
       <div style="display:flex;gap:6px;flex-wrap:wrap;width:100%;align-items:center">
-        <button class="btn sm" onclick="openEmpEdit(${e.id})">Edit (FPE)</button>
-        <button class="btn sm" onclick="openAdminEmpEdit(${e.id},${JSON.stringify(e.employee_id_phone||e.primary_phone||'')})">Edit Ops</button>
+        <button class="btn sm" onclick="openEmpEdit(${e.id})">Edit</button>
         ${e.status==='active' ? `<button class="btn sm secondary" style="color:var(--err);border-color:var(--err)" onclick="deactivateEmployee(${e.id},${JSON.stringify(e.display_name)})">🚫 Deactivate</button>` : ''}
         <button class="btn sm secondary" style="margin-left:auto" onclick="navigate('transactions');document.getElementById('txnEmpId').value=${e.id};loadTransactions(true);closePanel()">View All Transactions</button>
       </div>
@@ -4020,21 +3961,102 @@ async function openEmpDetail(id) {
   }
 }
 
+let _empTxnHistPage = 1;
+async function openEmpTransactionHistory(id, page = 1) {
+  _empTxnHistPage = page;
+  openPanel('Transaction History — Employee #' + id, '<div class="empty"><div class="icon">⏳</div>Loading…</div>');
+  document.getElementById('panelFooter').innerHTML =
+    `<button class="btn sm secondary" onclick="openEmpDetail(${id})">← Back to Employee</button>`;
+  try {
+    const d = await api(`/employees/${id}/transactions?page=${page}&page_size=20`);
+    const rows = d.transactions || [];
+    const pg = d.pagination || {};
+    if (!rows.length) {
+      document.getElementById('panelBody').innerHTML = '<div class="empty"><div class="icon">📋</div>No transactions found</div>';
+      return;
+    }
+    document.getElementById('panelBody').innerHTML = `
+      <table>
+        <thead><tr><th>Date</th><th>Payout Mobile</th><th>Method</th><th class="right">Amount</th><th>Status</th><th>Reference</th></tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td>${fmtDate(r.date)}</td>
+          <td class="mono">${esc(r.payout_phone || '—')}</td>
+          <td>${methodPill(r.payment_method)}</td>
+          <td class="right amount">৳${fmtAmt(r.amount)}</td>
+          <td><span class="pill ok">Posted</span></td>
+          <td class="mono" style="font-size:11px">${esc(r.txn_ref || '—')}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+      <div class="pager" style="margin-top:10px">
+        <button class="btn sm secondary" ${page<=1?'disabled':''} onclick="openEmpTransactionHistory(${id},${page-1})">Prev</button>
+        <span style="font-size:12px;color:var(--muted);margin:0 8px">Page ${pg.page || page} / ${pg.total_pages || 1}</span>
+        <button class="btn sm secondary" ${(pg.total_pages && page>=pg.total_pages)?'disabled':''} onclick="openEmpTransactionHistory(${id},${page+1})">Next</button>
+      </div>
+    `;
+  } catch(e) {
+    document.getElementById('panelBody').innerHTML = `<div class="empty"><div class="icon">⚠️</div>${e.message}</div>`;
+  }
+}
+
+// Unified Edit modal — covers Employee ID / Name / Mobile (FPE fields, via
+// PATCH /employees/{id}) plus Salary / Designation / Joining Date / Status
+// (WBOM fields, via PUT/deactivate/reactivate /api/admin/employees/{id}) in
+// one form. Submission branches on role:
+//   admin/superadmin -> writes both systems directly, same endpoints the old
+//     two separate modals used, just from one form
+//   anyone else       -> POSTs the changed-fields diff to the new
+//     /employees/{id}/edit-requests queue for admin approval instead
+// Real enforcement of that split is server-side (RBAC on the write
+// endpoints) -- this branch only picks the right UX/toast.
 async function openEmpEdit(id) {
   openPanel('Edit Employee #' + id, '<div class="empty"><div class="icon">⏳</div>Loading…</div>');
   try {
     const d = await api('/employees/' + id);
     const e = d.employee;
     const aliases = d.aliases || [];
+    let wbom = null;
+    if (e.wbom_employee_id) {
+      try {
+        const wd = await adminApi('/employees/' + e.wbom_employee_id);
+        wbom = wd.employee;
+      } catch (_) { /* no linked WBOM record, or lookup failed — fields below stay disabled */ }
+    }
+    const opsDisabled = wbom ? '' : 'disabled title="No linked operational (WBOM) record for this employee"';
+    const currentStatus = wbom ? wbom.status : null;
+    window.__origEmpEdit = {
+      full_name: e.full_name || '',
+      employee_id_phone: e.employee_id_phone || '',
+      primary_phone: e.primary_phone || '',
+      designation: wbom ? (wbom.designation || '') : null,
+      basic_salary: wbom ? (wbom.basic_salary != null ? String(wbom.basic_salary) : '') : null,
+      joining_date: wbom ? (wbom.joining_date || '') : null,
+      status: currentStatus,
+    };
     document.getElementById('panelBody').innerHTML = `
-      <form id="empEditForm" onsubmit="event.preventDefault();saveEmpEdit(${e.id})">
+      <form id="empEditForm" onsubmit="event.preventDefault();saveEmpEdit(${e.id},${wbom ? wbom.employee_id : 'null'})">
         <div style="display:grid;gap:10px">
-          <div><label>Full Name</label>
-            <input id="edName" type="text" value="${esc(e.full_name || '')}" style="width:100%"></div>
           <div><label>Employee ID Phone <span style="color:var(--muted);font-weight:400">(changing this may merge into another employee)</span></label>
             <input id="edIdPhone" type="text" value="${esc(e.employee_id_phone || '')}" style="width:100%"></div>
-          <div><label>Primary Phone</label>
+          <div><label>Name</label>
+            <input id="edName" type="text" value="${esc(e.full_name || '')}" style="width:100%"></div>
+          <div><label>Mobile</label>
             <input id="edPrimary" type="text" value="${esc(e.primary_phone || '')}" style="width:100%"></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div><label>Salary (৳)</label>
+              <input id="edSalary" type="number" min="0" step="0.01" ${opsDisabled} value="${wbom && wbom.basic_salary != null ? wbom.basic_salary : ''}" style="width:100%"></div>
+            <div><label>Designation</label>
+              <input id="edDesig" type="text" ${opsDisabled} value="${wbom ? esc(wbom.designation || '') : ''}" style="width:100%"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div><label>Joining Date</label>
+              <input id="edJoin" type="date" ${opsDisabled} value="${wbom ? (wbom.joining_date || '') : ''}" style="width:100%"></div>
+            <div><label>Status</label>
+              <select id="edStatus" ${opsDisabled} style="width:100%">
+                <option value="Active" ${currentStatus === 'Active' ? 'selected' : ''}>Active</option>
+                <option value="Inactive" ${currentStatus === 'Inactive' ? 'selected' : ''}>Inactive</option>
+              </select></div>
+          </div>
+          ${!wbom ? '<div style="font-size:11px;color:var(--warn)">ⓘ No linked operational (WBOM) record — Salary/Designation/Joining Date/Status can\'t be edited for this employee.</div>' : ''}
           <div><label>Add Alias</label>
             <div class="row" style="gap:6px">
               <select id="edAliasType" style="width:140px">
@@ -4047,13 +4069,13 @@ async function openEmpEdit(id) {
             <div id="edAliasList" style="margin-top:6px;font-size:12px;color:var(--muted)"></div>
           </div>
           <div style="font-size:11px;color:var(--muted);background:var(--surface);padding:8px;border-radius:6px;border:1px solid var(--border)">
-            ⓘ Profile metadata is mutable. Accounting transactions are immutable —
-            historical txn ownership is never rewritten. If <em>Employee ID Phone</em>
-            already belongs to another employee, this row will be soft-merged
-            (canonical_employee_id) and aliases preserved.
+            ⓘ Accounting transactions are immutable — historical txn ownership is never rewritten.
+            If <em>Employee ID Phone</em> already belongs to another employee, this row will be
+            soft-merged (canonical_employee_id) and aliases preserved.
+            ${!canAccessAdminMenu() ? '<br>Your changes will be submitted for admin approval, not applied immediately.' : ''}
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button type="submit" class="btn sm">Save</button>
+            <button type="submit" class="btn sm">${canAccessAdminMenu() ? 'Save' : 'Submit for Approval'}</button>
             <button type="button" class="btn sm secondary" onclick="closePanel()">Cancel</button>
             <button type="button" class="btn sm secondary" onclick="openEmpDetail(${e.id})">Back to View</button>
           </div>
@@ -4080,29 +4102,84 @@ function empEditAddAlias() {
   document.getElementById('edAliasList').innerHTML =
     'Pending: ' + window.__edPendingAliases.map(a=>`<span class="pill info">${esc(a.alias_type)}: ${esc(a.alias_value)}</span>`).join(' ');
 }
-async function saveEmpEdit(id) {
-  const body = {
-    full_name: document.getElementById('edName').value.trim() || null,
-    employee_id_phone: document.getElementById('edIdPhone').value.trim() || null,
-    primary_phone: document.getElementById('edPrimary').value.trim() || null,
-    aliases: window.__edPendingAliases || [],
+
+function _empEditReadForm(wbomId) {
+  const orig = window.__origEmpEdit || {};
+  const current = {
+    full_name: document.getElementById('edName').value.trim(),
+    employee_id_phone: document.getElementById('edIdPhone').value.trim(),
+    primary_phone: document.getElementById('edPrimary').value.trim(),
   };
-  try {
-    const r = await fetch('/api/fpe/employees/' + id, {
-      method: 'PATCH',
-      headers: {'Content-Type':'application/json','X-Internal-Key': API_KEY},
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
-    if (d.merged_into) {
-      showToast(`Soft-merged into employee #${d.merged_into}`, 'ok');
-    } else {
-      showToast('Employee updated', 'ok');
+  if (wbomId) {
+    current.designation = document.getElementById('edDesig').value.trim();
+    current.basic_salary = document.getElementById('edSalary').value.trim();
+    current.joining_date = document.getElementById('edJoin').value.trim();
+    current.status = document.getElementById('edStatus').value;
+  }
+  const changes = {};
+  for (const k of Object.keys(current)) {
+    if (orig[k] === undefined || orig[k] === null) continue;
+    if (String(current[k]) !== String(orig[k])) changes[k] = current[k];
+  }
+  return changes;
+}
+
+async function saveEmpEdit(id, wbomId) {
+  const changes = _empEditReadForm(wbomId);
+  const aliases = window.__edPendingAliases || [];
+  if (!Object.keys(changes).length && !aliases.length) {
+    showToast('No changes to save', '');
+    return;
+  }
+  if (changes.basic_salary !== undefined) changes.basic_salary = parseFloat(changes.basic_salary) || 0;
+
+  if (!canAccessAdminMenu()) {
+    // Non-admin: submit as a pending request instead of writing directly.
+    try {
+      await api('/employees/' + id + '/edit-requests', {
+        method: 'POST',
+        body: JSON.stringify({ changes }),
+      });
+      showToast('Your changes have been submitted for admin approval', 'ok');
+      closePanel();
+    } catch(e) {
+      showToast('Submit failed: ' + e.message, 'err');
     }
+    return;
+  }
+
+  try {
+    const fpeChanges = {};
+    for (const k of ['full_name', 'employee_id_phone', 'primary_phone']) {
+      if (changes[k] !== undefined) fpeChanges[k] = changes[k] || null;
+    }
+    if (aliases.length) fpeChanges.aliases = aliases;
+
+    let mergedInto = null;
+    if (Object.keys(fpeChanges).length) {
+      const r = await api('/employees/' + id, { method: 'PATCH', body: JSON.stringify(fpeChanges) });
+      mergedInto = r.merged_into || null;
+    }
+
+    if (wbomId) {
+      const wbomChanges = {};
+      for (const k of ['designation', 'basic_salary', 'joining_date']) {
+        if (changes[k] !== undefined) wbomChanges[k] = changes[k] || null;
+      }
+      if (changes.full_name !== undefined) wbomChanges.employee_name = changes.full_name || null;
+      if (Object.keys(wbomChanges).length) {
+        await adminApi('/employees/' + wbomId, { method: 'PUT', body: wbomChanges });
+      }
+      if (changes.status !== undefined) {
+        const action = changes.status === 'Inactive' ? 'deactivate' : 'reactivate';
+        await adminApi('/employees/' + wbomId + '/' + action, { method: 'PATCH' });
+      }
+    }
+
+    showToast(mergedInto ? `Soft-merged into employee #${mergedInto}` : 'Employee updated', 'ok');
     window.__edPendingAliases = [];
     await loadEmployees();
-    openEmpDetail(d.employee_id || id);
+    openEmpDetail(mergedInto || id);
   } catch(e) {
     showToast('Save failed: ' + e.message, 'err');
   }
@@ -4411,6 +4488,64 @@ async function rejectOperator(pendingId) {
     const r = await api('/operator/' + pendingId + '/reject?reviewer=' + encodeURIComponent(USER_ACCESS?.name || 'admin') + '&reason=' + encodeURIComponent(reason), { method: 'POST' });
     showToast('Rejected submission #' + pendingId, 'ok');
     await loadOperatorPending(true);
+  } catch(e) {
+    showToast('Reject failed: ' + e.message, 'err');
+  }
+}
+
+// ── Employee Edit Requests ───────────────────────────────────────────────────
+function _eeReviewerName() {
+  return (USER_ACCESS?.user?.name) || (USER_ACCESS?.user?.username) || 'admin';
+}
+function _eeChangesSummary(changes) {
+  return Object.entries(changes || {}).map(([k, v]) => `${esc(k)}: ${esc(String(v))}`).join(', ') || '—';
+}
+async function loadEmpEditRequests(resetPage = false) {
+  const status = document.getElementById('eeReqStatus').value;
+  const el = document.getElementById('empEditReqTable');
+  el.innerHTML = '<div class="empty"><div class="icon">⏳</div>Loading…</div>';
+  try {
+    const d = await api('/employees/edit-requests?status=' + encodeURIComponent(status));
+    const rows = d.items || [];
+    if (!rows.length) {
+      el.innerHTML = '<div class="empty"><div class="icon">✅</div>No ' + esc(status) + ' requests.</div>';
+      return;
+    }
+    el.innerHTML = '<table><thead><tr><th>Employee</th><th>Requested By</th><th>Submitted At</th><th>Changes</th><th>Actions</th></tr></thead><tbody>' +
+      rows.map(r => `<tr>
+        <td>${esc(r.employee_display_name || '(unknown)')}</td>
+        <td>${esc(r.requested_by)}</td>
+        <td>${fmtDt(r.submitted_at)}</td>
+        <td style="font-size:12px;color:var(--muted)">${_eeChangesSummary(r.changes)}</td>
+        <td>
+          ${r.status === 'pending' ? `
+            <button class="btn-icon approve" title="Approve" onclick="approveEmpEditRequest(${r.id})">✓</button>
+            <button class="btn-icon del" title="Reject" onclick="rejectEmpEditRequest(${r.id})">✕</button>
+            <button class="btn-icon edit" title="Edit employee before deciding" onclick="closeSidebar();navigate('employees');openEmpEdit(${r.employee_id})">✎</button>
+          ` : `<span class="pill ${r.status === 'approved' ? 'ok' : 'muted'}">${esc(r.status)}${r.status === 'rejected' && r.reject_reason ? ': ' + esc(r.reject_reason) : ''}</span>`}
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  } catch(e) {
+    el.innerHTML = '<div class="empty"><div class="icon">⚠️</div>' + esc(e.message) + '</div>';
+  }
+}
+async function approveEmpEditRequest(id) {
+  if (!confirm('Approve this edit request? Changes will be applied immediately.')) return;
+  try {
+    await api('/employees/edit-requests/' + id + '/approve?reviewer=' + encodeURIComponent(_eeReviewerName()), { method: 'POST' });
+    showToast('Approved edit request #' + id, 'ok');
+    await loadEmpEditRequests(true);
+  } catch(e) {
+    showToast('Approve failed: ' + e.message, 'err');
+  }
+}
+async function rejectEmpEditRequest(id) {
+  const reason = prompt('Reason for rejection:');
+  if (!reason) return;
+  try {
+    await api('/employees/edit-requests/' + id + '/reject?reviewer=' + encodeURIComponent(_eeReviewerName()) + '&reason=' + encodeURIComponent(reason), { method: 'POST' });
+    showToast('Rejected edit request #' + id, 'ok');
+    await loadEmpEditRequests(true);
   } catch(e) {
     showToast('Reject failed: ' + e.message, 'err');
   }

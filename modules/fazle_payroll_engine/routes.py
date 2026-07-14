@@ -1245,6 +1245,12 @@ async def get_employee(emp_id: int):
         """,
         member_ids,
     )
+    # Same total_advance source as the /employees list endpoint's ledger_agg
+    # CTE, so this modal's Net Balance matches the list view's figure.
+    advance_agg = await fetch_val(
+        "SELECT COALESCE(SUM(total_advance), 0) FROM fpe_employee_ledger WHERE employee_id = ANY($1::int[])",
+        member_ids,
+    )
     canon_full = await fetch_one(
         "SELECT * FROM fpe_employees WHERE id = $1", canon_id
     )
@@ -1265,6 +1271,8 @@ async def get_employee(emp_id: int):
         "totals": {
             "total_transactions": int(agg["total_transactions"] or 0) if agg else 0,
             "total_paid": float(agg["total_paid"] or 0) if agg else 0.0,
+            "total_advance": float(advance_agg or 0),
+            "net_balance": float(agg["total_paid"] or 0) - float(advance_agg or 0) if agg else 0.0,
             "first_payment_date": agg["first_payment_date"].isoformat() if agg and agg["first_payment_date"] else None,
             "last_payment_date": agg["last_payment_date"].isoformat() if agg and agg["last_payment_date"] else None,
         },
@@ -3237,3 +3245,178 @@ async def operator_reject(
         "pending_id": pending_id,
         "reviewer": reviewer,
     }
+
+
+# ── Employee Edit Requests (role-gated edit approval queue) ────────────────
+# New table (migration 046, fpe_employee_edit_requests) storing a pending
+# {field: new_value} diff for employee profile edits. Non-admin roles submit
+# here instead of writing directly; admin/superadmin approval applies the
+# diff via the SAME functions the direct-edit path already uses (called
+# directly, not duplicated) so there is exactly one place that knows how to
+# write each field:
+#   FPE fields  (full_name, primary_phone, employee_id_phone)
+#     -> update_employee() in this file (PATCH /employees/{id})
+#   WBOM fields (designation, basic_salary, joining_date)
+#     -> modules.admin_employees.update_employee() (PUT /api/admin/employees/{id})
+#   status
+#     -> modules.admin_employees.deactivate_employee() / reactivate_employee()
+#        (the generic WBOM PUT does not cross-propagate status to FPE; only
+#        those two dedicated endpoints do)
+#
+# Named "edit_requests", not "review_queue" -- this app already has an
+# unrelated "Review Queue" tab (parser-confidence triage on WhatsApp
+# messages); reusing that name for a third concept would recreate the exact
+# naming confusion that caused real navigation/session bugs earlier in this
+# project.
+
+_FPE_EDIT_FIELDS = {"full_name", "primary_phone", "employee_id_phone"}
+_WBOM_EDIT_FIELDS = {"designation", "basic_salary", "joining_date"}
+_STATUS_FIELD = "status"
+
+
+class EmployeeEditRequestSubmit(_BM):
+    changes: dict
+
+
+@router.post("/employees/{emp_id}/edit-requests", dependencies=[Depends(_require_operator_or_above)])
+async def submit_employee_edit_request(
+    emp_id: int,
+    req: EmployeeEditRequestSubmit,
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Non-admin roles submit a pending employee-field change here instead of
+    writing directly (admin/superadmin still write directly via the existing
+    PATCH/PUT endpoints -- see saveUnifiedEmployeeEdit() in payroll.html)."""
+    emp = await fetch_one(
+        "SELECT id, wbom_employee_id FROM fpe_employees WHERE id = $1", emp_id
+    )
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+
+    allowed = _FPE_EDIT_FIELDS | _WBOM_EDIT_FIELDS | {_STATUS_FIELD}
+    changes = {k: v for k, v in (req.changes or {}).items() if k in allowed}
+    if not changes:
+        raise HTTPException(400, "No editable fields in changes")
+
+    from modules import rbac
+    admin = await rbac.get_admin_by_api_key(key or "")
+    requested_by = (
+        (admin or {}).get("name") or (admin or {}).get("username") or (admin or {}).get("phone") or "unknown"
+    )
+
+    new_id = await fetch_val(
+        """
+        INSERT INTO fpe_employee_edit_requests
+            (employee_id, wbom_employee_id, requested_by, changes, status)
+        VALUES ($1, $2, $3, $4, 'pending')
+        RETURNING id
+        """,
+        emp_id, emp["wbom_employee_id"], requested_by, json.dumps(changes),
+    )
+    log.info(
+        "[fpe.employee_edit_requests] submitted id=%d employee_id=%d by=%s fields=%s",
+        new_id, emp_id, requested_by, list(changes.keys()),
+    )
+    return {"status": "pending", "request_id": new_id}
+
+
+@router.get("/employees/edit-requests", dependencies=[Depends(_require_viewer_or_above)])
+async def list_employee_edit_requests(status: Optional[str] = Query(None)):
+    where = ""
+    params: list = []
+    if status:
+        where = "WHERE r.status = $1"
+        params.append(status)
+    rows = await fetch_all(
+        f"""
+        SELECT r.id, r.employee_id, r.wbom_employee_id, r.requested_by, r.changes,
+               r.status, r.reject_reason, r.submitted_at, r.reviewed_by, r.reviewed_at,
+               COALESCE(e.full_name, e.employee_id_phone, e.primary_phone, '(unnamed)') AS employee_display_name
+        FROM fpe_employee_edit_requests r
+        LEFT JOIN fpe_employees e ON e.id = r.employee_id
+        {where}
+        ORDER BY r.submitted_at DESC
+        """,
+        *params,
+    )
+    items = []
+    for r in rows:
+        d = dict(r)
+        d["changes"] = json.loads(d["changes"]) if isinstance(d["changes"], str) else d["changes"]
+        items.append(d)
+    return {"items": items}
+
+
+@router.post("/employees/edit-requests/{req_id}/approve", dependencies=[Depends(_require_admin_role)])
+async def approve_employee_edit_request(
+    req_id: int,
+    reviewer: str = Query(..., min_length=1, max_length=128),
+):
+    """Applies the stored diff via the same update functions the direct-edit
+    path uses, then marks the request approved. Ledger/accounting tables are
+    never touched by this -- employee profile fields only."""
+    row = await fetch_one("SELECT * FROM fpe_employee_edit_requests WHERE id = $1", req_id)
+    if not row:
+        raise HTTPException(404, "Edit request not found")
+    if row["status"] != "pending":
+        raise HTTPException(409, f"Request is not pending (status={row['status']})")
+
+    changes = row["changes"]
+    changes = json.loads(changes) if isinstance(changes, str) else changes
+
+    fpe_changes = {k: v for k, v in changes.items() if k in _FPE_EDIT_FIELDS}
+    wbom_changes = {k: v for k, v in changes.items() if k in _WBOM_EDIT_FIELDS}
+    new_status = changes.get(_STATUS_FIELD)
+
+    if fpe_changes:
+        await update_employee(row["employee_id"], fpe_changes)
+
+    wbom_id = row["wbom_employee_id"]
+    if wbom_id:
+        from modules.admin_employees import (
+            update_employee as _wbom_update_employee,
+            deactivate_employee as _wbom_deactivate,
+            reactivate_employee as _wbom_reactivate,
+            EmployeeUpdate as _WbomEmployeeUpdate,
+        )
+        if wbom_changes:
+            await _wbom_update_employee(wbom_id, _WbomEmployeeUpdate(**wbom_changes))
+        if new_status == "Inactive":
+            await _wbom_deactivate(wbom_id)
+        elif new_status == "Active":
+            await _wbom_reactivate(wbom_id)
+
+    await execute(
+        """
+        UPDATE fpe_employee_edit_requests
+        SET status = 'approved', reviewed_by = $2, reviewed_at = NOW()
+        WHERE id = $1
+        """,
+        req_id, reviewer,
+    )
+    log.info("[fpe.employee_edit_requests] approved id=%d reviewer=%s fields=%s", req_id, reviewer, list(changes.keys()))
+    return {"status": "approved", "request_id": req_id}
+
+
+@router.post("/employees/edit-requests/{req_id}/reject", dependencies=[Depends(_require_admin_role)])
+async def reject_employee_edit_request(
+    req_id: int,
+    reviewer: str = Query(..., min_length=1, max_length=128),
+    reason: str = Query(..., min_length=1, max_length=512),
+):
+    row = await fetch_one("SELECT id, status FROM fpe_employee_edit_requests WHERE id = $1", req_id)
+    if not row:
+        raise HTTPException(404, "Edit request not found")
+    if row["status"] != "pending":
+        raise HTTPException(409, f"Request is not pending (status={row['status']})")
+
+    await execute(
+        """
+        UPDATE fpe_employee_edit_requests
+        SET status = 'rejected', reject_reason = $2, reviewed_by = $3, reviewed_at = NOW()
+        WHERE id = $1
+        """,
+        req_id, reason, reviewer,
+    )
+    log.info("[fpe.employee_edit_requests] rejected id=%d reviewer=%s reason=%s", req_id, reviewer, reason)
+    return {"status": "rejected", "request_id": req_id}

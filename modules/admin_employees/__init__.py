@@ -43,6 +43,25 @@ async def _require_api_key(key: str = Depends(_API_KEY_HEADER)):
     raise HTTPException(status_code=403, detail="Unauthorized")
 
 
+async def _require_admin_role(key: str = Depends(_API_KEY_HEADER)) -> str:
+    """
+    Admin/superadmin only. _require_api_key alone only checks for an active
+    admin account with ANY role (including plain 'viewer') — this adds the
+    actual role-level check via modules.rbac, same pattern as
+    fazle_payroll_engine.routes._require_admin_role. Needed on the employee
+    mutation endpoints below, which edit salary/designation/status and were
+    previously reachable by any logged-in role.
+    """
+    settings = get_settings()
+    if key and key == settings.internal_api_key:
+        return key
+    from modules import rbac
+    check = await rbac.check_permission(api_key=key or "", command="schedule_run")
+    if check.get("allowed"):
+        return key
+    raise HTTPException(status_code=403, detail="admin or superadmin required")
+
+
 # ── Request models ─────────────────────────────────────────────────────────────
 
 class EmployeeCreate(BaseModel):
@@ -281,7 +300,7 @@ async def get_employee(emp_id: int):
 
 # ── PUT /api/admin/employees/{emp_id} ────────────────────────────────────────
 
-@router.put("/employees/{emp_id}", dependencies=[Depends(_require_api_key)])
+@router.put("/employees/{emp_id}", dependencies=[Depends(_require_admin_role)])
 async def update_employee(emp_id: int, body: EmployeeUpdate):
     """Update safe operational fields on wbom_employees."""
     existing = await fetch_one(
@@ -338,7 +357,7 @@ async def update_employee(emp_id: int, body: EmployeeUpdate):
 
 # ── PATCH /api/admin/employees/{emp_id}/deactivate ───────────────────────────
 
-@router.patch("/employees/{emp_id}/deactivate", dependencies=[Depends(_require_api_key)])
+@router.patch("/employees/{emp_id}/deactivate", dependencies=[Depends(_require_admin_role)])
 async def deactivate_employee(emp_id: int):
     """Soft-delete: set wbom_employees.status='Inactive' and sync to FPE."""
     row = await fetch_one(
@@ -377,6 +396,50 @@ async def deactivate_employee(emp_id: int):
     return {
         "ok": True,
         "message": f"Employee '{row['employee_name']}' deactivated",
+        "employee_id": emp_id,
+    }
+
+
+@router.patch("/employees/{emp_id}/reactivate", dependencies=[Depends(_require_admin_role)])
+async def reactivate_employee(emp_id: int):
+    """Reverse of deactivate_employee() above: set wbom_employees.status='Active'
+    and sync to FPE. Mirrors that function's propagation logic exactly, just
+    flipped -- added so Status has a symmetric, properly cross-system-synced
+    path in both directions (previously only the Inactive direction did)."""
+    row = await fetch_one(
+        "SELECT employee_id, employee_name, employee_mobile, status "
+        "FROM wbom_employees WHERE employee_id=$1",
+        emp_id,
+    )
+    if not row:
+        raise HTTPException(404, "Employee not found")
+
+    if row["status"] == "Active":
+        return {"ok": True, "message": "Already active", "employee_id": emp_id}
+
+    await execute(
+        "UPDATE wbom_employees SET status='Active', updated_at=now() WHERE employee_id=$1",
+        emp_id,
+    )
+
+    try:
+        mobile = row["employee_mobile"]
+        await execute(
+            """UPDATE fpe_employees
+               SET status='active', updated_at=now()
+               WHERE (primary_phone=$1 OR employee_id_phone=$1)
+                 AND status != 'active'""",
+            mobile,
+        )
+        log.info(
+            "[admin_employees] reactivated employee_id=%d mobile=%s", emp_id, mobile
+        )
+    except Exception as exc:
+        log.warning("[admin_employees] FPE reactivate sync failed emp_id=%d: %s", emp_id, exc)
+
+    return {
+        "ok": True,
+        "message": f"Employee '{row['employee_name']}' reactivated",
         "employee_id": emp_id,
     }
 

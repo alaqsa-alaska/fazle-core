@@ -13,6 +13,8 @@
 
 **Updated again 2026-07-12/13** (Phase 2B Commit D): added `044_billing_payment_recording.sql` and `045_ai_read_billing_outstanding.sql`. Both applied directly to production (not via `db/migrate.py` — see the note below about `schema_migrations` being stale since `028`).
 
+**Updated again 2026-07-14** (Employee Edit approval queue): added `046_employee_edit_requests.sql` (new `fpe_employee_edit_requests` table). Applied directly to production the same way as `044`/`045` (dry-run in a `BEGIN...ROLLBACK` first, then applied for real), and this one *was* also recorded in `schema_migrations` — the `029`-`045` gap noted below is pre-existing and untouched by this change, but there's no reason to let it grow further.
+
 **Known gap found while applying 044/045**: `db/migrate.py`'s own `schema_migrations` tracking table has not recorded anything past `028_assistant_ext_location_audit.sql` — migrations `029` through `045` were all applied to production via direct execution (matching the pattern already used for `029`-`043` per their own "Done" entries in `NEXT_IMPLEMENTATION_QUEUE.md`), bypassing `migrate.py`'s bookkeeping entirely. Running `db/migrate.py` for real (not `--dry-run`) today would attempt to re-apply all of `029`-`045`, which is risky since not every one of those files is idempotent. Not fixed in this pass — tracked under Tier 2 "Cross-directory migration collision cleanup."
 
 ## ✅ `db/migrations/` (canonical, 52 files) — tracked in `schema_migrations` via `db/migrate.py`
@@ -70,6 +72,7 @@
 043_office_assistant_role.sql
 044_billing_payment_recording.sql
 045_ai_read_billing_outstanding.sql
+046_employee_edit_requests.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
