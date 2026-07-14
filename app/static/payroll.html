@@ -42,9 +42,9 @@ body{font-family:"Amasis MT Pro Medium",Georgia,serif;
 }
 
 /* ─── Layout ─────────────────────────────────────────────────────────────── */
-#app{display:none;min-height:100vh;flex-direction:column}
+#app{display:none;min-height:100vh;flex-direction:column;max-width:1400px;margin:0 auto;width:100%}
 
-header{background:var(--accent);color:#fff;padding:0 24px;height:64px;
+header{background:var(--accent);color:#fff;padding:0 20px;height:56px;
   display:flex;align-items:center;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,.2);flex-shrink:0}
 header .brand{display:flex;align-items:center;gap:12px;min-width:0}
 header .brand-link{display:inline-flex;align-items:center;text-decoration:none}
@@ -72,8 +72,8 @@ header .spacer{flex:1}
 .badge.warn{background:rgba(217,119,6,.35)}
 .badge.err{background:rgba(220,38,38,.3)}
 
-nav{background:#fff;border-bottom:1px solid var(--border);display:flex;gap:0;
-  overflow-x:auto;flex-shrink:0;position:sticky;top:0;z-index:100}
+nav{background:#fff;border-bottom:1px solid var(--border);display:flex;gap:0;flex-wrap:wrap;
+  overflow-x:visible;flex-shrink:0;position:sticky;top:0;z-index:100}
 nav button{background:none;border:none;padding:14px 20px;cursor:pointer;font-size:13px;
   font-weight:500;color:var(--muted);border-bottom:3px solid transparent;white-space:nowrap;
   transition:color .15s,border-color .15s}
@@ -91,11 +91,26 @@ nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-wei
 nav .nav-group{position:relative;display:flex}
 nav .nav-group.active-group>.nav-top{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 nav .nav-caret{font-size:10px;margin-left:4px}
-nav .nav-group .nav-sub{display:none;position:absolute;top:100%;left:0;background:#fff;
-  border:1px solid var(--border);border-radius:0 0 10px 10px;box-shadow:0 8px 20px rgba(15,23,42,.12);
-  flex-direction:column;min-width:180px;z-index:110}
-nav .nav-group.open .nav-sub{display:flex}
-nav .nav-group .nav-sub button{text-align:left;border-bottom:none}
+nav .nav-group .nav-sub{display:none;position:absolute;top:100%;left:0;background:#ffffff;
+  border:1px solid #cccccc;box-shadow:0 2px 4px rgba(0,0,0,.15);
+  flex-direction:column;min-width:100%;width:max-content;z-index:1000}
+nav .nav-group .nav-sub button{text-align:left;color:#111111;font-size:14px;padding:5px;
+  border-bottom:1px solid #cccccc}
+/* .open = explicit tap-to-expand (drawer groups via toggleNavGroup(), plus
+   the topNav username menu via toggleUserMenu() — it has no hover fallback
+   on touch since it isn't part of NAV_GROUPS). Desktop topNav's regular
+   groups never receive .open anymore (toggleNavGroup() is now inert there),
+   so this stays safe as a single general rule rather than needing separate
+   #topNav/#drawerNavGroups copies. */
+nav .nav-group.open>.nav-sub{display:flex}
+/* Desktop-only hover reveal, scoped to the top nav specifically — the
+   drawer is the touch-only surface and must never hover-reveal (its .open
+   rule above already covers taps), matching the existing @media(hover:none)
+   pattern this file already uses elsewhere for touch-vs-pointer behavior. */
+@media (hover:hover) and (pointer:fine){
+  #topNav .nav-group:hover>.nav-sub{display:flex}
+}
+nav #navUserBlock{margin-left:auto}
 
 .sidebar-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.42);opacity:0;pointer-events:none;transition:opacity .2s ease;z-index:899}
 .sidebar-backdrop.open{opacity:1;pointer-events:auto}
@@ -499,7 +514,17 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   </div>
 </header>
 
-<nav id="topNav"></nav>
+<nav id="topNav">
+  <div id="navGroupsBox" style="display:flex;flex-wrap:wrap"></div>
+  <div class="nav-group" id="navUserBlock" hidden>
+    <button class="nav-top" id="navUsernameBtn" onclick="toggleUserMenu()">
+      <span id="navUsernameText">—</span> <span class="nav-caret">▾</span>
+    </button>
+    <div class="nav-sub">
+      <button onclick="logout()">Logout</button>
+    </div>
+  </div>
+</nav>
 
 <div id="sidebarBackdrop" class="sidebar-backdrop" onclick="closeSidebar()"></div>
 <aside id="sidebarDrawer" class="sidebar-drawer" aria-hidden="true">
@@ -1545,7 +1570,7 @@ function syncAdminUiVisibility() {
     // not removed, so that class is intentionally left out of this selector.
     document.querySelectorAll('[data-admin-gate], #tab-admin').forEach(el => el.remove());
   }
-  document.querySelectorAll('.admin-only-nav, .admin-only-section').forEach(el => {
+  document.querySelectorAll('.admin-only-nav, .admin-only-section, [data-admin-gate]').forEach(el => {
     el.hidden = !showAdmin;
   });
   document.querySelectorAll('.viewer-only-nav, .viewer-only-section, [data-viewer-gate]').forEach(el => {
@@ -1555,6 +1580,9 @@ function syncAdminUiVisibility() {
   if (!showViewer && currentTab === 'attendance-office') navigate('overview', true);
 }
 
+// Returns {ok, reason} so callers (boot(), doLogin()) can tell an invalid/
+// expired key apart from a transient network failure, and only reveal the
+// app on a confirmed-valid session — never on a partial/empty USER_ACCESS.
 async function resolveUserAccess(apiKey) {
   USER_ACCESS = {
     canEditDelete: false,
@@ -1565,27 +1593,36 @@ async function resolveUserAccess(apiKey) {
     normalizedRoles: [],
     user: null,
   };
+  let result;
   try {
     const res = await fetch('/api/admin/session', {
       headers: { 'X-Internal-Key': apiKey },
       cache: 'no-store',
     });
-    if (!res.ok) throw new Error('Session lookup failed');
-    const data = await res.json();
-    const user = data.user || {};
-    USER_ACCESS = {
-      canEditDelete: !!user.can_edit_delete_transactions,
-      isOfficeAssistant: !!user.is_restricted_office_assistant,
-      canManageAdmin: !!user.can_manage_admin,
-      permissions: (user.permissions && typeof user.permissions === 'object') ? user.permissions : {},
-      normalizedName: normalizeIdentity(user.normalized_name || user.name),
-      normalizedRoles: Array.isArray(user.normalized_roles) ? user.normalized_roles.map(normalizeIdentity) : [],
-      user,
-    };
+    if (res.status === 401 || res.status === 403) {
+      result = { ok: false, reason: 'invalid' };
+    } else if (!res.ok) {
+      result = { ok: false, reason: 'network' };
+    } else {
+      const data = await res.json();
+      const user = data.user || {};
+      USER_ACCESS = {
+        canEditDelete: !!user.can_edit_delete_transactions,
+        isOfficeAssistant: !!user.is_restricted_office_assistant,
+        canManageAdmin: !!user.can_manage_admin,
+        permissions: (user.permissions && typeof user.permissions === 'object') ? user.permissions : {},
+        normalizedName: normalizeIdentity(user.normalized_name || user.name),
+        normalizedRoles: Array.isArray(user.normalized_roles) ? user.normalized_roles.map(normalizeIdentity) : [],
+        user,
+      };
+      result = USER_ACCESS.user ? { ok: true, reason: 'ok' } : { ok: false, reason: 'invalid' };
+    }
   } catch (_) {
-    USER_ACCESS.canEditDelete = false;
+    result = { ok: false, reason: 'network' };
   }
   syncAdminUiVisibility();
+  updateNavUsername();
+  return result;
 }
 
 function syncLoginMode() {
@@ -1629,7 +1666,13 @@ async function doLogin() {
       return;
     }
     API_KEY = credential;
-    await resolveUserAccess(credential);
+    const result = await resolveUserAccess(credential);
+    if (!result.ok) {
+      document.getElementById('loginErr').textContent =
+        result.reason === 'network' ? 'Cannot reach server. Try again.' : 'Login succeeded but session lookup failed.';
+      API_KEY = '';
+      return;
+    }
     localStorage.setItem('fpe_api_key', credential);
     document.getElementById('loginOverlay').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
@@ -1931,7 +1974,7 @@ function renderNavGroups(container, isDrawer) {
       `<button data-tab="${t}" onclick="${navFn}('${t}')">${esc(TAB_LABELS[t] || t)}</button>`
     ).join('');
     return `<div class="nav-group" data-group="${g.key}"${gateAttr}${hiddenAttr}>
-      <button class="nav-top" onclick="toggleNavGroup('${g.key}', ${isDrawer})">${esc(g.label)} <span class="nav-caret">▾</span></button>
+      <button class="nav-top" onclick="toggleNavGroup('${g.key}', ${isDrawer}, event)">${esc(g.label)} <span class="nav-caret">▾</span></button>
       <div class="nav-sub">${subBtns}</div>
     </div>`;
   }).join('');
@@ -1941,10 +1984,20 @@ function goToExternal(url) {
   window.location.href = url;
 }
 
-function toggleNavGroup(key, isDrawer) {
+// isDrawer=false (desktop top nav): hover alone reveals the dropdown (see
+// CSS), so a click on the group label is intentionally inert — it must not
+// toggle .open (that was the "stuck open" bug) and must not navigate either,
+// per the confirmed required behavior. isDrawer=true (drawer/touch, no
+// hover): unchanged tap-to-expand-and-navigate.
+function toggleNavGroup(key, isDrawer, ev) {
+  if (!isDrawer) {
+    ev?.preventDefault?.();
+    ev?.stopPropagation?.();
+    return;
+  }
   const group = NAV_GROUPS.find(g => g.key === key);
   if (!group || !group.tabs) return;
-  const scope = isDrawer ? document.getElementById('drawerNavGroups') : document.getElementById('topNav');
+  const scope = document.getElementById('drawerNavGroups');
   if (scope) {
     scope.querySelectorAll('.nav-group').forEach(el => {
       if (el.dataset.group !== key) el.classList.remove('open');
@@ -1955,17 +2008,38 @@ function toggleNavGroup(key, isDrawer) {
   navigate(group.tabs[0]);
 }
 
+// Purely a visual "current section" indicator now — must never touch .open,
+// which means something different (explicit tap-to-expand) since the hover
+// dropdown was added. Conflating the two was the root cause of the Overview
+// group's dropdown staying permanently open.
 function highlightActiveGroup(name) {
   const group = NAV_GROUPS.find(g => g.tabs && g.tabs.includes(name));
-  document.querySelectorAll('.nav-group').forEach(el => el.classList.remove('open', 'active-group'));
+  document.querySelectorAll('.nav-group').forEach(el => el.classList.remove('active-group'));
   if (!group) return;
   document.querySelectorAll(`.nav-group[data-group="${group.key}"]`).forEach(el => {
-    el.classList.add('open', 'active-group');
+    el.classList.add('active-group');
   });
 }
 
-renderNavGroups(document.getElementById('topNav'), false);
+renderNavGroups(document.getElementById('navGroupsBox'), false);
 renderNavGroups(document.getElementById('drawerNavGroups'), true);
+
+function toggleUserMenu() {
+  document.getElementById('navUserBlock')?.classList.toggle('open');
+}
+
+function updateNavUsername() {
+  const el = document.getElementById('navUserBlock');
+  const txt = document.getElementById('navUsernameText');
+  if (!el || !txt) return;
+  const username = USER_ACCESS.user && USER_ACCESS.user.username;
+  if (username) {
+    txt.textContent = username;
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+}
 
 function tabFromPath() {
   const p = location.pathname.replace(/\/+$/, '');
@@ -3439,11 +3513,7 @@ async function loadEmployees(resetPage = false) {
           <td class="mono">${e.joining_date || '—'}</td>
           <td class="mono">${e.last_payment_date || '—'}</td>
           <td><span class="pill ${e.status==='active'?'ok':'muted'}">${esc(e.status)}</span></td>
-          <td>
-            <button class="btn sm secondary" onclick="openEmpDetail(${e.id})">View</button>
-            <button class="btn sm" onclick="openEmpEdit(${e.id})">Edit</button>
-            ${e.status==='active' ? `<button class="btn sm secondary" style="color:var(--err);border-color:var(--err)" onclick="deactivateEmployee(${e.id},${JSON.stringify(e.display_name)})">Deactivate</button>` : ''}
-          </td>
+          <td>${renderEmpActionButtons(e.id, e.display_name, e.status)}</td>
         </tr>`).join('')}
         </tbody></table>`;
     }
@@ -3458,6 +3528,19 @@ async function loadEmployees(resetPage = false) {
     document.getElementById('empTable').innerHTML = `<div class="empty"><div class="icon">⚠️</div>${e.message}</div>`;
   }
 }
+// Same icon-button pattern as renderTxnActionButtons() (Overview/Transactions
+// tables) — View/Edit/Deactivate as icons instead of text buttons.
+function renderEmpActionButtons(id, name, status) {
+  const viewSvg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const editSvg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const delSvg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  return `<div class="row-actions">
+    <button class="btn-icon" title="View" onclick="openEmpDetail(${id})">${viewSvg}</button>
+    <button class="btn-icon edit" title="Edit" onclick="openEmpEdit(${id})">${editSvg}</button>
+    ${status==='active' ? `<button class="btn-icon del" title="Deactivate" onclick="deactivateEmployee(${id},${JSON.stringify(name)})">${delSvg}</button>` : ''}
+  </div>`;
+}
+
 function empPage(dir) { empOffset = Math.max(0, empOffset + dir * EMP_LIMIT); loadEmployees(); }
 function empGoto(p)   { p = Math.max(1, Math.min(p, empPages || 1)); empOffset = (p-1)*EMP_LIMIT; loadEmployees(); }
 function empGotoLast(){ empGoto(empPages || 1); }
@@ -4667,23 +4750,29 @@ function catPill(c) {
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
-(function boot() {
+(async function boot() {
   const saved = localStorage.getItem('fpe_api_key');
-  if (saved) {
-    API_KEY = saved;
-    // Quick verify
-    fetch('/api/fpe/health', { headers: { 'X-Internal-Key': saved } })
-      .then(async r => {
-        if (r.ok) {
-          await resolveUserAccess(saved);
-          document.getElementById('loginOverlay').style.display = 'none';
-          document.getElementById('app').style.display = 'flex';
-          initApp();
-        }
-        // If expired/invalid, show login (loginOverlay stays visible)
-      })
-      .catch(() => {}); // network err - still show login
+  if (!saved) return;
+  API_KEY = saved;
+
+  // /api/fpe/health used to gate this as a separate pre-check — removed:
+  // resolveUserAccess()'s own /api/admin/session call is already the
+  // single source of truth for "is this key valid," and having two
+  // independent network calls in series just doubled the chance a
+  // transient hiccup strands a valid session at the login screen.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await resolveUserAccess(saved);
+    if (result.ok) {
+      document.getElementById('loginOverlay').style.display = 'none';
+      document.getElementById('app').style.display = 'flex';
+      initApp();
+      return;
+    }
+    if (result.reason === 'invalid') return; // bad/expired key — keep login visible
+    await new Promise(r => setTimeout(r, 700)); // transient network issue — one retry
   }
+  const err = document.getElementById('loginErr');
+  if (err) err.textContent = 'Could not restore your session (network issue). Please log in again.';
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════

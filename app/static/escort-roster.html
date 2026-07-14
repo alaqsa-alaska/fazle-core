@@ -256,6 +256,7 @@ td.actions{white-space:nowrap;text-align:center}
 <!-- ── App Shell ───────────────────────────────────────────────────── -->
 <div id="app" style="display:none;flex-direction:column">
   <header>
+    <a href="/payroll" class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff;border:none;text-decoration:none;margin-right:8px">← Payroll</a>
     <span>🛡️</span>
     <h1>Escort Roster</h1>
     <div class="spacer"></div>
@@ -695,6 +696,27 @@ function doLogin() {
 }
 document.getElementById('apiKeyInput').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
 document.getElementById('passwordInput').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+
+// Auto-login from a key already saved by payroll.html (shared 'fpe_api_key'
+// localStorage key, same origin) — mirrors payroll.html's own boot() IIFE so
+// arriving here via the Escort Program link doesn't re-prompt for a password.
+(function boot() {
+  const saved = localStorage.getItem('fpe_api_key');
+  if (!saved) return;
+  API_KEY = saved;
+  apiFetch('/api/admin/session').then(async r => {
+    if (!r.ok) return; // invalid/expired — leave login form showing
+    const session = await r.json();
+    _sessionUser = session && session.user ? session.user : null;
+    syncAdminTabVisibility();
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    loadSummary();
+    loadRoster();
+    loadAttendance();
+    loadNetSalary();
+  }).catch(() => {});
+})();
 
 // ─────────────────────────────────────────────────────────────────────────
 // API wrapper
