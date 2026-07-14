@@ -444,6 +444,47 @@ async def reactivate_employee(emp_id: int):
     }
 
 
+class LinkFpeRequest(BaseModel):
+    fpe_id: int
+    wbom_id: int
+
+
+@router.post("/employees/link-fpe", dependencies=[Depends(_require_admin_role)])
+async def link_fpe_to_wbom(body: LinkFpeRequest):
+    """One-at-a-time manual linking for the wbom-link-review.html tool --
+    always targets exactly one fpe_employees row by primary key (id), never
+    a bulk WHERE clause. Refuses to overwrite an existing link (caller must
+    confirm each pair by eye first; this just performs the single UPDATE)."""
+    fpe = await fetch_one(
+        "SELECT id, full_name, wbom_employee_id FROM fpe_employees WHERE id = $1",
+        body.fpe_id,
+    )
+    if not fpe:
+        raise HTTPException(404, f"fpe_employees.id={body.fpe_id} not found")
+    if fpe["wbom_employee_id"] is not None:
+        raise HTTPException(409, f"fpe_employees.id={body.fpe_id} already linked to wbom_employee_id={fpe['wbom_employee_id']}")
+
+    wbom = await fetch_one(
+        "SELECT employee_id, employee_name FROM wbom_employees WHERE employee_id = $1",
+        body.wbom_id,
+    )
+    if not wbom:
+        raise HTTPException(404, f"wbom_employees.employee_id={body.wbom_id} not found")
+
+    await execute(
+        "UPDATE fpe_employees SET wbom_employee_id = $1, updated_at = now() WHERE id = $2",
+        body.wbom_id, body.fpe_id,
+    )
+    log.info(
+        "[admin_employees] manually linked fpe_id=%d (%s) -> wbom_id=%d (%s)",
+        body.fpe_id, fpe["full_name"], body.wbom_id, wbom["employee_name"],
+    )
+    return {
+        "ok": True,
+        "message": f"Linked FPE #{body.fpe_id} ({fpe['full_name']}) to WBOM #{body.wbom_id} ({wbom['employee_name']})",
+    }
+
+
 @router.get("/debug/auth-check")
 async def debug_auth_check(key: str = Depends(_API_KEY_HEADER)):
     """Safe diagnostics endpoint — no auth required, returns auth analysis only."""

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WBOM Link Review — one-time cleanup tool</title>
+<style>
+:root{--bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;--surface:#f8fafc;--text:#1e293b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:20px}
+h1{color:var(--accent);font-size:20px;margin-bottom:4px}
+p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+#loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
+#loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
+#loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
+#app{display:none;max-width:1100px;margin:0 auto}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:13px}
+th{background:var(--surface);color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.5px}
+tr.mismatch{background:#fff7ed}
+tr.done{opacity:.5}
+tr.skipped{opacity:.4;text-decoration:line-through}
+.pair{display:flex;flex-direction:column;gap:2px}
+.pair .fpe{color:var(--accent2);font-weight:600}
+.pair .wbom{color:var(--muted)}
+.warn-badge{display:inline-block;background:#fef3c7;color:#92400e;font-size:10px;padding:2px 6px;border-radius:6px;margin-left:6px}
+.btn{padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:12px;margin-right:6px}
+.btn.link{background:var(--ok);color:#fff;border-color:var(--ok)}
+.btn.skip{background:var(--surface);color:var(--muted)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.status{font-size:12px;margin-top:3px}
+.status.ok{color:var(--ok)}
+.status.err{color:var(--err)}
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>WBOM Link Review</h1>
+  <p class="sub">One-time cleanup tool. Requires the same admin key as /payroll.</p>
+  <input id="keyInput" type="password" placeholder="API Key">
+  <button onclick="doLogin()">Continue</button>
+  <div id="loginErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+</div>
+
+<div id="app">
+  <h1>WBOM Link Review — 33 candidate pairs</h1>
+  <p class="sub">Phone-matched FPE ↔ WBOM employee records with no existing link. Review each pair, then click Link or Skip. Nothing is changed until you click Link on that specific row — no bulk action exists on this page.</p>
+  <table>
+    <thead><tr><th>FPE #</th><th>Pair (FPE name / WBOM name)</th><th>Phone</th><th>WBOM #</th><th>Action</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<script>
+let API_KEY = '';
+
+const CANDIDATES = [
+  {fpe_id:35,fpe_name:"Hasan",wbom_id:48,wbom_name:"Hasan",phone:"01721312943"},
+  {fpe_id:84,fpe_name:", Samir",wbom_id:145,wbom_name:"Samir",phone:"01932377120"},
+  {fpe_id:94,fpe_name:"Ridoy",wbom_id:159,wbom_name:"Robiul Mongla",phone:"01971510717",mismatch:true},
+  {fpe_id:124,fpe_name:"Mehedi Shakib Convince",wbom_id:51,wbom_name:"Mehedi Shakib",phone:"01730514198"},
+  {fpe_id:128,fpe_name:"Nazmul Rubel",wbom_id:121,wbom_name:"Nazmul  Rubel",phone:"01886940992"},
+  {fpe_id:129,fpe_name:"Jibon",wbom_id:13,wbom_name:"Jibon",phone:"01400764012"},
+  {fpe_id:134,fpe_name:"Ibrahim Food bill master",wbom_id:10,wbom_name:"Ibrahim",phone:"01341210920"},
+  {fpe_id:138,fpe_name:"Hridoy",wbom_id:14,wbom_name:"Ridoy",phone:"01403276587"},
+  {fpe_id:139,fpe_name:"Mehedi Advance 300/",wbom_id:96,wbom_name:"Mehedi",phone:"01842577608"},
+  {fpe_id:142,fpe_name:"Joynal Alishah",wbom_id:67,wbom_name:"Joynal",phone:"01772260377"},
+  {fpe_id:144,fpe_name:"Ekram Advanced",wbom_id:165,wbom_name:"Ekramul",phone:"01985791577"},
+  {fpe_id:147,fpe_name:"Delowar Labor scot",wbom_id:5,wbom_name:"Delowar",phone:"01319019257"},
+  {fpe_id:148,fpe_name:"Nijam Uddin",wbom_id:40,wbom_name:"Nijam Uddin",phone:"01643431736"},
+  {fpe_id:150,fpe_name:"Shamim",wbom_id:119,wbom_name:"Shamim",phone:"01884592170"},
+  {fpe_id:154,fpe_name:"Ebrahim",wbom_id:116,wbom_name:"Ebrahim",phone:"01879545957"},
+  {fpe_id:157,fpe_name:"Hakim Boat Rent by Sabbir 11:30 pm",wbom_id:102,wbom_name:"Hakim",phone:"01850544801"},
+  {fpe_id:160,fpe_name:"Sakib",wbom_id:16,wbom_name:"Sakib",phone:"01533903594"},
+  {fpe_id:169,fpe_name:"Maruf",wbom_id:130,wbom_name:"Maruf",phone:"01894148965"},
+  {fpe_id:171,fpe_name:"Mannan",wbom_id:31,wbom_name:"Mannan",phone:"01618801051"},
+  {fpe_id:177,fpe_name:"Nazmul",wbom_id:151,wbom_name:"Nazmul",phone:"01958122301"},
+  {fpe_id:185,fpe_name:"Ismail MAX",wbom_id:81,wbom_name:"Ismail MAX",phone:"01814118119"},
+  {fpe_id:192,fpe_name:"Habib",wbom_id:111,wbom_name:"Habib",phone:"01870650208"},
+  {fpe_id:244,fpe_name:"Jolil",wbom_id:143,wbom_name:"Abdul Jolil",phone:"01927317829"},
+  {fpe_id:246,fpe_name:"Shariful",wbom_id:142,wbom_name:"Shariful",phone:"01922179045"},
+  {fpe_id:252,fpe_name:"Hridoy",wbom_id:64,wbom_name:"Hridoy (FP)",phone:"01765975159"},
+  {fpe_id:253,fpe_name:"Shipon",wbom_id:55,wbom_name:"Shipon (ASM)",phone:"01740136049"},
+  {fpe_id:257,fpe_name:"Parvez ASM",wbom_id:133,wbom_name:"Parvez (ASM)",phone:"01894371992"},
+  {fpe_id:259,fpe_name:"Omor Ali",wbom_id:46,wbom_name:"Omor Ali",phone:"01713322226"},
+  {fpe_id:262,fpe_name:"Khairul Islam",wbom_id:12,wbom_name:"Khairul Islam",phone:"01347176492"},
+  {fpe_id:263,fpe_name:"Forid",wbom_id:75,wbom_name:"Al-Momin",phone:"01795188719",mismatch:true},
+  {fpe_id:270,fpe_name:"Habibur Rahman",wbom_id:47,wbom_name:"Habibur Rahman",phone:"01719449097"},
+  {fpe_id:273,fpe_name:"Raju",wbom_id:76,wbom_name:"Raju",phone:"01795397908"},
+  {fpe_id:286,fpe_name:"Md. Raihan",wbom_id:52,wbom_name:"Md. Raihan",phone:"01732416131"},
+];
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function doLogin() {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  localStorage.setItem('fpe_api_key', key);
+  boot();
+}
+
+function renderRows() {
+  document.getElementById('rows').innerHTML = CANDIDATES.map((c, i) => `
+    <tr id="row-${i}" class="${c.mismatch ? 'mismatch' : ''}">
+      <td>#${c.fpe_id}</td>
+      <td>
+        <div class="pair">
+          <span class="fpe">${esc(c.fpe_name)}</span>
+          <span class="wbom">↔ ${esc(c.wbom_name)}</span>
+        </div>
+        ${c.mismatch ? '<span class="warn-badge">⚠ name mismatch</span>' : ''}
+      </td>
+      <td class="mono">${esc(c.phone)}</td>
+      <td>#${c.wbom_id}</td>
+      <td>
+        <button class="btn link" id="link-${i}" onclick="linkPair(${i})">Link These Two</button>
+        <button class="btn skip" id="skip-${i}" onclick="skipPair(${i})">Skip</button>
+        <div class="status" id="status-${i}"></div>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function skipPair(i) {
+  document.getElementById(`row-${i}`).classList.add('skipped');
+  document.getElementById(`link-${i}`).disabled = true;
+  document.getElementById(`skip-${i}`).disabled = true;
+  document.getElementById(`status-${i}`).textContent = 'Skipped (no change made)';
+}
+
+async function linkPair(i) {
+  const c = CANDIDATES[i];
+  if (!confirm(`Link FPE #${c.fpe_id} (${c.fpe_name}) to WBOM #${c.wbom_id} (${c.wbom_name})?`)) return;
+  const linkBtn = document.getElementById(`link-${i}`);
+  const skipBtn = document.getElementById(`skip-${i}`);
+  const statusEl = document.getElementById(`status-${i}`);
+  linkBtn.disabled = true;
+  skipBtn.disabled = true;
+  statusEl.textContent = 'Linking…';
+  statusEl.className = 'status';
+  try {
+    const r = await fetch('/api/admin/employees/link-fpe', {
+      method: 'POST',
+      headers: { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fpe_id: c.fpe_id, wbom_id: c.wbom_id }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    document.getElementById(`row-${i}`).classList.add('done');
+    statusEl.textContent = '✓ Linked';
+    statusEl.className = 'status ok';
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e.message;
+    statusEl.className = 'status err';
+    linkBtn.disabled = false;
+    skipBtn.disabled = false;
+  }
+}
+
+function boot() {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  renderRows();
+}
+
+(function () {
+  const saved = localStorage.getItem('fpe_api_key');
+  if (saved) {
+    API_KEY = saved;
+    boot();
+  }
+})();
+</script>
+</body>
+</html>

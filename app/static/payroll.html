@@ -248,7 +248,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
 #toast{position:fixed;bottom:24px;right:24px;background:#1e293b;color:#fff;
   padding:12px 18px;border-radius:8px;font-size:13px;font-weight:500;
   box-shadow:0 8px 24px rgba(0,0,0,.2);display:none;z-index:9998;max-width:340px}
-#toast.ok{background:var(--ok)}#toast.err{background:var(--err)}
+#toast.ok{background:var(--ok)}#toast.err{background:var(--err)}#toast.warn{background:var(--warn)}
 
 /* ─── Pagination ─────────────────────────────────────────────────────────── */
 .pager{display:flex;gap:8px;align-items:center;margin-top:12px;justify-content:flex-end}
@@ -4148,20 +4148,32 @@ async function saveEmpEdit(id, wbomId) {
     return;
   }
 
-  try {
-    const fpeChanges = {};
-    for (const k of ['full_name', 'employee_id_phone', 'primary_phone']) {
-      if (changes[k] !== undefined) fpeChanges[k] = changes[k] || null;
-    }
-    if (aliases.length) fpeChanges.aliases = aliases;
+  // Step A — FPE fields are the primary save. A failure here is a real
+  // failure: stop, keep the modal open, don't touch WBOM at all so we never
+  // report success for something that didn't happen.
+  const fpeChanges = {};
+  for (const k of ['full_name', 'employee_id_phone', 'primary_phone']) {
+    if (changes[k] !== undefined) fpeChanges[k] = changes[k] || null;
+  }
+  if (aliases.length) fpeChanges.aliases = aliases;
 
-    let mergedInto = null;
+  let mergedInto = null;
+  try {
     if (Object.keys(fpeChanges).length) {
       const r = await api('/employees/' + id, { method: 'PATCH', body: JSON.stringify(fpeChanges) });
       mergedInto = r.merged_into || null;
     }
+  } catch(e) {
+    showToast('Save failed: ' + e.message, 'err');
+    return;
+  }
 
-    if (wbomId) {
+  // Step B — WBOM fields are best-effort. The FPE save above already
+  // committed, so a WBOM failure (missing link, transient error) must not
+  // be reported as if nothing saved — downgrade to a warning instead.
+  let wbomWarning = null;
+  if (wbomId) {
+    try {
       const wbomChanges = {};
       for (const k of ['designation', 'basic_salary', 'joining_date']) {
         if (changes[k] !== undefined) wbomChanges[k] = changes[k] || null;
@@ -4174,15 +4186,23 @@ async function saveEmpEdit(id, wbomId) {
         const action = changes.status === 'Inactive' ? 'deactivate' : 'reactivate';
         await adminApi('/employees/' + wbomId + '/' + action, { method: 'PATCH' });
       }
+    } catch(e) {
+      wbomWarning = e.message;
     }
-
-    showToast(mergedInto ? `Soft-merged into employee #${mergedInto}` : 'Employee updated', 'ok');
-    window.__edPendingAliases = [];
-    await loadEmployees();
-    openEmpDetail(mergedInto || id);
-  } catch(e) {
-    showToast('Save failed: ' + e.message, 'err');
+  } else if (['designation', 'basic_salary', 'joining_date', 'status'].some(k => changes[k] !== undefined)) {
+    // Shouldn't normally happen (those inputs are disabled with no wbomId),
+    // but guard anyway rather than silently dropping the user's intent.
+    wbomWarning = 'no linked operational (WBOM) record for this employee';
   }
+
+  if (wbomWarning) {
+    showToast('⚠️ Basic info updated. Salary/Designation/Joining Date/Status were not synced to the operational system — ' + wbomWarning, 'warn');
+  } else {
+    showToast(mergedInto ? `Soft-merged into employee #${mergedInto}` : '✅ Employee updated successfully', 'ok');
+  }
+  window.__edPendingAliases = [];
+  await loadEmployees();
+  openEmpDetail(mergedInto || id);
 }
 
 // ── Unmatched ─────────────────────────────────────────────────────────────────
