@@ -12,3 +12,13 @@
 # Empty as of 2026-07-12 (working tree was clean when this manifest was
 # created) — add entries here only when genuine multi-day in-flight work
 # needs to sit uncommitted across a restart.
+
+# 2026-07-14: db/migrations_drafts/ holds migration 047 (WBOM stub records
+# for unlinked FPE employees) as a reviewed-but-explicitly-held draft —
+# Owner has NOT approved it (open question: payroll-eligibility/bot-identity
+# blast radius from fabricated designation='Unknown' rows, see chat history).
+# Left here deliberately so it survives this restart without being committed
+# or added to MIGRATION_INVENTORY.md. Remove this entry once the Owner
+# decides (approved -> move back to db/migrations/ + commit + document;
+# rejected -> delete the draft file and this entry).
+db/migrations_drafts/
