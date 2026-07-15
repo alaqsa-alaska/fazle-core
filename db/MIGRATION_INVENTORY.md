@@ -17,7 +17,9 @@
 
 **Known gap found while applying 044/045**: `db/migrate.py`'s own `schema_migrations` tracking table has not recorded anything past `028_assistant_ext_location_audit.sql` — migrations `029` through `045` were all applied to production via direct execution (matching the pattern already used for `029`-`043` per their own "Done" entries in `NEXT_IMPLEMENTATION_QUEUE.md`), bypassing `migrate.py`'s bookkeeping entirely. Running `db/migrate.py` for real (not `--dry-run`) today would attempt to re-apply all of `029`-`045`, which is risky since not every one of those files is idempotent. Not fixed in this pass — tracked under Tier 2 "Cross-directory migration collision cleanup."
 
-## ✅ `db/migrations/` (canonical, 52 files) — tracked in `schema_migrations` via `db/migrate.py`
+**Updated again 2026-07-15** (`chat_history` shadow archive): added `048_chat_history.sql` (new, standalone `chat_history` table — not read or written by any fazle-core application code, exists only as the write target for an out-of-repo read-only sync service). Applied directly against `schema_migrations` for this one file only (**not** via a real `db/migrate.py` run — that would have re-attempted the entire `029`-`045` backlog above, which was out of scope for this task and deliberately not touched). `047` was intentionally skipped — it's reserved in `db/migrations_drafts/` for an unrelated, still-pending Owner decision (see `db/.restart_gate_manifest`).
+
+## ✅ `db/migrations/` (canonical, 53+ files as of this update — see 2026-07-15 note above for a known pre-existing count discrepancy not resolved here) — tracked in `schema_migrations` via `db/migrate.py`
 
 ```
 001_safe_mode_and_escort_extractor.sql
@@ -73,6 +75,7 @@
 044_billing_payment_recording.sql
 045_ai_read_billing_outstanding.sql
 046_employee_edit_requests.sql
+048_chat_history.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
