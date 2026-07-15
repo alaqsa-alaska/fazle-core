@@ -645,6 +645,16 @@ async def _check_social_daemon_health() -> bool:
         return True  # DB failure — assume alive, avoid disabling social engine
 
 
+# Bangladeshi mobile number in any real-world format clients actually use:
+# 01XXXXXXXXX, +8801XXXXXXXXX, 8801XXXXXXXXX, hyphenated/spaced digit groups.
+# Presence of a mobile number is the primary escort-order signal per
+# escort_business_rules.md ("Primary signal: Master Mobile Number") — it must
+# not depend on MV-label spacing/punctuation/case, which vary per client and
+# previously caused valid orders to be silently dropped into the (disabled)
+# social-reply pipeline before ever reaching the parser.
+_BD_MOBILE_HINT_RE = re.compile(r"\+?(?:880|0)[\s\-]?1[3-9](?:[\s\-]?\d){8}")
+
+
 def _requires_legacy_workflow(text: str, msg: dict) -> bool:
     """Operational messages must use Fazle's workflow router, not social recruiting."""
     t = (text or "").lower()
@@ -654,6 +664,8 @@ def _requires_legacy_workflow(text: str, msg: dict) -> bool:
             return True
     except Exception:
         pass
+    if _BD_MOBILE_HINT_RE.search(text or ""):
+        return True
     operational_tokens = (
         "m.v", "mv ", "mother vessel", "lighter", "lighter vessel",
         "escort", "এস্কর্ট", "এমভি", "master number", "destination",

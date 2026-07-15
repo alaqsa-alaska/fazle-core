@@ -98,7 +98,7 @@ _MV_LABEL_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _IMPORTER_RE = re.compile(
-    r"(?:a/?c\.?\s*[:.\-]?\s*|account\s*:?\s*|importer\s*:?\s*)\*?([A-Za-z][\w\s&.\-/]{2,80}?)(?=\s*[\n$]|$)",
+    r"(?:a/?c\.?\s*[:.\-]?\s*|account\s*:?\s*|importer\s*:?\s*)\*?([A-Za-z][\w\s&.\-/]{2,80}?)[*_~]*\s*(?=[\n]|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 _CARGO_RE = re.compile(
@@ -288,10 +288,12 @@ def _normalize_capacity(value: str, *, allow_bare: bool = False) -> Optional[str
     if not allow_bare:
         return None
     scrubbed = _MOBILE_FMT_RE.sub(" ", value or "")
-    # Field messages often end a lighter line with bare 900/1000/1200.
-    # Keep the range narrow so serials, dates, and phone fragments do not turn
-    # into capacity.
-    bare = re.search(r"(?<!\d)(9\d{2}|1[01]\d{2}|1200)(?!\d)", scrubbed)
+    # Field messages often end a lighter line with a bare capacity number
+    # (e.g. "...local 800"). 700 MT is the KB's own documented example
+    # (escort_business_rules.md Normalization Rules), so the floor must cover
+    # it. Keep the range narrow enough that serials, dates, and phone
+    # fragments do not turn into capacity.
+    bare = re.search(r"(?<!\d)([7-9]\d{2}|1[01]\d{2}|1200)(?!\d)", scrubbed)
     digits = bare.group(1) if bare else ""
     return f"{digits} MT" if digits else None
 

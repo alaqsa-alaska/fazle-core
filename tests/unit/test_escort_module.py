@@ -172,6 +172,46 @@ class TestEscortRegexExtraction:
         assert draft["master_mobile"] == "01716797411"
 
 
+class TestSecondarySignalsPositionIndependent:
+    """Secondary signals (importer/cargo/destination/capacity) are content-based,
+    not tied to a fixed sequence relative to mother/lighter vessel — regression
+    coverage for the 2026-07-15 incident where two real client orders
+    ("Mv.Wan minh ... *A/c.kazi firm* ... local 800",
+    "Mv.Alondra ... *A/c.Aci godrej* ...") lost their importer and capacity
+    fields because of formatting/range assumptions the KB never actually
+    required."""
+
+    def test_importer_survives_whatsapp_bold_markup(self):
+        from modules.escort import parse_escort_message
+
+        text = "Mv.Wan minh 01/soyabean ext\n*A/c.kazi firm*\n1.Ak Sarkar 5-01730840247 local 800 "
+        order = parse_escort_message(text)
+        assert order["importer"] == "kazi firm"
+        assert order["cargo_type"] == "Soybean Extract"
+        assert order["lighters"][0]["capacity"] == "800 MT"
+        assert order["lighters"][0]["destination"] == "Chattogram"
+
+    def test_importer_after_mother_vessel_before_lighter_with_markup(self):
+        from modules.escort import parse_escort_message
+
+        text = "Mv.Alondra/soyabean ext\n*For oute\n*A/c.Aci godrej*\n1.Abdullah sayad-01725964055 "
+        order = parse_escort_message(text)
+        assert order["importer"] == "Aci godrej"
+        assert order["mother_vessel"] == "MV ALONDRA"
+
+    @pytest.mark.parametrize("bare,expected", [
+        ("700", "700 MT"),
+        ("800", "800 MT"),
+        ("900", "900 MT"),
+        ("1100", "1100 MT"),
+        ("1200", "1200 MT"),
+    ])
+    def test_bare_capacity_covers_700_to_1200_range(self, bare, expected):
+        from modules.escort import _normalize_capacity
+
+        assert _normalize_capacity(f"local {bare}", allow_bare=True) == expected
+
+
 class TestIsEscortMessage:
     """Test is_escort_message() detection function."""
 

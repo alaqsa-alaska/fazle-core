@@ -24,6 +24,20 @@ Secondary signals:
 - Destination
 - Capacity
 
+**This list is a set of signal types, not a fixed sequence.** Real client
+messages do not present these in this order, and the parser must not assume
+they do. Observed real-world positioning (2026-07-15):
+- Destination is identified by content — a Bangladeshi place name in full or
+  short-hand form (e.g. `local`, `CTG`, `N.Bari`) — not by its position in the
+  message.
+- Capacity commonly appears **after** the lighter vessel name/mobile (end of
+  the lighter line), not in a fixed slot.
+- Importer/product/cargo commonly appears **after the mother vessel name or
+  before the lighter vessel name** — i.e. in the free-text zone between the
+  two vessel blocks — and may be wrapped in WhatsApp markdown (`*bold*`),
+  which the importer/cargo extraction must tolerate rather than treat as a
+  line terminator.
+
 Important rules:
 - Mobile always anchors the lighter block
 - The nearest vessel name to that mobile is the lighter vessel
@@ -214,6 +228,15 @@ Rules:
 - Do not treat client drafts as final truth.
 - Do not let roster search/export use ambiguous joined columns.
 - UI requests should omit empty params and surface real API errors.
+- `modules/bridge_poller._requires_legacy_workflow()` gates whether a
+  bridge1/bridge2 message reaches this parser at all before
+  `SOCIAL_AUTO_REPLY_SINGLE_ENGINE` diverts it to the social-reply pipeline.
+  This gate must treat a Bangladesh mobile-number match
+  (`_BD_MOBILE_HINT_RE`) as a first-class trigger, not just literal
+  `"m.v"`/`"mv "` substrings — MV-label spacing, punctuation, and case vary
+  per client (`Mv.`, `MV `, `mv-`) and a literal-token-only gate previously
+  caused valid orders to be silently dropped into the social pipeline before
+  ever reaching this module (incident 2026-07-13/14, fixed 2026-07-15).
 
 ## Verified Examples
 

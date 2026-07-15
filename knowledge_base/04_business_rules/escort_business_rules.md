@@ -100,6 +100,14 @@ Secondary signals:
 - Destination
 - Capacity
 
+This is a list of signal types, not the order they appear in a message.
+Destination is recognized by content (a Bangladeshi place name, full or
+short-hand), not position. Capacity commonly trails the lighter vessel name.
+Importer/cargo commonly sits after the mother vessel name or before the
+lighter vessel name, and may be wrapped in WhatsApp `*bold*` markup — see
+`../06_developer_system/escort_order_parser.md` Parser Philosophy for the
+full positional notes.
+
 Rules:
 - Every valid Bangladesh mobile belongs to one lighter block
 - The vessel nearest that mobile is the lighter vessel
