@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from app.database import execute, fetch_all, fetch_one, fetch_val
@@ -10,6 +11,40 @@ from app.database import execute, fetch_all, fetch_one, fetch_val
 
 def daemon_enabled() -> bool:
     return os.getenv("SOCIAL_AUTO_REPLY_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+
+async def get_activation_watermark() -> datetime:
+    """Backlog-flood guard (2026-07-15): the planner must never process
+    historical pending events accumulated while the daemon was disabled --
+    only see docs/TASK_BRIEF_chat_sync_and_reply_gap_2026-07-15.md Phase 4.
+
+    Set once, the first time this is called after the daemon is actually
+    un-paused (not on every restart -- ON CONFLICT DO NOTHING keeps the
+    original value), and stable thereafter. Events received before this
+    timestamp are treated as pre-activation backlog and are permanently
+    excluded from planner sweeps, regardless of how many future
+    restarts/re-activations happen.
+    """
+    row = await fetch_one(
+        "SELECT last_checked_at FROM social_backlog_state WHERE state_key='activation_watermark'"
+    )
+    if row and row.get("last_checked_at"):
+        return row["last_checked_at"]
+    now = datetime.now(timezone.utc)
+    await execute(
+        """
+        INSERT INTO social_backlog_state (state_key, platform, last_checked_at, metadata)
+        VALUES ('activation_watermark', 'global', $1,
+                '{"reason": "first_daemon_activation_backlog_cutoff"}'::jsonb)
+        ON CONFLICT (state_key) DO NOTHING
+        """,
+        now,
+    )
+    # Re-read in case a concurrent caller inserted first -- their value wins.
+    row = await fetch_one(
+        "SELECT last_checked_at FROM social_backlog_state WHERE state_key='activation_watermark'"
+    )
+    return row["last_checked_at"] if row and row.get("last_checked_at") else now
 
 
 async def set_paused(paused: bool, reason: str = "manual") -> None:
