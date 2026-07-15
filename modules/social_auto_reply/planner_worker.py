@@ -4,14 +4,16 @@ from __future__ import annotations
 import logging
 import os
 
+from app.config import get_settings
 from app.database import execute, fetch_val
+from modules.outbound import enqueue as enqueue_outbound
+from shared.draft_reply import create_draft_reply
 
 from .classifier import classify_comment, classify_message
 from .conversation_history import pending_events, pending_threads
 from .employee_lookup import find_by_mobile
 from .intelligent_generator import plan_reply
 from .risk_flagger import is_recruiting_intent
-from .send_queue import enqueue_reply
 
 _COOLDOWN_MINUTES = int(__import__("os").getenv("SOCIAL_REPLY_COOLDOWN_M", "15"))
 
@@ -69,21 +71,68 @@ async def process_due_threads(limit: int = 10) -> dict:
             await execute("UPDATE social_inbox_events SET reply_status='ignored' WHERE id = ANY($1::bigint[])", plan.event_ids)
             skipped += 1
             continue
-        queue_id = await enqueue_reply(
-            event_id=plan.event_ids[-1],
+        # 2026-07-15: human-in-the-loop gate — the social daemon must never
+        # auto-send (see docs/TASK_BRIEF_chat_sync_and_reply_gap_2026-07-15.md
+        # Phase 3). Every would-auto-send reply becomes a draft for admin
+        # approval instead of an entry in social_reply_queue.
+        draft_id = await _draft_instead_of_send(
             platform=platform,
             target_id=target_id,
             reply_text=plan.reply_text,
             intent=plan.intent,
-            conversation_id=events[-1].get("conversation_id"),
-            reply_to_comment_id=plan.reply_to_comment_id,
-            source_bridge=None,
-            meta={"combined_event_ids": plan.event_ids, "planner": "context_v1", "sender_role": sender_role},
+            sender_role=sender_role,
         )
-        if queue_id:
-            await execute("UPDATE social_inbox_events SET reply_status='queued' WHERE id = ANY($1::bigint[])", plan.event_ids)
+        if draft_id:
+            await execute("UPDATE social_inbox_events SET reply_status='drafted' WHERE id = ANY($1::bigint[])", plan.event_ids)
             planned += 1
     return {"planned": planned, "flagged": flagged, "skipped": skipped}
+
+
+def _primary_admin_number() -> str:
+    settings = get_settings()
+    admins = settings.admin_number_list
+    return admins[0] if admins else settings.admin_meta_number
+
+
+async def _draft_instead_of_send(
+    *, platform: str, target_id: str, reply_text: str, intent: str, sender_role: str
+) -> int | None:
+    """Create a fazle_draft_replies row instead of enqueueing a real send,
+    and notify the admin that a draft is waiting. Reuses the same shared
+    draft mechanism modules/bridge_poller._save_draft() uses, so this is a
+    routing change only -- no new draft/notification infrastructure.
+    """
+    draft_id = await create_draft_reply(
+        sender=target_id,
+        bridge=platform,
+        draft_text=reply_text,
+        role="social_lead",
+        intent=intent,
+        context=f"social_auto_reply planner — platform={platform} sender_role={sender_role}",
+        source_module="social_auto_reply.planner_worker",
+    )
+    if not draft_id:
+        return None
+    admin_phone = _primary_admin_number()
+    if admin_phone:
+        preview = reply_text if len(reply_text) <= 300 else reply_text[:300] + "…"
+        await enqueue_outbound(
+            admin_phone,
+            (
+                "📋 Social Auto-Reply Draft Pending Approval\n"
+                f"Platform: {platform}\n"
+                f"Sender: {target_id}\n"
+                f"Intent: {intent}\n"
+                f"Draft ID: {draft_id}\n\n"
+                f"{preview}"
+            ),
+            source_bridge="bridge1",
+            fallback_channel="bridge2",
+            purpose="social-draft-pending",
+            idempotency_key=f"social-draft-notify:{draft_id}",
+            meta={"draft_id": draft_id, "platform": platform, "target_id": target_id},
+        )
+    return draft_id
 
 
 async def _flag_events(event_ids: list[int], platform: str, target_id: str, reason: str, events: list[dict]) -> None:
