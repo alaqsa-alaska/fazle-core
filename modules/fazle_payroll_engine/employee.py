@@ -163,7 +163,7 @@ async def match_or_create_employee(
             "SELECT employee_id, employee_name, employee_mobile "
             "FROM wbom_employees "
             "WHERE (employee_mobile = $1 OR bkash_number = $1 OR nagad_number = $1) "
-            "  AND status != 'inactive' "
+            "  AND LOWER(status) != 'inactive' "
             "LIMIT 1",
             phone,
         )

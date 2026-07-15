@@ -1,9 +1,11 @@
 """Unit tests — modules/social_auto_reply/planner_worker draft-routing gate.
 
-2026-07-15 Phase 3: the social daemon must never auto-send. Every reply the
-planner would previously have pushed into social_reply_queue for real
-dispatch must instead become a fazle_draft_replies row plus an admin
-notification. See docs/TASK_BRIEF_chat_sync_and_reply_gap_2026-07-15.md.
+2026-07-15 Phase 4 (Owner-confirmed policy: Selective, not blanket): only
+senders matching the existing DRAFT_ALWAYS_ROLES/PHONES/NAMES config get
+routed to a fazle_draft_replies row + admin notification instead of a real
+send. Everyone else gets enqueue_reply() -> social_reply_queue, same as
+pre-2026-06-23 behavior. See
+docs/TASK_BRIEF_chat_sync_and_reply_gap_2026-07-15.md.
 """
 from __future__ import annotations
 
@@ -67,10 +69,56 @@ class TestDraftInsteadOfSend:
         assert draft_id is None
         fake_enqueue.assert_not_awaited()
 
-    async def test_never_imports_social_reply_queue_enqueue(self):
-        """Hard guarantee: the planner module must not reference the real
-        send-queue enqueue function anywhere -- auto-send is fully retired
-        for this module, not just bypassed in one branch."""
+    async def test_enqueue_reply_is_wired_for_non_draft_always_senders(self):
+        """2026-07-15 Phase 4 policy reversal: unlike the interim blanket-draft
+        commit, real auto-send is NOT retired -- it's restored for senders
+        that don't match DRAFT_ALWAYS_*, per Owner-confirmed Selective policy."""
+        import modules.social_auto_reply.planner_worker as planner
+        from modules.social_auto_reply.send_queue import enqueue_reply
+
+        assert planner.enqueue_reply is enqueue_reply
+
+
+class TestSelectiveDraftRoutingGate:
+    """_is_draft_always_sender() decides the draft-vs-real-send branch --
+    must reuse modules.bridge_poller._is_draft_always(), not reimplement it."""
+
+    async def test_draft_always_role_routes_to_draft(self, monkeypatch):
+        import modules.social_auto_reply.planner_worker as planner
+        import modules.identity_brain as identity_brain
+        import modules.bridge_poller as bridge_poller
+
+        monkeypatch.setattr(
+            identity_brain, "detect_identity",
+            AsyncMock(return_value={"role": "accountant", "display_name": "Test Accountant"}),
+        )
+        # Exercise the real _is_draft_always() -- "accountant" is in the
+        # default DRAFT_ALWAYS_ROLES set, so no need to mock it too.
+        result = await planner._is_draft_always_sender(
+            "8801811111111", {"message_text": "hi"},
+        )
+        assert result is True
+
+    async def test_unknown_role_routes_to_real_send(self, monkeypatch):
+        import modules.social_auto_reply.planner_worker as planner
+        import modules.identity_brain as identity_brain
+
+        monkeypatch.setattr(
+            identity_brain, "detect_identity",
+            AsyncMock(return_value={"role": "unknown", "display_name": None}),
+        )
+        result = await planner._is_draft_always_sender(
+            "8801799999999", {"message_text": "hi"},
+        )
+        assert result is False
+
+    async def test_non_phone_target_id_falls_back_to_unknown_and_real_send(self, monkeypatch):
+        """Facebook comment/PSID identifiers aren't phone numbers --
+        detect_identity() must safely fall back rather than raise, and the
+        result must not accidentally match DRAFT_ALWAYS_*."""
         import modules.social_auto_reply.planner_worker as planner
 
-        assert not hasattr(planner, "enqueue_reply")
+        result = await planner._is_draft_always_sender(
+            "969218865858934_1528952915612330", {"message_text": "hi"},
+        )
+        assert result is False

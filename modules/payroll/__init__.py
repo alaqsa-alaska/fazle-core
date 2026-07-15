@@ -58,16 +58,48 @@ async def _existing_active_run(employee_id: int, period_year: int, period_month:
     }
 
 
+async def _prorated_basic(
+    basic_salary: float, employee_id: int,
+    period_start: date, period_end: date, calendar_days: int,
+) -> tuple[float, float]:
+    """
+    Settlement formula (docs/NEXT_IMPLEMENTATION_QUEUE.md's canonical spec):
+    basic_salary ÷ calendar_days_in_month × approved_duty_days.
+
+    Reuses modules.payroll.dry_run's own attendance summary (duty days from
+    wbom_attendance rows with entry_source IN ('manual_office','message_parser')
+    only) rather than re-querying wbom_attendance directly, so this stays in
+    lockstep with the eligibility-preview/dry-run/reconciliation numbers an
+    admin already sees before authoritative payroll ever runs.
+
+    Returns (prorated_basic, duty_days).
+    """
+    from modules.payroll.dry_run import _attendance_summary
+
+    att = await _attendance_summary(employee_id, period_start, period_end)
+    duty_days = float(att["total_duty_days"])
+    prorated = round((basic_salary / calendar_days) * duty_days, 2) if calendar_days else 0.0
+    return prorated, duty_days
+
+
 async def compute_run(
     employee_id: int,
     period_year: int,
     period_month: int,
     computed_by: str,
     per_program_rate: Optional[float] = None,
+    prorate_basic: bool = False,
 ) -> dict:
     """
     Idempotent monthly payroll compute. Returns existing active draft when present.
     Writes wbom_payroll_runs (1 row) + wbom_payroll_run_items (N rows) atomically.
+
+    prorate_basic=True (office-staff path only -- see
+    compute_all_for_period_office_only) prorates the basic-salary component by
+    attendance instead of paying the full flat rate; escort-program pay
+    (already tied to real completed-program-days) is unaffected either way.
+    Default False preserves the escort-inclusive compute_all_for_period()
+    path's existing behavior byte-for-byte.
     """
     if not (1 <= period_month <= 12):
         return {"ok": False, "error": "invalid period_month"}
@@ -92,6 +124,13 @@ async def compute_run(
     last_day = monthrange(period_year, period_month)[1]
     period_start = date(period_year, period_month, 1)
     period_end = date(period_year, period_month, last_day)
+
+    basic_component = basic_salary
+    duty_days: Optional[float] = None
+    if prorate_basic:
+        basic_component, duty_days = await _prorated_basic(
+            basic_salary, employee_id, period_start, period_end, last_day,
+        )
 
     # Count completed programs in month (count by end_date or program_date when end null)
     prog_rows = await fetch_all(
@@ -121,7 +160,7 @@ async def compute_run(
     other_allowance = 0.0
     total_deductions = 0.0
 
-    gross = round(basic_salary + program_allowance + other_allowance, 2)
+    gross = round(basic_component + program_allowance + other_allowance, 2)
     net = round(max(gross - total_advances - total_deductions, 0), 2)
 
     # Insert atomically. Two concurrent calls for the same employee/period
@@ -147,16 +186,19 @@ async def compute_run(
                                $11, $12, $13, NOW(), NOW())
                        RETURNING run_id""",
                     employee_id, period_year, period_month,
-                    basic_salary, total_programs, rate,
+                    basic_component, total_programs, rate,
                     program_allowance, other_allowance, total_advances,
                     total_deductions, gross, net, computed_by,
                 )
                 # Items: basic, programs, advances
+                basic_notes = f"emp:{employee_id}"
+                if prorate_basic and duty_days is not None:
+                    basic_notes += f" prorated {duty_days:.1f}/{last_day} days"
                 await conn.execute(
                     """INSERT INTO wbom_payroll_run_items
                           (run_id, component_type, component_label, amount, sign, source_table, notes)
                        VALUES ($1, 'basic', 'Basic Salary', $2, '+', 'wbom_employees', $3)""",
-                    run_id, basic_salary, f"emp:{employee_id}",
+                    run_id, basic_component, basic_notes,
                 )
                 for pr in prog_rows:
                     await conn.execute(
@@ -209,11 +251,12 @@ async def compute_run(
         "run_id": int(run_id), "status": "draft",
         "employee_id": employee_id, "employee_name": emp["employee_name"],
         "period": f"{period_year}-{period_month:02d}",
-        "basic_salary": basic_salary, "per_program_rate": rate,
+        "basic_salary": basic_component, "per_program_rate": rate,
         "total_programs": total_programs, "total_days": total_days,
         "program_allowance": program_allowance,
         "total_advances": total_advances,
         "gross_salary": gross, "net_salary": net,
+        "duty_days": duty_days,
     }
 
 
@@ -249,11 +292,10 @@ async def compute_all_for_period_office_only(
     employees must never enter office payroll. Guarded behind
     settings.office_payroll_authoritative_enabled in modules.scheduler's
     job_daily_payroll; not called anywhere while that flag is False (the
-    default). Note: compute_run()'s own internal formula (basic_salary +
-    escort-program day-count allowance) has not been rewritten to the new
-    calendar-days/attendance-based formula yet -- that rewrite is still
-    needed before this path could be safely enabled, tracked separately in
-    docs/NEXT_IMPLEMENTATION_QUEUE.md."""
+    default). Calls compute_run(..., prorate_basic=True) (2026-07-15 fix) --
+    the basic-salary component is now prorated by calendar-days/attendance
+    for this path specifically; compute_all_for_period() (the escort-inclusive,
+    currently-authoritative path) is unaffected, still paying the flat rate."""
     from modules.payroll.eligibility import classify_office_staff
 
     rows = await fetch_all(
@@ -267,7 +309,10 @@ async def compute_all_for_period_office_only(
         if not classification["eligible"]:
             skipped += 1
             continue
-        result = await compute_run(int(r["employee_id"]), period_year, period_month, computed_by)
+        result = await compute_run(
+            int(r["employee_id"]), period_year, period_month, computed_by,
+            prorate_basic=True,
+        )
         if not result.get("ok"):
             failed += 1; continue
         if result.get("already_exists"):
@@ -299,6 +344,23 @@ async def _transition(
     if target not in ALLOWED_TRANSITIONS.get(cur_status, set()):
         return {"ok": False, "error":
                 f"transition {cur_status} → {target} not allowed"}
+
+    # A "paid" transition must post a canonical fpe_cash_transactions ledger
+    # entry (knowledge_base/06_developer_system/daily_cash_transaction_source_of_truth.md
+    # -- fpe_cash_transactions is the ONLY canonical cash ledger). Fail closed
+    # rather than mark a run paid with no ledger entry: check the FPE bridge
+    # link exists *before* mutating anything.
+    fpe_employee = None
+    if target == "paid":
+        fpe_employee = await fetch_one(
+            "SELECT id, primary_phone FROM fpe_employees "
+            "WHERE wbom_employee_id=$1 AND status='active'",
+            cur["employee_id"],
+        )
+        if not fpe_employee:
+            return {"ok": False, "error":
+                     f"employee {cur['employee_id']} has no linked active FPE "
+                     f"record — cannot post payroll ledger entry, run not marked paid"}
 
     sets = ["status=$2", "updated_at=NOW()"]
     params = [run_id, target]
@@ -344,9 +406,69 @@ async def _transition(
            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)""",
         run_id, target, actor, cur_status, target, reason, json.dumps(payload),
     )
+
+    if target == "paid":
+        assert fpe_employee is not None  # guaranteed by the fail-closed check above
+        await _post_payroll_ledger_entry(
+            run_id=run_id, actor=actor, fpe_employee=fpe_employee,
+            period_year=cur["period_year"], period_month=cur["period_month"],
+            amount=paid_amount if paid_amount is not None else float(cur["net_salary"]),
+            payment_method=payment_method, payment_reference=payment_reference,
+        )
+
     log.info(f"[payroll] run {run_id} {cur_status} → {target} by {actor}")
     return {"ok": True, "run_id": run_id, "from_status": cur_status,
             "to_status": target, "net_salary": float(cur["net_salary"])}
+
+
+async def _post_payroll_ledger_entry(
+    *, run_id: int, actor: str, fpe_employee: dict,
+    period_year: int, period_month: int, amount: float,
+    payment_method: Optional[str], payment_reference: Optional[str],
+) -> None:
+    """
+    Write the canonical fpe_cash_transactions entry for a payroll payout.
+    Reuses modules.fazle_payroll_engine.accounting.create_transaction() --
+    the single choke point every other module (draft_approval, payment_correction)
+    already funnels through; never a raw INSERT here.
+    """
+    from decimal import Decimal
+    from modules.fazle_payroll_engine.accounting import create_transaction
+    from modules.fazle_payroll_engine.models import (
+        TransactionCreateRequest, PayoutMethod, TxnCategory,
+        TransactionStatus, PaymentSource,
+    )
+
+    method_lower = (payment_method or "cash").lower()
+    payout_method = (
+        PayoutMethod[method_lower] if method_lower in PayoutMethod.__members__
+        else PayoutMethod.cash
+    )
+    period = f"{period_year}-{period_month:02d}"
+    phone = fpe_employee.get("primary_phone")
+
+    req = TransactionCreateRequest(
+        employee_id=fpe_employee["id"],
+        amount=Decimal(str(amount)),
+        payout_phone=phone,
+        payout_method=payout_method,
+        txn_date=date.today(),
+        txn_category=TxnCategory.salary,
+        accounting_period=period,
+        created_by=f"admin:{actor}",
+        source=PaymentSource.admin_api,
+        source_channel="payroll",
+        source_message_id=f"payroll-run-{run_id}",
+        employee_id_phone=phone,
+        employee_phone=phone,
+        transaction_status=TransactionStatus.final,
+        metadata={"payroll_run_id": run_id, "payment_reference": payment_reference},
+    )
+    txn_row = await create_transaction(req)
+    log.info(
+        f"[payroll] run {run_id} posted ledger txn id={txn_row.id} "
+        f"ref={txn_row.txn_ref[:16]} emp={fpe_employee['id']} amount={amount}"
+    )
 
 
 async def submit_run(run_id: int, actor: str) -> dict:

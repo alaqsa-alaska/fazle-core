@@ -125,6 +125,7 @@ Rules:
 - Reversal/create accounting path also updates ledger via `_upsert_ledger()`.
 - Admin transaction create API writes through canonical create path.
 - `wbom_cash_transactions` has no active insert/update/delete writes in runtime modules.
+- `modules/payroll/__init__.py`'s `mark_paid()` (monthly payroll payout, the `wbom_payroll_runs.status → 'paid'` transition) now also posts through `create_transaction()` (fixed 2026-07-15 — previously it only flipped the run's status and wrote a `wbom_payroll_approval_log` row, with no `fpe_cash_transactions` entry at all). It resolves the payee via `fpe_employees.wbom_employee_id` (the standard WBOM↔FPE bridge) and **fails closed**: if no active FPE employee is linked, the run is not marked paid and no ledger row is written, rather than completing the status change with a missing ledger entry.
 
 ### Not Fully Working / Gaps
 

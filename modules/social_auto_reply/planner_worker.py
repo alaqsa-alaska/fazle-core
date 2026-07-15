@@ -14,6 +14,7 @@ from .conversation_history import pending_events, pending_threads
 from .employee_lookup import find_by_mobile
 from .intelligent_generator import plan_reply
 from .risk_flagger import is_recruiting_intent
+from .send_queue import enqueue_reply
 
 _COOLDOWN_MINUTES = int(__import__("os").getenv("SOCIAL_REPLY_COOLDOWN_M", "15"))
 
@@ -71,21 +72,63 @@ async def process_due_threads(limit: int = 10) -> dict:
             await execute("UPDATE social_inbox_events SET reply_status='ignored' WHERE id = ANY($1::bigint[])", plan.event_ids)
             skipped += 1
             continue
-        # 2026-07-15: human-in-the-loop gate — the social daemon must never
-        # auto-send (see docs/TASK_BRIEF_chat_sync_and_reply_gap_2026-07-15.md
-        # Phase 3). Every would-auto-send reply becomes a draft for admin
-        # approval instead of an entry in social_reply_queue.
-        draft_id = await _draft_instead_of_send(
+        # Selective draft policy (2026-07-15, Owner-confirmed -- see
+        # docs/TASK_BRIEF_chat_sync_and_reply_gap_2026-07-15.md Phase 4): only
+        # senders matching the existing DRAFT_ALWAYS_ROLES/PHONES/NAMES config
+        # (modules.bridge_poller._is_draft_always(), the same mechanism the
+        # legacy bridge_poller path already uses) get routed to an admin-
+        # approval draft. Everyone else gets a real auto-send, matching
+        # pre-2026-06-23 behavior, once the underlying send-worker bug is fixed.
+        if await _is_draft_always_sender(target_id, events[-1]):
+            draft_id = await _draft_instead_of_send(
+                platform=platform,
+                target_id=target_id,
+                reply_text=plan.reply_text,
+                intent=plan.intent,
+                sender_role=sender_role,
+            )
+            if draft_id:
+                await execute("UPDATE social_inbox_events SET reply_status='drafted' WHERE id = ANY($1::bigint[])", plan.event_ids)
+                planned += 1
+            continue
+        queue_id = await enqueue_reply(
+            event_id=plan.event_ids[-1],
             platform=platform,
             target_id=target_id,
             reply_text=plan.reply_text,
             intent=plan.intent,
-            sender_role=sender_role,
+            conversation_id=events[-1].get("conversation_id"),
+            reply_to_comment_id=plan.reply_to_comment_id,
+            source_bridge=None,
+            meta={"combined_event_ids": plan.event_ids, "planner": "context_v1", "sender_role": sender_role},
         )
-        if draft_id:
-            await execute("UPDATE social_inbox_events SET reply_status='drafted' WHERE id = ANY($1::bigint[])", plan.event_ids)
+        if queue_id:
+            await execute("UPDATE social_inbox_events SET reply_status='queued' WHERE id = ANY($1::bigint[])", plan.event_ids)
             planned += 1
     return {"planned": planned, "flagged": flagged, "skipped": skipped}
+
+
+async def _is_draft_always_sender(target_id: str, latest_event: dict) -> bool:
+    """
+    Reuses modules.bridge_poller._is_draft_always() (phone/role/name-prefix
+    match against DRAFT_ALWAYS_PHONES/ROLES/NAMES) rather than re-implementing
+    the match rules -- same identity source (modules.identity_brain.detect_identity)
+    the legacy bridge_poller path already uses for this exact check.
+
+    target_id is not always a phone number (e.g. Facebook comment/PSID
+    identifiers) -- detect_identity() safely falls back to role="unknown" for
+    anything that doesn't normalize as a phone, which never matches
+    DRAFT_ALWAYS_ROLES, so non-WhatsApp senders correctly fall through to the
+    real-send path unless separately matched by name.
+    """
+    from modules.bridge_poller import _is_draft_always
+    from modules.identity_brain import detect_identity
+
+    text = str(latest_event.get("message_text") or "")
+    identity = await detect_identity(target_id, text)
+    role = identity.get("role") or "unknown"
+    display_name = (identity.get("display_name") or "").strip()
+    return _is_draft_always(target_id, role, display_name)
 
 
 def _primary_admin_number() -> str:

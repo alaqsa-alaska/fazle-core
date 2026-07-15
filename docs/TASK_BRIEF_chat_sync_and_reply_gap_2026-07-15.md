@@ -1,8 +1,9 @@
 ---
 title: Task Brief — Chat History Sync (Phase 1) then Reply-Gap Fix (Phase 2)
 owner: Fazle Core Admin
-status: not started
+status: phase 1 partially done (table + one-time backfill, continuous sync service not yet deployed); phase 2 done (Selective draft policy, see knowledge_base/00_governance/management_decisions.md Session 13, and knowledge_base/06_developer_system/social_auto_reply_system.md "Draft vs. Real-Send Routing")
 created: 2026-07-15
+updated: 2026-07-15
 ---
 
 # Task Brief: Chat History Sync, then Reply-Gap Fix

@@ -18,6 +18,7 @@ from modules.fazle_payroll_engine.validation import (
 from modules.fazle_payroll_engine.workers import _eligible_for_accounting_review, _should_skip_payroll_parse
 from modules.fazle_payroll_engine.employee import (
     create_employee_manual,
+    match_or_create_employee,
     _is_valid_human_name,
 )
 from modules.fazle_payroll_engine.reconcile import compute_reconciliation
@@ -606,3 +607,50 @@ class TestFazlePayrollEngineTierGates:
             line_end = source.find("\n", m.end())
             line = source[line_start:line_end]
             assert '"/ingest"' in line, f"unexpected weak gate: {line}"
+
+
+class TestWbomCrossLookupStatusCase:
+    """
+    2026-07-15 fix: the WBOM cross-lookup in match_or_create_employee() compared
+    `status != 'inactive'` (lowercase literal) against wbom_employees.status,
+    which is stored Title-case ('Active'/'Inactive'). Postgres text comparison
+    is case-sensitive, so the filter was a permanent no-op -- Inactive WBOM
+    employees were never excluded. Fixed to `LOWER(status) != 'inactive'`.
+    """
+
+    async def test_inactive_wbom_employee_excluded_from_cross_lookup(
+        self, test_db_pool, seed_employee
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE wbom_employees SET status='Inactive' WHERE employee_id=$1",
+                seed_employee["employee_id"],
+            )
+            fpe_row = await conn.fetchrow(
+                """
+                INSERT INTO fpe_employees
+                    (employee_code, full_name, name_normalized, primary_phone,
+                     status)
+                VALUES ('EMP-CROSSLOOKUP', $1, $2, $3, 'active')
+                RETURNING id
+                """,
+                seed_employee["employee_name"],
+                seed_employee["employee_name"].lower().strip(),
+                seed_employee["employee_mobile"],
+            )
+
+        result = await match_or_create_employee(
+            name_raw=None,
+            payout_phone=None,
+            employee_id_phone=seed_employee["employee_mobile"],
+        )
+
+        # Must resolve to the existing FPE employee (correct identity), but
+        # NOT via the wbom_phone_match path -- that path must treat this
+        # Inactive WBOM employee as excluded, same as an active-status one
+        # that simply has no WBOM counterpart at all.
+        assert result.employee_id == fpe_row["id"]
+        assert result.match_type != "wbom_phone_match"

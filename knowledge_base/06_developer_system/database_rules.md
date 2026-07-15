@@ -243,6 +243,8 @@ The FPE subsystem has 5 asyncio workers (all ACTIVE — see `fpe_overview.md`). 
 
 The FPE maintains its own employee directory (`fpe_employees`) separate from the HR master (`wbom_employees`). After migration 008, these are soft-linked: `fpe_employees.wbom_employee_id → wbom_employees.employee_id` (nullable FK matched via phone last-10 normalization).
 
+**Status casing differs by table — do not assume one convention across both:** `wbom_employees.status` is Title-case (`Active`/`Inactive`); `fpe_employees.status` is lowercase (`active`/`inactive`). Any query comparing across both (e.g. `modules/fazle_payroll_engine/employee.py`'s WBOM cross-lookup) must compare case-insensitively (`LOWER(status)`) when checking `wbom_employees`, and can compare lowercase directly against `fpe_employees`. A 2026-07-15 fix corrected exactly this: a case-sensitive `!= 'inactive'` literal against `wbom_employees.status` was a permanent no-op (Postgres text comparison is case-sensitive, so `'Inactive' != 'inactive'` was always true), meaning Inactive WBOM employees were never actually excluded from that lookup.
+
 **Payment Draft Lifecycle (cross-domain):**
 Escort program completion → `fazle_payment_drafts` created (ST) → admin approves → `fpe_cash_transactions` written via `create_transaction()` + `escort_roster_entries` status updated.
 

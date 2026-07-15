@@ -105,6 +105,8 @@ ALLOWED_TRANSITIONS = {
 
 All transitions write to `wbom_payroll_approval_log` (actor, from_status, to_status, reason).
 
+**`PAYROLL PAID` also posts to the canonical FPE ledger (fixed 2026-07-15):** previously `mark_paid()` only performed the `wbom_payroll_runs` status flip and audit-log write above — it never wrote a `fpe_cash_transactions` row, meaning payroll payouts never appeared in the canonical cash ledger (`daily_cash_transaction_source_of_truth.md`). It now resolves the FPE employee via `fpe_employees.wbom_employee_id` and calls `create_transaction()` (category `salary`, status `final`) in the same transition. If no active FPE employee is linked to the WBOM employee, the transition **fails closed** — `PAYROLL PAID` returns an error and the run stays `locked`, rather than being marked paid with no ledger entry.
+
 ---
 
 ## `wbom_payroll_runs` — Column Schema

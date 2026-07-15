@@ -2,7 +2,7 @@
 title: Social Auto-Reply System — System Overview
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-07-15
 runtime_index: true
 ---
 
@@ -113,7 +113,9 @@ planner_worker (every daemon tick)
   ├── intent classification: classify(text)
   ├── escalation check → social_flagged_items (needs_admin)
   ├── risky check → social_flagged_items (manual_review)
-  └── safe intent → social_reply_queue (pending)
+  ├── DRAFT_ALWAYS_* sender (see "Draft vs. Real-Send Routing" below)
+  │     → fazle_draft_replies (pending admin approval) + admin notification
+  └── everyone else → social_reply_queue (pending)
          ↓
 daemon_worker (main loop)
   ├── heartbeat → fazle_service_heartbeats
@@ -131,6 +133,43 @@ send_queue (1 message per tick)
 social_sent_log                 ← immutable sent record
 social_inbox_events.reply_status ← updated to 'sent'
 ```
+
+---
+
+## Draft vs. Real-Send Routing (2026-07-15, Owner-confirmed: Selective policy)
+
+`modules/social_auto_reply/planner_worker.py`'s `process_due_threads()` branches on
+`_is_draft_always_sender(target_id, latest_event)` for every plan with `auto_send=True`:
+
+- **True** (sender matches `DRAFT_ALWAYS_ROLES`/`DRAFT_ALWAYS_PHONES`/`DRAFT_ALWAYS_NAMES`,
+  same config the legacy `modules/bridge_poller` path already uses) → `_draft_instead_of_send()`
+  creates a `fazle_draft_replies` row and notifies the primary admin (`purpose=
+  "social-draft-pending"`). Never reaches `social_reply_queue`.
+- **False** (everyone else) → `enqueue_reply()` → `social_reply_queue` → real dispatch via
+  `send_queue.sweep_once()`, same as before 2026-06-23.
+
+`_is_draft_always_sender()` resolves identity via `modules.identity_brain.detect_identity()`
+(role + display_name) and calls `modules.bridge_poller._is_draft_always()` directly — the
+match rules are not reimplemented here. `target_id` is not always a phone number (Facebook
+comment/PSID identifiers, `meta_whatsapp` numbers, etc.) — `detect_identity()` safely falls
+back to `role="unknown"` for anything that doesn't normalize as a phone, which never matches
+`DRAFT_ALWAYS_ROLES`, so non-WhatsApp senders correctly fall through to real-send unless
+separately matched by name.
+
+**History, for anyone reconciling against an older commit:** an interim commit the same day
+(`7bbe641`) briefly made this draft for *every* sender unconditionally (no per-sender branch
+at all) while the underlying disabled-send-worker bug was being root-caused. That was never
+the intended end state — the Owner's confirmed policy is Selective, matching the
+`DRAFT_ALWAYS_*` list exactly as described above, not a blanket policy. See
+`knowledge_base/00_governance/management_decisions.md` for the recorded decision.
+
+**Root cause of the 2026-06-23→07-15 reply gap:** `SOCIAL_AUTO_REPLY_ENABLED` was never set
+in `.env` (defaulting to `false` in `state_tracker.daemon_enabled()`) since the single-engine
+routing (`SOCIAL_AUTO_REPLY_SINGLE_ENGINE=true`) was introduced — inbound messages were
+ingested into `social_inbox_events` correctly, but the daemon that plans and sends replies
+never actually ran. Fixed 2026-07-15 by setting `SOCIAL_AUTO_REPLY_ENABLED=true`, paired with
+an activation watermark (`social_backlog_state`, see `modules/social_auto_reply/state_tracker.py::get_activation_watermark()`)
+so the ~1 month of accumulated backlog is never swept in one burst on first activation.
 
 ---
 
