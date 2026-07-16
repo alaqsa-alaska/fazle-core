@@ -494,3 +494,31 @@ proposal") as scoped down in that doc.
 | S16-02 | `modules/escort_roster/db.py` | `expire_stale_drafts()` gained a second sweep for legacy `status='expired'` rows past TTL. |
 | S16-02 | `knowledge_base/05_workflows/escort_source_of_truth_workflow.md` | Documented the sender-validation gate functions and 24h hard-delete behavior by name. |
 | S16-02 | `knowledge_base/06_developer_system/escort_roster_system.md` | Added `expired` row to the program-status → roster-status mapping table. |
+
+---
+
+## Session 17 — Escort Audit Phase 2: Legacy Drafts, S/N 777, Historical & Duplicate Review (2026-07-16)
+
+### Management Authorization (Session 17)
+
+Owner directed Phase 2 cleanup and review, 5 items. Full findings in
+`knowledge_base/00_governance/escort_sender_validation_audit_phase2_2026-07-16.md`.
+No code changes were needed (S/N 777's parser bug confirmed non-reproducible against
+current code), so per Owner's instruction this session is data cleanup + documentation
+only.
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S17-01 | Delete 10 legacy known-sender expired drafts | program_id: 141, 759, 760, 761, 763, 764, 768, 770, 771, 777 — registered sender, pre-2026-06-27, abandoned mid-order, verified financially inert. Audit-logged (`manual_legacy_expired_cleanup`) before delete. | 2026-07-16 |
+| S17-02 | S/N 777 reproducibility test — no code change | Raw message recovered from `wbom_whatsapp_messages`, replayed through current `parse_escort_message()` in isolation. The original "label leakage into lighter_vessel" defect does not reproduce; `is_minimum_escort_order()` now correctly rejects the message outright (no mother vessel stated) instead of saving a corrupted row. Folded into S17-01's delete batch. | 2026-07-16 |
+| S17-03 | Historical backfill 9-row review — recommendations only, no edits made | 699/702/704/718/727 = keep (blank master_mobile is correct per source text). 703/707 = flagged for admin input (unclaimed phone-like number near lighter name, ambiguous vs Escort Mobile). 734 = flagged for admin review (no MV label in source at all, most ambiguous). 933 = recommend delete as duplicate of 934 (933 is the system's own internal admin-review alert text, accidentally backfilled as if it were a real confirmation) — **not deleted, pending sign-off**. | 2026-07-16 |
+| S17-04 | Duplicate review corrected: 6 of 8 pairs are not duplicates | Original detection grouped by mv+lv+master only, missing `program_date` — 58/136, 60/107, 62/93, 900/905, 901/906 all have different program_dates (legitimate separate runs of a recurring vessel/lighter pairing), not duplicates. Only 1/9 and 3/10 (same date, 10 minutes apart, same 2026-04-18 bulk-seed batch) look like genuine accidental duplicates. **No deletions made** for 1/9, 3/10, or 933/934 — all three pending explicit sign-off. | 2026-07-16 |
+| S17-05 | master_mobile blank-field rule documented from KB | `escort_business_rules.md`: Master Mobile is a required *draft* field but NOT a required *confirmation* field. Rows created via `_create_confirmed_from_admin()` (`auto_created=true`) can legitimately have a blank master_mobile; rows that went through a real draft first should not. The 189 flagged rows were not individually reclassified — report only, per Owner's instruction. | 2026-07-16 |
+| S17-06 | New finding, out of scope, not acted on | 900/901/905/906 all have `destination` containing leaked `"Escort Name: X"` text instead of a place name. Reproducibility unconfirmed (no matching raw message found in `wbom_whatsapp_messages` to replay). Flagged for a possible future follow-up audit; no action taken this session. | 2026-07-16 |
+
+### Files Authorized for Change (Session 17)
+
+| ID | File | Change |
+|---|---|---|
+| S17-01 | *(data only, one-time)* | 10 rows deleted via `scripts/cleanup_legacy_expired_escort_rows_20260716.py`, audit-logged first. |
+| — | *(no code changes this session)* | S/N 777 confirmed non-reproducible; no fix needed. |
