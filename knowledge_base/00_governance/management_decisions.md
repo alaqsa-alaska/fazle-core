@@ -522,3 +522,30 @@ only.
 |---|---|---|
 | S17-01 | *(data only, one-time)* | 10 rows deleted via `scripts/cleanup_legacy_expired_escort_rows_20260716.py`, audit-logged first. |
 | — | *(no code changes this session)* | S/N 777 confirmed non-reproducible; no fix needed. |
+
+---
+
+## Session 18 — Escort Duplicate Cleanup + Issue Tracking (2026-07-16)
+
+### Management Authorization (Session 18)
+
+Owner approved deleting the 3 confirmed duplicate rows identified in Phase 2, declined
+to auto-correct the 3 ambiguous historical rows (703, 707, 734), and asked for the
+destination-field-leak finding to be tracked as a documented-but-unfixed issue rather
+than investigated further right now. Data-only session, no application code touched, no
+service restart performed.
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S18-01 | Delete 3 confirmed duplicate rows | program_id 933 (dup of 934), 1 (dup of 9), 3 (dup of 10). Re-verified zero references across every FK-linked table (`fpe_cash_transactions`, `wbom_cash_transactions`, `wbom_billing_records`, `wbom_cases`, `wbom_whatsapp_messages`, `fazle_payment_drafts`, `escort_order_lighters`) before deleting. `escort_shift_logs` (7 rows each for 1 and 3, no FK) deleted alongside. `escort_roster_entries` for 1/3 had non-zero computed `total`/`net_payable` (৳1,400 / ৳3,000) — flagged explicitly since this differs from every other row removed in this audit; confirmed no actual payout (`fpe_cash_transactions`) existed, and the kept sibling (9/10) carries the identical computed amount, so nothing is lost. Audit-logged (`manual_duplicate_cleanup`) before each delete. | 2026-07-16 |
+| S18-02 | 703/707/734 left as-is | Owner directive: do not guess at field ownership when raw text is ambiguous. Review note added to the Phase 2 KB doc instead of an edit. | 2026-07-16 |
+| S18-03 | Destination-field leak tracked as a separate open issue | New doc `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md` — evidence (4 known rows), what was checked (could not locate the source admin messages to test reproducibility, unlike S/N 777), and a recommended-next-step list. No fix attempted, no proposal written — explicitly a documentation-only holding doc per Owner's instruction. | 2026-07-16 |
+
+### Files Authorized for Change (Session 18)
+
+| ID | File | Change |
+|---|---|---|
+| S18-01 | *(data only, one-time)* | 3 rows deleted via `scripts/cleanup_confirmed_duplicate_escort_rows_20260716.py`, audit-logged first. |
+| S18-02 | `knowledge_base/00_governance/escort_sender_validation_audit_phase2_2026-07-16.md` | Added review note for 703/707/734; updated §6 deleted-IDs summary. |
+| S18-03 | `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md` | New — issue tracking doc, no code change. |
+| — | *(no application code changes this session)* | Data-only; no service restart performed. |

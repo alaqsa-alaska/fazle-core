@@ -102,6 +102,19 @@ report only, per Owner's instruction ("do not mass-edit the other historical row
 | 734 | `GM Fortune / Rafiq Mansur-1 / Escort: Shahin / Mobile: 01302857234` | **mother_vessel blank**, lv=`'GM Fortune'` | **Needs admin review — most ambiguous of the 9.** This is the only one of the 9 with no `MV`/`Mother Vessel` label anywhere in the raw text, so the extractor had nothing to anchor on. It read the first line (`GM Fortune`) as the lighter vessel and dropped the second line (`Rafiq Mansur-1`, which looks like it was meant to be the lighter) entirely. Whether `GM Fortune` is actually the mother vessel (label just omitted) or something else needs someone who knows this vessel to decide — I can't resolve it from text alone. |
 | 933 / 934 | See below | | **Merge-delete 933, keep 934.** |
 
+### Review note — 703, 707, 734 (added 2026-07-16, post Owner review)
+
+**Left as-is, not auto-corrected.** 703 and 707 each have an unclaimed phone-like
+number sitting in the raw text next to the lighter name, distinct from the Escort
+Mobile also present in the same message — plausibly the missing master_mobile, but the
+two numbers differ by a digit and I cannot determine which one (if either) is
+authoritative without domain/vessel knowledge. 734 is the most ambiguous of the 9: its
+raw text has no `MV`/`Mother Vessel` label at all, so whether `GM Fortune` is the
+mother vessel (label just omitted) or something else can't be resolved from the text
+alone. Per Owner's explicit instruction: **do not guess** at field ownership when the
+raw text is ambiguous — these three require a human with vessel/route knowledge to
+correct safely, and stay flagged-but-unedited until then.
+
 ### 933 / 934 — not a normal duplicate
 
 `933`'s `raw_block` is not a client/admin escort message at all — it's the **system's own internal admin-review alert text**, captured verbatim:
@@ -197,13 +210,28 @@ quick, cheap next query — say the word and I'll run it.
 
 ---
 
-## 6. Program IDs deleted this session
+## 6. Program IDs deleted
 
-`141, 759, 760, 761, 763, 764, 768, 770, 771, 777` — see §1. Audit trail:
-`escort_roster_audit_logs`, action `manual_legacy_expired_cleanup`.
+**2026-07-16, initial pass:** `141, 759, 760, 761, 763, 764, 768, 770, 771, 777` — see
+§1. Audit trail: `escort_roster_audit_logs`, action `manual_legacy_expired_cleanup`.
 
-**Not deleted, pending sign-off:** 933 (duplicate of 934), 3 (duplicate of 10), 1
-(duplicate of 9).
+**2026-07-16, follow-up (Owner sign-off on the 3 confirmed duplicates):** `933`
+(duplicate of 934, kept), `1` (duplicate of 9, kept), `3` (duplicate of 10, kept).
+Pre-delete re-verification checked every table with a `program_id`/`related_program_id`
+FK to `wbom_escort_programs` (`fpe_cash_transactions`, `wbom_cash_transactions`,
+`wbom_billing_records`, `wbom_cases`, `wbom_whatsapp_messages`,
+`fazle_payment_drafts`, `escort_order_lighters`) — zero references on all three.
+`escort_shift_logs` had 7 release-log rows each for program_id 1 and 3 (no FK
+constraint, but deleted alongside to avoid dangling references); 0 for 933.
+`escort_roster_entries` for 1 and 3 had non-zero `total`/`net_payable`
+(৳1,400 and ৳3,000 respectively) — flagged and checked explicitly since this differs
+from every other row removed in this audit, but confirmed there was no
+`fpe_cash_transactions` entry behind it (i.e., a roster amount was computed/displayed,
+but no actual payout was ever recorded against these specific duplicate rows — the kept
+sibling, 9/10, carries the same computed amount, so nothing is lost). Audit trail:
+`escort_roster_audit_logs`, action `manual_duplicate_cleanup`.
 
 **Not touched, per instruction:** the 189 blank-field rows; the other 65
-non-flagged historical rows; the destination-leak finding in §4.
+non-flagged historical rows; historical rows 703, 707, 734 (§3 review note above); the
+destination-leak finding, now tracked separately — see
+[escort_destination_field_leak_issue_2026-07-16.md](escort_destination_field_leak_issue_2026-07-16.md).
