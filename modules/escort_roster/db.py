@@ -1226,7 +1226,48 @@ async def expire_stale_drafts(hours: int = 24, actor: str = "scheduler") -> dict
         )
     count = len(stale)
     log.info(f"[expire_drafts] Deleted {count} stale drafts (>{hours}h, actor={actor})")
-    return {"expired": count, "message": f"Deleted {count} stale draft(s) older than {hours}h"}
+
+    # Defensive sweep (Session 16, S16-02): a pre-2026-07-05 bug path could
+    # leave a program sitting in status='expired' instead of being deleted
+    # (see knowledge_base/00_governance/escort_sender_validation_audit_2026-07-16.md,
+    # 18 such rows found and cleaned up one-time). Nothing has produced a new
+    # row via that path since the 2026-07-05 fix, but Rule 3 is "no draft
+    # exists beyond 24h under any circumstance" — so also catch any
+    # financially-inert legacy 'expired' row past TTL here, every run, as
+    # insurance against a future edge case reintroducing the same limbo.
+    legacy_expired = await fetch_all(
+        """
+        SELECT p.*, e.id AS roster_entry_id
+        FROM wbom_escort_programs p
+        LEFT JOIN escort_roster_entries e ON e.program_id = p.program_id
+        WHERE p.status = 'expired'
+          AND p.escort_employee_id IS NULL
+          AND p.assignment_time < NOW() - ($1 || ' hours')::INTERVAL
+        """,
+        str(hours),
+    )
+    legacy_count = 0
+    if legacy_expired:
+        legacy_ids = [r["program_id"] for r in legacy_expired]
+        for row in legacy_expired:
+            await log_audit(
+                program_id=row["program_id"],
+                action="legacy_expired_ttl_deleted",
+                old_data=dict(row),
+                new_data={"status": "deleted"},
+                performed_by=actor,
+                source="scheduler",
+            )
+        await execute("DELETE FROM escort_roster_entries WHERE program_id = ANY($1::int[])", legacy_ids)
+        await execute(
+            "DELETE FROM wbom_escort_programs WHERE program_id = ANY($1::int[]) AND status = 'expired'",
+            legacy_ids,
+        )
+        legacy_count = len(legacy_ids)
+        log.info(f"[expire_drafts] Deleted {legacy_count} legacy financially-inert 'expired' row(s) (>{hours}h, actor={actor})")
+
+    total = count + legacy_count
+    return {"expired": total, "message": f"Deleted {count} stale draft(s) + {legacy_count} legacy expired row(s) older than {hours}h"}
 
 
 async def reconcile_drafts_for_confirmation(

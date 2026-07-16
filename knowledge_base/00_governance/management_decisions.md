@@ -463,3 +463,34 @@ same sync pattern to those three fields.
 |---|---|---|
 | S15-01 | `modules/admin_employees/__init__.py` | `update_employee()` gained a post-write sync step propagating designation/basic_salary/joining_date to `fpe_employees` via `wbom_employee_id`. |
 | S15-02 | `modules/admin_employees/__init__.py` | `update_employee()` now parses `joining_date` into a `date` object before the SQL bind, instead of passing the raw string through. |
+
+---
+
+## Session 16 — Escort Sender Validation Audit & Historical Cleanup (2026-07-16)
+
+### Management Authorization (Session 16)
+
+Owner requested an audit of escort-roster S/N provenance (869, 871, 873, 880 and others)
+against 4 non-negotiable business rules on sender validation, draft lifecycle, and
+source-of-truth. Full discovery + 6-part proposal written to
+`knowledge_base/00_governance/escort_sender_validation_audit_2026-07-16.md`. Key finding:
+the requested sender-validation gates (Rules 1-2) and 24h hard-delete (Rule 3) were
+**already implemented** in commits `41916b0` (2026-06-27) and `82f2b33` (2026-07-05) —
+verified via `git log -S` and zero unauthorized-sender/soft-expired rows created since
+those dates. The only live gap was 18 historical rows predating the 2026-06-27 gate that
+were never retroactively swept. Owner approved the full proposal ("Approve full
+proposal") as scoped down in that doc.
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S16-01 | Delete 18 historical unauthorized-sender `wbom_escort_programs` rows | program_id: 155, 213, 214, 219, 229, 230, 765, 769, 774, 779, 808, 840, 851, 860, 869, 871, 873, 880 — all pre-date the 2026-06-27 sender-validation gate, all verified financially inert (no `escort_employee_id`, zero `fpe_cash_transactions` references). Full row content logged to `escort_roster_audit_logs` (action `manual_unauthorized_sender_cleanup`) before each delete. `940` (`is_historical=true`) and the 5 known-sender expired drafts explicitly NOT touched, per Owner's constraint. | 2026-07-16 |
+| S16-02 | Defensive sweep for legacy `status='expired'` rows | `expire_stale_drafts()` in `modules/escort_roster/db.py` extended to also catch any *future* financially-inert `status='expired'` row past TTL, so the "stuck in expired limbo" failure mode (root cause of S16-01's backlog) can't recur even in an edge case. Not required by current evidence — pure defensive addition per Rule 3's "no exceptions" framing. | 2026-07-16 |
+
+### Files Authorized for Change (Session 16)
+
+| ID | File | Change |
+|---|---|---|
+| S16-01 | *(data only, one-time)* | 18 rows deleted from `wbom_escort_programs` + `escort_roster_entries` via `scripts/cleanup_unauthorized_sender_escort_rows_20260716.py`, audit-logged first. |
+| S16-02 | `modules/escort_roster/db.py` | `expire_stale_drafts()` gained a second sweep for legacy `status='expired'` rows past TTL. |
+| S16-02 | `knowledge_base/05_workflows/escort_source_of_truth_workflow.md` | Documented the sender-validation gate functions and 24h hard-delete behavior by name. |
+| S16-02 | `knowledge_base/06_developer_system/escort_roster_system.md` | Added `expired` row to the program-status → roster-status mapping table. |

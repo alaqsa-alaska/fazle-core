@@ -92,3 +92,31 @@ Live non-destructive verification completed on 2026-06-27 confirmed:
 - duplicate prevention works
 - roster list and export search both work
 - browser search, view, edit, recalculate, config, escort-client management, and export all work
+
+## Enforcement — Where The Gates Actually Live
+
+Added in commit `41916b0` (2026-06-27) and unchanged since:
+
+- **Draft creation gate** (`modules/escort/__init__.py`, `handle_escort_client_message()`):
+  `_is_trusted_escort_source(source)` (bridge must be in `ESCORT_TRUSTED_SOURCES`) and
+  `_is_allowed_escort_client(sender_phone)` (sender must be in `ESCORT_CLIENT_PHONES`),
+  both checked before parsing; `is_minimum_escort_order(order)` (mother vessel + at
+  least one lighter with lighter_vessel + master_mobile) checked before saving.
+- **Confirmation gate** (`handle_admin_escort_completion()`):
+  `_is_authoritative_bridge_confirmation(ctx)` — sender must be one of
+  `ADMIN_NUMBERS`/`ADMIN_META_NUMBER`/`ADMIN_BRIDGE1_NUMBER`/`ADMIN_BRIDGE2_NUMBER`, and
+  if a recipient is given it must be a registered `ESCORT_CLIENT_PHONES` entry.
+- **Draft TTL**: unconfirmed drafts (`status='draft'`) are hard-**deleted**, not
+  soft-expired, after `DRAFT_TTL_HOURS` (default 24) — `expire_stale_drafts()` in
+  `modules/escort_roster/db.py`, added in commit `82f2b33` (2026-07-05), run on a
+  schedule by `modules/scheduler`. Full row content is written to
+  `escort_roster_audit_logs` before each delete.
+
+Session 16 (2026-07-16) audited this against an explicit non-negotiable business-rule
+set and found all of the above already enforced; the only gap was 18 historical rows
+predating the 2026-06-27 gate that had gone through the *old* soft-expire path and were
+never retroactively swept — cleaned up one-time, see
+`knowledge_base/00_governance/escort_sender_validation_audit_2026-07-16.md`. A
+defensive second sweep for any future financially-inert legacy `status='expired'` row
+was added to `expire_stale_drafts()` so this specific failure mode can't recur even in
+an edge case.

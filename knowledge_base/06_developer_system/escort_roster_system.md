@@ -64,6 +64,7 @@ Current mapping:
 | `running` | `active` |
 | `completed` | `completed` |
 | `cancelled` | `cancelled` |
+| `expired` | `expired` — draft that missed the 24h confirmation TTL. Should be transient: `expire_stale_drafts()` hard-deletes `status='draft'` rows past TTL directly (added 2026-07-05), so a row is not expected to sit in this state for long. A defensive second sweep (added 2026-07-16, Session 16) also deletes any financially-inert legacy `expired` row past TTL, in case a future edge case produces one instead of a clean delete. |
 
 ## Sync And Recalculate Behavior
 
