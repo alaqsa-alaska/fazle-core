@@ -11,6 +11,7 @@ Rules:
 """
 import logging
 import math
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -331,6 +332,14 @@ async def update_employee(emp_id: int, body: EmployeeUpdate):
         # Convert empty string to NULL for optional fields
         if field not in ("employee_name", "designation", "status") and val == "":
             val = None
+        # joining_date is a DATE column in both wbom_employees and
+        # fpe_employees; EmployeeUpdate carries it as a plain ISO string
+        # (see class docstring), which asyncpg will not auto-cast.
+        if field == "joining_date" and val is not None:
+            try:
+                val = date.fromisoformat(val)
+            except ValueError:
+                raise HTTPException(400, "joining_date must be an ISO date (YYYY-MM-DD)")
         set_parts.append(f"{field} = ${idx}")
         params.append(val)
         resolved[field] = val
