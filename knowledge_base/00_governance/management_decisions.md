@@ -410,3 +410,30 @@ authorized as a management decision without a separate approval round per phase.
 | S13-02 | `modules/payroll/__init__.py` | `_transition()`/`mark_paid()` now call new `_post_payroll_ledger_entry()`; fail-closed FPE-link check added. |
 | S13-03 | `modules/payroll/__init__.py` | `compute_run()` gained `prorate_basic` param + `_prorated_basic()` helper; `compute_all_for_period_office_only()` passes `prorate_basic=True`. |
 | S13-04 | `modules/fazle_payroll_engine/employee.py` | Case-insensitive status comparison in the WBOM cross-lookup query. |
+
+---
+
+## Session 14 — Payroll "View All Transactions" Fix (2026-07-16)
+
+### Management Authorization (Session 14)
+
+Owner (superadmin) approved the read-only audit's proposal ("Approve as-is") for the
+Employees → side panel → "View All Transactions" button, which was firing a redundant
+unfiltered fetch racing against the filtered one and never clearing the default
+current-month period filter, and had no URL/deep-link support at all for an
+employee-scoped transactions view.
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S14-01 | Single-fetch, filter-clean navigation to employee transactions | Button now clears all transaction filters (period/method/from/to/category) before setting `employee_id`, then triggers exactly one `loadTransactions()` call via `navigate()` — removes the prior double-fetch race. | 2026-07-16 |
+| S14-02 | Frontend router gains optional employee-ID path segment | `tabFromPath()`/`pathForTab()`/`activateTab()` extended so `/payroll/transactions/{id}` is parsed on load/deep-link/refresh and pre-populates the employee filter; all other tab paths unaffected. | 2026-07-16 |
+| S14-03 | Backend route `/payroll/transactions/{employee_id}` | New int-typed FastAPI route serving the same `payroll.html` SPA shell, mirroring the existing `payroll_spa_tab` pattern. Employee **ID** used, not raw name, to avoid display-name collisions. | 2026-07-16 |
+
+### Files Authorized for Change (Session 14)
+
+| ID | File | Change |
+|---|---|---|
+| S14-01 | `app/static/payroll.html` | Replaced inline onclick on the "View All Transactions" button with a named handler that clears filters and fires a single load. |
+| S14-02 | `app/static/payroll.html` | `tabFromPath()`, `pathForTab()`, `activateTab()` updated for optional employee-ID segment on the `transactions` tab. |
+| S14-03 | `app/main.py` | New `@app.get("/payroll/transactions/{employee_id}")` route. |
+| S14-03 | `docs/DEVELOPER_GUIDE.md` | Route list updated to document the new employee-scoped deep link. |

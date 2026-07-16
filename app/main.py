@@ -1828,6 +1828,12 @@ async def payroll_spa_tab():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "payroll.html"))
 
 
+@app.get("/payroll/transactions/{employee_id}", response_class=HTMLResponse)
+async def payroll_spa_employee_transactions(employee_id: int):
+    """Employee-scoped transactions deep link — same SPA shell, employee_id filter is applied client-side."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "payroll.html"))
+
+
 @app.get("/escort-roster", response_class=HTMLResponse)
 @app.get("/escort-roster.html", response_class=HTMLResponse)
 async def escort_roster_spa():

@@ -2067,13 +2067,21 @@ function updateNavUsername() {
 function tabFromPath() {
   const p = location.pathname.replace(/\/+$/, '');
   if (p === '' || p === '/payroll') return 'overview';
-  const m = p.match(/^\/payroll\/([a-z]+)$/);
+  const m = p.match(/^\/payroll\/([a-z]+)(?:\/(\d+))?$/);
   if (m && VALID_TABS.includes(m[1])) return m[1];
   return 'overview';
 }
 
-function pathForTab(name) {
-  return name === 'overview' ? '/payroll' : '/payroll/' + name;
+// Employee-scoped deep link: /payroll/transactions/{employee_id}
+function empIdFromPath() {
+  const p = location.pathname.replace(/\/+$/, '');
+  const m = p.match(/^\/payroll\/transactions\/(\d+)$/);
+  return m ? m[1] : null;
+}
+
+function pathForTab(name, subId) {
+  const base = name === 'overview' ? '/payroll' : '/payroll/' + name;
+  return (name === 'transactions' && subId) ? base + '/' + subId : base;
 }
 
 function activateTab(name) {
@@ -2090,6 +2098,10 @@ function activateTab(name) {
     }
   }
   if (!VALID_TABS.includes(name)) name = 'overview';
+  if (name === 'transactions') {
+    const empId = empIdFromPath();
+    if (empId) document.getElementById('txnEmpId').value = empId;
+  }
   document.querySelectorAll('.tab').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('nav button[data-tab]').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.sidebar-menu button[data-tab]').forEach(b => b.classList.remove('active'));
@@ -2105,8 +2117,8 @@ function activateTab(name) {
   highlightActiveGroup(name);
 }
 
-function navigate(name, replace = false) {
-  const target = pathForTab(name);
+function navigate(name, replace = false, subId = null) {
+  const target = pathForTab(name, subId);
   if (location.pathname !== target) {
     if (replace) history.replaceState({tab: name}, '', target);
     else         history.pushState({tab: name}, '', target);
@@ -2137,6 +2149,18 @@ function loadTab(name) {
 
 function refreshCurrent() { loadTab(currentTab); loadHeaderStatus(); }
 
+// Employee panel → "View All Transactions": clear stale filters, then navigate
+// once so loadTab() fires a single, correctly-filtered fetch (no race).
+function viewEmployeeTransactions(id) {
+  document.getElementById('txnPeriod').value = '';
+  document.getElementById('txnFrom').value = '';
+  document.getElementById('txnTo').value = '';
+  document.getElementById('txnMethod').value = '';
+  txnCategoryFilter = '';
+  closePanel();
+  navigate('transactions', false, id);
+}
+
 function registerPayrollPwa() {
   if (!('serviceWorker' in navigator)) return;
   navigator.serviceWorker.register('/service-worker.js').catch(() => {});
@@ -2161,7 +2185,8 @@ function initApp() {
   loadHeaderStatus();
   // Activate tab from URL (deep-link / refresh support)
   const initialTab = tabFromPath();
-  history.replaceState({tab: initialTab}, '', pathForTab(initialTab));
+  const initialEmpId = empIdFromPath();
+  history.replaceState({tab: initialTab}, '', pathForTab(initialTab, initialEmpId));
   activateTab(initialTab);
   registerPayrollPwa();
   setInterval(loadHeaderStatus, 15000);
@@ -3953,7 +3978,7 @@ async function openEmpDetail(id) {
       <div style="display:flex;gap:6px;flex-wrap:wrap;width:100%;align-items:center">
         <button class="btn sm" onclick="openEmpEdit(${e.id})">Edit</button>
         ${e.status==='active' ? `<button class="btn sm secondary" style="color:var(--err);border-color:var(--err)" onclick="deactivateEmployee(${e.id},${JSON.stringify(e.display_name)})">🚫 Deactivate</button>` : ''}
-        <button class="btn sm secondary" style="margin-left:auto" onclick="navigate('transactions');document.getElementById('txnEmpId').value=${e.id};loadTransactions(true);closePanel()">View All Transactions</button>
+        <button class="btn sm secondary" style="margin-left:auto" onclick="viewEmployeeTransactions(${e.id})">View All Transactions</button>
       </div>
     `;
   } catch(e) {
