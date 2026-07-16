@@ -322,6 +322,7 @@ async def update_employee(emp_id: int, body: EmployeeUpdate):
     set_parts: list[str] = ["updated_at = now()"]
     params: list = []
     idx = 1
+    resolved: dict = {}
 
     for field in allowed_fields:
         val = getattr(body, field, None)
@@ -332,6 +333,7 @@ async def update_employee(emp_id: int, body: EmployeeUpdate):
             val = None
         set_parts.append(f"{field} = ${idx}")
         params.append(val)
+        resolved[field] = val
         idx += 1
 
     if len(set_parts) == 1:  # only updated_at — nothing to do
@@ -347,6 +349,29 @@ async def update_employee(emp_id: int, body: EmployeeUpdate):
         f"UPDATE wbom_employees SET {set_sql} WHERE employee_id = ${idx}",
         *params,
     )
+
+    # Propagate to the linked FPE employee row — fpe_employees is what the
+    # Employees list/detail panel actually display, and unlike `status`
+    # (synced in deactivate_employee()/reactivate_employee() below) these
+    # three fields previously had no write-back path at all, so edits here
+    # were invisible everywhere else in the UI. Best-effort/non-fatal, same
+    # pattern as the status sync.
+    fpe_sync_fields = {
+        k: v for k, v in resolved.items()
+        if k in ("designation", "basic_salary", "joining_date")
+    }
+    if fpe_sync_fields:
+        try:
+            fpe_set_parts = [f"{k} = ${i + 1}" for i, k in enumerate(fpe_sync_fields)]
+            fpe_params = list(fpe_sync_fields.values())
+            fpe_params.append(emp_id)
+            await execute(
+                f"UPDATE fpe_employees SET {', '.join(fpe_set_parts)}, updated_at = now() "
+                f"WHERE wbom_employee_id = ${len(fpe_params)}",
+                *fpe_params,
+            )
+        except Exception as exc:
+            log.warning("[admin_employees] FPE field sync failed emp_id=%d: %s", emp_id, exc)
 
     row = await fetch_one(
         "SELECT * FROM wbom_employees WHERE employee_id=$1", emp_id

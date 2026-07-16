@@ -437,3 +437,27 @@ employee-scoped transactions view.
 | S14-02 | `app/static/payroll.html` | `tabFromPath()`, `pathForTab()`, `activateTab()` updated for optional employee-ID segment on the `transactions` tab. |
 | S14-03 | `app/main.py` | New `@app.get("/payroll/transactions/{employee_id}")` route. |
 | S14-03 | `docs/DEVELOPER_GUIDE.md` | Route list updated to document the new employee-scoped deep link. |
+
+---
+
+## Session 15 — Employee Edit Salary/Designation/Joining-Date Sync Fix (2026-07-16)
+
+### Management Authorization (Session 15)
+
+Owner (superadmin) reported being unable to update Salary/Designation/Joining Date from
+the Employees panel Edit form. Audit found the edits were being written successfully to
+`wbom_employees` but never propagated to `fpe_employees` — the table every display surface
+(Employees list, Employee Detail panel) actually reads — so saved changes were invisible.
+Status already had a working WBOM→FPE sync (`deactivate_employee`/`reactivate_employee`);
+Salary/Designation/Joining Date did not. Owner approved ("Approve as-is") extending the
+same sync pattern to those three fields.
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S15-01 | WBOM→FPE sync for designation/basic_salary/joining_date | `update_employee()` (PUT `/api/admin/employees/{id}`) now propagates these three fields to the linked `fpe_employees` row after the `wbom_employees` write, matched by `wbom_employee_id` (the FK — more precise than the phone-match the status sync uses). Best-effort/non-fatal, same pattern as the existing status sync. | 2026-07-16 |
+
+### Files Authorized for Change (Session 15)
+
+| ID | File | Change |
+|---|---|---|
+| S15-01 | `modules/admin_employees/__init__.py` | `update_employee()` gained a post-write sync step propagating designation/basic_salary/joining_date to `fpe_employees` via `wbom_employee_id`. |
