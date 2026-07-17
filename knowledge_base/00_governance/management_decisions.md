@@ -861,3 +861,26 @@ All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier
 
 **Remaining for Group C:** C2 (Transactions, 4 calls), C3 (Escort, 2 calls), C4 (Income, 1 call) — not yet started, plan to be presented and approved per sub-group before each is touched.
 
+---
+
+### Management Authorization (Session 20, Step 2 — Group C2)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-05 | 4 transaction ad-hoc `fetch()` calls migrated to `FazleAuthFetch` | Second of 4 Group C sub-groups. Owner reviewed and approved the exact diff for all 4 calls before implementation, including an explicit instruction to preserve `_fetchTxnSuggest()`'s pre-existing no-`res.ok`-check / silent-failure behavior unchanged rather than fix it in this session. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 2 — Group C2)
+
+| ID | File | Change |
+|---|---|---|
+| S20-05 | `app/static/payroll.html` | `_fetchTxnSuggest()` (typeahead, GET `/api/fpe/employees/suggest`): raw `fetch()` swapped for `FazleAuthFetch.fetch()` only — the missing `res.ok` check and the silent-catch behavior were deliberately left exactly as-is, per Owner instruction (documented, not fixed). `saveNewPayment()` (POST `/api/admin/transactions`) and `saveEditTxn()` (PUT `/api/admin/transactions/{id}`): raw `fetch()` + manual `r.json()`-then-check replaced with `FazleAuthFetch.postJson(...)`/`putJson(...)`. `confirmDeleteTxn()` (DELETE `/api/admin/transactions/{id}`): raw `fetch()` replaced with `FazleAuthFetch.fetch(..., {method:'DELETE'})` + `FazleAuthFetch.readError(res)` on non-ok — `shared-auth-fetch.js` was **not** modified to add a `deleteJson` helper, per Owner's standing rule against touching that file without a fatal-issue report first. |
+
+**Behavior changes (all pre-reviewed and approved by Owner, no happy-path change on any of the 4):**
+- Typeahead (GET): zero behavior change — same incidental `Content-Type` header addition as prior GET conversions in this session; the pre-existing no-`ok`-check / silent-failure quirk is explicitly preserved, not fixed, per Owner instruction.
+- Add payment (POST) and edit transaction (PUT): same class of change as Group C1's create/deactivate calls — error-message text improves (`readError()` handles array-shaped 422 `detail` and non-JSON bodies) and fixes the parse-before-check bug (old code called `res.json()` before checking `res.ok`).
+- Delete transaction (DELETE): same error-message-improvement class, implemented manually (fetch + explicit `if (!res.ok) throw new Error(await readError(res))` + `res.json()`) since no `deleteJson` helper exists — this mirrors the exact internal shape of the already-approved `clientBillingFetch`/`attendanceFetch` wrappers, so no new pattern was introduced.
+
+**Verification:** `git diff` reviewed — confirmed exactly the 4 intended hunks, no unrelated changes; `grep -n "fetch("` before/after confirms only these 4 lines changed, with the 2 remaining C3/C4 ad-hoc calls, the 2 bootstrap calls, and the 2 deferred wrappers untouched. `node -e "new Function(...)"` syntax check on the extracted inline `<script>` block passed. Committed as `cc6f96d`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`, `/static/payroll.html` served `200`.
+
+**Remaining for Group C:** C3 (Escort, 2 calls), C4 (Income, 1 call) — not yet started.
+
