@@ -640,3 +640,19 @@ This is full end-to-end confirmation of the exact failure mode Section 1B-iv des
 
 **Both Step 1 and Step 3 are now considered fully live**, not just committed to the working tree.
 
+### Session 19, Step 4 — chat_history sync: staged files verified, install still pending manual sudo
+
+Re-verified `~/chat_sync_staging/` (`sync.py`, `chat-sync.service`) against the live schema before recommending install:
+- `sync.py`'s `INSERT_SQL` column list (`thread_id, direction, sender_phone, receiver_phone, message_body, message_type, bridge, purpose, status, source_table, source_id, sent_at`) matches the live `chat_history` table exactly (12 of its 14 columns — `id` and `created_at` correctly omitted as auto-populated).
+- The `ON CONFLICT (source_table, source_id) DO NOTHING` clause is backed by a real constraint: `chat_history_source_table_source_id_key UNIQUE (source_table, source_id)`, confirmed present.
+- `chat-sync.service`: `ExecStart=/home/azim/.venv/bin/python /opt/chat_sync/sync.py` — interpreter path confirmed to exist and resolve correctly (`/home/azim/.venv/bin/python → python3.11`). `Restart=always`/`RestartSec=10` present (a stronger policy than the originally-suggested `on-failure`, no change needed). No fixes required to either staged file.
+- No schema drift since the files were staged 2026-07-15.
+
+**Not installed this session** — requires interactive `sudo` (password prompt), which this session cannot supply. Exact install commands (for the Owner to run) and rollback commands are recorded in `docs/AUDIT_REPORT_2026-07-17.md` Part 2 Step 4 and were re-confirmed unchanged during this re-verification.
+
+### Files Authorized for Change (Session 19, Step 4)
+
+| ID | File | Change |
+|---|---|---|
+| S19-04 | *(none — verification only)* | No files changed. Staged files re-verified correct as-is; install deferred to a manual sudo session. |
+
