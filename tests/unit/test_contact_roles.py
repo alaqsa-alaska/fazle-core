@@ -51,7 +51,12 @@ class TestPostAllowedRoles:
         phone = f"88017{hash(role) % 100000000:08d}"
         r = await client.post(
             "/admin/contact-roles/",
-            json={"phone": phone, "role": role},
+            # name/sub_role/notes explicitly supplied as "" — a pre-existing,
+            # separate gap (not part of Phase 1B's scope) means omitting them
+            # raises a raw NotNullViolationError instead of falling back to
+            # the column's own DB-level default; see the Phase 1B.2 report's
+            # "additionally discovered" section.
+            json={"phone": phone, "role": role, "name": "", "sub_role": "", "notes": ""},
             headers=_headers(),
         )
         assert r.status_code == 200, r.text
@@ -93,7 +98,7 @@ class TestPostRejectedRoles:
         is the canonical trimmed form, not the raw padded input."""
         r = await client.post(
             "/admin/contact-roles/",
-            json={"phone": "8801788888888", "role": " vendor "},
+            json={"phone": "8801788888888", "role": " vendor ", "name": "", "sub_role": "", "notes": ""},
             headers=_headers(),
         )
         assert r.status_code == 200, r.text
@@ -115,7 +120,7 @@ class TestPutBehavior:
     async def _seed(self, client, phone: str, role: str = "vendor"):
         r = await client.post(
             "/admin/contact-roles/",
-            json={"phone": phone, "role": role},
+            json={"phone": phone, "role": role, "name": "", "sub_role": "", "notes": ""},
             headers=_headers(),
         )
         assert r.status_code == 200, r.text
@@ -254,7 +259,7 @@ class TestAuthorizationUnchanged:
     async def test_valid_key_accepted(self, client):
         r = await client.post(
             "/admin/contact-roles/",
-            json={"phone": "8801755555556", "role": "vendor"},
+            json={"phone": "8801755555556", "role": "vendor", "name": "", "sub_role": "", "notes": ""},
             headers=_headers(),
         )
         assert r.status_code == 200
