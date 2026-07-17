@@ -77,6 +77,19 @@ log = logging.getLogger("fazle.router")
 _ESCORT_ROLES = frozenset({"escort_client", "client_escort_buyer", "vip_client", "repeat_client"})
 _ESCORT_ORDER_PREFIXES: tuple[str, ...] = ("escort", "client", "tcis", "gms")
 
+
+def _is_verified_escort_identity(identity: dict, role_str: str) -> bool:
+    """Phase 1B.2 — distinguishes a verified escort-client/vip/repeat-client
+    identity (seed row, .env phone, contact-name marker, or a genuine
+    wbom_contacts/escort_roster history match) from identity_brain's Step 6
+    keyword-only fallback (identity_source == "text_hint"), which must never
+    carry the same trust level per Owner Decision 5 — it's a real, previously
+    -unseen sender whose message merely looked escort-shaped, not a known or
+    confirmed escort client."""
+    if role_str not in _ESCORT_ROLES:
+        return False
+    return identity.get("identity_source") != "text_hint"
+
 # Legacy fallback only; runtime source of truth is app.config draft-always settings.
 _SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office")
 # Compiled regex for silent-skip token matching — O(n) single pass vs O(n*k) loop
@@ -365,6 +378,7 @@ async def process_message(
 
     # ── 2. ESCORT CLIENT roles — strict order gate + admin draft only ─────────
     if role_str in _ESCORT_ROLES:
+        is_verified_escort = _is_verified_escort_identity(identity, role_str)
         intent_check = classify(text)
         strict_order = _looks_like_escort_order(text)
         escort_intent = intent_check in ("client_order", "escort_duty") or strict_order
@@ -373,6 +387,7 @@ async def process_message(
                 text,
                 sender,
                 source,
+                is_verified=is_verified_escort,
             )
         if escort_intent or _looks_like_escort_buying_intent(text):
             return "", _admin_review_note(
@@ -552,11 +567,15 @@ async def process_message(
             return ai_reply, None
 
     # ── 9. ESCORT ORDER (intent-triggered for non-registered senders) ─────────
+    # Reached only when role_str wasn't in _ESCORT_ROLES at all (Tier 2 above
+    # already returned otherwise) — by construction an unverified sender,
+    # per Owner Decision 5. Never persisted as client_escort_buyer identity.
     if intent in ("client_order", "escort_duty") and _looks_like_escort_order(text):
         return await handle_escort_client_message(
             text,
             sender,
             source,
+            is_verified=False,
         )
 
     # ── 10. EMPLOYEE ───────────────────────────────────────────────────────────

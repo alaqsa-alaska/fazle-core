@@ -1062,8 +1062,15 @@ async def save_escort_programs(
     order: EscortOrder,
     sender_phone: str,
     source: str,
+    is_verified: bool = True,
 ) -> list:
-    """Save one DB row per valid lighter block only."""
+    """Save one DB row per valid lighter block only.
+
+    is_verified (Phase 1B.2): recorded in remarks.source_verified — audit
+    evidence only, does not change save behavior. False means the sender's
+    client_escort_buyer routing came from message-content keyword inference
+    (identity_brain Step 6), not a genuine identity source.
+    """
     program_ids = []
     mv = order["mother_vessel"] or ""
     contact_id = await _get_contact_id(sender_phone)
@@ -1091,6 +1098,7 @@ async def save_escort_programs(
             "cargo_type": order.get("cargo_type"),
             "date_hint": order.get("date_hint"),
             "shift": lighter.get("shift") or order_shift,
+            "source_verified": is_verified,
         }
         try:
             if mv_clean:
@@ -1740,40 +1748,72 @@ async def handle_escort_client_message(
     sender_phone: str,
     source: str,
     is_historical: bool = False,
+    is_verified: bool = True,
 ) -> tuple[str, Optional[dict]]:
     """
-    Entry point for messages from escort_client role.
+    Entry point for messages from escort_client-eligible senders.
     Extracts vessel data, saves to DB, sends draft to admin.
     Returns ("", admin_note) — no reply to client.
 
     is_historical=True: save DB record but suppress admin notification.
     Use this when importing historical messages.
+
+    is_verified (Phase 1B.2): True when the sender's client_escort_buyer
+    identity came from a genuine source (ESCORT_CLIENT_PHONES, a stored
+    fazle_contact_roles row, or a contact-book name marker — see
+    modules.identity_brain.resolve_escort_client_identity). False when the
+    caller only matched via message-content keyword inference (identity_brain
+    Step 6) — a real, previously-unseen sender whose message merely looked
+    escort-shaped. The unverified path still runs the same safe extraction
+    and admin-review routing, but the draft is clearly labeled and the saved
+    row's evidence records the sender as unverified; it never grants any
+    escort-client identity or authority on its own.
     """
     from modules.message_router import get_primary_admin
 
     if not _is_trusted_escort_source(source):
         log.info("[escort] ignore client order from untrusted source=%s sender=%s", source, sender_phone)
         return "", None
-    if not _is_allowed_escort_client(sender_phone):
-        log.info("[escort] ignore client order from non-whitelisted sender=%s", sender_phone)
-        return "", None
+
+    if not is_verified:
+        # Unverified path (Phase 1B.2): the phone-allowlist gate's existing
+        # closed/open-mode behavior is preserved exactly as before — this is
+        # unchanged from pre-1B.2 code. A genuinely closed allowlist can
+        # still suppress an unrecognized stranger's order entirely.
+        if not _is_allowed_escort_client(sender_phone):
+            log.info("[escort] ignore unverified client order from non-whitelisted sender=%s", sender_phone)
+            return "", None
+    # Verified callers (Phase 1B.2): trust already came from identity
+    # resolution (env_phone, stored role, or contact-name marker) — a
+    # verified sender whose phone happens not to be in ESCORT_CLIENT_PHONES
+    # (e.g. verified only via a stored contact-role) must not be rejected by
+    # a phone-list check that isn't how they were verified in the first
+    # place. Fixes a real identity/gate inconsistency found during the
+    # Phase 1B.2 convergence audit.
 
     order = parse_escort_message(text)
     log.info(
         f"[escort] client={sender_phone} mv={order['mother_vessel']} "
-        f"lighters={len(order['lighters'])} historical={is_historical}"
+        f"lighters={len(order['lighters'])} historical={is_historical} verified={is_verified}"
     )
 
     if not is_minimum_escort_order(order):
         log.info("[escort] ignore non-order/no-minimum-fields sender=%s source=%s", sender_phone, source)
         return "", None
 
-    await save_escort_programs(order, sender_phone, source)
+    await save_escort_programs(order, sender_phone, source, is_verified=is_verified)
 
     if is_historical:
         return "", None
 
     admin_msg = build_admin_message(order, sender_phone)
+    if not is_verified:
+        admin_msg = (
+            "⚠️ UNVERIFIED SENDER — order-like message from a number not "
+            "recognized as a known escort client (no .env/stored-role/"
+            "contact-name match). Please verify manually before treating "
+            "as a confirmed order.\n\n" + admin_msg
+        )
     admin_phone = get_primary_admin()
 
     if not admin_phone:
