@@ -3,15 +3,22 @@ version: "3.9"
 services:
 
   # ── PostgreSQL (test DB) ─────────────────────────────────────────────────
+  # SECURITY (2026-07-17 incident, see
+  # knowledge_base/00_governance/incidents/2026-07-17_test_postgres_public_exposure.md):
+  # this was previously "5433:5432" (all interfaces) with a hardcoded trivial
+  # password — reachable from the public internet, hit by a real Postgres RCE
+  # exploit attempt within minutes, twice. Bound to 127.0.0.1 only + password
+  # now required from the environment, no hardcoded fallback. Never remove
+  # the 127.0.0.1: prefix, and never hardcode a password here again.
   postgres-test:
     image: postgres:15-alpine
     container_name: fazle-test-postgres
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:?Set TEST_DB_PASSWORD before starting the test stack — no hardcoded fallback, see the 2026-07-17 exposure incident}
       POSTGRES_DB: fazle_test
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - fazle-test-pg-data:/var/lib/postgresql/data
     healthcheck:
@@ -21,11 +28,14 @@ services:
       retries: 10
 
   # ── Redis (for queue/dedup, avoids conflict with prod on 6379) ───────────
+  # SECURITY: same class of issue as postgres-test above (all-interfaces
+  # bind, no auth) — bound to 127.0.0.1 only. Redis itself has no password
+  # configured here; do not publish this on a non-loopback interface.
   redis-test:
     image: redis:7-alpine
     container_name: fazle-test-redis
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -84,7 +94,7 @@ services:
       dockerfile: Dockerfile
     container_name: fazle-test-runner
     environment:
-      TEST_DATABASE_URL: "postgresql://postgres:postgres@postgres-test:5432/fazle_test"
+      TEST_DATABASE_URL: "postgresql://postgres:${TEST_DB_PASSWORD:?Set TEST_DB_PASSWORD before starting the test stack}@postgres-test:5432/fazle_test"
       BRIDGE1_URL: "http://mock-bridge1:8201"
       BRIDGE2_URL: "http://mock-bridge2:8202"
       OLLAMA_BASE_URL: "http://mock-ollama:11434"
