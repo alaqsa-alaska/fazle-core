@@ -1865,3 +1865,81 @@ instance of the test/production schema-drift class already tracked in
 `NEXT_IMPLEMENTATION_QUEUE.md` Technical Debt, not a new category.
 
 **Stage A result: PASS. Safe to begin Phase 1C: Yes.**
+
+### Session 23, Stage 0 — Stale Credential Residue Cleanup (2026-07-17)
+
+Follow-up to the test-Postgres exposure incident above: cleaned the stale,
+already-rotated (confirmed dead — does not match the live production
+credential, verified by comparison earlier this session without printing
+either value) production Postgres password out of plaintext residue.
+**No production credential was changed; no service was restarted.**
+
+**Originally-reported locations, both confirmed and cleaned:**
+- `/home/azim/.bash_history` (mode `0600`, owner `azim`, unchanged) — 3
+  matching history lines removed (not just redacted — a shell history entry
+  is a full command, so the whole line was dropped), 1997 unrelated lines
+  preserved untouched. Backed up first to
+  `/home/azim/.bash_history.pre-redaction-2026-07-17.bak` (mode `0600`).
+  Verified zero remaining matches. **Caveat, not fully closeable from
+  outside a session:** 3 other interactive bash sessions (`pts/0`, `pts/1`,
+  `pts/2`, all started 2026-07-17, i.e. after the credential was last
+  plausibly typed) are currently open; if any of their in-memory history
+  buffers still held the old command they could re-append it to
+  `.bash_history` on exit — not independently verifiable without reaching
+  into those sessions, which this session did not do. Low residual risk
+  given their start times.
+- `/home/azim/ESCORT-ROSTER-PRODUCTION-PLAN-2026-07-02.md` (mode `0664`,
+  owner `azim`, unchanged, **not inside any git repository** — confirmed
+  via `git rev-parse --is-inside-work-tree` failing at `/home/azim`) — the
+  one credential-bearing line's password redacted in place to
+  `[REDACTED — credential rotated]`; all other content, line count (514),
+  and permissions preserved exactly.
+
+**Wider scan (`/home/azim`, `/home/azim/core`, excluding `.git`,
+`node_modules`, `.venv`, `__pycache__`) found the same stale value in
+several additional categories — file paths and counts only, never the
+secret or matching line content:**
+
+| Category | Count | Action |
+|---|---:|---|
+| `/home/azim/scripts/auto_maintain.py` (live cron script, `0 2 * * *`) | 1 | **Cleaned this session** — see below |
+| `/home/azim/backups/*` (2 backup archives: `al-aqsa-docker-compose.yml`, `agent.env`) | 9 total matches | **Not modified** — explicitly out of scope per the stop-before-archives/backups rule; reported for Owner decision |
+| `/home/azim/.vscode-server/.../User/History/*` (VS Code local file-history snapshots) | 46 | **Not modified** — editor-internal backup mechanism, same class as "unknown application data" |
+| `/home/azim/.codex/sessions/*.jsonl` (OpenAI Codex CLI session transcripts) | 5 | **Not modified** — another tool's own session store |
+| `/home/azim/.claude/file-history/*`, `/home/azim/.claude/projects/-home-azim/*.jsonl` (Claude Code's own session/project transcripts, **including this session's own conversation log and a cached tool-output file from this session's own earlier wider-scan command**) | 37 | **Not modified** — this is the running harness's own conversation/audit trail; editing or deleting it was judged inappropriate and potentially disruptive to the active session, not a decision this pass should make unilaterally |
+| GitHub Copilot Chat transcripts (found nested under `.vscode-server`, counted within that category above) | — | **Not modified** — another tool's own data store |
+
+**`auto_maintain.py` finding detail:** the stale value was hardcoded as the
+default argument of an `os.environ.get('DATABASE_URL', ...)` call — a full
+Postgres connection string (user `postgres`, host `172.20.0.3`, port 5432,
+db `postgres`) with the stale password embedded — reached only if
+`DATABASE_URL` isn't resolvable from `.env`/
+`DATABASE_URL_TEMPLATE` first. Whether this fallback path is ever actually
+exercised by the nightly cron run wasn't independently traced this session
+(out of Stage 0's scope); either way, hardcoding a real-shaped credential as
+a fallback is bad practice regardless of whether it's live. Replaced with an
+obviously-non-functional placeholder
+(`ROTATED-CREDENTIAL-REMOVED-SET-DATABASE_URL-ENV-VAR`) — preserves the
+exact same behavior as before (both the old stale password and the new
+placeholder fail to authenticate identically if this branch is ever hit;
+no functional regression, since this path was never going to work with the
+already-rotated password anyway). Verified `python3 -m py_compile` clean,
+permissions (`rwxrwxr-x`, owner `azim`) and line count preserved except the
+one substituted line.
+
+**Not committed to git:** `.bash_history`, the loose planning `.md` file,
+and `auto_maintain.py` are all outside `/home/azim/core` and/or not
+git-tracked — nothing to commit for these. Only this documentation update
+(inside the repo) is committed.
+
+**Verification:** all three targeted files (`~/.bash_history`, the planning
+doc, `auto_maintain.py`) independently re-confirmed at zero remaining
+matches after cleanup. No password was printed in any command output,
+report, or this record — all verification used match counts and line
+numbers only.
+
+**Stage 0 result: complete for all directly-actionable, in-scope locations.**
+Backups, editor/AI-tool-internal history stores, and this session's own
+transcript are flagged for Owner awareness but intentionally left
+unmodified, per the explicit stop-before-archives/unknown-application-data
+rule.
