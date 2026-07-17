@@ -884,3 +884,23 @@ All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier
 
 **Remaining for Group C:** C3 (Escort, 2 calls), C4 (Income, 1 call) — not yet started.
 
+---
+
+### Management Authorization (Session 20, Step 2 — Group C3)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-06 | 2 escort change-request ad-hoc `fetch()` calls migrated to `FazleAuthFetch` | Third of 4 Group C sub-groups. Owner reviewed and approved the exact diff for both calls before implementation. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 2 — Group C3)
+
+| ID | File | Change |
+|---|---|---|
+| S20-06 | `app/static/payroll.html` | `rvApproveOneClick()` (POST `/api/escort-roster/change-requests/{id}/approve`) and `rvDismissOneClick()` (POST `/api/escort-roster/change-requests/{id}/reject?note=...`): raw `fetch().then(async r => {...})` chains replaced with `FazleAuthFetch.postJson(path, API_KEY)` (no body). The `?note=` query string on the reject call is preserved verbatim. |
+
+**Behavior change (Owner pre-approved, cosmetic only):** both calls discard the parsed response body and always show a hardcoded toast on success, unchanged before/after. Only the error-path message wording changes — old code used raw `r.text()` (never parsed the FastAPI `{detail: ...}` JSON shape), falling back to `'HTTP ' + r.status` on an empty body; `readError()` parses `detail` when present and falls back to `` `${status} ${statusText}` `` (e.g. `"404 Not Found"`) instead of `"HTTP 404"` on a genuinely empty body — a cosmetic fallback-format difference the Owner explicitly accepted with no action needed.
+
+**Verification:** `git diff` reviewed — confirmed exactly the 2 intended hunks, both hardcoded `showToast(...)` calls immediately following each migrated line left untouched (happy path preserved). `grep -n "fetch("` before/after confirms only these 2 lines changed; the C4 income-delete call, the 2 bootstrap calls, and the 2 deferred wrappers untouched. `node -e "new Function(...)"` syntax check on the extracted inline `<script>` block passed. Committed as `b738006`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`, `/static/payroll.html` served `200`.
+
+**Remaining for Group C:** C4 (Income, 1 call) — not yet started. Once complete, Group C (all 10 ad-hoc calls) will be fully migrated; only `api()`/`adminApi()` (deferred, Tier 2) and `resolveUserAccess()`/`doLogin()` (permanently out of scope) will remain on `payroll.html`.
+
