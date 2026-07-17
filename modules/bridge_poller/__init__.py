@@ -403,6 +403,27 @@ def _fetch_new_messages(
     return messages, max_ts
 
 
+def _fetch_image_context_rows(messages_db: str, chat_jid: str, timestamp) -> list:
+    """
+    Fetch the last 5 prior inbound messages' content for image OCR context
+    classification. Runs synchronously — call via asyncio.to_thread().
+    """
+    con = sqlite3.connect(f"file:{messages_db}?mode=ro", uri=True, check_same_thread=False, timeout=3.0)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            """SELECT content FROM messages
+               WHERE chat_jid = ? AND is_from_me = 0
+                 AND datetime(timestamp) < datetime(?)
+                 AND content IS NOT NULL
+               ORDER BY datetime(timestamp) DESC LIMIT 5""",
+            (chat_jid, timestamp),
+        ).fetchall()
+        return rows
+    finally:
+        con.close()
+
+
 def _fetch_outgoing_escort_completions(
     messages_db: str,
     since_ts: datetime,
@@ -815,17 +836,12 @@ async def _poll_bridge(config: dict):
                         # STEP 1: Lightweight context check (no OCR yet)
                         ctx_rows = []
                         try:
-                            _ctx_con = sqlite3.connect(f"file:{messages_db}?mode=ro", uri=True, check_same_thread=False, timeout=3.0)
-                            _ctx_con.row_factory = sqlite3.Row
-                            ctx_rows = _ctx_con.execute(
-                                """SELECT content FROM messages
-                                   WHERE chat_jid = ? AND is_from_me = 0
-                                     AND datetime(timestamp) < datetime(?)
-                                     AND content IS NOT NULL
-                                   ORDER BY datetime(timestamp) DESC LIMIT 5""",
-                                (msg["chat_jid"], msg["timestamp"]),
-                            ).fetchall()
-                            _ctx_con.close()
+                            # asyncio.to_thread() preferred over run_in_executor on
+                            # Python 3.9+ — see also _fetch_new_messages for the
+                            # older loop.run_in_executor pattern
+                            ctx_rows = await asyncio.to_thread(
+                                _fetch_image_context_rows, messages_db, msg["chat_jid"], msg["timestamp"]
+                            )
                         except Exception as _ctx_err:
                             log.debug(f"[{bridge_name}] context fetch error: {_ctx_err}")
                         context_text = " ".join(r["content"] for r in ctx_rows)
