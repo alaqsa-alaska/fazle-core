@@ -7,10 +7,11 @@ DELETE /admin/contact-roles/{phone}  → remove role by phone (+ optional platfo
 from __future__ import annotations
 
 import logging
+from enum import Enum
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.database import execute, fetch_all, fetch_one
 from shared.auth_deps import require_api_key as _require_api_key
@@ -19,27 +20,51 @@ log = logging.getLogger("fazle.contact_roles")
 router = APIRouter(prefix="/admin/contact-roles", tags=["contact-roles"])
 
 
+class AssignableContactRole(str, Enum):
+    """Roles this API may assign. Deliberately excludes admin/accountant/
+    employee/family — those must come from .env or their own canonical
+    domain (CANONICAL_BUSINESS_RULES.md's .env-authority Structural Rule),
+    never from this free-text seed table. 'blocked' is not a role here
+    either; disabling a contact is `is_active=false`, not a role string
+    (that value was removed for good, migration 042)."""
+
+    VIP_CLIENT = "vip_client"
+    CLIENT_ESCORT_BUYER = "client_escort_buyer"
+    REPEAT_CLIENT = "repeat_client"
+    VENDOR = "vendor"
+    SUPERVISOR = "supervisor"
+    CANDIDATE = "candidate"
+
+
+def _strip_role_ws(v):
+    return v.strip() if isinstance(v, str) else v
+
+
 class ContactRoleBody(BaseModel):
     phone: str
     platform: str = "whatsapp"
     name: Optional[str] = None
-    role: str
+    role: AssignableContactRole
     sub_role: Optional[str] = None
     priority: int = 10
     source: str = "admin_api"
     notes: Optional[str] = None
     confidence: int = 90
 
+    _strip_role = field_validator("role", mode="before")(_strip_role_ws)
+
 
 class ContactRoleUpdate(BaseModel):
     platform: str = "whatsapp"
-    role: Optional[str] = None
+    role: Optional[AssignableContactRole] = None
     sub_role: Optional[str] = None
     name: Optional[str] = None
     priority: Optional[int] = None
     notes: Optional[str] = None
     confidence: Optional[int] = None
     is_active: Optional[bool] = None
+
+    _strip_role = field_validator("role", mode="before")(_strip_role_ws)
 
 
 @router.get("/", dependencies=[Depends(_require_api_key)])
@@ -87,15 +112,15 @@ async def upsert_contact_role(body: ContactRoleBody):
         body.phone,
         body.platform,
         body.name,
-        body.role,
+        body.role.value,
         body.sub_role,
         body.priority,
         body.source,
         body.confidence,
         body.notes,
     )
-    log.info("contact_role upserted phone=%s platform=%s role=%s", body.phone, body.platform, body.role)
-    return {"ok": True, "phone": body.phone, "platform": body.platform, "role": body.role}
+    log.info("contact_role upserted phone=%s platform=%s role=%s", body.phone, body.platform, body.role.value)
+    return {"ok": True, "phone": body.phone, "platform": body.platform, "role": body.role.value}
 
 
 @router.put("/{phone}", dependencies=[Depends(_require_api_key)])
@@ -120,7 +145,7 @@ async def update_contact_role(
         """,
         phone,
         body.platform,
-        body.role,
+        body.role.value if body.role is not None else None,
         body.sub_role,
         body.name,
         body.priority,
