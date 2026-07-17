@@ -1,13 +1,16 @@
 # Next Implementation Queue — Fazle Core
 
-**Last updated:** 2026-07-17 (end of Session 19) — reviewed against `git log` through
-commit `e458158` and `knowledge_base/00_governance/management_decisions.md` Sessions
-13-19. Session 19 (this update) implemented and shipped Steps 0-8 of
-`docs/AUDIT_REPORT_2026-07-17.md`'s recommended plan — see "What shipped in Session 19"
-below. All commits through `e458158` pushed to `origin/main` (`46acd44..e458158`, clean
-fast-forward, 84 commits). Working tree clean except an intentionally-untracked
-`db/migrations_drafts/047_*.DRAFT-DO-NOT-APPLY`, which is a **rejected, dead** migration
-kept only as a record — see "Resolved/closed since last review" below, not a pending task.
+**Last updated:** 2026-07-17 (end of Session 20) — reviewed against `git log` through
+commit `d870cee` and `knowledge_base/00_governance/management_decisions.md` Sessions
+13-20. Session 20 (this update) shipped three separate pieces of work — see "What
+shipped in Session 20" below: Step 1 (a blocking-SQLite-call fix), Step 2 (the
+`payroll.html` shared-fetch migration), and Step 3 (a Finance-First Link/Sync Integrity
+audit + 3 approved implementation phases). All commits through `d870cee` pushed to
+`origin/main` (`e458158..d870cee`, clean fast-forward, 23 commits), confirmed synced —
+`git rev-parse HEAD` and `git rev-parse origin/main` match. Working tree clean except an
+intentionally-untracked `db/migrations_drafts/047_*.DRAFT-DO-NOT-APPLY`, which is a
+**rejected, dead** migration kept only as a record — see "Resolved/closed since last
+review" below, not a pending task.
 
 **How to use this file:** work top to bottom within a tier. Don't start Phase 2/3 items
 while Tier 0/1/2 items remain open — that repeats the exact "freeze declared, freeze not
@@ -93,6 +96,64 @@ at a time with a commit + restart-verify after each:
 **Not done this session (deliberately, per Owner decision):** Step 9 (Groq key rotation +
 DB password rotation) — deferred to its own dedicated task, not bundled into a code-fix
 session.
+
+## What shipped in Session 20 (2026-07-17)
+
+All Owner-authorized, all committed, pushed, and live, all documented in
+`management_decisions.md`. Three independent pieces of work, each with its own
+per-change approval trail (exact current code + exact proposed diff shown and approved
+before every change, no exceptions):
+
+- **Step 1:** fixed the second blocking-`sqlite3.connect()` instance Session 19 Step 8
+  found but didn't fix — `modules/escort_roster/history_sync.py:779`, inside `async def
+  sync_from_bridge_sqlite()`. Same pattern as commit `a5d3871`: extracted a sync helper
+  (`_fetch_backfill_messages()`), dispatched via `asyncio.to_thread()`. No business logic
+  changed. Commit `e3c1f58`.
+- **Step 2:** `payroll.html` shared-fetch migration — 12 of its 16 `fetch()` calls (2
+  wrapper functions + all 10 ad-hoc calls) migrated to `shared-auth-fetch.js`, done as 6
+  separate, individually-verified sub-groups (B1/B2 wrappers, C1-C4 ad-hoc calls by
+  feature area). `api()`/`adminApi()` deferred to Tier 2 (dual-prefix routing + auto-
+  serialize behavior need a design decision, not a mechanical swap). Commits `d76a7ff`,
+  `2cab0f2`, `6feffd1`, `cc6f96d`, `b738006`, `8512acd`. See "URL / Route-Based Functions
+  Needing Attention" below.
+- **Step 3 — Finance-First Link/Sync Integrity audit,** requested separately after Steps
+  1-2 closed: a read-only audit (ownership matrix, writer inventory, mismatch report,
+  top-3 root-cause paths — full report in `management_decisions.md` S20-08) into
+  unlinked/out-of-sync row creation between `wbom_employees`/`fpe_employees` breaking
+  finance workflows, followed by 3 Owner-approved, narrowly-scoped fixes:
+  - **Phase 1:** disabled `message_router::_seed_unknown_employee_identity()` — it
+    auto-created a `wbom_employees` row (and indirectly seeded `fpe_employees`) for
+    **any** sender identity_brain classified as `"unknown"` whose message merely looked
+    like an attendance/escort/advance-request, with zero trust check of its own. By
+    construction every such sender had already failed every trust check the system has.
+    Disabled, not deleted — full rationale in the function's own docstring. Commit
+    `47018f7`.
+  - **Phase 2:** fixed a real search-order gap in the trusted admin→accountant finance
+    path — `payment_ingest::_match_or_create_instruction_employee()` collapsed
+    `employee_id_mobile`/`payout_mobile` into one search key before ever calling
+    `match_employee()`, so an explicit ID-mobile miss never fell back to a payout-number
+    retry, risking duplicate employee rows for someone already registered. 2-line fix;
+    trusted auto-create, no-reply, and no-review-queue behavior all verified unchanged.
+    Commit `38dbedd`.
+  - **Phase 3:** added `modules/reports::_b_unresolved_fpe_employees()`, a read-only
+    report distinguishing genuinely-unlinked `fpe_employees` rows from rows that are
+    already correctly linked but carry a stale `resolution_status` label (the Phase 2
+    finding) — never conflated. Confirmed live against production:
+    `172 (no_wbom_match) + 81 (wbom_match_unlinked) = 253`, matching the audit's live
+    finding exactly; `153` more `linked_but_mislabeled`. Served via the existing generic
+    `GET /reports/{name}` dispatcher, no new route. Commit `b0c0057`.
+  - **Explicitly excluded from this session, unless separately approved later:**
+    `wbom_*`→`fpe_*` renames, the `wbom_employees`↔`fpe_employees` merge,
+    `employee_id_phone` uniqueness changes, escort dual-write concurrency,
+    `accounting.py` semantics changes, `admin_transactions` bypass cleanup, and the
+    pre-existing operator-manual-entry review-queue gap found during Phase 0 (documented,
+    not fixed — see "Immediate Next" below).
+
+**Two new Technical Debt items found and filed this session, not fixed:**
+`POST /admin/contact-roles` accepts a free-text `role` field with no enum/whitelist (an
+admin could assign `role=accountant` to a second number without touching `.env`); a
+`resolution_status` metadata-staleness note for anyone building on the new report. Both
+detailed under "Technical Debt" below.
 
 ## Resolved/closed since last review (no action needed, noted so nobody re-opens them)
 
@@ -371,6 +432,19 @@ conflicting with `CANONICAL_BUSINESS_RULES.md` §Role, which ratifies `.env` as 
 sole authoritative source for functional roles. Touches RBAC/admin tooling. Needs its
 own scoped fix, not bundled into finance-integrity work. See `management_decisions.md`
 Session 20 Step 3 Phase 2 for the full finding.
+
+**`fpe_employees.resolution_status` stays `'unresolved'` on rows that are actually
+correctly linked — found 2026-07-17 during Session 20 Phase 2/3:**
+`modules/payment_ingest/fpe_bridge.py::resolve_fpe_employee_for_wbom_employee()`'s
+creating `INSERT` (step 3) never explicitly sets `resolution_status`, so it takes the
+schema default (`'unresolved'`) even in the same statement that sets `wbom_employee_id`
+— the row is genuinely linked, just mislabeled. Not a linkage bug (confirmed via the new
+`unresolved_fpe_employees` report's `linked_but_mislabeled` bucket, 153 such rows live in
+production as of 2026-07-17) — a cosmetic metadata gap. Low priority: cheap to fix
+(`resolution_status = 'resolved'` alongside the existing `wbom_employee_id` set, one
+column added to one `INSERT`/`UPDATE`), but only worth doing if something starts trusting
+`resolution_status` as a filter without also checking `wbom_employee_id IS NULL` the way
+the new report already does — not urgent on its own.
 
 ---
 
