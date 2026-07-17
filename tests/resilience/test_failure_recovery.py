@@ -147,12 +147,18 @@ class TestMalformedPayloads:
         )
         assert response.status_code in (400, 422)
 
-    async def test_missing_sender_field_returns_422(self, client):
+    async def test_missing_sender_field_returns_200(self, client):
+        # Intentional: the bridge webhook always acks a structurally-valid-JSON
+        # payload with 200, even when a per-event field like the sender is
+        # missing (the event is logged and skipped internally, never raised),
+        # to avoid retry-storms from the upstream bridge client on ordinary
+        # malformed/incomplete events. See docs/AUDIT_REPORT_2026-07-17.md
+        # Part 2 Step 7 and management_decisions.md Session 19 (S19-01a).
         response = await client.post(
             "/webhook/mcp1",
             json={"text": "hello"},  # missing 'from'
         )
-        assert response.status_code in (400, 422)
+        assert response.status_code == 200
 
     async def test_oversized_message_handled(self, client, mock_all_services):
         """A very long message body must not crash the app."""
