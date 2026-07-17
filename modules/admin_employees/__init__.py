@@ -133,7 +133,11 @@ async def _seed_fpe(name: str, mobile: str, wbom_employee_id: int | None = None)
         # Set the WBOM link so both tables stay in sync
         if result and wbom_employee_id:
             await _exec(
-                "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2 AND wbom_employee_id IS NULL",
+                """UPDATE fpe_employees
+                   SET wbom_employee_id = $1,
+                       resolution_status = CASE WHEN resolution_status = 'unresolved'
+                                                 THEN 'resolved' ELSE resolution_status END
+                   WHERE id = $2 AND wbom_employee_id IS NULL""",
                 wbom_employee_id, result.employee_id,
             )
     except Exception as exc:
@@ -506,7 +510,12 @@ async def link_fpe_to_wbom(body: LinkFpeRequest):
         raise HTTPException(404, f"wbom_employees.employee_id={body.wbom_id} not found")
 
     await execute(
-        "UPDATE fpe_employees SET wbom_employee_id = $1, updated_at = now() WHERE id = $2",
+        """UPDATE fpe_employees
+           SET wbom_employee_id = $1,
+               resolution_status = CASE WHEN resolution_status = 'unresolved'
+                                         THEN 'resolved' ELSE resolution_status END,
+               updated_at = now()
+           WHERE id = $2""",
         body.wbom_id, body.fpe_id,
     )
     log.info(
@@ -583,7 +592,12 @@ async def create_and_link_wbom(body: CreateAndLinkRequest):
     )
 
     await execute(
-        "UPDATE fpe_employees SET wbom_employee_id = $1, updated_at = now() WHERE id = $2",
+        """UPDATE fpe_employees
+           SET wbom_employee_id = $1,
+               resolution_status = CASE WHEN resolution_status = 'unresolved'
+                                         THEN 'resolved' ELSE resolution_status END,
+               updated_at = now()
+           WHERE id = $2""",
         new_wbom_id, body.fpe_id,
     )
 

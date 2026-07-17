@@ -56,7 +56,11 @@ async def resolve_fpe_employee_for_wbom_employee(
         if row:
             fpe_id = int(row["id"])
             await fetch_one(
-                "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2",
+                """UPDATE fpe_employees
+                   SET wbom_employee_id = $1,
+                       resolution_status = CASE WHEN resolution_status = 'unresolved'
+                                                 THEN 'resolved' ELSE resolution_status END
+                   WHERE id = $2""",
                 wbom_employee_id,
                 fpe_id,
             )
@@ -67,11 +71,13 @@ async def resolve_fpe_employee_for_wbom_employee(
     fpe_id = await fetch_val(
         """INSERT INTO fpe_employees
                (full_name, name_normalized, primary_phone, employee_id_phone,
-                wbom_employee_id, status, created_source)
-           VALUES ($1, $2, $3, $3, $4, 'active', 'payment_ingest_bridge')
+                wbom_employee_id, status, created_source, resolution_status)
+           VALUES ($1, $2, $3, $3, $4, 'active', 'payment_ingest_bridge', 'resolved')
            ON CONFLICT (primary_phone) WHERE primary_phone IS NOT NULL DO UPDATE
               SET wbom_employee_id = COALESCE(fpe_employees.wbom_employee_id, EXCLUDED.wbom_employee_id),
-                  status = 'active'
+                  status = 'active',
+                  resolution_status = CASE WHEN fpe_employees.resolution_status = 'unresolved'
+                                            THEN 'resolved' ELSE fpe_employees.resolution_status END
            RETURNING id""",
         wbom_employee_name,
         name_normalized,

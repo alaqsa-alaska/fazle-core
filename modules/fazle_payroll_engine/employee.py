@@ -181,7 +181,11 @@ async def match_or_create_employee(
                 if not fpe_row.get("wbom_employee_id"):
                     try:
                         await execute(
-                            "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2",
+                            """UPDATE fpe_employees
+                               SET wbom_employee_id = $1,
+                                   resolution_status = CASE WHEN resolution_status = 'unresolved'
+                                                             THEN 'resolved' ELSE resolution_status END
+                               WHERE id = $2""",
                             wbom_row["employee_id"], fpe_row["id"],
                         )
                     except Exception as _link_err:
@@ -530,7 +534,11 @@ async def _auto_create_employee(
             )
             if wbom_match:
                 await con.execute(
-                    "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2",
+                    """UPDATE fpe_employees
+                       SET wbom_employee_id = $1,
+                           resolution_status = CASE WHEN resolution_status = 'unresolved'
+                                                     THEN 'resolved' ELSE resolution_status END
+                       WHERE id = $2""",
                     wbom_match["employee_id"], new_id,
                 )
 
