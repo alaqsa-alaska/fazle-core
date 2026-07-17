@@ -27,6 +27,7 @@ Matching strategy (highest confidence wins):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -736,6 +737,32 @@ async def sync_conversation_history(
     return stats
 
 
+def _fetch_backfill_messages(db_path: str, jid_patterns: list[str]) -> list:
+    """
+    Fetch outbound admin messages from a bridge SQLite DB matching client JID
+    patterns, for historical escort-order backfill. Runs synchronously — call
+    via asyncio.to_thread().
+    """
+    import sqlite3 as _sqlite3
+
+    con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
+    con.row_factory = _sqlite3.Row
+
+    # Build WHERE clause dynamically for multiple phones
+    placeholders = " OR ".join(["chat_jid LIKE ?"] * len(jid_patterns))
+    query = f"""
+        SELECT id, chat_jid, content, timestamp
+        FROM messages
+        WHERE is_from_me = 1
+          AND ({placeholders})
+          AND content IS NOT NULL AND content != ''
+        ORDER BY datetime(timestamp) ASC
+    """
+    rows = con.execute(query, jid_patterns).fetchall()
+    con.close()
+    return rows
+
+
 async def sync_from_bridge_sqlite(
     db_path: str,
     bridge_number: str,
@@ -757,8 +784,6 @@ async def sync_from_bridge_sqlite(
 
     Returns a summary dict.
     """
-    import sqlite3 as _sqlite3
-
     if not Path(db_path).exists():
         raise FileNotFoundError(f"Bridge SQLite not found: {db_path}")
 
@@ -776,21 +801,9 @@ async def sync_from_bridge_sqlite(
 
     # Read from SQLite (read-only)
     try:
-        con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
-        con.row_factory = _sqlite3.Row
-
-        # Build WHERE clause dynamically for multiple phones
-        placeholders = " OR ".join(["chat_jid LIKE ?"] * len(jid_patterns))
-        query = f"""
-            SELECT id, chat_jid, content, timestamp
-            FROM messages
-            WHERE is_from_me = 1
-              AND ({placeholders})
-              AND content IS NOT NULL AND content != ''
-            ORDER BY datetime(timestamp) ASC
-        """
-        rows = con.execute(query, jid_patterns).fetchall()
-        con.close()
+        # asyncio.to_thread() dispatch — same pattern as bridge_poller's
+        # _fetch_image_context_rows (commit a5d3871)
+        rows = await asyncio.to_thread(_fetch_backfill_messages, db_path, jid_patterns)
     except Exception as e:
         log.error(f"[sqlite_backfill] SQLite read error ({db_path}): {e}")
         stats["errors"].append(str(e))
