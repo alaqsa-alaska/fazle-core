@@ -469,32 +469,26 @@ captured, with no migration ever recording the change. Same class of gap as the
 27-table "no schema source of truth" finding from the 2026-07-08 audit — this is one
 more confirmed instance, not a new category of problem.
 
-**Escort-client identity does not actually converge across its three intended
-sources — found 2026-07-17 during a routing-convergence audit requested after Phase
-1B. Full trace and proposal in `management_decisions.md` Session 21 Phase 1B.2 (not
-yet implemented, awaiting Owner decision):**
-- `ESCORT_CLIENT_PHONES` (`.env`) is **not** an identity-assignment source at all —
-  `modules/escort/__init__.py::_is_allowed_escort_client()` only gates order-parsing
-  *after* `identity_brain` has already decided the sender's role via some other path.
-- Contact-book name substring matching (e.g. a contact named "Escort ABC Shipping")
-  — the Owner's originally-intended detection method — **does not exist anywhere in
-  the codebase.** `identity_brain._lookup_contact()`/`_map_relation()` match
-  `wbom_contacts.relation` (a separate, 99.9%-`'unknown'` structured field), never
-  `display_name`.
-- `fazle_contact_roles.role = client_escort_buyer` (Phase 1B's allowed value) is the
-  **only** fully-implemented identity source for this role.
-- **Live conditional risk, previously footnoted (S20-08) but not fully traced until
-  now:** `identity_brain`'s Step 6 text-hint fallback assigns `role="repeat_client"`
-  (which `message_router._ESCORT_ROLES` treats identically to `client_escort_buyer`)
-  to *any never-before-seen sender* whose message merely contains escort keywords —
-  gated only by `_is_allowed_escort_client()`, which returns `True` for *any* phone
-  the moment `ESCORT_CLIENT_PHONES` is ever emptied ("open mode"). Not exercised
-  live today (the list currently has 3 phones) but is a live landmine if the list is
-  ever cleared.
-- **Newly found parity gap:** the webhook path (`app/main.py::_handle_bridge_event()`)
-  never resolves `@lid`-suffixed senders to a phone number (only the SQLite poller
-  does, via `_load_lid_map()`) — a LID-only sender is always `unknown` on the webhook
-  path regardless of any of the above three sources.
+**🟢 RESOLVED 2026-07-17 (Session 21 Phase 1B.2) — Escort-client identity now
+converges across its three intended sources.** Was: found during a routing-
+convergence audit requested after Phase 1B that `ESCORT_CLIENT_PHONES` was only a
+downstream parser gate (not an identity source), contact-name-based detection didn't
+exist, and `fazle_contact_roles.role` was the only reliable source. Fixed:
+`identity_brain.detect_identity()` gained an explicit `ESCORT_CLIENT_PHONES` match
+(Step 3.7) and a contact-name "escort" token match (Step 4, word-boundary matched);
+a new canonical `resolve_escort_client_identity()` distinguishes verified sources
+from the pre-existing keyword-only Step 6 fallback (now explicitly labeled
+`unverified_message_content`, never persisted as identity); `message_router` and
+`modules/escort::handle_escort_client_message()` route verified/unverified senders
+differently (unverified admin drafts are labeled, `save_escort_programs()` records
+`source_verified`); the webhook path (`app/main.py::_handle_bridge_event()`) now
+resolves `@lid` senders via the poller's own `_load_lid_map()`, closing the
+webhook/poller parity gap. Commits `7313613`, `45d23fa`, `24051fe`, `f8a1d75`. 39 new
+tests, full regression sweep clean (1 pre-existing unrelated failure). Full record:
+`management_decisions.md` Session 21 Phase 1B.2. **Residual, explicitly flagged, not
+blocking:** the escort-order-creation path itself has not been exercised by a live
+production webhook call (deliberate safety choice — see the governance entry) —
+recommend confirming against the next real inbound escort order.
 
 ---
 

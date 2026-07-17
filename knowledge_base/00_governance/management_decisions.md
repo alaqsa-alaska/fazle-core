@@ -1606,3 +1606,133 @@ RBAC, `.env`, or financial-authority code (none proposed, none needed).
 **Implementation performed: No.** This entire section is a proposal only,
 produced per Owner authorization to prepare (not implement) the Phase 1B.2
 decision package. Awaiting explicit separate Owner approval to begin coding.
+
+### Session 21, Phase 1B.2 — Implementation, Deployment, Production Certification (2026-07-17)
+
+Owner explicitly approved implementing the ratified Phase 1B.2 proposal above.
+Implemented, tested, pushed, deployed, and certified in this session.
+
+**Implementation (4 commits):**
+
+| Commit | File(s) | Summary |
+|---|---|---|
+| `7313613` | `modules/identity_brain/__init__.py`, `shared/env.py` | New Step 3.7 (env_phone) and Step 4 name-marker check, both additive, priority-ordered per Owner Decision 2; new `resolve_escort_client_identity()` canonical resolver; dead `shared/env.py::is_escort_client()` documented as superseded, not deleted |
+| `45d23fa` | `modules/message_router/__init__.py`, `modules/escort/__init__.py` | `_is_verified_escort_identity()` helper; both `handle_escort_client_message()` call sites now pass `is_verified`; unverified admin drafts labeled; `save_escort_programs()` records `source_verified` in remarks; verified senders no longer blocked by the phone-only allowlist gate (a real gap this fix closes) |
+| `24051fe` | `app/main.py` | Webhook `@lid` resolution via the poller's own `_load_lid_map()`, resolved per-bridge from existing settings; unresolved LIDs get the poller's `"unresolved:<lid>"` sentinel, never a fabricated phone |
+| `f8a1d75` | `tests/unit/test_escort_client_identity_convergence.py` (new) | 39 tests |
+
+**Design interpretation decisions made during implementation** (each individually
+justified, not arbitrary):
+- Source A (env_phone) and Source B (contact-name marker) checks are inserted
+  additively, only reached when the existing seed-rule/employee/cash/attendance/
+  escort-roster checks all missed — guarantees zero regression risk to any
+  existing admin/family/accountant/employee/vip_client/vendor/supervisor
+  classification, at the cost of env_phone not literally overriding an existing
+  employee match (judged the safer reading of "priority among escort-client
+  sources" vs. "global identity priority," given `.env`'s escort-client list is
+  operationally disjoint from employee/guard phone numbers by construction).
+- The Step 6 keyword-only fallback's actual `role`/`source` values
+  (`repeat_client`/`text_hint`) were left byte-identical — `repeat_client` has
+  other legitimate, unrelated uses (message_router KB/AI routing,
+  `DRAFT_ALWAYS_ROLES`) that a role-string change would have broken. The
+  verified/unverified distinction is carried by `identity_source == "text_hint"`
+  instead, recognized explicitly by both `resolve_escort_client_identity()` and
+  `message_router._is_verified_escort_identity()`.
+- Contact-name matching checked before the legacy `wbom_contacts.relation`-based
+  classification (which is ~0.1% populated in production and mostly dead in
+  practice) — an edge case where a contact's `relation` says e.g. `"family"`
+  but its `display_name` also contains "escort" would now classify as
+  `client_escort_buyer`; judged acceptable given `relation`'s near-total
+  non-population, flagged here for the record rather than silently decided.
+- The phone-allowlist gate inside `handle_escort_client_message()` was narrowed
+  to apply only to the **unverified** path — unchanged for that path,
+  removed for the verified path (a real fix, not scope creep: a sender
+  verified via stored role or contact-name marker was previously rejected by a
+  gate that only ever checked `.env` membership).
+- Incomplete-order handling, dedup mechanics, and the parser's own
+  minimum-field policy were deliberately left untouched, per the proposal's
+  own explicit scope limits.
+
+**Tests:** 39 new (verified sources + false-positive rejections, source
+priority, phone-form normalization equivalence, empty-allowlist semantics,
+canonical resolver contract, authority isolation, message_router helper,
+escort-module unverified labeling and the fixed verified-gate, webhook/poller
+LID parity using a real disposable Postgres) — all pass. One test-hygiene
+issue found and fixed during verification (not a defect in the implementation
+itself): the LID webhook tests initially attempted a real network call via
+the AI-reply fallback path for an "unknown" classified message; fixed by
+adding the existing `mock_all_services` fixture.
+
+Broader regression sweep (`test_identity_brain.py`, `test_message_router_identity_seed.py`,
+`test_escort_module.py`, `test_escort_lifecycle.py`, `test_escort_roster_routes.py`,
+`test_escort_source_of_truth_refactor.py`, `test_shared_auth_deps.py`,
+`tests/integration/test_webhooks.py`, plus the new file): **1 pre-existing
+failure** (`test_escort_source_of_truth_refactor.py::test_draft_updated_by_bridge_confirmation`,
+`_is_authoritative_bridge_confirmation()` — an unrelated code path this
+session never touched, matches a failure already on record from a prior
+session's own git-stash-isolation check). Notably,
+`test_escort_module.py::test_creates_escort_program_and_draft` — the *other*
+previously-documented pre-existing failure — passed in every run this
+session; no causal mechanism was identified connecting it to this diff, and
+it is flagged here as an observation, not claimed as a fix, since test-order
+sensitivity was independently confirmed elsewhere this session (the LID test
+hang, resolved by adding `mock_all_services`).
+
+Verified against the same isolated disposable test Postgres container
+(`docker-compose.test.yml`'s `postgres-test` service) used for Phase 1B,
+torn down cleanly afterward (`docker compose down -v`, confirmed removed).
+
+**Git:** pushed (`7313613`, `45d23fa`, `24051fe`, `f8a1d75`), `HEAD` ==
+`origin/main` confirmed at `f8a1d75`.
+
+**Deployment:** `scripts/restart_gate.sh --restart` — all 7 pre-checks PASS
+(xfail count unchanged at 13, targeted tests 100%, migrations clean, `.env`
+flags unchanged), health `ok` before and after (PID `1598304`→`1598344`),
+clean startup log (no import/Pydantic errors), zero new errors observed in
+logs after restart during a live-traffic observation window (bridge poller
+actively running, RAG rebuild completed normally).
+
+**Live production smoke tests — deliberately scoped down, documented reasoning:**
+Per this task's own instruction ("do not message real customers unless the
+Owner separately authorizes it"), synthetic webhook payloads were **not**
+injected into the live production ingestion pipeline. Unlike Phase 1B's
+contact-role smoke test (a cleanly reversible, disposable row in a low-stakes
+lookup table), triggering `_handle_bridge_event()` live risks a real outbound
+send via the bridge's own send API if a reply is generated, and unsigned
+webhook payloads are currently accepted in this environment (`enforcement
+disabled`, a pre-existing, separately-tracked item) — a materially different
+risk class from Phase 1B's smoke test. Live-traffic proof for the specific
+escort-order-creation path (verified/unverified order creation, admin draft
+delivery, dedup under real bridge traffic) is **not yet independently
+confirmed against production** and is flagged as the one residual risk
+below. Primary evidence for this deployment is the automated suite above,
+which exercises the identical webhook HTTP handler (including the new LID
+resolution code) against a real Postgres via `ASGITransport`, with
+bridge/Ollama network calls mocked — a faithful stand-in for the code path
+itself, though not literally the production process.
+
+**Phase 1B.2: CERTIFIED** for the identity-convergence and routing-labeling
+logic itself (all automated test evidence, clean deploy, zero new errors).
+**Residual risk, explicitly flagged, not blocking:** the escort-order
+creation/admin-draft/dedup path has not been exercised by a live production
+webhook call this session, by deliberate safety choice — recommend observing
+production logs for the next real inbound escort-order message (webhook or
+poller) to confirm end-to-end behavior, or a separately-authorized live test
+with an explicitly Owner-approved disposable scenario if faster confirmation
+is wanted.
+
+**Rollback (not needed, recorded for completeness):**
+```
+git revert f8a1d75 24051fe 45d23fa 7313613
+git push origin main
+scripts/restart_gate.sh --restart
+curl -fsS http://127.0.0.1:8200/health
+```
+No database rollback required — no schema/data change shipped (the
+`source_verified` remarks field is additive-only, on a JSON-shaped column
+that already tolerates new keys).
+
+**Not implemented, deliberately out of scope:** the incomplete-order handling
+redesign, any feature-flag/shadow-rollout mechanism, Source C (contact-name
+marker) row persistence, Phase 1C, Dispatch, GL, AI Console, frontend
+consolidation, or any RBAC/financial-authority change.
