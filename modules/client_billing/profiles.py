@@ -6,8 +6,9 @@ CRUD against wbom_client_billing_profiles (db/migrations/034_client_billing_prof
 
 Contact Person Mobile is validated against the live ESCORT_CLIENT_PHONES
 .env list (re-read on every call, never cached) — reusing
-modules.escort_roster.routes's existing _normalize_client_phone /
-_escort_client_phone_list rather than duplicating phone-validation logic.
+modules.escort_roster.routes's existing _escort_client_phone_list and
+modules.fazle_payroll_engine.normalizer's normalize_bd_phone/to_880
+rather than duplicating phone-validation logic.
 .env remains the sole authority for that list: this module only reads it.
 
 employee_wage_general/24h/12h/monthly exist for the profit-ESTIMATION
@@ -24,7 +25,8 @@ import asyncpg
 from fastapi import HTTPException
 
 from app.database import execute, fetch_all, fetch_one, fetch_val
-from modules.escort_roster.routes import _escort_client_phone_list, _normalize_client_phone
+from modules.escort_roster.routes import _escort_client_phone_list
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone, to_880
 
 _NUMERIC_FIELDS = (
     "general_rate", "rate_24h", "rate_12h", "rate_monthly",
@@ -35,7 +37,9 @@ _NUMERIC_FIELDS = (
 
 async def _validate_contact_mobile(raw: str) -> str:
     """Normalize + require membership in the current ESCORT_CLIENT_PHONES list."""
-    normalized = _normalize_client_phone(raw)
+    normalized = to_880(normalize_bd_phone(raw))
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Invalid Bangladesh mobile number")
     authorized = _escort_client_phone_list()
     if normalized not in authorized:
         raise HTTPException(
