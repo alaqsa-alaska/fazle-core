@@ -46,12 +46,13 @@ from app.config import get_settings
 from shared.events import emit
 
 log = logging.getLogger("fazle.bridge_orchestrator")
+_settings = get_settings()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 ADMIN_BRIDGE_NAME: str = "bridge2"
-ADMIN_SELF_NUMBER: str = "8801880446111"
-ADMIN_SELF_JID: str = "8801880446111@s.whatsapp.net"
+ADMIN_SELF_NUMBER: str = _settings.admin_bridge2_number
+ADMIN_SELF_JID: str = f"{_settings.admin_bridge2_number}@s.whatsapp.net"
 
 # Lower integer = higher priority (bridge2 is always preferred)
 BRIDGE_PRIORITY: dict[str, int] = {

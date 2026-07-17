@@ -34,12 +34,13 @@ from .ingestion import ingest_message
 from .models import IngestionRequest
 
 log = logging.getLogger("fazle.fpe.hsync")
+_settings = get_settings()
 
 # Bridge configurations (matches bridge_poller.BRIDGE_CONFIGS)
 _BRIDGE_CONFIGS = [
     {
         "name": "bridge1",
-        "source_number": "8801958122300",
+        "source_number": _settings.admin_bridge1_number,
         "messages_db": "/home/azim/whatsapp1/store/messages.db",
         "whatsapp_db": "/home/azim/whatsapp1/store/whatsapp.db",
         # When all_dms=True, enumerate ALL individual DM chat JIDs from SQLite
@@ -48,7 +49,7 @@ _BRIDGE_CONFIGS = [
     },
     {
         "name": "bridge2",
-        "source_number": "8801880446111",
+        "source_number": _settings.admin_bridge2_number,
         "messages_db": "/home/azim/whatsapp2/store/messages.db",
         "whatsapp_db": "/home/azim/whatsapp2/store/whatsapp.db",
     },

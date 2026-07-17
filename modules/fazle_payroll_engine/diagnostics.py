@@ -152,9 +152,11 @@ async def _check_and_alert_stale_bridges() -> None:
             # Best-effort admin notification via outbound queue
             try:
                 from shared.queue import enqueue_message
+                from app.config import get_settings
+                _admin_number = get_settings().admin_bridge2_number
                 await enqueue_message(
-                    bridge_number="8801880446111",   # bridge2 = admin authority
-                    recipient_jid="8801880446111@s.whatsapp.net",
+                    bridge_number=_admin_number,   # bridge2 = admin authority
+                    recipient_jid=f"{_admin_number}@s.whatsapp.net",
                     text=(
                         f"⚠️ BRIDGE ALERT: {bridge_id} last seen {last_seen}.\n"
                         f"Ingestion gap > {_GAP_ALERT_MINS} min. "

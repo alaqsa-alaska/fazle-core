@@ -1482,7 +1482,7 @@ async def _handle_fb_comment(value: dict):
     # Use a standard recruitment invite reply for page comments
     recruit_reply = (
         f"ধন্যবাদ আপনার মন্তব্যের জন্য! আমাদের সিকিউরিটি গার্ড পদে আবেদন করতে "
-        f"অনুগ্রহ করে আমাদের WhatsApp-এ মেসেজ করুন: wa.me/8801958122300"
+        f"অনুগ্রহ করে আমাদের WhatsApp-এ মেসেজ করুন: wa.me/{settings.admin_bridge1_number}"
     )
     ok = await _send_fb_comment_reply(comment_id, recruit_reply)
     if ok:
@@ -1676,7 +1676,7 @@ async def _handle_bridge_event(payload: dict, source: str):
 # ── Unified message processor — delegates to modules.message_router ────────────
 
 # Phones forwarded to fazle-agent /admin/inbox for Tier-1 NL handling.
-_AGENT_FORWARD_PHONES = {"8801880446111", "8801958122300"}
+_AGENT_FORWARD_PHONES = set(settings.admin_number_list)
 _AGENT_INBOX_URL = "http://127.0.0.1:8300/admin/inbox"
 
 

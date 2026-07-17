@@ -535,7 +535,7 @@ async def api_backfill_sqlite(
 
     result = await sync_from_bridge_sqlite(
         db_path=bridge2_db,
-        bridge_number="8801880446111",
+        bridge_number=_settings.bridge2_number,
         client_phones=client_phones,
         date_from=date_from,
         date_to=date_to,

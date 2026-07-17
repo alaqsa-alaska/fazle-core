@@ -708,3 +708,36 @@ recorded in the KB doc for future sessions.
 |---|---|---|
 | S19-05 | `knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md` | New — three-writer comparison table, test-run result, recommended next step for an actual fix session. |
 
+### Session 19, Step 6 — Hardcoded admin bridge numbers replaced with settings references
+
+`docs/AUDIT_REPORT_2026-07-17.md` §1D found the literal `"8801880446111"` (bridge2/OPS admin number) hardcoded in 5+ production files instead of reading `settings.admin_bridge2_number`, plus its bridge1 counterpart `"8801958122300"` hardcoded alongside it in several of the same files. Existing `Settings` fields already covered both (`app/config.py:72` `bridge2_number`, `:165` `admin_bridge2_number`, `:164` `admin_bridge1_number`) — no new config needed, no permission required.
+
+**7 files fixed, one at a time, each read/edited/syntax-checked/value-confirmed before moving to the next:**
+1. `shared/bridge_orchestrator.py` — `ADMIN_SELF_NUMBER`/`ADMIN_SELF_JID` module constants now derive from `get_settings().admin_bridge2_number`.
+2. `app/main.py` — `_AGENT_FORWARD_PHONES` now `set(settings.admin_number_list)` instead of a hardcoded 2-element set.
+3. `modules/fazle_payroll_engine/diagnostics.py` — stale-bridge admin alert now resolves `get_settings().admin_bridge2_number` via a local import (matching this file's existing local-import style).
+4. `modules/escort_roster/routes.py` — `/backfill-sqlite` route now passes `_settings.bridge2_number` (an already-resolved `_settings` object existed at this call site).
+5. `modules/fazle_payroll_engine/historical_sync.py` — `_BRIDGE_CONFIGS`' `source_number` fields now derive from `_settings.admin_bridge1_number`/`admin_bridge2_number`.
+6. `modules/fazle_payroll_engine/replay.py` — `_do_replay()`'s `source_number` now resolves `get_settings().admin_bridge1_number` via a local import.
+7. `modules/contact_sync/__init__.py` — `BRIDGE_SOURCES`' `number` fields now derive from `_settings.admin_bridge1_number`/`admin_bridge2_number`.
+
+**8th fix, found by the final verification grep, not in the original audit list:** `app/main.py`'s Facebook-comment recruitment auto-reply had a hardcoded `wa.me/8801958122300` in the Bangla reply text sent to commenters — same drift risk (a number rotation would silently send users to a dead link). Fixed to `wa.me/{settings.admin_bridge1_number}`.
+
+**`app/critical_numbers.py` — investigated per request, nuanced finding, not modified.** The *module* is live (imported by `modules/number_identity/__init__.py`, which is itself in the live import graph via `message_router`/`escort`/`message_archive`/`reviewed_reply_memory`/`shared/phone.py`) — but only for its generic `normalize_phone_880()` helper. The `CRITICAL_NUMBERS`/`CRITICAL_NUMBERS_RAW` hardcoded 20-number list itself is **dead in the live app process** — its only consumers are `recover_critical_numbers.py` (a standalone one-off script, not part of the running service) and the already-archived `archive/deprecated/20260602_gap_detector/__init__.py`. The real live "is this critical" check has moved to `number_identity.is_critical_phone()`, which reads `settings.critical_phone_set` (`.env`-driven) instead. No `# DEAD FILE` comment added — that would misdescribe a file that's genuinely still imported; flagged here for the Owner's own call on whether the unused list is worth removing separately. Also: this file's 20 numbers are unrelated to `8801880446111`/`8801958122300` — never actually in Step 6's scope.
+
+**Final verification:** `grep -rn "8801880446111\|8801958122300" modules/ app/ shared/ --include="*.py"` returns only comment/docstring lines (top-of-file/function docstrings, inline `#` comments, one usage-example docstring in `shared/env.py`) — zero remaining functional literals.
+
+### Files Authorized for Change (Session 19, Step 6)
+
+| ID | File | Change |
+|---|---|---|
+| S19-06 | `shared/bridge_orchestrator.py` | `ADMIN_SELF_NUMBER`/`ADMIN_SELF_JID` derived from settings instead of hardcoded. |
+| S19-06 | `app/main.py` | `_AGENT_FORWARD_PHONES` derived from `settings.admin_number_list`; FB-comment reply text uses `settings.admin_bridge1_number`. |
+| S19-06 | `modules/fazle_payroll_engine/diagnostics.py` | Stale-bridge alert's `bridge_number`/`recipient_jid` derived from settings. |
+| S19-06 | `modules/escort_roster/routes.py` | `/backfill-sqlite`'s `bridge_number` derived from settings. |
+| S19-06 | `modules/fazle_payroll_engine/historical_sync.py` | `_BRIDGE_CONFIGS`' `source_number` fields derived from settings. |
+| S19-06 | `modules/fazle_payroll_engine/replay.py` | `_do_replay()`'s `source_number` derived from settings. |
+| S19-06 | `modules/contact_sync/__init__.py` | `BRIDGE_SOURCES`' `number` fields derived from settings. |
+
+**Verification status:** all 7 touched files pass `py_compile`; each settings-derived value confirmed via a standalone import test to resolve to the exact same literal it replaced (no behavior change, only the source of truth changed). Final grep confirms zero remaining functional hardcoded literals. Not yet restarted/smoke-tested live this step — pending Owner restart, same pattern as Steps 1-3.
+

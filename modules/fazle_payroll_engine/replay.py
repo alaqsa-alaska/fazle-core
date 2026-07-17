@@ -58,6 +58,8 @@ async def _run(since: Optional[str], dry_run: bool) -> None:
 
 
 async def _do_replay(since, dry_run, _fetch, ingest_message, IngestionRequest) -> None:
+    from app.config import get_settings
+    _admin_bridge1_number = get_settings().admin_bridge1_number
 
     since_dt = datetime.fromisoformat(since) if since else datetime(2026, 5, 7, tzinfo=timezone.utc)
 
@@ -115,7 +117,7 @@ async def _do_replay(since, dry_run, _fetch, ingest_message, IngestionRequest) -
             req = IngestionRequest(
                 wa_message_id=wa_msg_id,
                 source="bridge1",
-                source_number="8801958122300",
+                source_number=_admin_bridge1_number,
                 chat_jid=chat_jid,
                 sender_phone=sender if sender else None,
                 is_from_me=False,

@@ -34,21 +34,23 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.config import get_settings
 from app.database import execute, fetch_val
 
 log = logging.getLogger("fazle.contact_sync")
+_settings = get_settings()
 
 # Bridge SQLite sources
 BRIDGE_SOURCES = [
     {
         "bridge": "bridge1",
         "whatsapp_db": "/home/azim/whatsapp1/store/whatsapp.db",
-        "number": "8801958122300",
+        "number": _settings.admin_bridge1_number,
     },
     {
         "bridge": "bridge2",
         "whatsapp_db": "/home/azim/bridges/bridge2/store/whatsapp.db",
-        "number": "8801880446111",
+        "number": _settings.admin_bridge2_number,
     },
 ]
 
