@@ -1364,3 +1364,245 @@ webhook/poller LID parity gap documented in the Phase 1B.2 proposal above.
 **Rollback (not needed, recorded for completeness):** `git revert ba1ac40
 393781f bcb5a53 aee44bc && git push origin main && scripts/restart_gate.sh
 --restart`. No database rollback required — no schema/data change shipped.
+
+---
+
+## Phase 1B.2 Escort Client Identity and Routing Convergence Proposal (FINALIZED per Owner decision — NOT IMPLEMENTED)
+
+**Status: proposal only. No code, schema, or config changed. Awaiting explicit
+separate Owner approval before any implementation, per the Owner's own
+instruction that this session covers deployment + proposal, not Phase 1B.2 code.**
+
+### 1. Current Behavior
+
+- **Source A — `ESCORT_CLIENT_PHONES`:** `modules/escort/__init__.py::_is_allowed_escort_client()`
+  (lines 276-281), called only from `handle_escort_client_message()` (line ~1757) —
+  a post-identity order-parsing gate, not an identity source. A second, unused,
+  divergent implementation exists at `shared/env.py::EscortEnv.is_escort_client()`
+  (dead code, zero callers).
+- **Source B — stored role:** `identity_brain._lookup_seed()` (`modules/identity_brain/__init__.py:198-210`),
+  Step 2 (line 101) — the only fully-implemented, reliable source.
+- **Source C — contact name:** does not exist. `identity_brain._lookup_contact()`
+  (line 320) / `_map_relation()` (line 337), Step 4 (line 152), match
+  `wbom_contacts.relation` — a structured field, 99.9% `'unknown'` — never
+  `display_name`.
+- **Step 6 fallback** (line 168): keyword-only (`_ESCORT_CONTENT_RE`) classification
+  of a never-before-seen sender to `role="repeat_client"`, which
+  `message_router._ESCORT_ROLES` (line 77) treats identically to `client_escort_buyer`
+  for routing purposes.
+- **Webhook behavior:** `app/main.py::_handle_bridge_event()` (line 1534) strips only
+  `@s.whatsapp.net`/`+`; never resolves `@lid`.
+- **Poller behavior:** `modules/bridge_poller/__init__.py::_load_lid_map()`
+  (lines 241-252) resolves LID → phone via the bridge's own `whatsmeow_lid_map`
+  SQLite table before calling `process_message()`.
+- **LID behavior:** a LID-only sender is `unknown` on webhook, correctly resolved
+  on poller — a real parity gap.
+- **Empty-list behavior:** confirmed = allowlist gate disabled, not automatic
+  `client_escort_buyer` promotion (Interpretation A/C, not B) — see Session 21
+  reconciliation entry above for the full trace.
+
+### 2. Owner Decisions (now authoritative, recorded verbatim in substance)
+
+1. **Canonical identity:** `client_escort_buyer` is the one canonical identity;
+   A/B/C must converge to it, not remain three independent concepts.
+2. **Priority order:** (1) `.env` explicit phone match, (2) stored
+   `fazle_contact_roles.role`, (3) contact-name "escort" marker, (4) existing
+   lower-confidence fallback. A higher-priority explicit match is never
+   overwritten by a lower one. The resolver must record which source fired.
+3. **Contact-name matching:** case-insensitive, Unicode-safe, whitespace/punctuation-
+   tolerant, word/token-boundary match on "escort" — not a bare substring match
+   (must reject e.g. a name that merely contains "escort" mid-word with no
+   token boundary). Evidence recorded with the matched name appropriately
+   masked/limited in logs.
+4. **Empty `ESCORT_CLIENT_PHONES`:** disables the phone-allowlist gate only;
+   stored-role and contact-name detection keep working; the Step 6 keyword-only
+   fallback must **not** be treated as a trusted, persistent identity source.
+5. **Unverified message-content fallback:** Step 6 becomes a *routing signal for
+   review only* — labeled `unverified_escort_order_source` (or an equivalent
+   existing review-status vocabulary), never silently promoted to a persisted
+   `client_escort_buyer` row, never auto-confirmed, never granted any
+   financial/admin/RBAC weight.
+6. **Webhook/poller parity:** both must resolve a given sender to the same
+   canonical identity; LID resolution must use the existing safe mapping
+   (never invent a phone number, never collapse distinct LIDs, retain original
+   JID as evidence, fall through to "unverified" rather than misclassify on
+   resolution failure); `.env` phone matching only after a normalized phone is
+   actually obtained.
+
+### 3. Exact Gaps
+
+- No contact-name classifier exists (Source B entirely missing).
+- `ESCORT_CLIENT_PHONES` used only as a parser-stage gate, not wired into identity
+  resolution at all.
+- `fazle_contact_roles.role` is the only reliable identity source today — a single
+  point of failure for the "three converging sources" design the Owner intends.
+- `shared/env.py::EscortEnv.is_escort_client()` is dead, duplicate code (divergent
+  from the one actually used in `modules/escort/__init__.py`).
+- Webhook/poller LID mismatch — webhook path has zero LID resolution.
+- Verified (A/B/C) vs. unverified (Step 6 keyword-only) trust levels are conflated
+  today — both land in the same `_ESCORT_ROLES` set with no distinguishing flag.
+
+### 4. Proposed Architecture
+
+- **Canonical resolver location: `modules/identity_brain`.** Not `modules/escort/__init__.py`
+  — `identity_brain.detect_identity()` is already the single shared entry point both
+  webhook (`app/main.py::_handle_bridge_event()`) and poller
+  (`modules/bridge_poller/__init__.py`, via `process_message()`) call before any
+  role-specific handling. Centralizing there gives webhook/poller parity "for
+  free" for sources A/B/C, rather than requiring each ingestion path to
+  separately re-implement escort-client detection.
+- **Input contract:** sender phone (raw, pre-normalization), original JID (may
+  carry `@lid`), resolved contact-book name (if any), current `fazle_contact_roles`
+  row (if any), `Settings` (for `.env` lists).
+- **Result contract** (conceptual — exact type to match this module's existing
+  `_build()`/`_build_contact()`/`_unknown()` pattern rather than introducing a
+  new unrelated shape): `is_escort_client: bool`, `canonical_role: Optional[str]`,
+  `is_verified: bool`, `source: Optional[str]` (`"env_phone" | "stored_contact_role"
+  | "contact_name_marker" | "unverified_message_content" | None`),
+  `normalized_phone`, `original_jid`, `resolved_contact_name`, `evidence: dict`.
+- **Verified/unverified distinction:** a new boolean (or equivalent) threaded
+  through the existing `identity_role`/`identity_source`/`identity_priority`
+  dict fields `detect_identity()` already returns, so `message_router` can
+  branch on it without a second parallel lookup.
+- **Integration points:** `identity_brain.detect_identity()` (add the new
+  priority-ordered check before/alongside today's Step 2/4/6), `message_router`
+  (branch on `is_verified` for the two routing-contract paths in §14 below),
+  `modules/escort/__init__.py::handle_escort_client_message()` (receives the
+  verified/unverified flag instead of re-deriving trust itself).
+
+### 5. File-by-File Change Plan
+
+| File | Proposed change | Reason |
+|---|---|---|
+| `modules/identity_brain/__init__.py` | New canonical escort-client resolution step, priority-ordered per Decision 2; new contact-name "escort" token matcher; Step 6's escort-content branch reclassified as unverified, not a trusted role | Centralizes A/B/C, gives webhook/poller parity, implements Decisions 1-3, 5 |
+| `modules/escort/__init__.py` | `_is_allowed_escort_client()` role narrowed to a true parser-stage gate only, consuming the new resolver's `is_verified`/`source` instead of independently re-deriving trust; `handle_escort_client_message()` branches per §14's two-path contract | Decision 4, 5 — separates verified/unverified handling |
+| `shared/env.py` | Remove or clearly deprecate the dead, divergent `is_escort_client()` | Closes the duplicate-implementation gap (§3) |
+| `app/main.py::_handle_bridge_event()` | Add LID resolution (reuse the poller's existing `whatsmeow_lid_map`-based approach or a shared helper) before calling `detect_identity()` | Decision 6 — webhook/poller parity |
+| `modules/message_router/__init__.py` | Branch on the new `is_verified` flag for auto-reply suppression / admin-draft routing per §14's contract | Implements the verified/unverified routing contract |
+
+### 6. Routing Decision Table
+
+| Identity source | Verified | Generic reply | Parser | Admin draft | Persist role |
+|---|---:|---|---|---|---|
+| A — `.env` phone match | Yes | Suppressed | Evaluated | Yes | No change (source of truth is `.env`, not a persisted row) |
+| B (proposed) — stored `client_escort_buyer` | Yes | Suppressed | Evaluated | Yes | Already persisted |
+| C (proposed) — contact-name marker | Yes | Suppressed | Evaluated | Yes | Optional — could seed a `fazle_contact_roles` row for future speed, needs Owner input |
+| Step 6 — keyword-only, unverified | **No** | Suppressed (for that message only) | Evaluated, safely | Yes, labeled `unverified_escort_order_source` | **Never** |
+
+### 7. Webhook/Poller Parity
+
+- Shared normalization: both paths call the same `identity_brain.detect_identity()`
+  once the resolver above lands — no separate re-implementation.
+- LID mapping: webhook gains the same `whatsmeow_lid_map`-based resolution the
+  poller already has (exact mechanism TBD at implementation time — reuse vs.
+  extract to a shared helper is an implementation-time call, not a design
+  decision that changes behavior).
+- Failure behavior: unresolved LID → proceed as unverified, never fabricate a
+  phone number, never collapse distinct LIDs into one identity.
+- Original JID retention: kept as evidence in the result contract regardless of
+  resolution success.
+
+### 8. Empty-List Behavior
+
+- **Current:** disables the phone-allowlist parser gate only (confirmed, not
+  assumed — see Session 21 reconciliation trace).
+- **Proposed:** unchanged for the gate itself; the resolver's Decision 4/5
+  changes apply regardless of list state — an empty list changes nothing about
+  whether Step 6 output is trusted (it never should be, list state or not).
+- **Compatibility impact:** none expected on already-verified senders (A/B/C);
+  today's "open mode lets an unverified sender's order through the parser" stays
+  true, but the order/sender would now be correctly labeled unverified rather
+  than silently riding on `repeat_client`'s undifferentiated trust level.
+
+### 9. Data and Schema Impact
+
+- **Schema required:** No, for the minimum viable version (verified/unverified
+  can travel as a dict field, same pattern as existing `identity_*` fields).
+  Optionally, if Source C (contact-name match) is meant to *persist* a
+  `fazle_contact_roles` row for future speed (open question in §6), that would
+  be an additive `INSERT` through the already-existing, already-whitelisted
+  Phase 1B endpoint/logic — no new column needed either way.
+- **Existing row changes:** none required.
+- **Backfill:** none required.
+- **Audit metadata:** the proposed `evidence`/`source` fields serve this
+  directly; where an admin-review draft is created for an unverified sender, the
+  draft's own audit trail should carry the `unverified_escort_order_source` label.
+
+### 10. Risks
+
+- False positive identity: contact-name token matching, done carelessly, could
+  misclassify (mitigated by Decision 3's token-boundary requirement).
+- False negative identity: over-tightening the name matcher could miss real
+  escort clients whose contact names are formatted unexpectedly.
+- Order loss: any change to the Step 6 path must preserve "create an admin-review
+  draft" behavior — must not regress to silently dropping unverified orders.
+- Auto-reply leakage: must confirm suppression still fires for the unverified
+  path exactly as it does today for `repeat_client`.
+- Duplicate drafts: the existing dedup mechanism must be confirmed compatible
+  with the new verified/unverified split.
+- LID mismatch: webhook LID resolution must be proven against real bridge data,
+  not just unit-mocked, before certification.
+- Legacy behavior change: today's 3-phone `ESCORT_CLIENT_PHONES` list masks
+  most of this — real-world behavior change is largest for empty-list and
+  never-before-seen-sender scenarios, which need deliberate test coverage since
+  they're rare in current traffic.
+
+### 11. Tests
+
+Unit: resolver priority order (A beats B beats C beats Step 6, each in isolation
+and layered); contact-name matcher (true positives from §Decision 3's examples,
+true negatives against bare-substring false positives). Integration: full
+webhook and full poller round-trips for a phone-only sender, a LID-only sender,
+a contact-name-only sender, a stored-role-only sender, and a no-match sender.
+LID: resolved vs. unresolved LID behavior on both paths. Open mode vs. closed
+mode: identical resolver behavior for A/B/C, differing only in whether the
+phone-list *gate* (not identity) applies. Complete order / incomplete order /
+non-order message: existing parser behavior preserved for verified senders;
+unverified-path equivalents newly tested. Duplicate message: existing dedup
+behavior confirmed unchanged.
+
+### 12. Rollout
+
+Feature flag recommended given the sender-identity blast radius (affects every
+inbound WhatsApp message, not just escort-shaped ones) — e.g. gate the new
+resolver behind a settings flag defaulting to today's behavior, flip only after
+a shadow-comparison period. Shadow comparison: log what the new resolver would
+have decided alongside today's actual decision for some window before cutover.
+Logging: source/evidence on every resolution, verified/unverified explicitly
+visible in logs for the first weeks. Smoke tests: same shape as Phase 1B's
+(disposable phone/LID, read-only collision check first). Monitoring: watch
+`unverified_escort_order_source`-labeled draft volume for a spike (would
+indicate the empty-list/Step-6 risk is live) or a drop-to-zero (would indicate
+over-suppression).
+
+### 13. Rollback
+
+Code rollback: revert the resolver commit(s); since integration points are
+additive branches (`is_verified` check), a revert restores today's undifferentiated
+behavior exactly. Config rollback: flip the proposed feature flag off. Schema
+rollback: not applicable (no schema change in the minimum viable version).
+Data cleanup: not applicable unless Source C is given persistence (§9's open
+question), in which case any auto-seeded rows would need their own reviewable
+cleanup path — flagged for the eventual detailed implementation proposal, not
+decided here.
+
+### 14. Owner Approval Gate
+
+**Exact files this would touch (not yet approved for editing):**
+`modules/identity_brain/__init__.py`, `modules/escort/__init__.py`, `shared/env.py`,
+`app/main.py`, `modules/message_router/__init__.py`.
+
+**Exact behavior changes (not yet approved):** contact-name "escort" token
+matching as a new identity source; `ESCORT_CLIENT_PHONES` elevated from
+parser-gate-only to an actual identity source; Step 6's keyword fallback
+downgraded from full `_ESCORT_ROLES` trust to a labeled "unverified" path;
+webhook gains LID resolution.
+
+**Explicitly excluded from this proposal, still open:** whether Source C
+should *persist* a `fazle_contact_roles` row (§9); the feature-flag/shadow-rollout
+mechanics (implementation-time detail, not a design decision); any change to
+RBAC, `.env`, or financial-authority code (none proposed, none needed).
+
+**Implementation performed: No.** This entire section is a proposal only,
+produced per Owner authorization to prepare (not implement) the Phase 1B.2
+decision package. Awaiting explicit separate Owner approval to begin coding.
