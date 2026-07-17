@@ -166,108 +166,25 @@ async def _seed_unknown_employee_identity(
     text: str,
     identity: dict,
 ) -> tuple[dict, bool]:
-    """Best-effort identity seed for phone-backed operational senders."""
-    role_hint = (identity.get("role") or identity.get("identity_role") or "unknown").strip().lower()
-    if role_hint != "unknown":
-        return identity, False
+    """Best-effort identity seed for phone-backed operational senders.
 
-    sender_norm = normalize_phone(sender)
-    if not sender_norm:
-        local_phone = normalize_bd_phone(sender)
-        if local_phone and local_phone.startswith("01") and len(local_phone) == 11:
-            sender_norm = "880" + local_phone[1:]
-    if not sender_norm:
-        return identity, False
+    DISABLED (Owner directive, Session 20 Phase 1, 2026-07-17): this function
+    only ever runs when identity_brain.detect_identity() already returned
+    role="unknown" -- meaning the sender failed every trust check the system
+    has (not an admin, not the accountant, not an escort-client, not an
+    existing wbom_employees/wbom_contacts/escort-roster match). Auto-creating
+    a wbom_employees row (and indirectly seeding fpe_employees via
+    match_or_create_employee()) for such a sender is exactly the
+    "random/unapproved number" auto-create Owner Rule D prohibits. There is
+    no narrower guard to add -- the entire remaining population is untrusted
+    by construction. Kept in place, not deleted, as a documented reference
+    for the original design intent (first-time genuine-employee self-report)
+    in case a future Owner-approved trust signal is introduced.
 
-    intent_hint = classify(text) if text else "unknown"
-    operational_trigger = (
-        intent_hint in _OPERATIONAL_AUTO_CREATE_INTENTS
-        or is_advance_request(text)
-        or is_release_intent(text)
-        or is_attendance_message(text)
-        or is_supervisor_attendance(text)
-        or ec_detect_trigger(text)
-        or _looks_like_escort_order(text)
-        or _looks_like_escort_buying_intent(text)
-        or is_completed_escort_draft(text)
-    )
-    if not operational_trigger:
-        return identity, False
-
-    employee_name = (
-        identity.get("employee_name")
-        or identity.get("display_name")
-        or "Unknown"
-    )
-    employee_name = str(employee_name).strip() or "Unknown"
-    designation = str(identity.get("designation") or "Staff").strip() or "Staff"
-
-    existing = await fetch_one(
-        "SELECT employee_id, employee_name, designation, basic_salary, status FROM wbom_employees WHERE employee_mobile = $1 LIMIT 1",
-        sender_norm,
-    )
-    if existing:
-        wbom_row = dict(existing)
-    else:
-        wbom_id = await fetch_val(
-            """INSERT INTO wbom_employees
-                   (employee_name, employee_mobile, designation, status, joining_date)
-               VALUES ($1, $2, $3, 'Active', CURRENT_DATE)
-               ON CONFLICT (employee_mobile) DO UPDATE
-                   SET employee_name = COALESCE(NULLIF(EXCLUDED.employee_name, ''), wbom_employees.employee_name),
-                       designation = COALESCE(NULLIF(EXCLUDED.designation, ''), wbom_employees.designation),
-                       status = 'Active'
-               RETURNING employee_id""",
-            employee_name,
-            sender_norm,
-            designation,
-        )
-        wbom_row = await fetch_one(
-            "SELECT employee_id, employee_name, designation, basic_salary, status FROM wbom_employees WHERE employee_id = $1",
-            wbom_id,
-        ) or {
-            "employee_id": wbom_id,
-            "employee_name": employee_name,
-            "designation": designation,
-            "basic_salary": None,
-            "status": "Active",
-        }
-
-    try:
-        fpe_row = await match_or_create_employee(
-            name_raw=employee_name,
-            payout_phone=sender_norm,
-            employee_id_phone=sender_norm,
-        )
-        if fpe_row:
-            await execute(
-                "UPDATE fpe_employees SET wbom_employee_id = $1 WHERE id = $2 AND wbom_employee_id IS NULL",
-                wbom_row["employee_id"],
-                fpe_row.employee_id,
-            )
-    except Exception as exc:
-        log.warning("[identity-seed] FPE seed failed sender=%s: %s", sender_norm, exc)
-
-    refreshed = await detect_identity(sender_norm, text)
-    if refreshed:
-        refreshed["identity_source"] = "message_router_auto_create"
-        refreshed["identity_confidence"] = max(int(refreshed.get("identity_confidence") or 0), 60)
-        return refreshed, True
-
-    updated_identity = dict(identity)
-    updated_identity.update(
-        {
-            "role": "employee",
-            "employee_id": wbom_row["employee_id"],
-            "employee_name": wbom_row.get("employee_name") or employee_name,
-            "designation": wbom_row.get("designation") or designation,
-            "basic_salary": wbom_row.get("basic_salary"),
-            "identity_role": "employee",
-            "identity_source": "message_router_auto_create",
-            "identity_confidence": 60,
-        }
-    )
-    return updated_identity, True
+    _OPERATIONAL_AUTO_CREATE_INTENTS (module level) is now unused outside
+    this function -- flagged, not removed, per session hard rules.
+    """
+    return identity, False
 
 
 def _looks_like_escort_buying_intent(text: str) -> bool:

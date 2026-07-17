@@ -7,7 +7,17 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_unknown_phone_backed_operational_message_is_seeded(monkeypatch):
+async def test_unknown_phone_backed_operational_message_is_not_seeded(monkeypatch):
+    """_seed_unknown_employee_identity() is disabled (Owner directive, Session
+    20 Phase 1, 2026-07-17): every sender reaching this function already
+    failed identity_brain's admin/accountant/escort-client/employee/contact
+    checks, so auto-creating a row here is exactly the "random/unapproved
+    number" auto-create Owner Rule D prohibits. This test proves the guard is
+    an unconditional no-op -- even input shaped to match the OLD trigger
+    conditions (unknown role + an advance-request-shaped message) must
+    return the identity dict unchanged with seeded=False, and must not touch
+    the database at all (fetch_one/fetch_val/execute/match_or_create_employee
+    all zero calls)."""
     import modules.message_router as router
 
     monkeypatch.setattr(router, "normalize_phone", lambda _sender: "8801712345678")
@@ -35,30 +45,17 @@ async def test_unknown_phone_backed_operational_message_is_seeded(monkeypatch):
     execute = AsyncMock()
     monkeypatch.setattr(router, "execute", execute)
     monkeypatch.setattr(router, "match_or_create_employee", AsyncMock(return_value=SimpleNamespace(employee_id=77)))
-    monkeypatch.setattr(
-        router,
-        "detect_identity",
-        AsyncMock(return_value={
-            "role": "employee",
-            "identity_role": "employee",
-            "identity_confidence": 60,
-            "identity_source": "message_router_auto_create",
-            "employee_id": 9,
-            "employee_name": "Rahim",
-            "designation": "Staff",
-            "basic_salary": 10000,
-        }),
-    )
+
+    original_identity = {"role": "unknown", "identity_confidence": 10, "identity_source": "phone"}
 
     updated_identity, seeded = await router._seed_unknown_employee_identity(
         "8801712345678",
         "অগ্রিম চাই",
-        {"role": "unknown", "identity_confidence": 10, "identity_source": "phone"},
+        original_identity,
     )
 
-    assert seeded is True
-    assert updated_identity["role"] == "employee"
-    assert updated_identity["employee_id"] == 9
-    assert updated_identity["identity_source"] == "message_router_auto_create"
-    assert execute.await_count == 1
-    assert fetch_val_mock.await_count == 1
+    assert seeded is False
+    assert updated_identity is original_identity
+    assert fetch_one.await_count == 0
+    assert fetch_val_mock.await_count == 0
+    assert execute.await_count == 0
