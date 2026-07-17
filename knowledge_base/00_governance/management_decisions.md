@@ -777,3 +777,9 @@ Bridge1 cursor advance mechanism confirmed correct 2026-07-17 — `fetched=0` ov
 
 **Process gap, for future sessions:** before deleting or renaming any function — even one that looks file-local or is underscore-prefixed — search the *whole repository* for importers (`grep -rn "from <module> import.*<name>"` or `grep -rn "\b<name>\b"` across `modules/`, `app/`, `shared/`, `tests/`), not just call sites within the same file. Underscore-prefixed names in this codebase are a naming convention, not an enforced privacy boundary — cross-module imports of "private" functions exist (confirmed here, and `_escort_client_phone_list` itself is cross-imported by two files too, which happened to survive only because that function wasn't the one removed). `py_compile` does not catch this class of error — it only validates syntax within a single file, not cross-module import resolution. The `import app.main` full-chain test (matching uvicorn's actual load path) used to verify the hotfix should be standard practice before any restart request going forward, not just for large multi-file changes.
 
+### Session 19 — Session closed (2026-07-17)
+
+Session 19 complete — Steps 0-8 implemented, tested, and committed. Service healthy. Open items carried to next session: dual-write hang fix, history_sync blocking call, employee edit 500 investigation, Step 9 credential rotation.
+
+All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier unpushed commits from prior sessions — 84 total — pushed to `origin/main` this session (`46acd44..e458158`, clean fast-forward, confirmed `origin/main` == local `HEAD`).
+

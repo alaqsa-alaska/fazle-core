@@ -1,11 +1,13 @@
 # Next Implementation Queue — Fazle Core
 
-**Last updated:** 2026-07-17 — reviewed against `git log` through commit `3582821`
-(Session 18, 2026-07-16) and `knowledge_base/00_governance/management_decisions.md`
-Sessions 13-18. Everything through Session 18 is committed on `main` (66 commits ahead
-of `origin/main`, working tree clean except an intentionally-untracked
+**Last updated:** 2026-07-17 (end of Session 19) — reviewed against `git log` through
+commit `e458158` and `knowledge_base/00_governance/management_decisions.md` Sessions
+13-19. Session 19 (this update) implemented and shipped Steps 0-8 of
+`docs/AUDIT_REPORT_2026-07-17.md`'s recommended plan — see "What shipped in Session 19"
+below. All commits through `e458158` pushed to `origin/main` (`46acd44..e458158`, clean
+fast-forward, 84 commits). Working tree clean except an intentionally-untracked
 `db/migrations_drafts/047_*.DRAFT-DO-NOT-APPLY`, which is a **rejected, dead** migration
-kept only as a record — see "Resolved/closed since last review" below, not a pending task).
+kept only as a record — see "Resolved/closed since last review" below, not a pending task.
 
 **How to use this file:** work top to bottom within a tier. Don't start Phase 2/3 items
 while Tier 0/1/2 items remain open — that repeats the exact "freeze declared, freeze not
@@ -42,6 +44,56 @@ All Owner-authorized, all committed, all documented in `management_decisions.md`
   audit-logged before deletion. Two items explicitly left open by Owner directive, not
   oversight — see "Immediate Next" below.
 
+## What shipped in Session 19 (2026-07-17)
+
+All Owner-authorized, all committed and live, all documented in `management_decisions.md`.
+Implemented `docs/AUDIT_REPORT_2026-07-17.md`'s recommended session plan, Steps 0-8, one
+at a time with a commit + restart-verify after each:
+
+- **Step 0:** retroactive `management_decisions.md` entries for migrations 043
+  (`office_assistant_role`) and 046 (`fpe_employee_edit_requests`), which had shipped
+  with no governance record.
+- **Step 1 — 🔴 the highest-severity live finding:** webhook path (`/webhook/mcp1`/`mcp2`)
+  gained the same `_requires_legacy_workflow()` gate the SQLite poller already had —
+  previously an inbound escort order over the webhook could be silently classified as a
+  social message and never reach booking creation. Also fixed the P15-03 dedup guard from
+  fail-open to fail-closed. **Confirmed live** via a real smoke test (escort-shaped test
+  message → 0 rows in `social_inbox_events`, correctly routed to the escort pipeline
+  instead; control greeting → correctly classified `social`).
+- **Step 2:** `webhook/mcp1`'s always-200 behavior — Owner decision: Option A, document as
+  intentional (prevents bridge retry-storms). Test renamed/updated to match.
+- **Step 3 — destination-field leak, upgraded from "unconfirmed" to fixed:** root cause
+  confirmed (`_CD_DEST_RE`'s `\s*` crossing a newline on a blank `Destination:` line,
+  `modules/escort/__init__.py`), fixed (`\s*`→`[ \t]*`), blast radius corrected from 4 to 6
+  rows (902 and 938 were previously uncounted), 6 corrupted rows backfilled to `NULL`.
+- **Step 4 — discovered `chat_history` sync was already running for ~2 days,
+  undocumented:** the Session 13 "blocked on sudo" note was stale — someone/something
+  installed and started `chat-sync.service` the same night, outside any recorded session.
+  Verified healthy (9,156+ rows synced, zero errors in its full run). Record corrected.
+- **Step 5:** dual-write concurrency diagnostic (no fix) — documented all 3 writers to
+  `escort_roster_entries` (a previously-undiscussed 3rd writer, `create_roster_entry()`,
+  found). Still open, see below.
+- **Step 6 (+6B):** hardcoded admin bridge number (`8801880446111`) replaced with settings
+  references across 8 files. Found and fixed a real, separate bug along the way:
+  `modules/social_auto_reply/rate_limiter.py::mark_sent()` was passing an `int` to a
+  `$2::text`-cast query param, crashing on every send and silently disabling the
+  DB-backed rate limiter for at least ~22 hours before the fix.
+- **Step 7:** consolidated the escort-client-phone-allowlist duplication by extending
+  `modules/fazle_payroll_engine/normalizer.py` (the pre-existing, Owner-directed single
+  source of truth for BD phone normalization) with the missing operator-code check,
+  rather than building a new file — caught mid-implementation after discovering that
+  module already existed. **Caused a brief self-inflicted production outage** (deleted a
+  function still cross-imported by `client_billing/profiles.py`; hotfixed same session).
+  Full incident writeup in `management_decisions.md`.
+- **Step 8:** fixed the blocking `sqlite3.connect()` call inside `async def _poll_bridge()`
+  (`modules/bridge_poller/__init__.py`) — extracted a sync helper, dispatched via
+  `asyncio.to_thread()`. Found (not fixed) a second instance of the same bug class in
+  `modules/escort_roster/history_sync.py:779` — see "Technical Debt" below.
+
+**Not done this session (deliberately, per Owner decision):** Step 9 (Groq key rotation +
+DB password rotation) — deferred to its own dedicated task, not bundled into a code-fix
+session.
+
 ## Resolved/closed since last review (no action needed, noted so nobody re-opens them)
 
 - **Migration `047` (bulk-fabricate designation/salary for 180 unlinked FPE employees) —
@@ -58,48 +110,59 @@ All Owner-authorized, all committed, all documented in `management_decisions.md`
 
 ## Immediate Next (genuinely open, ranked)
 
-1. **Escort-roster/lifecycle dual-write concurrency hang — unresolved, needs dedicated
+1. **[ ] Escort-roster/lifecycle dual-write concurrency hang — unresolved, needs dedicated
    concurrency-debugging time.** See "Known Broken / Conflicting Workflows" below for the
-   full call-path trace. Not a quick pickup — budget real time for `pg_locks`/
-   `pg_stat_activity` inspection during a live hang, not another blind refactor attempt.
-2. **Escort `destination` field leak (S/N 900/901/905/906) — open, undiagnosed, unfixed.**
-   `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md`. Next
-   step is a *scoped investigation* (find the 4 source admin messages in a wider search —
-   they weren't in `wbom_whatsapp_messages`'s narrow window checked so far — then trace
-   `_create_confirmed_from_admin()`'s field mapping around `modules/escort/__init__.py:1650-1680`),
-   not a code change yet. KB-first proposal required before touching the parser.
-3. **Historical rows 703, 707, 734 — flagged for manual admin review, Owner declined to
+   full call-path trace. **Session 19 Step 5 completed the diagnostic** (all 3 writers to
+   `escort_roster_entries` documented, including a previously-undiscussed 3rd writer —
+   see `knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md`) but
+   did **not** fix it — reproducing the actual hang requires temporarily reintroducing the
+   reverted refactor, out of scope for a diagnosis-only step. Budget real time for
+   `pg_locks`/`pg_stat_activity` inspection during a live hang.
+2. **[x] RESOLVED 2026-07-17 (Session 19 Step 3) — Escort `destination` field leak.** Root
+   cause confirmed (`_CD_DEST_RE`'s `\s*` crossing a newline on a blank `Destination:`
+   line), fixed, 6 corrupted rows (blast radius corrected from 4) backfilled to `NULL`.
+   See `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md`
+   (status now "CONFIRMED AND FIXED") and "Known Broken / Conflicting Workflows" below.
+3. **[ ] Historical rows 703, 707, 734 — flagged for manual admin review, Owner declined to
    guess.** Raw text is genuinely ambiguous (unclaimed phone-like number near the lighter
    name in 703/707; no mother-vessel label at all in 734). See
    `escort_sender_validation_audit_phase2_2026-07-16.md` §3 review note. Needs an admin
-   with domain knowledge of the actual vessel/booking, not another automated pass.
-4. **`chat_history` sync (Phase 1 of `docs/TASK_BRIEF_chat_sync_and_reply_gap_2026-07-15.md`)
-   — code finished and validated, still not deployed.** Staged at `~/chat_sync_staging/`
-   (`sync.py` + a systemd unit file, not installed). Blocked on `/opt` write access
-   requiring `sudo`, not available in-session as of 2026-07-15. Needs a session with sudo
-   to actually install and start the service.
-5. **Frontend shared-fetch migration — see "URL / Route-Based Functions Needing Attention"
+   with domain knowledge of the actual vessel/booking, not another automated pass. Not
+   touched in Session 19.
+4. **[x] RESOLVED 2026-07-17 (Session 19 Step 4) — `chat_history` sync.** Turned out to
+   already be installed and running since 2026-07-15 23:28:28 — the "blocked on sudo, not
+   deployed" note below was stale. Verified healthy (9,156+ rows, zero errors across the
+   full run). See `management_decisions.md` Session 19 Step 4 for the full correction.
+5. **[ ] Frontend shared-fetch migration — see "URL / Route-Based Functions Needing Attention"
    below.** Scope grew from the original "5 pages" estimate to 8 (two new admin pages
-   shipped since that assessment also need it).
-6. **`open-webui` docker-compose.yml Groq API key in plaintext** (`/home/azim/docker-compose.yml`,
+   shipped since that assessment also need it). Not touched in Session 19.
+6. **[ ] `open-webui` docker-compose.yml Groq API key in plaintext** (`/home/azim/docker-compose.yml`,
    outside this repo) — still flagged, still not rotated. Same class of issue as the
-   Postgres password (already rotated 2026-07-12), smaller blast radius.
-7. **`webhook/mcp1` always-200 behavior — needs a product decision, not an inference.**
-   See "URL / Route-Based Functions Needing Attention" below.
-8. **LOW PRIORITY — `PUT /api/admin/employees/143` 500 error, single occurrence, no
+   Postgres password (already rotated 2026-07-12), smaller blast radius. This is Session
+   19's deferred "Step 9" — deliberately not bundled into a code-fix session; needs its
+   own dedicated task (requires logging into the Groq console).
+7. **[x] RESOLVED 2026-07-17 (Session 19 Step 2) — `webhook/mcp1` always-200 behavior.**
+   Owner decision: Option A, document as intentional (prevents bridge retry-storms). Test
+   renamed to `test_missing_sender_field_returns_200` and updated. See "URL / Route-Based
+   Functions Needing Attention" below.
+8. **[ ] LOW PRIORITY — `PUT /api/admin/employees/143` 500 error, single occurrence, no
    confirmed pattern.** Occurred 2026-07-16 20:48:46 — no traceback found in available log
    history; Pydantic type validation rules out a simple str/int mismatch (confirmed via a
    direct test: an int for an `Optional[str]` field raises a 422, not a 500). Cannot
    diagnose from logs alone. Next step when reproducing: check logs immediately after
    triggering the same edit action live to capture the traceback. Standalone bug, not part
    of any Tier or Phase — investigate opportunistically when log context is available, not
-   a scoped project of work. See `management_decisions.md` Session 19 for full detail.
+   a scoped project of work. Not resolved in Session 19 (Owner decision: log and defer).
+   See `management_decisions.md` Session 19 for full detail.
+9. **[ ] NEW (found in Session 19 Step 8) — `modules/escort_roster/history_sync.py:779`
+   blocking SQLite call in async context.** Same bug class as the `bridge_poller` fix
+   (commit `a5d3871`), not yet applied here. See "Technical Debt" below for full detail.
 
 ---
 
 ## Known Broken / Conflicting Workflows
 
-### 1. Escort release-event dual-write — concurrent releases can hang (UNFIXED, reverted)
+### 1. Escort release-event dual-write — concurrent releases can hang (UNFIXED, reverted) — diagnostic completed 2026-07-17, still not fixed
 
 **Where:** `modules/escort_lifecycle/__init__.py` (~line 315-390, the raw `INSERT INTO
 escort_roster_entries ... ON CONFLICT DO UPDATE` block) vs. `modules/escort_roster`'s own
@@ -154,49 +217,51 @@ reproducing the hang and inspecting `pg_locks`/`pg_stat_activity` live** — the
 attempt burned real time chasing this blind twice and stopped rather than ship a
 financial/lifecycle-path deadlock.
 
-### 2. Escort `destination` field leak — parser/field-mapping conflict, unconfirmed scope
+**Update 2026-07-17 (Session 19 Step 5):** full diagnostic completed, no code changed.
+A **previously-undiscussed 3rd writer** to `escort_roster_entries` was found:
+`escort_roster.create_roster_entry()` (the manual admin "add roster entry" API), with its
+own two separate check-then-act races (program_id collision, duplicate-entry bypass),
+unrelated to the release-event path. Running `test_concurrent_release_events` against
+today's (reverted, safe) code passes — expected, not new evidence, since the hang was
+specific to the abandoned refactor which no longer exists in the tree. Full writeup:
+`knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md`, including
+diagnostic SQL ready for whenever someone next attempts the actual fix.
+
+### 2. Escort `destination` field leak — ✅ RESOLVED 2026-07-17 (Session 19 Step 3)
 
 **Where:** `modules/escort/__init__.py::_create_confirmed_from_admin()` (~line 1650-1680),
 the direct-create path used when an admin's confirmation message has no matching prior
-draft.
+draft, and `_update_program_confirmed()` (a second consumer of the same parse output,
+found during the fix).
 
-```
-Admin sends a direct confirmation message (no prior draft exists)
-        │
-        ▼
-modules/escort/__init__.py::_create_confirmed_from_admin() (~1517-1662)
-        │
-        ├── parses fields from raw message text
-        │
-        ├── escort-name field  ──┐
-        │                        ├─ cross paths somewhere in here
-        └── destination field  ──┘  (exact line not yet found)
-        │
-        ▼
-Result: `destination` column stores "Escort Name: <name>" instead of
-a place name — confirmed on 4 rows (900, 901, 905, 906), all
-`auto_created=true`, all in the 2026-06-25–06-27 window.
-```
+**Root cause confirmed and fixed.** `_CD_DEST_RE` (`modules/escort/__init__.py:144-147`)
+used `\s*` around the colon, which matches newlines — when an admin left `Destination:`
+blank, the pattern spilled into and captured the entire next line ("Escort Name: ...")
+instead of an empty value. Confirmed via a direct regex test against the real source
+message (message_id 10678). Fixed: `\s*` → `[ \t]*`. Blast radius corrected from the
+originally-reported 4 rows to **6** (902 and 938 were previously uncounted; 938 confirmed
+the bug also affects `_update_program_confirmed()`, not just the auto-create path). All 6
+corrupted rows backfilled to `NULL` (the correct value, not data loss — the admin
+genuinely left the field blank).
 
-Unlike the S/N 777 defect (positively confirmed fixed by replaying the original message
-through current code), the 4 source WhatsApp messages could not be located in
-`wbom_whatsapp_messages` — reproducibility against current code is **open, not ruled
-out, not confirmed**. Next step is finding the source messages (try `fazle_messages` /
-`processed_bridge_messages`, or accept the retention window has passed), not editing the
-parser blind. Full write-up: `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md`.
+Full write-up (updated to "ROOT CAUSE CONFIRMED AND FIXED"):
+`knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md`.
 
 ---
 
 ## URL / Route-Based Functions Needing Attention
 
-### 1. `POST /webhook/mcp1` — always returns 200, needs a product decision
+### 1. `POST /webhook/mcp1` — always returns 200 — ✅ RESOLVED 2026-07-17 (Session 19 Step 2)
 
-`app/main.py:1507`. `test_missing_sender_field_returns_422` documents that this route
+`app/main.py:1507`. **Owner decision: Option A — document as intentional.** The route
 returns `200` even for a structurally invalid payload (missing sender field) instead of
-`422`. Plausibly deliberate ("always ack the inbound webhook so the upstream bridge
-doesn't retry-storm"), but nobody has actually decided that — it's an inference either
-way. **Needs an explicit Owner/product decision recorded in `management_decisions.md`**,
-then either document the always-200 behavior as intentional or add real validation.
+`422`, deliberately, to avoid retry-storms from the upstream bridge client. Test renamed
+`test_missing_sender_field_returns_422` → `test_missing_sender_field_returns_200`,
+assertion updated to `== 200` with an intent comment. No route code change. See
+`management_decisions.md` Session 19 (S19-01a) for the full decision record, including the
+bridge-client-script search performed before the decision (binary located, systemd
+service confirmed, but no source code present to independently confirm its retry
+behavior — decided anyway, since Option A is the safe default regardless).
 
 ### 2. Frontend pages not yet on the shared auth-fetch utility — 8 pages, not 5
 
@@ -262,11 +327,14 @@ functions" would look first.
 ## Tier 2 (carried forward, unresolved)
 
 - [ ] **Escort roster/lifecycle dual-write fix — ATTEMPTED 2026-07-13, REVERTED after
-  finding a real concurrency hang.** See "Known Broken / Conflicting Workflows" #1 above
-  for the full trace. `modules/escort_lifecycle/__init__.py` (~line 315-390) still writes
-  `escort_roster_entries` directly instead of calling `escort_roster`'s own
+  finding a real concurrency hang. Diagnostic completed 2026-07-17 (Session 19 Step 5),
+  still not fixed.** See "Known Broken / Conflicting Workflows" #1 above for the full
+  trace and the 3-writer comparison (including a previously-undiscussed 3rd writer,
+  `create_roster_entry()`). `modules/escort_lifecycle/__init__.py` (~line 315-390) still
+  writes `escort_roster_entries` directly instead of calling `escort_roster`'s own
   `sync_program_to_roster()`. Worth revisiting with real concurrency-debugging time
-  budgeted, not as a quick cleanup pass.
+  budgeted, not as a quick cleanup pass — diagnostic SQL ready in
+  `knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md`.
 
 ---
 
