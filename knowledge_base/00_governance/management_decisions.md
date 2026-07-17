@@ -819,3 +819,23 @@ All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier
 
 **Not done, deferred per Owner scope:** `attendanceFetch()` (Group B2), `api()`/`adminApi()` (explicitly deferred — see `docs/NEXT_IMPLEMENTATION_QUEUE.md` Tier 2 addition), the 10 ad-hoc `fetch()` calls (Group C), `resolveUserAccess()`/`doLogin()` (permanently out of scope per Owner decision).
 
+---
+
+### Management Authorization (Session 20, Step 2 — Group B2)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-03 | `payroll.html::attendanceFetch()` migrated to `shared-auth-fetch.js` | Same pattern as Group B1 (S20-02) — `attendanceFetch()` was structurally identical to the pre-migration `clientBillingFetch()` (same inline header-building/error-parsing block, same `/admin` route prefix). Owner approved the exact diff before implementation. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 2 — Group B2)
+
+| ID | File | Change |
+|---|---|---|
+| S20-03 | `app/static/payroll.html` | Reimplemented `attendanceFetch(path, opts = {})` to call `FazleAuthFetch.fetch('/admin' + path, API_KEY, opts)` and `FazleAuthFetch.readError(r)` on non-ok, instead of its own inline header-building/error-parsing block. Function name, signature, route prefix (`/admin`), and all 10 call sites unchanged. No new `<script>` tag needed — already added in Group B1 (S20-02). |
+
+**Behavior change (same class as B1, Owner pre-approved):** error-message text only — `readError()` additionally handles FastAPI's array-shaped 422 `detail` and falls back to raw response text instead of just `statusText`. Happy path unchanged.
+
+**Verification:** `git diff` reviewed — confirmed the single intended hunk, no unrelated changes. `node -e "new Function(...)"` syntax check on the extracted inline `<script>` block passed. All 10 `attendanceFetch()` call sites checked — pass either no `opts` or pre-stringified `body: JSON.stringify(...)`, both compatible with `FazleAuthFetch.fetch()`'s pass-through; no call-site changes needed. Committed as `2cab0f2`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`, `/static/payroll.html` served `200`.
+
+**Group B (both wrappers) now complete.** Remaining for `payroll.html`: Group C (10 ad-hoc `fetch()` calls, not yet started), `api()`/`adminApi()` deferred per Tier 2 note above.
+
