@@ -642,6 +642,10 @@ This is full end-to-end confirmation of the exact failure mode Section 1B-iv des
 
 ### Session 19, Step 4 — chat_history sync: staged files verified, install still pending manual sudo
 
+**STATUS: NOT INSTALLED. `chat-sync.service` does not exist yet — nothing is running.** The steps below are pre-install verification only. This entry stays open until a follow-up entry records the actual `systemctl enable --now chat-sync.service` and its confirmed `active (running)` status.
+
+**Column cross-check (requested detail):** the live `chat_history` table has 14 columns; `sync.py`'s `INSERT_SQL` writes 12 of them. The 2 not written are `id` (`NOT NULL`, but `DEFAULT nextval('chat_history_id_seq'::regclass)` — auto-generated PK) and `created_at` (nullable, `DEFAULT now()`) — both safe to omit (case (a): live-table-only columns with defaults, not missing-from-INSERT columns that the table requires). Every column that is `NOT NULL` with **no** default (`thread_id`, `direction`, `source_table`, `source_id`, `sent_at`) is present in `sync.py`'s column list. No INSERT-time error risk; no fix needed to `sync.py`.
+
 Re-verified `~/chat_sync_staging/` (`sync.py`, `chat-sync.service`) against the live schema before recommending install:
 - `sync.py`'s `INSERT_SQL` column list (`thread_id, direction, sender_phone, receiver_phone, message_body, message_type, bridge, purpose, status, source_table, source_id, sent_at`) matches the live `chat_history` table exactly (12 of its 14 columns — `id` and `created_at` correctly omitted as auto-populated).
 - The `ON CONFLICT (source_table, source_id) DO NOTHING` clause is backed by a real constraint: `chat_history_source_table_source_id_key UNIQUE (source_table, source_id)`, confirmed present.
