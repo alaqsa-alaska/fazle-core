@@ -133,9 +133,14 @@ session.
    already be installed and running since 2026-07-15 23:28:28 — the "blocked on sudo, not
    deployed" note below was stale. Verified healthy (9,156+ rows, zero errors across the
    full run). See `management_decisions.md` Session 19 Step 4 for the full correction.
-5. **[ ] Frontend shared-fetch migration — see "URL / Route-Based Functions Needing Attention"
-   below.** Scope grew from the original "5 pages" estimate to 8 (two new admin pages
-   shipped since that assessment also need it). Not touched in Session 19.
+5. **[x] RESOLVED 2026-07-17 (Session 20) — `payroll.html` shared-fetch migration.** See
+   "URL / Route-Based Functions Needing Attention" below. 12 of `payroll.html`'s 16
+   `fetch()` calls (2 wrapper functions + all 10 ad-hoc calls) migrated to
+   `shared-auth-fetch.js` across 6 Owner-approved, individually-verified sub-groups (B1,
+   B2, C1-C4). `api()`/`adminApi()` deferred to Tier 2 (design decision needed first, not
+   a mechanical swap) and `resolveUserAccess()`/`doLogin()` permanently out of scope
+   (bootstrap/session logic). Full record: `management_decisions.md` Session 20, S20-02
+   through S20-07. **Remaining scope: 7 pages, not 8** — see the updated table below.
 6. **[ ] `open-webui` docker-compose.yml Groq API key in plaintext** (`/home/azim/docker-compose.yml`,
    outside this repo) — still flagged, still not rotated. Same class of issue as the
    Postgres password (already rotated 2026-07-12), smaller blast radius. This is Session
@@ -263,17 +268,22 @@ bridge-client-script search performed before the decision (binary located, syste
 service confirmed, but no source code present to independently confirm its retry
 behavior — decided anyway, since Option A is the safe default regardless).
 
-### 2. Frontend pages not yet on the shared auth-fetch utility — 8 pages, not 5
+### 2. Frontend pages not yet on the shared auth-fetch utility — 7 pages, not 8
 
 `app/static/shared-auth-fetch.js` (`FazleAuthFetch`) was built 2026-07-13 and proven on
-`escort-roster.html` only. At the time, 5 other pages were flagged as the natural
-follow-up. Verified current state (`grep -c "fetch(" app/static/*.html`): **8 pages**
-still call the API through their own independently-reimplemented fetch/auth code, because
-2 admin pages shipped after that original count:
+`escort-roster.html`. **Session 20 (2026-07-17) migrated `payroll.html`** — 12 of its 16
+`fetch()` calls (both wrapper functions, `clientBillingFetch()`/`attendanceFetch()`, plus
+all 10 ad-hoc calls) now go through `FazleAuthFetch`, done as 6 separate Owner-approved,
+individually-verified sub-groups (see `management_decisions.md` Session 20, S20-02 through
+S20-07, commits `d76a7ff`, `2cab0f2`, `6feffd1`, `cc6f96d`, `b738006`, `8512acd`).
+`payroll.html`'s `api()`/`adminApi()` wrappers are **deferred, not done** — see the Tier 2
+item above; dual-prefix routing and auto-serialize behavior have no equivalent in
+`shared-auth-fetch.js` and need a design decision before migration, not a mechanical swap.
+
+Remaining pages, verified current state (`grep -c "fetch(" app/static/*.html`):
 
 | Page | fetch() calls | Notes |
 |---|---|---|
-| `payroll.html` | 16 | Largest surface, has real behavioral differences to reconcile before a blind swap |
 | `kb.html` | 6 | |
 | `drafts.html` | 5 | |
 | `dashboard.html` | 2 | Has its own auto-JSON-serialize + logout-on-403 behavior — not a pure drop-in |
@@ -284,7 +294,8 @@ still call the API through their own independently-reimplemented fetch/auth code
 
 Each page needs individual behavioral verification after migration (no browser tooling
 was available in the sessions that built the utility) — not a mechanical find-replace
-across all 8 at once, per the same caution already recorded for the original 5.
+across all 7 at once, per the same caution already recorded for the original 5 (and
+followed sub-group-by-sub-group for `payroll.html` in Session 20).
 
 ### 3. `/payroll/transactions/{employee_id}` — new route, working, just documenting it exists here
 
