@@ -549,3 +549,27 @@ service restart performed.
 | S18-02 | `knowledge_base/00_governance/escort_sender_validation_audit_phase2_2026-07-16.md` | Added review note for 703/707/734; updated §6 deleted-IDs summary. |
 | S18-03 | `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md` | New — issue tracking doc, no code change. |
 | — | *(no application code changes this session)* | Data-only; no service restart performed. |
+
+---
+
+## Session 19 — Post-Audit Governance Backfill + Implementation Queue (2026-07-17)
+
+### Management Authorization (Session 19)
+
+Owner directed implementation of `docs/AUDIT_REPORT_2026-07-17.md`'s recommended
+session plan, one step at a time with a commit and doc update after each. This entry
+retroactively records two schema migrations that shipped during the 2026-06-24→2026-07-15
+governance-log gap the audit found (§1A) — both were legitimate, Owner-scoped changes,
+just never logged here at the time.
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S19-00a | Retroactive record: Migration 043 (`office_assistant_role`) | Formalizes `office_assistant` as a real `fazle_roles` row (level 20, between `viewer`/10 and `operator`/30): view attendance list/own records, create attendance draft entries only — no review/approve/edit/salary visibility. Replaces the prior ad-hoc name-string check (`_OFFICE_ASSISTANT_NAMES` in `modules/admin_transactions/__init__.py`). Corrected both known office-assistant accounts (`officeassistant01`, `officeassistant02`) from inconsistent prior roles (`operator`/`viewer`) to this one properly-scoped role — a real permission *reduction* for `officeassistant01` (lost stray `operator`-level edit/approve power), which was the intended fix. Shipped in commit `aea5679` (2026-07-11), no governance entry made at the time. | 2026-07-11 (retroactive) |
+| S19-00b | Retroactive record: Migration 046 (`fpe_employee_edit_requests`) | New `fpe_employee_edit_requests` table backing `payroll.html`'s Employees-tab edit flow for non-admin roles: admin/superadmin edits still write directly to `fpe_employees`/`wbom_employees` (unchanged), any other role's edit is queued here (`changes` JSONB diff, `pending`/`approved`/`rejected` status) for an admin to approve/reject. Deliberately a new table rather than reusing the Operator-submission pattern's storage (shape mismatch — that one requires a synthetic WhatsApp-message FK row). Named `edit_requests`, not `review_queue`, to avoid colliding with the existing parser-confidence "Review Queue" tab. Shipped in commit `fbf1204` (2026-07-14), no governance entry made at the time. **Compatibility confirmed with Session 15** (`admin_employees/__init__.py` WBOM→FPE sync for designation/basic_salary/joining_date, 2026-07-16): S15's sync sits *after* a direct admin/superadmin write in the same function this migration's approve-handler also writes through — both changes are additive to different branches (direct-edit vs. queued-request-then-approve) of the same underlying update logic, not conflicting. | 2026-07-14 (retroactive) |
+| S19-00c | Note: `open-webui` Groq API key still plaintext | Confirmed still open (`/home/azim/docker-compose.yml`, outside this repo) — same class of issue as the already-rotated Postgres password, smaller blast radius. Deferred to its own dedicated rotation task, not bundled into this implementation queue (Owner decision, 2026-07-17). | 2026-07-17 |
+
+### Files Authorized for Change (Session 19, Step 0)
+
+| ID | File | Change |
+|---|---|---|
+| S19-00a/b/c | `knowledge_base/00_governance/management_decisions.md` | This entry — retroactive documentation only, no code/schema change (migrations 043/046 were already live in production). |
