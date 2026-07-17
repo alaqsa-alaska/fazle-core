@@ -1,0 +1,924 @@
+{
+  "predicate": "wbom_employee_id IS NOT NULL AND resolution_status = 'unresolved'",
+  "affected_count": 153,
+  "rows": [
+    {
+      "id": 1,
+      "wbom_employee_id": 695,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 2,
+      "wbom_employee_id": 17,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 3,
+      "wbom_employee_id": 699,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 4,
+      "wbom_employee_id": 700,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 5,
+      "wbom_employee_id": 701,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 6,
+      "wbom_employee_id": 702,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 7,
+      "wbom_employee_id": 68,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 8,
+      "wbom_employee_id": 703,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 9,
+      "wbom_employee_id": 704,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 11,
+      "wbom_employee_id": 27,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 12,
+      "wbom_employee_id": 705,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 13,
+      "wbom_employee_id": 43,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 14,
+      "wbom_employee_id": 72,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 15,
+      "wbom_employee_id": 77,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 16,
+      "wbom_employee_id": 105,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 17,
+      "wbom_employee_id": 114,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 18,
+      "wbom_employee_id": 58,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 19,
+      "wbom_employee_id": 706,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 20,
+      "wbom_employee_id": 126,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 21,
+      "wbom_employee_id": 4,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 22,
+      "wbom_employee_id": 82,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 23,
+      "wbom_employee_id": 95,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 24,
+      "wbom_employee_id": 720,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 25,
+      "wbom_employee_id": 22,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 26,
+      "wbom_employee_id": 70,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 28,
+      "wbom_employee_id": 41,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 29,
+      "wbom_employee_id": 707,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 30,
+      "wbom_employee_id": 708,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 31,
+      "wbom_employee_id": 123,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 32,
+      "wbom_employee_id": 109,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 33,
+      "wbom_employee_id": 709,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 34,
+      "wbom_employee_id": 710,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 35,
+      "wbom_employee_id": 48,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 36,
+      "wbom_employee_id": 128,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 37,
+      "wbom_employee_id": 711,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 38,
+      "wbom_employee_id": 712,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 39,
+      "wbom_employee_id": 713,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 40,
+      "wbom_employee_id": 112,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 41,
+      "wbom_employee_id": 80,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 42,
+      "wbom_employee_id": 87,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 44,
+      "wbom_employee_id": 97,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 47,
+      "wbom_employee_id": 714,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 48,
+      "wbom_employee_id": 715,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 49,
+      "wbom_employee_id": 716,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 50,
+      "wbom_employee_id": 717,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 52,
+      "wbom_employee_id": 718,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 53,
+      "wbom_employee_id": 719,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 67,
+      "wbom_employee_id": 157,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 68,
+      "wbom_employee_id": 15,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 70,
+      "wbom_employee_id": 154,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 72,
+      "wbom_employee_id": 38,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 73,
+      "wbom_employee_id": 88,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 74,
+      "wbom_employee_id": 9,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 75,
+      "wbom_employee_id": 127,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 77,
+      "wbom_employee_id": 83,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 79,
+      "wbom_employee_id": 24,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 84,
+      "wbom_employee_id": 145,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 89,
+      "wbom_employee_id": 25,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 97,
+      "wbom_employee_id": 91,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 100,
+      "wbom_employee_id": 150,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 102,
+      "wbom_employee_id": 108,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 104,
+      "wbom_employee_id": 39,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 107,
+      "wbom_employee_id": 132,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 110,
+      "wbom_employee_id": 166,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 113,
+      "wbom_employee_id": 163,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 120,
+      "wbom_employee_id": 33,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 121,
+      "wbom_employee_id": 94,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 124,
+      "wbom_employee_id": 51,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 125,
+      "wbom_employee_id": 137,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 127,
+      "wbom_employee_id": 1,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 128,
+      "wbom_employee_id": 121,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 129,
+      "wbom_employee_id": 13,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 131,
+      "wbom_employee_id": 117,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 132,
+      "wbom_employee_id": 99,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 133,
+      "wbom_employee_id": 139,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 134,
+      "wbom_employee_id": 10,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 135,
+      "wbom_employee_id": 106,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 137,
+      "wbom_employee_id": 118,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 138,
+      "wbom_employee_id": 14,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 139,
+      "wbom_employee_id": 96,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 140,
+      "wbom_employee_id": 63,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 141,
+      "wbom_employee_id": 85,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 142,
+      "wbom_employee_id": 67,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 144,
+      "wbom_employee_id": 165,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 145,
+      "wbom_employee_id": 113,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 146,
+      "wbom_employee_id": 3,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 147,
+      "wbom_employee_id": 5,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 148,
+      "wbom_employee_id": 40,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 149,
+      "wbom_employee_id": 50,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 150,
+      "wbom_employee_id": 119,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 151,
+      "wbom_employee_id": 49,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 154,
+      "wbom_employee_id": 116,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 156,
+      "wbom_employee_id": 122,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 157,
+      "wbom_employee_id": 102,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 161,
+      "wbom_employee_id": 65,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 162,
+      "wbom_employee_id": 8,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 163,
+      "wbom_employee_id": 53,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 164,
+      "wbom_employee_id": 120,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 165,
+      "wbom_employee_id": 144,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 166,
+      "wbom_employee_id": 135,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 170,
+      "wbom_employee_id": 69,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 172,
+      "wbom_employee_id": 156,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 173,
+      "wbom_employee_id": 162,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 174,
+      "wbom_employee_id": 125,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 175,
+      "wbom_employee_id": 34,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 177,
+      "wbom_employee_id": 151,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 179,
+      "wbom_employee_id": 79,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 184,
+      "wbom_employee_id": 54,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 185,
+      "wbom_employee_id": 81,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 187,
+      "wbom_employee_id": 28,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 197,
+      "wbom_employee_id": 152,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 241,
+      "wbom_employee_id": 92,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 243,
+      "wbom_employee_id": 136,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 245,
+      "wbom_employee_id": 100,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 248,
+      "wbom_employee_id": 62,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 249,
+      "wbom_employee_id": 84,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 250,
+      "wbom_employee_id": 138,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 251,
+      "wbom_employee_id": 29,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 254,
+      "wbom_employee_id": 6,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 255,
+      "wbom_employee_id": 45,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 256,
+      "wbom_employee_id": 90,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 257,
+      "wbom_employee_id": 133,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 258,
+      "wbom_employee_id": 161,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 259,
+      "wbom_employee_id": 46,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 261,
+      "wbom_employee_id": 148,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 262,
+      "wbom_employee_id": 12,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 265,
+      "wbom_employee_id": 93,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 267,
+      "wbom_employee_id": 107,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 268,
+      "wbom_employee_id": 124,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 269,
+      "wbom_employee_id": 71,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 271,
+      "wbom_employee_id": 158,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 272,
+      "wbom_employee_id": 66,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 275,
+      "wbom_employee_id": 30,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 276,
+      "wbom_employee_id": 146,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 277,
+      "wbom_employee_id": 74,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 278,
+      "wbom_employee_id": 141,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 282,
+      "wbom_employee_id": 19,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 285,
+      "wbom_employee_id": 60,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 287,
+      "wbom_employee_id": 129,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 288,
+      "wbom_employee_id": 110,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 289,
+      "wbom_employee_id": 2,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 329,
+      "wbom_employee_id": 676,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 349,
+      "wbom_employee_id": 696,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 354,
+      "wbom_employee_id": 685,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 360,
+      "wbom_employee_id": 684,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 361,
+      "wbom_employee_id": 678,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 376,
+      "wbom_employee_id": 692,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 377,
+      "wbom_employee_id": 683,
+      "original_resolution_status": "unresolved",
+      "created_source": "payment_ingest_bridge"
+    },
+    {
+      "id": 459,
+      "wbom_employee_id": 679,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 1273,
+      "wbom_employee_id": 688,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 1274,
+      "wbom_employee_id": 686,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 1275,
+      "wbom_employee_id": 687,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    },
+    {
+      "id": 1282,
+      "wbom_employee_id": 693,
+      "original_resolution_status": "unresolved",
+      "created_source": "whatsapp_auto_create"
+    }
+  ]
+}
