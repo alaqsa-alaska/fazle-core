@@ -996,3 +996,46 @@ New scope opened this session: a read-only audit of unlinked/out-of-sync row cre
 
 **Not done, deliberately out of scope this session:** Phase 3 (read-only unresolved/unlinked FPE report), the rename/merge proposal, escort dual-write concurrency, `accounting.py` changes, `admin_transactions` bypass cleanup, the operator-manual-entry review-queue gap, the `resolution_status` metadata staleness, and the `contact-roles` role-field validation gap (last two now tracked in `NEXT_IMPLEMENTATION_QUEUE.md`).
 
+### Management Authorization (Session 20, Step 3 — Phase 3)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-11 | Add `unresolved_fpe_employees` read-only report builder | New builder in `modules/reports/__init__.py`, registered in the existing `_BUILDERS` dict pattern — no new route needed (served automatically via the existing generic `GET /reports/{name}` dispatcher, `app/main.py:2416`, untouched). Investigated `wbom-create-link.html`/`wbom-link-review.html` before writing anything: both currently use a **hardcoded static `CANDIDATES` JavaScript array**, not live data — no report-data hook exists in either file, confirmed via inspection, so neither was touched (per Owner's hard rule). Owner approved the exact function body and registry line before implementation. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 3 — Phase 3)
+
+| ID | File | Change |
+|---|---|---|
+| S20-11 | `modules/reports/__init__.py` | Added `_b_unresolved_fpe_employees()` (one `fetch_all()` SELECT, zero writes) and one line in `_BUILDERS`: `"unresolved_fpe_employees": _b_unresolved_fpe_employees`. Purely additive — 105 lines added, 0 removed, no other function touched. |
+
+**What the report covers:** `fpe_employees` rows where `resolution_status = 'unresolved' OR wbom_employee_id IS NULL`, split into 3 buckets that are never conflated:
+- `no_wbom_match` — no phone match found in `wbom_employees` at all. Feeds `wbom-create-link.html`'s candidate shape (`fpe_id`, name, phone, salary, joining_date, created_source, txn_count) — needs a human-provided designation, never guessed.
+- `wbom_match_unlinked` — a `wbom_employees` phone match exists (checked against `employee_mobile`/`bkash_number`/`nagad_number`, last-10-digit normalized, same fields already treated as authoritative WBOM phone anchors elsewhere in this codebase) but `wbom_employee_id` isn't set. Feeds `wbom-link-review.html`'s candidate shape, including a `name_mismatch` boolean flag.
+- `linked_but_mislabeled` — **separated per the Phase 2 finding (S20-10):** `wbom_employee_id IS NOT NULL` (i.e. genuinely, correctly linked) but `resolution_status` still reads `'unresolved'` because `resolve_fpe_employee_for_wbom_employee()`'s creating INSERT never explicitly sets that column, so it takes the schema default. These rows need **no action** — reporting them in the same bucket as the two above would have wrongly told a human reviewer to "fix" something that isn't broken, exactly the mistake the Phase 2 audit flagged as a risk for this report's design.
+
+**Confirmed LIVE, production read** (not a test-DB run): `GET /reports/unresolved_fpe_employees` returned HTTP 200 with:
+```json
+{"no_wbom_match_count": 172, "wbom_match_unlinked_count": 81, "linked_but_mislabeled_count": 153, "total_reviewed": 406}
+```
+`172 + 81 = 253` — matches the Phase 2 audit's live finding ("253 of 493 `fpe_employees` rows had `wbom_employee_id IS NULL`") exactly, the first time that number has been reproduced end-to-end through the new report rather than a one-off manual query. Spot-checked one row per bucket for shape correctness (`no_wbom_match` row: name defaulted to the phone number itself, a real WhatsApp-auto-create artifact; `wbom_match_unlinked` row: `fpe_name="Unknown"` vs `wbom_match_name="Rabbi"`, `name_mismatch: true`, correctly caught; `linked_but_mislabeled` row: `wbom_employee_id=695` set, correctly excluded from the two actionable buckets). `?fmt=csv` also verified working.
+
+**Exact routes:**
+- `GET /reports/unresolved_fpe_employees` (JSON)
+- `GET /reports/unresolved_fpe_employees?fmt=csv`
+- `GET /reports/unresolved_fpe_employees?fmt=text`
+
+**Verification:** `git diff` reviewed — confirmed purely additive (105 insertions, 0 deletions), only `modules/reports/__init__.py` touched. `py_compile` clean. Zero write calls (`execute`/`fetch_val`) in the new function — verified via grep, one `fetch_all()` SELECT only. No test file references `modules.reports` at all (repo-wide grep, zero hits) — no test needed updating. Full `tests/unit` sweep: 542 passed, 4 xpassed, 14 xfailed, 4 failed, 242 errors — all 4 failures and all 242 errors confirmed pre-existing via `git stash` isolation (same `password authentication failed for user "postgres"` test-DB-connectivity limitation seen throughout this session; the 2 `test_drafts_router_mounted.py` failures specifically re-verified via stash for this entry, not previously checked this session). Committed as `b0c0057`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`, and the report itself confirmed working against production data as shown above.
+
+**Discovered, documented, not fixed (per hard rule):** `.gitignore` line 71 has a bare `reports/` pattern that unintentionally also matches `modules/reports/` (likely intended only for a top-level report-output directory). Did not cause any harm this session since `modules/reports/__init__.py` was already tracked from before, but any *new* file added under `modules/reports/` in the future would need `git add -f`. Not fixed — flagging only.
+
+**Not done, deliberately out of scope:** wiring this report's live output into `wbom-create-link.html`/`wbom-link-review.html` (both still run on their original static `CANDIDATES` snapshot) — a separate, not-yet-scoped task, tracked in `NEXT_IMPLEMENTATION_QUEUE.md`.
+
+### Session 20, Step 3 — Finance-First Link/Sync Integrity work complete (Phases 0-3)
+
+| Phase | What | Code commit | Docs commit |
+|---|---|---|---|
+| 0 | Requirements lock — 4-flow call-path trace, MATCHES/PARTIAL/VIOLATES | — (read-only) | `dfc67f1` |
+| 1 | Disable unknown-sender auto-create (`_seed_unknown_employee_identity`) | `47018f7` | `dfc67f1` |
+| 2 | `payout_mobile` fallback search (`_match_or_create_instruction_employee`) | `38dbedd` | `80de8e3` |
+| 3 | `unresolved_fpe_employees` read-only report builder | `b0c0057` | (this entry) |
+
