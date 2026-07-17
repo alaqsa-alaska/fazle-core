@@ -1575,7 +1575,15 @@ async def _handle_bridge_event(payload: dict, source: str):
                 await _mark_processed(dedup_id, source, sender_clean)
                 pre_marked = True
             except Exception as _dedup_err:
-                log.debug(f"[{source.upper()}] dedup check unavailable: {_dedup_err}")
+                # Fail closed: skip this message rather than process it without
+                # dedup protection. A DB hiccup here must not turn into a real
+                # double-processing event; the SQLite poller path (if running)
+                # will still pick the message up independently.
+                log.error(
+                    f"[{source.upper()}] dedup check failed dedup_id={dedup_id}, "
+                    f"skipping to fail closed: {_dedup_err}"
+                )
+                continue
 
         log.info(f"[{source.upper()}] from={sender_clean} text={text[:60]!r}")
 
@@ -1613,7 +1621,15 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         _forward_to_agent_if_admin(sender_clean, text, source)
 
-        if _social_auto_reply_single_engine():
+        # Mirrors modules.bridge_poller._requires_legacy_workflow — keep in sync.
+        # Without this gate, an inbound escort/operational message on the webhook
+        # path (unlike the SQLite poller path, which already has this check) could
+        # be classified by the social auto-reply pipeline and never reach the real
+        # order/booking pipeline at all. See docs/AUDIT_REPORT_2026-07-17.md §1B-iv.
+        from modules.bridge_poller import _requires_legacy_workflow
+        if _social_auto_reply_single_engine() and not _requires_legacy_workflow(
+            text, {"media_type": media_type}
+        ):
             try:
                 social_event_id = await ingest_social_event(
                     platform=source,

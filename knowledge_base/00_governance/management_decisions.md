@@ -573,3 +573,17 @@ just never logged here at the time.
 | ID | File | Change |
 |---|---|---|
 | S19-00a/b/c | `knowledge_base/00_governance/management_decisions.md` | This entry — retroactive documentation only, no code/schema change (migrations 043/046 were already live in production). |
+
+### Management Authorization (Session 19, Step 1)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S19-01 | Webhook path gains the poller's legacy-workflow gate; dedup guard changed to fail closed | `docs/AUDIT_REPORT_2026-07-17.md` §1B-iv found the webhook path (`/webhook/mcp1`/`/webhook/mcp2`) had no equivalent to the SQLite poller's `_requires_legacy_workflow()` pre-filter, so an inbound escort/operational message could be classified by the social auto-reply pipeline and never reach booking creation — the exact failure mode that gate was built to prevent on the poller side. `app/main.py::_handle_bridge_event()` now applies the same gate before calling `ingest_social_event()`. Separately, the P15-03 dedup guard's exception handler previously logged at DEBUG and fell through to process the message anyway (fail-open) on any dedup-check error; it now logs at ERROR and skips the message (fail-closed) instead, since a double-processed message is worse than one skipped message the SQLite poller will likely still pick up independently. | 2026-07-17 |
+
+### Files Authorized for Change (Session 19, Step 1)
+
+| ID | File | Change |
+|---|---|---|
+| S19-01 | `app/main.py` | `_handle_bridge_event()`: added `and not _requires_legacy_workflow(text, {"media_type": media_type})` to the `ingest_social_event()` gating condition (mirrors `modules.bridge_poller._requires_legacy_workflow`, imported locally); dedup-check `except` block changed from log-and-fall-through to log-and-`continue`. |
+
+**Verification status:** function-level only — `_requires_legacy_workflow()` confirmed (via a standalone import test) to correctly classify the exact escort-order message used in `tests/integration/test_webhooks.py::test_escort_order_creates_program` as requiring the legacy workflow, and a plain greeting as not. Full HTTP/integration-level verification (posting to the live `/webhook/mcp1` route, or running the pytest suite against the test DB) was **not possible this session** — no sudo access to restart `fazle-core.service`, and the test DB host (`172.20.0.3`) is unreachable from this session's network. **Pending:** run `scripts/restart_gate.sh --restart` and re-run `pytest tests/integration/test_webhooks.py -k escort_order` in a session with the necessary access before considering this fully verified live.
