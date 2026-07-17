@@ -2156,3 +2156,82 @@ hang) are explicitly NOT part of this fix and remain open, unrelated
 technical debt.**
 
 **Git:** `9fea840`. Pushed. No restart performed (test-only).
+
+### Session 24, Phase 1E — Live Unresolved-Employee Report Integration (2026-07-18)
+
+**API contract confirmed via live read:** `GET /reports/unresolved_fpe_employees`
+(same `X-Internal-Key` auth both pages already use), flat `rows` array (no
+pagination — 253 rows total, safe for direct frontend use at this size),
+per-row fields: `fpe_id`, `fpe_name`, `resolution_status`, `phone`, `salary`,
+`joining_date`, `created_source`, `designation`, `txn_count`, `bucket`
+(`no_wbom_match` | `wbom_match_unlinked` | `linked_but_mislabeled`), plus
+bucket-specific `wbom_employee_id`/`wbom_match_id`/`wbom_match_name`/
+`name_mismatch`. `summary` gives the 4 counts directly.
+
+**Recounted before implementation (matches Phase 1C's post-backfill numbers
+exactly, no drift):** `no_wbom_match=172`, `wbom_match_unlinked=81`,
+`linked_but_mislabeled=0`, `total_reviewed=253`.
+
+**Implementation:** both pages now call the live endpoint on boot and filter
+client-side by `bucket`, replacing the hardcoded snapshots (180 rows /
+33 rows) from when they were built. `wbom-link-review.html` also gained an
+always-visible (even at 0) `linked_but_mislabeled` section — read-only,
+future-regression detection per the explicit requirement not to remove
+support for an empty category. Existing action endpoints
+(`/api/admin/employees/create-and-link`, `/api/admin/employees/link-fpe`),
+confirm dialogs, and the shared API-key login flow are unchanged. Added:
+loading/network-error/403-unauthorized/empty states on both pages; explicit
+`409`/`404` stale-row handling on `wbom-link-review.html`'s `linkPair()`
+(`wbom-create-link.html` already had `409` handling, confirmed unchanged).
+No new shared JS utility introduced — `shared-auth-fetch.js`'s semantics
+(different auth/base-URL conventions) didn't cleanly fit these two
+already-self-contained, differently-authenticated tools; extending it was
+judged unnecessary risk for a 2-page, low-traffic admin surface.
+
+**Static-snapshot removal:** `wbom-link-review.html`'s 33-row array deleted
+outright (zero use for local demo). `wbom-create-link.html`'s 180-row array
+kept as an explicitly-named, provably-unreferenced `_DEMO_FIXTURE_CANDIDATES`
+constant (verified via grep: zero references outside its own declaration)
+rather than deleted, per the "move to an explicit fixture, don't compete
+with live data" instruction.
+
+**Verification (no real browser available in this environment — see
+"Remaining Risks" below):**
+- Both pages confirmed serving `HTTP 200` from the running production
+  static-file mount after the edit (static files are read live from disk,
+  no restart needed for this class of change — confirmed empirically, not
+  assumed).
+- Diff-scanned both files for any dynamic string interpolation bypassing
+  the existing `esc()` HTML-escaping helper — zero found; every new dynamic
+  field goes through `esc()`.
+- Node `--check` syntax-validated both files' extracted `<script>` blocks —
+  clean.
+- **End-to-end data-flow validation:** fed the real, live report response
+  through both pages' exact client-side mapping/filter logic in a Node
+  script. Result: `no_wbom_match` → 172 mapped candidates, `wbom_match_unlinked`
+  → 81, `linked_but_mislabeled` → 0, zero rows with missing required fields
+  in either mapping, and `172 + 81 + 0 = 253` — exactly matching
+  `total_reviewed`, confirming complete, non-overlapping bucket coverage
+  across both pages with no gap and no double-counting.
+
+**Git:** `fe5b342`. No restart performed (static-file-only change,
+confirmed unnecessary via the live 200 checks above).
+
+**Not implemented, deliberately out of scope:** any change to
+`create-and-link`/`link-fpe`'s backend logic beyond what Phase 1C already
+touched (both endpoints' stale-state 409 handling was already correct,
+confirmed by reading the code, not assumed); merging the two pages into
+one (the current architecture cleanly supports the existing two-purpose
+split); a shared frontend loader utility (judged unnecessary for 2
+self-contained pages); pagination on the report endpoint (253 rows is
+small enough for direct use, confirmed via the live read).
+
+**Remaining risk, explicitly flagged:** no live browser click-through was
+performed in this session (no browser automation tooling available in this
+environment) — verification relied on syntax checking, XSS-safety diff
+scanning, and feeding real production data through the exact client-side
+logic in Node, which validates the data flow and mapping correctness but
+not actual DOM rendering, CSS layout, or interactive click behavior.
+Recommend a manual browser pass (both pages, both action buttons, at least
+one real disposable link action) before treating this as fully certified
+for interactive use, even though the underlying logic is verified correct.

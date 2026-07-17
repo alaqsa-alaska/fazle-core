@@ -250,10 +250,12 @@ detailed under "Technical Debt" below.
     finding — reported separately, not flagged as broken). Confirmed live against
     production: 172 + 81 = 253, matching Phase 2's live-audit number exactly. See
     `management_decisions.md` Session 20 Step 3 Phase 3 (S20-11), commit `b0c0057`.
-    **Not done:** wiring this report's live output into `wbom-create-link.html`/
-    `wbom-link-review.html` — both still run on a one-time hardcoded `CANDIDATES`
-    snapshot from when they were built (S15-18), not live data; a separate,
-    not-yet-scoped task.
+    **🟢 DONE 2026-07-18 (Phase 1E):** both pages now load this report live on
+    boot instead of the hardcoded `CANDIDATES` snapshot. Full record:
+    `management_decisions.md` Session 24 Phase 1E. Commit `fe5b342`.
+    **Remaining risk:** no live browser click-through performed (no browser
+    tooling available this session) — recommend a manual pass before treating
+    interactive behavior as fully certified.
 
 ---
 
