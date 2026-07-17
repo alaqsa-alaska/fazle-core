@@ -1560,6 +1560,32 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         sender_clean = sender.replace("@s.whatsapp.net", "").replace("+", "")
 
+        # Phase 1B.2 — LID resolution parity with the SQLite poller, which
+        # already resolves @lid senders via bridge_poller._load_lid_map()
+        # before calling process_message(). Without this, a LID-only sender
+        # was always classified identity_role="unknown" on the webhook path
+        # regardless of which escort-identity source would otherwise have
+        # matched. Reuses the poller's own mapping (same algorithm, not
+        # duplicated); never invents a phone number — an unresolved LID gets
+        # the poller's own "unresolved:<lid>" sentinel so identity resolution
+        # safely falls through to unknown/unverified rather than
+        # misclassifying or colliding two distinct LIDs into one identity.
+        if sender.endswith("@lid"):
+            sender_lid = sender.split(":")[0].split("@")[0]
+            whatsapp_db = {
+                "bridge1": settings.bridge1_whatsapp_db_path,
+                "bridge2": settings.bridge2_whatsapp_db_path,
+            }.get(source)
+            resolved_phone = None
+            if whatsapp_db:
+                try:
+                    from modules.bridge_poller import _load_lid_map
+                    lid_map = await asyncio.to_thread(_load_lid_map, whatsapp_db)
+                    resolved_phone = lid_map.get(sender_lid)
+                except Exception as _lid_err:
+                    log.debug(f"[{source.upper()}] LID resolution failed for {sender_lid}: {_lid_err}")
+            sender_clean = resolved_phone or f"unresolved:{sender_lid}"
+
         # P15-03: Dedup guard — prevent double-processing when webhook fires
         # alongside the SQLite poller (both paths call process_message).
         # Keep pre-mark for race protection, but roll back on save failure to avoid no-loss gaps.
