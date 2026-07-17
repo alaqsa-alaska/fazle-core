@@ -974,3 +974,25 @@ New scope opened this session: a read-only audit of unlinked/out-of-sync row cre
 
 **Not done, deliberately out of scope this session:** Phase 2 (trusted finance path — the search-order PARTIAL finding above, not yet fixed), Phase 3 (read-only unresolved/unlinked FPE report), the rename/merge proposal, escort dual-write concurrency, `accounting.py`, `admin_transactions` bypass cleanup, and the operator-manual-entry review-queue gap (documented, explicitly deferred).
 
+### Management Authorization (Session 20, Step 3 — Phase 2)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-10 | Add `payout_mobile` fallback search to `_match_or_create_instruction_employee()` | Re-verified Phase 0's finding with exact current code, live DB queries (`fazle_contact_roles` seed rows, `.env` comparison), and a full trace of `parse_admin_cash_shorthand()` → `_match_or_create_instruction_employee()` → `match_employee()`. **Confirmed real gap:** `parse_admin_cash_shorthand()` collapses `employee_id_mobile`/`payout_mobile` into one `lookup_mobile` value (line 464) before `match_employee()` ever runs, so an explicit ID-mobile that misses never falls back to a second search against the payout number — even when the payout number belongs to an already-registered employee, causing a duplicate `wbom_employees`/`fpe_employees` row instead of a match. Owner approved the exact 3-line fix before implementation. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 3 — Phase 2)
+
+| ID | File | Change |
+|---|---|---|
+| S20-10 | `modules/payment_ingest/__init__.py` | `_match_or_create_instruction_employee()`: added `if not eid and payout_mobile and payout_mobile != lookup_mobile: eid, _ratio, _mtype = await match_employee(payout_mobile, name)` immediately after the first `match_employee()` call. Two lines. `match_employee()` itself, `modules/payment_ingest/fpe_bridge.py`, and `modules/fazle_payroll_engine/accounting.py` were read for verification but not modified. |
+
+**Explicitly preserved (verified, not just asserted):** auto-create still allowed if both searches miss (fall-through logic below `if eid:` byte-identical to before); no reply to the accountant (no code in the reply path touched); no review-queue routing added (none introduced); transaction completion and ledger write confirmed unaffected — traced `payment_event_from_whatsapp()` (used by this path) hardcodes `transaction_status=TransactionStatus.final`, and `resolve_fpe_employee_for_wbom_employee()`'s return type is `int` (never `None`), so `accounting.py::create_transaction()`'s ledger-upsert condition (`req.employee_id and req.transaction_status.value == "final"`) is always satisfied on this path — both `fpe_cash_transactions` and `fpe_employee_ledger` are written every time, confirmed by code trace, not changed by this fix.
+
+**Two items explicitly deferred, not bundled into this fix:**
+- `resolution_status` metadata staleness on `resolve_fpe_employee_for_wbom_employee()`'s step-3 INSERT (defaults to `'unresolved'` even though `wbom_employee_id` is set in the same statement) — noted for Phase 3's report-query design only (a naive `resolution_status='unresolved' OR wbom_employee_id IS NULL` filter would over-flag already-linked rows), not fixed here.
+- `POST /admin/contact-roles`'s unvalidated free-text `role` field (an admin could assign `role=accountant` to a second phone without touching `.env`, conflicting with `CANONICAL_BUSINESS_RULES.md` §Role) — added to `docs/NEXT_IMPLEMENTATION_QUEUE.md` Technical Debt as its own item, not fixed here (touches RBAC/admin tooling, outside this session's locked scope).
+
+**Verification:** `git diff` reviewed — confirmed exactly the 2-line addition, no other file touched. `py_compile` clean. No test asserts single-search-only behavior (searched for direct/indirect test coverage of this function; the one test that exercises it end-to-end, `test_accountant_payment_pipeline.py::TestIngestPaymentSms::test_admin_accountant_instruction_finalizes_direct_transaction`, uses distinct ID-mobile/payout-mobile values against an empty test DB, so both the old and new code paths miss identically and fall through to auto-create — its assertions are unaffected). Full targeted sweep (`tests/unit/test_accountant_payment_pipeline.py`, 53 passed / 4 xpassed / 10 errors) confirmed identical before/after via `git stash` isolation — the 10 errors are the same pre-existing `test_db_pool`/Postgres-auth environmental limitation seen throughout this session, not caused by this change. Committed as `38dbedd`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`.
+
+**Not done, deliberately out of scope this session:** Phase 3 (read-only unresolved/unlinked FPE report), the rename/merge proposal, escort dual-write concurrency, `accounting.py` changes, `admin_transactions` bypass cleanup, the operator-manual-entry review-queue gap, the `resolution_status` metadata staleness, and the `contact-roles` role-field validation gap (last two now tracked in `NEXT_IMPLEMENTATION_QUEUE.md`).
+

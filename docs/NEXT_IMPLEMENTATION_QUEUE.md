@@ -333,6 +333,14 @@ functions" would look first.
   small fix (same pattern: extract a sync helper, dispatch via `asyncio.to_thread()`),
   not bundled into Step 8 since that step was scoped to `bridge_poller` only.
 
+**`POST /admin/contact-roles` accepts a free-text `role` field with no enum/whitelist
+— found 2026-07-17 during Session 20 Phase 2 (finance-integrity audit):** an admin
+could assign `role=accountant` to a second phone number without touching `.env`,
+conflicting with `CANONICAL_BUSINESS_RULES.md` §Role, which ratifies `.env` as the
+sole authoritative source for functional roles. Touches RBAC/admin tooling. Needs its
+own scoped fix, not bundled into finance-integrity work. See `management_decisions.md`
+Session 20 Step 3 Phase 2 for the full finding.
+
 ---
 
 ## Tier 2 (carried forward, unresolved)
