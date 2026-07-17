@@ -44,52 +44,26 @@ tr.skipped{opacity:.4;text-decoration:line-through}
 </div>
 
 <div id="app">
-  <h1>WBOM Link Review — 33 candidate pairs</h1>
-  <p class="sub">Phone-matched FPE ↔ WBOM employee records with no existing link. Review each pair, then click Link or Skip. Nothing is changed until you click Link on that specific row — no bulk action exists on this page.</p>
+  <h1>WBOM Link Review</h1>
+  <p class="sub">Phone-matched FPE ↔ WBOM employee records with no existing link (live from <code>GET /reports/unresolved_fpe_employees</code>, category <code>wbom_match_unlinked</code>). Review each pair, then click Link or Skip. Nothing is changed until you click Link on that specific row — no bulk action exists on this page.</p>
+  <div id="progress" style="font-size:13px;color:var(--muted);margin-bottom:14px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07)"></div>
+  <div id="tableHost">
   <table>
     <thead><tr><th>FPE #</th><th>Pair (FPE name / WBOM name)</th><th>Phone</th><th>WBOM #</th><th>Action</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
+  </div>
+  <div id="mislabeledSection" style="margin-top:20px"></div>
 </div>
 
 <script>
 let API_KEY = '';
 
-const CANDIDATES = [
-  {fpe_id:35,fpe_name:"Hasan",wbom_id:48,wbom_name:"Hasan",phone:"01721312943"},
-  {fpe_id:84,fpe_name:", Samir",wbom_id:145,wbom_name:"Samir",phone:"01932377120"},
-  {fpe_id:94,fpe_name:"Ridoy",wbom_id:159,wbom_name:"Robiul Mongla",phone:"01971510717",mismatch:true},
-  {fpe_id:124,fpe_name:"Mehedi Shakib Convince",wbom_id:51,wbom_name:"Mehedi Shakib",phone:"01730514198"},
-  {fpe_id:128,fpe_name:"Nazmul Rubel",wbom_id:121,wbom_name:"Nazmul  Rubel",phone:"01886940992"},
-  {fpe_id:129,fpe_name:"Jibon",wbom_id:13,wbom_name:"Jibon",phone:"01400764012"},
-  {fpe_id:134,fpe_name:"Ibrahim Food bill master",wbom_id:10,wbom_name:"Ibrahim",phone:"01341210920"},
-  {fpe_id:138,fpe_name:"Hridoy",wbom_id:14,wbom_name:"Ridoy",phone:"01403276587"},
-  {fpe_id:139,fpe_name:"Mehedi Advance 300/",wbom_id:96,wbom_name:"Mehedi",phone:"01842577608"},
-  {fpe_id:142,fpe_name:"Joynal Alishah",wbom_id:67,wbom_name:"Joynal",phone:"01772260377"},
-  {fpe_id:144,fpe_name:"Ekram Advanced",wbom_id:165,wbom_name:"Ekramul",phone:"01985791577"},
-  {fpe_id:147,fpe_name:"Delowar Labor scot",wbom_id:5,wbom_name:"Delowar",phone:"01319019257"},
-  {fpe_id:148,fpe_name:"Nijam Uddin",wbom_id:40,wbom_name:"Nijam Uddin",phone:"01643431736"},
-  {fpe_id:150,fpe_name:"Shamim",wbom_id:119,wbom_name:"Shamim",phone:"01884592170"},
-  {fpe_id:154,fpe_name:"Ebrahim",wbom_id:116,wbom_name:"Ebrahim",phone:"01879545957"},
-  {fpe_id:157,fpe_name:"Hakim Boat Rent by Sabbir 11:30 pm",wbom_id:102,wbom_name:"Hakim",phone:"01850544801"},
-  {fpe_id:160,fpe_name:"Sakib",wbom_id:16,wbom_name:"Sakib",phone:"01533903594"},
-  {fpe_id:169,fpe_name:"Maruf",wbom_id:130,wbom_name:"Maruf",phone:"01894148965"},
-  {fpe_id:171,fpe_name:"Mannan",wbom_id:31,wbom_name:"Mannan",phone:"01618801051"},
-  {fpe_id:177,fpe_name:"Nazmul",wbom_id:151,wbom_name:"Nazmul",phone:"01958122301"},
-  {fpe_id:185,fpe_name:"Ismail MAX",wbom_id:81,wbom_name:"Ismail MAX",phone:"01814118119"},
-  {fpe_id:192,fpe_name:"Habib",wbom_id:111,wbom_name:"Habib",phone:"01870650208"},
-  {fpe_id:244,fpe_name:"Jolil",wbom_id:143,wbom_name:"Abdul Jolil",phone:"01927317829"},
-  {fpe_id:246,fpe_name:"Shariful",wbom_id:142,wbom_name:"Shariful",phone:"01922179045"},
-  {fpe_id:252,fpe_name:"Hridoy",wbom_id:64,wbom_name:"Hridoy (FP)",phone:"01765975159"},
-  {fpe_id:253,fpe_name:"Shipon",wbom_id:55,wbom_name:"Shipon (ASM)",phone:"01740136049"},
-  {fpe_id:257,fpe_name:"Parvez ASM",wbom_id:133,wbom_name:"Parvez (ASM)",phone:"01894371992"},
-  {fpe_id:259,fpe_name:"Omor Ali",wbom_id:46,wbom_name:"Omor Ali",phone:"01713322226"},
-  {fpe_id:262,fpe_name:"Khairul Islam",wbom_id:12,wbom_name:"Khairul Islam",phone:"01347176492"},
-  {fpe_id:263,fpe_name:"Forid",wbom_id:75,wbom_name:"Al-Momin",phone:"01795188719",mismatch:true},
-  {fpe_id:270,fpe_name:"Habibur Rahman",wbom_id:47,wbom_name:"Habibur Rahman",phone:"01719449097"},
-  {fpe_id:273,fpe_name:"Raju",wbom_id:76,wbom_name:"Raju",phone:"01795397908"},
-  {fpe_id:286,fpe_name:"Md. Raihan",wbom_id:52,wbom_name:"Md. Raihan",phone:"01732416131"},
-];
+// Live-loaded from GET /reports/unresolved_fpe_employees, category
+// wbom_match_unlinked — replaces the previous hardcoded 33-row snapshot
+// from when this tool was built. See knowledge_base/00_governance/
+// management_decisions.md, Phase 1E, for the full record.
+let CANDIDATES = [];
 
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -101,7 +75,61 @@ function doLogin() {
   boot();
 }
 
+async function loadCandidates() {
+  const tableHost = document.getElementById('tableHost');
+  const progress = document.getElementById('progress');
+  progress.textContent = 'Loading…';
+  let resp;
+  try {
+    resp = await fetch('/reports/unresolved_fpe_employees', {
+      headers: { 'X-Internal-Key': API_KEY },
+    });
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error loading the report: ${esc(e.message)}. <button class="btn" onclick="loadCandidates()">Retry</button></span>`;
+    return;
+  }
+  if (resp.status === 403) {
+    progress.innerHTML = '<span style="color:var(--err)">Unauthorized — the API key was rejected. Log in again.</span>';
+    localStorage.removeItem('fpe_api_key');
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('loginBox').style.display = 'block';
+    return;
+  }
+  if (!resp.ok) {
+    progress.innerHTML = `<span style="color:var(--err)">Report request failed (HTTP ${resp.status}). <button class="btn" onclick="loadCandidates()">Retry</button></span>`;
+    return;
+  }
+  const data = await resp.json();
+  const rows = data.rows || [];
+  CANDIDATES = rows
+    .filter(r => r.bucket === 'wbom_match_unlinked')
+    .map(r => ({
+      fpe_id: r.fpe_id,
+      fpe_name: r.fpe_name,
+      wbom_id: r.wbom_match_id,
+      wbom_name: r.wbom_match_name,
+      phone: r.phone,
+      mismatch: !!r.name_mismatch,
+    }));
+  const mislabeled = rows.filter(r => r.bucket === 'linked_but_mislabeled');
+  const s = data.summary || {};
+  progress.innerHTML =
+    `<b>${s.wbom_match_unlinked_count ?? CANDIDATES.length}</b> unlinked candidate pairs` +
+    (s.no_wbom_match_count ? ` &nbsp;·&nbsp; ${s.no_wbom_match_count} in wbom-create-link.html` : '');
+  renderRows();
+  renderMislabeledSection(mislabeled);
+}
+
 function renderRows() {
+  const tableHost = document.getElementById('tableHost');
+  if (CANDIDATES.length === 0) {
+    tableHost.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--muted)">✅ Nothing to review — wbom_match_unlinked is empty.</div>';
+    return;
+  }
+  tableHost.innerHTML = `<table>
+    <thead><tr><th>FPE #</th><th>Pair (FPE name / WBOM name)</th><th>Phone</th><th>WBOM #</th><th>Action</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>`;
   document.getElementById('rows').innerHTML = CANDIDATES.map((c, i) => `
     <tr id="row-${i}" class="${c.mismatch ? 'mismatch' : ''}">
       <td>#${c.fpe_id}</td>
@@ -121,6 +149,25 @@ function renderRows() {
       </td>
     </tr>
   `).join('');
+}
+
+function renderMislabeledSection(mislabeled) {
+  const host = document.getElementById('mislabeledSection');
+  // Always shown, even at zero — future regression detection is the point
+  // (this bucket should stay empty after Phase 1C's atomic-resolve fix; a
+  // nonzero count here would mean a writer regressed).
+  host.innerHTML = `
+    <details ${mislabeled.length ? '' : 'open'}>
+      <summary style="cursor:pointer;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px">
+        linked_but_mislabeled — ${mislabeled.length} row${mislabeled.length === 1 ? '' : 's'}
+        ${mislabeled.length ? '<span class="warn-badge">⚠ unexpected after Phase 1C</span>' : ''}
+      </summary>
+      ${mislabeled.length === 0
+        ? '<p class="sub" style="margin-top:8px">None — already-linked rows are correctly labeled resolved. No action needed here.</p>'
+        : `<table style="margin-top:8px"><thead><tr><th>FPE #</th><th>Name</th><th>WBOM Employee ID (already linked)</th><th>Resolution status</th></tr></thead>
+           <tbody>${mislabeled.map(r => `<tr><td>#${r.fpe_id}</td><td>${esc(r.fpe_name)}</td><td>#${r.wbom_employee_id}</td><td>${esc(r.resolution_status)}</td></tr>`).join('')}</tbody></table>
+           <p class="sub" style="margin-top:8px;color:var(--warn)">These rows are already linked but resolution_status wasn't updated — read-only here, no link action needed. If this is nonzero, a writer may have regressed past Phase 1C's fix; report it.</p>`}
+    </details>`;
 }
 
 function skipPair(i) {
@@ -147,7 +194,25 @@ async function linkPair(i) {
       body: JSON.stringify({ fpe_id: c.fpe_id, wbom_id: c.wbom_id }),
     });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    if (!r.ok) {
+      const detail = Array.isArray(d.detail) ? d.detail.map(x => x.msg).join('; ') : (d.detail || ('HTTP ' + r.status));
+      if (r.status === 409) {
+        // Stale row — this FPE employee was already linked (e.g. via the
+        // other page, or another reviewer) since the report was loaded.
+        // Never silently overwrite; surface it and remove the row.
+        statusEl.textContent = 'Already linked elsewhere — removing from list. (' + detail + ')';
+        statusEl.className = 'status';
+        document.getElementById(`row-${i}`).classList.add('done');
+        return;
+      }
+      if (r.status === 404) {
+        statusEl.textContent = 'No longer found (already processed?) — removing from list.';
+        statusEl.className = 'status';
+        document.getElementById(`row-${i}`).classList.add('done');
+        return;
+      }
+      throw new Error(detail);
+    }
     document.getElementById(`row-${i}`).classList.add('done');
     statusEl.textContent = '✓ Linked';
     statusEl.className = 'status ok';
@@ -162,7 +227,7 @@ async function linkPair(i) {
 function boot() {
   document.getElementById('loginBox').style.display = 'none';
   document.getElementById('app').style.display = 'block';
-  renderRows();
+  loadCandidates();
 }
 
 (function () {

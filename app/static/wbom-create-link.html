@@ -45,8 +45,8 @@ p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
 </div>
 
 <div id="app">
-  <h1>WBOM Create + Link — 180 employees</h1>
-  <p class="sub">Each of these 180 FPE employees has no WBOM record and no phone-matchable candidate. Enter the employee's real designation (required — "Unknown" is rejected by the server) and confirm salary, then Create + Link. Skip moves to the next one with no DB change. Already-linked rows (e.g. handled in another tab) are detected when you try to submit and skipped automatically.</p>
+  <h1>WBOM Create + Link</h1>
+  <p class="sub">FPE employees with no WBOM record and no phone-matchable candidate (live from <code>GET /reports/unresolved_fpe_employees</code>, category <code>no_wbom_match</code>). Enter the employee's real designation (required — "Unknown" is rejected by the server) and confirm salary, then Create + Link. Skip moves to the next one with no DB change. Already-linked rows (e.g. handled in another tab, or by another category's fix) are detected when you try to submit and skipped automatically.</p>
   <div id="progress"></div>
   <div id="cardHost"></div>
 </div>
@@ -55,7 +55,16 @@ p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
 let API_KEY = '';
 let idx = 0;
 
-const CANDIDATES = [
+// Live-loaded from GET /reports/unresolved_fpe_employees, category
+// no_wbom_match — replaces the previous hardcoded 180-row snapshot from
+// when this tool was built. See knowledge_base/00_governance/
+// management_decisions.md, Phase 1E, for the full record.
+let CANDIDATES = [];
+
+// The original one-time snapshot is preserved only as an explicit,
+// clearly-marked local fixture for offline demo — never loaded in the
+// real app. See _DEMO_FIXTURE_CANDIDATES below if you need it for a demo.
+const _DEMO_FIXTURE_CANDIDATES = [
   {fpe_id:3,full_name:"Rabbi Kazi",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01706597371",txn_count:6},
   {fpe_id:4,full_name:"Iftekhar",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01813740972",txn_count:1},
   {fpe_id:5,full_name:"Safiul",salary:10000.00,joining_date:null,created_source:"whatsapp_auto_create",phone:"01342506069",txn_count:8},
@@ -248,18 +257,66 @@ function doLogin() {
   boot();
 }
 
-function updateProgress() {
-  document.getElementById('progress').innerHTML =
-    `<b>${idx}</b> of <b>${CANDIDATES.length}</b> processed`;
-}
-
-function renderCard() {
-  updateProgress();
+async function loadCandidates() {
   const host = document.getElementById('cardHost');
-  if (idx >= CANDIDATES.length) {
-    host.innerHTML = '<div class="done-empty">✅ All 180 processed. Nothing left to review.</div>';
+  host.innerHTML = '<div class="done-empty">Loading…</div>';
+  let resp;
+  try {
+    resp = await fetch('/reports/unresolved_fpe_employees', {
+      headers: { 'X-Internal-Key': API_KEY },
+    });
+  } catch (e) {
+    host.innerHTML = `<div class="done-empty" style="color:var(--err)">Network error loading the report: ${esc(e.message)}. <button class="btn" onclick="loadCandidates()">Retry</button></div>`;
     return;
   }
+  if (resp.status === 403) {
+    host.innerHTML = '<div class="done-empty" style="color:var(--err)">Unauthorized — the API key was rejected. Log in again.</div>';
+    localStorage.removeItem('fpe_api_key');
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('loginBox').style.display = 'block';
+    return;
+  }
+  if (!resp.ok) {
+    host.innerHTML = `<div class="done-empty" style="color:var(--err)">Report request failed (HTTP ${resp.status}). <button class="btn" onclick="loadCandidates()">Retry</button></div>`;
+    return;
+  }
+  const data = await resp.json();
+  CANDIDATES = (data.rows || [])
+    .filter(r => r.bucket === 'no_wbom_match')
+    .map(r => ({
+      fpe_id: r.fpe_id,
+      full_name: r.fpe_name,
+      salary: r.salary ?? 10000,
+      joining_date: r.joining_date,
+      created_source: r.created_source,
+      phone: r.phone,
+      txn_count: r.txn_count,
+    }));
+  idx = 0;
+  const s = data.summary || {};
+  _summaryLine =
+    `<b>${s.no_wbom_match_count ?? CANDIDATES.length}</b> in no_wbom_match` +
+    (s.wbom_match_unlinked_count ? ` &nbsp;·&nbsp; ${s.wbom_match_unlinked_count} in wbom-link-review.html` : '') +
+    (s.linked_but_mislabeled_count ? ` &nbsp;·&nbsp; <span style="color:var(--warn)">${s.linked_but_mislabeled_count} linked_but_mislabeled (unexpected — should normally be 0 after Phase 1C)</span>` : '');
+  renderCard();
+}
+
+let _summaryLine = '';
+
+function renderCard() {
+  const host = document.getElementById('cardHost');
+  if (CANDIDATES.length === 0) {
+    document.getElementById('progress').innerHTML = _summaryLine;
+    host.innerHTML = '<div class="done-empty">✅ Nothing to review — no_wbom_match is empty.</div>';
+    return;
+  }
+  if (idx >= CANDIDATES.length) {
+    document.getElementById('progress').innerHTML = _summaryLine;
+    host.innerHTML = `<div class="done-empty">✅ All ${CANDIDATES.length} processed this session. <button class="btn" onclick="loadCandidates()">Reload from server</button></div>`;
+    return;
+  }
+  document.getElementById('progress').innerHTML =
+    `<b>${idx}</b> of <b>${CANDIDATES.length}</b> processed this session &nbsp;·&nbsp; ${_summaryLine}`;
   const c = CANDIDATES[idx];
   host.innerHTML = `
     <div class="card">
@@ -351,7 +408,7 @@ async function createAndLink() {
 function boot() {
   document.getElementById('loginBox').style.display = 'none';
   document.getElementById('app').style.display = 'block';
-  renderCard();
+  loadCandidates();
 }
 
 (function () {
