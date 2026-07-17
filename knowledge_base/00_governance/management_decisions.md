@@ -757,3 +757,13 @@ Found during Step 6's own log review (not part of the original audit list): `mod
 |---|---|---|
 | S19-6B | `modules/social_auto_reply/rate_limiter.py` | `mark_sent()`: `delay` → `str(delay)` as the `$2::text` query parameter. One-line fix. |
 
+### Session 19 — Known open item: Employee Edit 500 (log and defer, Owner decision)
+
+PUT /api/admin/employees/143 returned 500 at 2026-07-16 20:48:46 — single occurrence, no traceback found in available log history. Pydantic type validation rules out a simple str/int mismatch. Cannot diagnose from logs alone. Next step when reproducing: check logs immediately after triggering the same edit action live to capture the traceback.
+
+**Owner decision (2026-07-17): log and defer.** Not investigated further this session. Filed as a standalone LOW-priority item in `docs/NEXT_IMPLEMENTATION_QUEUE.md`'s "Immediate Next" section — not assigned to any Tier or Phase, since it's a single occurrence with no confirmed pattern, not a scoped project of work.
+
+### Session 19 — Bridge1 cursor: confirmed correct, no action
+
+Bridge1 cursor advance mechanism confirmed correct 2026-07-17 — `fetched=0` over 10h overnight period is expected behavior when no inbound messages arrive, not a bug. Advance-only-if-newer guard (`if new_cursor > cursor: cursor = new_cursor; await _set_cursor(...)`, `modules/bridge_poller/__init__.py:1140-1143`) working as designed. Owner will do a manual sanity check by texting the HR number directly; no code change made or needed.
+
