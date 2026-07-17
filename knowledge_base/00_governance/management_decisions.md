@@ -654,11 +654,26 @@ Re-verified `~/chat_sync_staging/` (`sync.py`, `chat-sync.service`) against the 
 
 **Not installed this session** — requires interactive `sudo` (password prompt), which this session cannot supply. Exact install commands (for the Owner to run) and rollback commands are recorded in `docs/AUDIT_REPORT_2026-07-17.md` Part 2 Step 4 and were re-confirmed unchanged during this re-verification.
 
+### CORRECTION (2026-07-17, same session): the above "NOT INSTALLED" status was wrong — the service was already running
+
+Everything above this line was written based on Session 13's note ("blocked on sudo, not deployed") and this session's own file-level re-verification, **without first checking whether `chat-sync.service` already existed as a systemd unit.** That check was skipped — a real gap in this session's own Step 4 process, not just stale prior information.
+
+When the Owner ran the install commands, `systemctl status chat-sync.service` revealed the service was **already `active (running)` since `Wed 2026-07-15 23:28:28 CEST`** — roughly 20 minutes after Session 13 staged the files (`~/chat_sync_staging/`, mtime 2026-07-15 23:11) and about 1.5 hours before Session 14 began the same night. **Someone or something installed and started this service in that window, entirely outside of any recorded Claude Code session** — no commit, no `management_decisions.md` entry, nothing. This is the same class of gap already found in Step 0 (undocumented migrations 043/046) — a third instance of a real production change happening with zero governance trail.
+
+**Verified healthy over its full ~2-day undocumented run:**
+- `chat_history` contains 9,156 rows (8,437 from `wbom_whatsapp_messages`, 719 from `fazle_outbound_queue`), spanning 2026-07-15 08:15:39 UTC → 2026-07-17 01:13:55 UTC (query run by the assistant) — continuous, real, still growing.
+- `journalctl -u chat-sync.service -n 50 --no-pager` (run by the Owner, since the assistant has no sudo/journal-group access this session): every line from `chat_sync started, poll_interval=20s` (2026-07-15 23:28:28) through `synced 1 rows...` (2026-07-17 03:13:50) is `INFO`-level — **zero errors, zero warnings**, across the entire run.
+- The final logged sync (`2026-07-17 03:13:50, synced 1 rows`) is the assistant's own Step 1 escort-gate smoke-test message (sent 03:13:38 CEST the same session) — confirming the full pipeline (webhook → `wbom_whatsapp_messages` → `chat_sync` → `chat_history`) is working end-to-end, live, right now.
+
+The Owner's `sudo cp`/`systemctl enable --now` commands run this session did not restart anything (systemd does not restart an already-active unit on `--now`) — they overwrote `/opt/chat_sync/sync.py` with byte-identical content (already confirmed matching the staged version) and re-enabled the unit for boot, both no-ops on the already-correct running state.
+
+**Corrected status: chat_history sync IS installed, IS running, and has been healthy for ~2 days. No further action needed for Step 4.**
+
 ### Files Authorized for Change (Session 19, Step 4)
 
 | ID | File | Change |
 |---|---|---|
-| S19-04 | *(none — verification only)* | No files changed. Staged files re-verified correct as-is; install deferred to a manual sudo session. |
+| S19-04 | *(repo: none)* | No repo files changed. **System state (outside this repo, discovered already in place):** `/opt/chat_sync/sync.py`, `/etc/systemd/system/chat-sync.service` — both were already live since 2026-07-15 23:28:28, from an undocumented install predating this session; the Owner's commands this session (`sudo cp`, `systemctl enable --now`) overwrote them with byte-identical content, a no-op on the already-correct running state. |
 
 ### Session 19, Step 5 — Dual-write concurrency diagnostic (no code changed)
 
