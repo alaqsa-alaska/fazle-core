@@ -53,8 +53,8 @@ def normalize_bd_phone(raw: Optional[str]) -> Optional[str]:
     # 10-digit form (e.g. 1725494969) — prepend leading zero
     if len(d) == 10 and d.startswith("1"):
         d = "0" + d
-    # Must now be exactly 11 digits starting with 01
-    if len(d) != 11 or not d.startswith("01"):
+    # Must now be exactly 11 digits starting with 01, with a valid operator code
+    if len(d) != 11 or not d.startswith("01") or d[2] not in "3456789":
         return None
     return d
 

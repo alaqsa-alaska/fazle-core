@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings, update_repo_env_value
 from app.database import fetch_all
-from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone, to_880
 
 from .db import (
     audit_exact_confirmed_duplicates,
@@ -263,15 +263,6 @@ async def api_upsert_config(body: ConveyanceConfigRequest):
     )
 
 
-def _normalize_client_phone(raw: str) -> str:
-    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if digits.startswith("880") and len(digits) == 13:
-        return digits
-    if digits.startswith("0") and len(digits) == 11:
-        return "880" + digits[1:]
-    raise HTTPException(status_code=400, detail="Invalid Bangladesh mobile number")
-
-
 def _escort_client_phone_list() -> list[str]:
     current = get_settings().escort_client_phones or ""
     phones: list[str] = []
@@ -279,9 +270,8 @@ def _escort_client_phone_list() -> list[str]:
         item = item.strip()
         if not item:
             continue
-        try:
-            norm = _normalize_client_phone(item)
-        except HTTPException:
+        norm = to_880(normalize_bd_phone(item))
+        if not norm:
             continue
         if norm not in phones:
             phones.append(norm)
@@ -295,7 +285,9 @@ async def api_get_escort_clients():
 
 @router.post("/escort-clients", dependencies=[Depends(_require_key)])
 async def api_add_escort_client(body: EscortClientRequest):
-    phone = _normalize_client_phone(body.phone)
+    phone = to_880(normalize_bd_phone(body.phone))
+    if not phone:
+        raise HTTPException(status_code=400, detail="Invalid Bangladesh mobile number")
     phones = _escort_client_phone_list()
     if phone not in phones:
         phones.append(phone)
@@ -305,7 +297,9 @@ async def api_add_escort_client(body: EscortClientRequest):
 
 @router.delete("/escort-clients/{phone}", dependencies=[Depends(_require_key)])
 async def api_remove_escort_client(phone: str):
-    norm = _normalize_client_phone(phone)
+    norm = to_880(normalize_bd_phone(phone))
+    if not norm:
+        raise HTTPException(status_code=400, detail="Invalid Bangladesh mobile number")
     phones = [p for p in _escort_client_phone_list() if p != norm]
     update_repo_env_value("ESCORT_CLIENT_PHONES", ",".join(phones))
     return {"ok": True, "phones": phones}

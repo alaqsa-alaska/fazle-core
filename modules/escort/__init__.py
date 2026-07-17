@@ -33,6 +33,7 @@ from typing import Optional, TypedDict
 
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_val, fetch_all
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone, to_880
 from modules.identity_brain import _phone_variants
 
 log = logging.getLogger("fazle.escort")
@@ -258,7 +259,7 @@ def _escort_client_phone_list() -> list[str]:
     raw = getattr(get_settings(), "escort_client_phones", "") or ""
     numbers: list[str] = []
     for item in raw.split(","):
-        mobile = _normalize_mobile(item.strip())
+        mobile = to_880(normalize_bd_phone(item.strip()))
         if mobile and mobile not in numbers:
             numbers.append(mobile)
     return numbers
