@@ -1943,3 +1943,135 @@ Backups, editor/AI-tool-internal history stores, and this session's own
 transcript are flagged for Owner awareness but intentionally left
 unmodified, per the explicit stop-before-archives/unknown-application-data
 rule.
+
+### Session 23, Stage 1 — Phase 1C: FPE Employee Resolution Status Consistency (2026-07-17)
+
+**Canonical invariant, validated against live production data and code
+before implementation (not assumed):**
+
+```
+resolution_status = 'unresolved' (schema default — "not yet classified in
+any dimension") AND wbom_employee_id IS NOT NULL
+→ resolution_status = 'resolved', set atomically with the link.
+```
+
+**Confirmed legitimate exceptions, never touched by this fix:**
+- `resolution_status IN ('duplicate', 'canonical', 'inactive')` — a
+  *separate* dimension owned by `modules.fazle_payroll_engine.normalization`'s
+  dedup workflow (`link_duplicate()`, `mark_inactive()`). Zero live rows in
+  this state today, but the fix's predicate (`WHERE resolution_status =
+  'unresolved'`, never `<> 'resolved'`) protects it regardless, since these
+  functions are live, reachable code, not dead.
+- `resolution_status = 'resolved' AND wbom_employee_id IS NULL` — confirmed
+  live: all 6 such rows are `created_source = 'admin_manual_create'`,
+  i.e. deliberately WBOM-less FPE-only employees created via
+  `fazle_payroll_engine/employee.py`'s admin-manual-create path, which
+  hardcodes `resolution_status='resolved'` in the same INSERT regardless of
+  WBOM linkage. Not a bug — a different, valid meaning of "resolved."
+- `resolution_status = 'auto_created'` (12 rows, all unlinked) — a third,
+  distinct status, out of this fix's scope either way (none are linked).
+
+**All writers audited** (grep for every `fpe_employees.wbom_employee_id`
+assignment repo-wide, not just the originally-cited function):
+
+| # | File:location | Prior behavior | Fix |
+|---|---|---|---|
+| 1 | `payment_ingest/fpe_bridge.py` — existing-row phone-link UPDATE | Set link only | Conditional `resolution_status` added |
+| 2 | `payment_ingest/fpe_bridge.py` — new-row `INSERT ... ON CONFLICT DO UPDATE` | Relied on schema default `'unresolved'`, no ON CONFLICT status handling | `resolution_status='resolved'` on INSERT; conditional CASE on the ON CONFLICT branch |
+| 3 | `admin_employees/__init__.py::_seed_fpe()` | Set link only | Conditional `resolution_status` added |
+| 4 | `admin_employees/__init__.py` — `POST /api/admin/employees/link-fpe` | Set link only | Conditional `resolution_status` added |
+| 5 | `admin_employees/__init__.py` — `POST /api/admin/employees/create-and-link` | Set link only | Conditional `resolution_status` added |
+| 6 | `fazle_payroll_engine/employee.py` — "runtime repair" link UPDATE (`match_or_create_employee`) | Set link only | Conditional `resolution_status` added |
+| 7 | `fazle_payroll_engine/employee.py` — `whatsapp_auto_create` post-insert WBOM-link UPDATE | Set link only; row's own INSERT moments earlier hardcoded `'unresolved'` | Conditional `resolution_status` added — **the dominant real-world contributor, 152/153 of the live affected rows** |
+
+**Already-correct writers, confirmed by inspection, untouched:**
+`modules/escort/__init__.py`'s program-confirmation INSERT (already sets
+`resolution_status='resolved'` inline) and
+`fazle_payroll_engine/employee.py`'s `admin_manual_create` INSERT (already
+sets `'resolved'` inline, by design, independent of WBOM linkage — this is
+the source of the 6 legitimate resolved-but-unlinked rows above).
+
+**Fix pattern, identical everywhere:**
+```sql
+resolution_status = CASE WHEN resolution_status = 'unresolved'
+                          THEN 'resolved' ELSE resolution_status END
+```
+set in the same statement as `wbom_employee_id`. Deliberately conditional,
+not unconditional — protects the dedup-workflow states even though none
+currently exist, and costs nothing when they don't.
+
+**Read-only production audit (before any write):**
+
+| resolution_status | total | linked | unlinked |
+|---|---:|---:|---:|
+| `auto_created` | 12 | 0 | 12 |
+| `resolved` | 93 | 87 | 6 |
+| `unresolved` | 388 | 153 | 235 |
+
+Linked-but-not-resolved: **153**. Resolved-but-unlinked: **6** (all
+`admin_manual_create`, confirmed legitimate, not touched). Broken WBOM
+references (`wbom_employee_id` pointing at a non-existent
+`wbom_employees` row): **0**. `created_source` breakdown of the 153:
+`whatsapp_auto_create` ×152, `payment_ingest_bridge` ×1 — exactly matching
+writers #7 and #1 above, confirming root cause.
+
+**Tests:** 13 new (`tests/unit/test_fpe_employee_resolution_status.py`,
+commit `c2671fb`) against the isolated disposable test DB — all pass.
+Broader regression sweep (existing employee/payment_ingest/reports/
+shared-auth-deps tests): 92 passed, 16 failed — all 16 are the same
+pre-existing, already-documented `fazle_contact_roles` test-schema drift
+(missing `sub_role` column in the migration-built schema), unrelated to
+this change.
+
+**Historical backfill — executed, not deferred.** All 6 safety conditions
+proven before running: every affected row's `wbom_employee_id` references
+a real `wbom_employees` row (0 broken links); no linked-but-unresolved
+state is legitimate (100% of the 153 map to the two confirmed-defective
+writers, none to the dedup workflow or any other deliberate state);
+original statuses are homogeneous and known (`'unresolved'` for all 153);
+affected IDs captured before the write
+(`knowledge_base/00_governance/phase1c_backfill_audit_20260717.json`,
+commit `20c3778` — IDs + `wbom_employee_id` + original status +
+`created_source` only, no personal data); predicate unambiguous
+(`wbom_employee_id IS NOT NULL AND resolution_status = 'unresolved'`);
+expected count (153) re-verified immediately before the transaction,
+matched exactly, no drift from the earlier audit.
+
+Executed in a single transaction with in-transaction pre/post assertions:
+pre-count 153 (asserted), `UPDATE 153`, post-count of remaining
+unresolved-but-linked rows 0 (asserted), resolved-but-unlinked inverse
+check still exactly 6 (asserted unchanged — confirms the legitimate
+exception rows were not touched). Transaction committed.
+
+**Post-backfill verification (read-only, live):**
+
+| Status | Total | Linked | Unlinked |
+|---|---:|---:|---:|
+| `auto_created` | 12 | 0 | 12 |
+| `resolved` | 246 | 240 | 6 |
+| `unresolved` | 235 | 0 | 235 |
+
+Zero linked rows remain `unresolved`; the 6 legitimate
+`admin_manual_create` resolved-but-unlinked rows are unchanged; zero
+broken WBOM references. `modules.reports._b_unresolved_fpe_employees`'s
+live output confirms end-to-end: `linked_but_mislabeled_count` **153 → 0**;
+`no_wbom_match_count` (172) and `wbom_match_unlinked_count` (81) unchanged
+— exactly matching the original Session 20 Phase 3 audit numbers,
+confirming those two buckets were never disturbed.
+
+**Not implemented, deliberately out of scope:** any change to employee
+identity architecture, table merger, phone-column renaming, payroll
+eligibility/formulas, employee deduplication rules, or the unresolved-
+review UI integration (`wbom-create-link.html`/`wbom-link-review.html`
+still run on their original static `CANDIDATES` snapshot, unrelated to
+this fix).
+
+**Git:** `55a2d79` (code fix), `c2671fb` (tests), `20c3778` (backfill audit
+artifact) — pushed alongside this documentation commit.
+
+**Deployment:** restart gate run, health confirmed before/after, logs
+reviewed for new errors — see the final report for this session for exact
+PID/health/log detail.
+
+**Phase 1C: CERTIFIED.** Both the future-write fix and the historical
+correction are live and verified.

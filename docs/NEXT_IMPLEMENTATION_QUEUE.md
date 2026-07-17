@@ -434,18 +434,20 @@ readable/updatable via `PUT` as long as `role` itself isn't part of the update �
 data migration, no schema change. See `management_decisions.md` for the full record
 and existing-role audit.
 
-**`fpe_employees.resolution_status` stays `'unresolved'` on rows that are actually
-correctly linked — found 2026-07-17 during Session 20 Phase 2/3:**
-`modules/payment_ingest/fpe_bridge.py::resolve_fpe_employee_for_wbom_employee()`'s
-creating `INSERT` (step 3) never explicitly sets `resolution_status`, so it takes the
-schema default (`'unresolved'`) even in the same statement that sets `wbom_employee_id`
-— the row is genuinely linked, just mislabeled. Not a linkage bug (confirmed via the new
-`unresolved_fpe_employees` report's `linked_but_mislabeled` bucket, 153 such rows live in
-production as of 2026-07-17) — a cosmetic metadata gap. Low priority: cheap to fix
-(`resolution_status = 'resolved'` alongside the existing `wbom_employee_id` set, one
-column added to one `INSERT`/`UPDATE`), but only worth doing if something starts trusting
-`resolution_status` as a filter without also checking `wbom_employee_id IS NULL` the way
-the new report already does — not urgent on its own.
+**🟢 RESOLVED 2026-07-17 (Session 23, Phase 1C) — `fpe_employees.resolution_status`
+consistency.** Was: 7 writers across 3 modules (not just the originally-cited
+`fpe_bridge.py` function) set `wbom_employee_id` without also flipping
+`resolution_status` from the schema default `'unresolved'` to `'resolved'`. Fixed with
+an identical conditional pattern everywhere (`CASE WHEN resolution_status =
+'unresolved' THEN 'resolved' ELSE resolution_status END`, set atomically with the
+link) — deliberately conditional, not unconditional, to protect the separate
+dedup-workflow states (`duplicate`/`canonical`/`inactive`) and the confirmed-legitimate
+`resolved`+unlinked `admin_manual_create` rows. Historical backfill executed same
+session: 153 affected rows corrected in one audited transaction (rollback artifact:
+`knowledge_base/00_governance/phase1c_backfill_audit_20260717.json`). Live-verified:
+`unresolved_fpe_employees` report's `linked_but_mislabeled_count` **153 → 0**;
+`no_wbom_match`/`wbom_match_unlinked` unchanged. Full record:
+`management_decisions.md` Session 23 Stage 1. Commits `55a2d79`, `c2671fb`, `20c3778`.
 
 **`modules/contact_roles/routes.py::upsert_contact_role()` raises a raw 500 (
 `NotNullViolationError`) if `name`/`sub_role`/`notes` are omitted from the POST body
