@@ -469,6 +469,12 @@ captured, with no migration ever recording the change. Same class of gap as the
 27-table "no schema source of truth" finding from the 2026-07-08 audit — this is one
 more confirmed instance, not a new category of problem.
 
+**`escort_roster_audit_logs` relation missing from the test schema — found
+2026-07-17 during Phase 1B.2 Stage A live-verification testing.** Caught and logged
+non-fatally (`[audit] log_audit failed: relation "escort_roster_audit_logs" does not
+exist`), doesn't block escort-order processing — one more instance of the same
+migration-drift class above, not a new category.
+
 **🟢 RESOLVED 2026-07-17 (Session 21 Phase 1B.2) — Escort-client identity now
 converges across its three intended sources.** Was: found during a routing-
 convergence audit requested after Phase 1B that `ESCORT_CLIENT_PHONES` was only a

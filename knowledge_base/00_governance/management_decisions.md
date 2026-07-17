@@ -1736,3 +1736,132 @@ that already tolerates new keys).
 redesign, any feature-flag/shadow-rollout mechanism, Source C (contact-name
 marker) row persistence, Phase 1C, Dispatch, GL, AI Console, frontend
 consolidation, or any RBAC/financial-authority change.
+
+### Session 22 — Security Incident: Test Postgres Public Exposure (2026-07-17)
+
+While resuming Phase 1B.2 Stage A live-verification work (see below), the
+disposable `docker-compose.test.yml` `postgres-test` container was found
+**actively targeted by a real PostgreSQL RCE exploit attempt** within
+minutes of startup — twice in the same session. Full evidence, timeline,
+and decoded payload:
+`knowledge_base/00_governance/incidents/2026-07-17_test_postgres_public_exposure.md`.
+
+**Summary:** `docker-compose.test.yml` published `postgres-test` on
+`"5433:5432"` (Docker's default publishes all host interfaces when no
+`127.0.0.1:` prefix is given) with a hardcoded `POSTGRES_PASSWORD: postgres`.
+This VPS has a public IP (`5.189.131.48`); an internet scanner found and hit
+the port, authenticated with the trivial password, and attempted a classic
+`CREATE FUNCTION system(cstring) ... LANGUAGE 'c'` privilege-escalation
+technique to fetch and run a Kinsing-family cryptomining dropper from
+`196.251.121.185/bot`. **The exploit failed** — the image is
+`postgres:15-alpine` (musl libc), and the attack hardcoded glibc paths that
+don't exist on it, so the malicious UDF never loaded and the payload never
+ran.
+
+**Immediate containment:** container killed, then
+`docker compose -f docker-compose.test.yml down -v --remove-orphans` —
+confirmed no container, volume, or network remained.
+
+**Host compromise checks (all clean):** no suspicious processes (kinsing/
+kdevtmpfsi/miner names), no executables in `/tmp`, `/var/tmp`, `/dev/shm`,
+no cron/systemd persistence added in the relevant window, no new users, no
+`authorized_keys` tampering found, no active or historical connections to
+the attacker IP, login history shows only recognized source IPs, docker
+daemon logs show nothing anomalous.
+
+**Production Postgres (`ai-postgres`) checks (all clean):** confirmed still
+bound `127.0.0.1:5432` only (never exposed by this incident); read-only
+inspection found no unknown/malicious functions (all `lanname='c'` functions
+are legitimate `pgvector`/`pg_trgm` extension internals plus standard
+built-ins), no unexpected roles (`postgres`, `fazle_ai_reader`,
+`ollama_memory_owner` plus standard `pg_*` roles only, no altered login/
+superuser flags), no unexpected databases (`postgres`, `fazle_ollama_memory`,
+`fazle_test` — the last one is this repo's own pre-existing, legitimate
+same-server test-database convention, unrelated to today's incident and the
+separate disposable-container `postgres-test` service), no unexpected
+extensions.
+
+**Remediation, committed:**
+- `599dacd` — `postgres-test` and `redis-test` both rebound to `127.0.0.1`
+  only; `POSTGRES_PASSWORD`/`TEST_DATABASE_URL` now require `TEST_DB_PASSWORD`
+  from the environment (fails loud, no hardcoded fallback) instead of the
+  trivial checked-in `postgres` password. Verified via `ss -lntp` (listener
+  shows `127.0.0.1:5433`, not `0.0.0.0`/`*`) and a direct connection attempt
+  against the host's own public IP (correctly refused).
+- `111c957` — full incident evidence record committed.
+- Compose-file sweep (`grep` across `/home/azim` for `5432`-shaped exposed
+  ports): no other exposed database found — `ai-postgres`
+  (`127.0.0.1:5432`) and `vps-monorepo-staging/docker-compose.yml`
+  (`127.0.0.1:5432:5432`) were already correctly bound.
+
+**Separate, lower-severity housekeeping finding, not part of this incident's
+remediation (flagged, not fixed):** a stale, already-rotated production
+Postgres password (confirmed via safe comparison against the current live
+credential — **not** a match, i.e. genuinely dead) was found sitting in
+plaintext in `/home/azim/.bash_history` and
+`/home/azim/ESCORT-ROSTER-PRODUCTION-PLAN-2026-07-02.md` (a loose file at
+the home-directory root, **not** inside any git repository — confirmed via
+`git rev-parse --is-inside-work-tree` failing at `/home/azim`). Dead
+credential, not in git, low risk — but poor hygiene worth cleaning up
+(`history -c`/`.bash_history` edit, and redacting or deleting the old
+planning doc) whenever convenient. Not touched this session — editing a
+user's shell history or personal files without being asked is out of scope
+for an incident-response pass.
+
+**Safe to resume Stage A: Yes.** **Safe to begin Phase 1C: Yes** (production
+Postgres integrity confirmed, host confirmed clean, test Postgres confirmed
+no longer publicly reachable, trivial password removed).
+
+### Phase 1B.2 Stage A — Live End-to-End Escort Order Verification (2026-07-17)
+
+Completed after the security remediation above, using **Method 3** (the
+task's own sanctioned fallback: production code — `identity_brain`,
+`message_router`, `modules.escort`, `app.main`'s real webhook handler —
+exercised end-to-end against a real, now-properly-secured disposable
+Postgres, with only the external bridge send and Ollama/Groq calls mocked).
+Method 1 (observe a genuine order) wasn't practical synchronously; Method 2
+(Owner-controlled real phone) wasn't available in this session. No synthetic
+payload was ever sent to the live production webhook, since unsigned
+webhook payloads are currently accepted there (a separate, already-tracked
+item) and a live send risk was judged unacceptable for a routine
+verification pass.
+
+**4 tests, all pass** (`tests/unit/test_stage_a_live_escort_verification.py`,
+commit `f57def2`):
+1. Verified sender (`env_phone` source) + complete order → identity
+   correctly resolves `client_escort_buyer`; exactly one
+   `wbom_escort_programs` row created, `status='draft'` (never
+   auto-confirmed — confirmed structurally, the INSERT hardcodes `'draft'`);
+   `remarks.source_verified = true`; exactly one admin notification enqueued
+   into `fazle_outbound_queue`, correctly unlabeled; zero entries addressed
+   to the client's own phone (no client-facing reply).
+2. Same `message_id` replayed → zero duplicates anywhere (message, program,
+   or admin notification) — confirms the webhook-level
+   `processed_bridge_messages` dedup guard short-circuits before any further
+   processing.
+3. Unverified, never-before-seen sender + order-shaped text → identity
+   resolves `repeat_client`/`text_hint` (never `client_escort_buyer`); the
+   draft program's `remarks.source_verified = false`; the admin notification
+   is prefixed `"⚠️ UNVERIFIED SENDER"`; no `fazle_contact_roles` row is
+   auto-created from message content alone; no client-facing reply.
+4. No attendance, `fpe_cash_transactions`, or elevated `fazle_contact_roles`
+   role created as a side effect of an escort order.
+
+**Real production log trace from the first (pre-incident) run already
+confirmed this working correctly** before the security interruption —
+e.g. `[identity] 8801766600001 → client_escort_buyer (env_phone)`,
+`[escort] ... verified=True`, `[OUTBOUND_ENQUEUE] ... purpose=internal-notification`,
+and for the unverified case `[identity] ... → repeat_client (text_hint, escort content)`
+with the admin body starting `'⚠️ UNVERIFIED SENDER — order-like message...'`.
+The only issues found were in the *test's own* SQL (a wrong column name,
+`wbom_whatsapp_messages.id` instead of the real `message_id`) and two
+over-fitted parser-output assertions — not the Phase 1B.2 implementation
+itself, which needed no changes.
+
+**Discovered, not part of Phase 1B.2's scope, logged only:**
+`escort_roster_audit_logs` relation does not exist in the test schema
+(`[audit] log_audit failed`, caught and logged, non-fatal) — another
+instance of the test/production schema-drift class already tracked in
+`NEXT_IMPLEMENTATION_QUEUE.md` Technical Debt, not a new category.
+
+**Stage A result: PASS. Safe to begin Phase 1C: Yes.**
