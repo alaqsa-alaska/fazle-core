@@ -904,3 +904,36 @@ All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier
 
 **Remaining for Group C:** C4 (Income, 1 call) — not yet started. Once complete, Group C (all 10 ad-hoc calls) will be fully migrated; only `api()`/`adminApi()` (deferred, Tier 2) and `resolveUserAccess()`/`doLogin()` (permanently out of scope) will remain on `payroll.html`.
 
+---
+
+### Management Authorization (Session 20, Step 2 — Group C4)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-07 | 1 income ad-hoc `fetch()` call migrated to `FazleAuthFetch` — Group C now fully complete | Fourth and final Group C sub-group. Owner reviewed and approved the exact diff before implementation. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 2 — Group C4)
+
+| ID | File | Change |
+|---|---|---|
+| S20-07 | `app/static/payroll.html` | `deleteIncomeTxn()` (DELETE `/api/admin/income/{id}?deleted_by=admin_manual`): raw `fetch()` replaced with `FazleAuthFetch.fetch(..., {method:'DELETE'})` + `FazleAuthFetch.readError(res)` on non-ok — same shape as the Group C2 transaction-delete conversion. `?deleted_by=admin_manual` query string and the `const data = await res.json()` success-path line preserved exactly, per Owner instruction, even though `data` is never read (the toast is hardcoded). |
+
+**Behavior change (same class as C2's delete-transaction call, Owner pre-approved):** error-message text improves (`readError()` handles array-shaped `detail` and non-JSON bodies vs. the old string-only `data.detail || res.statusText`) and fixes the parse-before-check bug (old code called `res.json()` before checking `res.ok`). Happy path unchanged.
+
+**Verification:** `git diff` reviewed — confirmed the single intended hunk, no unrelated changes. `grep -n "fetch("` before/after confirms the only remaining raw `fetch()` calls in the file are the 2 permanently-out-of-scope bootstrap calls (`resolveUserAccess`, `doLogin`) and the 2 deferred wrappers (`api()`, `adminApi()`) — all 10 Group C ad-hoc calls now use `FazleAuthFetch`. `node -e "new Function(...)"` syntax check on the extracted inline `<script>` block passed. Committed as `8512acd`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`, `/static/payroll.html` served `200`.
+
+### Session 20, Step 2 — payroll.html shared-fetch migration complete (Groups B1, B2, C1, C2, C3, C4)
+
+All 6 Owner-approved sub-groups landed, each its own commit, each restart-verified live:
+
+| Sub-group | What | Commit |
+|---|---|---|
+| B1 | `clientBillingFetch()` wrapper | `d76a7ff` |
+| B2 | `attendanceFetch()` wrapper | `2cab0f2` |
+| C1 | Employee ad-hoc calls (create, lookup-by-phone, deactivate) | `6feffd1` |
+| C2 | Transaction ad-hoc calls (typeahead, add, edit, delete) | `cc6f96d` |
+| C3 | Escort ad-hoc calls (approve, reject) | `b738006` |
+| C4 | Income ad-hoc call (delete) | `8512acd` |
+
+12 of `payroll.html`'s original 16 `fetch()` calls now go through `shared-auth-fetch.js` (2 wrapper functions + 10 ad-hoc calls). The remaining 4 are explicitly out of scope: `api()`/`adminApi()` deferred to Tier 2 (dual-prefix routing and auto-serialize behavior need a design decision, not a mechanical swap — see `docs/NEXT_IMPLEMENTATION_QUEUE.md`), and `resolveUserAccess()`/`doLogin()` permanently excluded (bootstrap/session logic, structurally different from the general authenticated-fetch pattern this migration targets).
+
