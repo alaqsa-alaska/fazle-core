@@ -480,6 +480,8 @@ async def _match_or_create_instruction_employee(parsed: dict) -> tuple[int, str,
     name = parsed.get("name") or "Unknown"
 
     eid, _ratio, _mtype = await match_employee(lookup_mobile, name)
+    if not eid and payout_mobile and payout_mobile != lookup_mobile:
+        eid, _ratio, _mtype = await match_employee(payout_mobile, name)
     if eid:
         row = await fetch_one(
             "SELECT employee_id, employee_name, employee_mobile FROM wbom_employees WHERE employee_id=$1",
