@@ -620,3 +620,23 @@ just never logged here at the time.
 | S19-03 | *(data only)* | `UPDATE wbom_escort_programs SET destination = NULL, remarks = ... WHERE program_id IN (900,901,902,905,906,938) AND destination LIKE 'Escort Name:%'` — 6 rows affected, verified before and after. |
 
 **Verification status:** regex fix verified via 4 standalone tests (blank destination, real destination, blank-with-trailing-spaces, and the exact real message that produced row 938 — all pass) plus `ast`/`py_compile` syntax check. Data backfill verified via `SELECT` before (6/6 still corrupted) and after (6/6 now `NULL` with the fix marker) the `UPDATE`. **Not yet done:** full HTTP/live-service verification (posting a blank-destination admin confirmation through the running app) — pending sudo access to restart `fazle-core.service`, same blocker as Steps 1-2.
+
+---
+
+### Session 19 — Steps 1 and 3 confirmed LIVE (2026-07-17, 03:09:07 CEST restart)
+
+Owner ran `sudo systemctl restart fazle-core` at 2026-07-17 03:09:07 CEST (confirmed via `systemctl status`: `Active: active (running) since Fri 2026-07-17 03:09:07 CEST`, Main PID 4169473). This restart picks up commits `b3fe767` (Step 1: webhook gate + fail-closed dedup) and `7f05de6` (Step 3: `_CD_DEST_RE` fix) — both are now live in the running process, not just the working tree.
+
+**Post-restart health check:** `logs/fazle-core.log` for PID 4169473 shows a clean startup (`Application startup complete`, `Uvicorn running on http://127.0.0.1:8200`) followed only by routine `/health` polls and a benign `Unsupported upgrade request` warning (unrelated WebSocket probe, not a regression). `logs/fazle-core-error.log`'s most recent traceback (`asyncpg.exceptions.DataError`, a stale `toordinal`-shaped error) predates this restart (occurred under an earlier PID before 4169473 started) — not a new regression. (`journalctl -u fazle-core` was not readable without sudo in this session; verification used the log files CLAUDE.md documents instead.)
+
+**Live smoke test — Step 1 (webhook gate) confirmed working end-to-end:**
+- Posted an escort-order-shaped message (`"MV TEST VESSEL AUDIT\nlighter: TESTLIGHTER-9\nmaster mobile: 01911112222\nescort lagbe 20/07/2026 Day"`, sender `8801700000199`, a non-whitelisted test number) to `/webhook/mcp1`. Result: **zero rows** in `social_inbox_events` for this sender (confirmed via `SELECT`) — the message never entered the social auto-reply classifier at all. `logs/fazle-core.log` shows it reached `fazle.escort` instead, correctly rejected with `"ignore client order from non-whitelisted sender=8801700000199"` (the pre-existing, unrelated sender-validation gate doing its job) — i.e. the message was routed to the real escort pipeline, not silently classified as social and dropped.
+- Control test: posted a plain greeting (`"hello, good morning"`, sender `8801700000288`) to the same route. Result: **one row** in `social_inbox_events` (`classification='greeting'`, `reply_status='pending'`) — confirming the normal social-auto-reply path is unaffected by the new gate.
+- No entries in `logs/fazle-core-error.log` during either test's time window.
+
+This is full end-to-end confirmation of the exact failure mode Section 1B-iv described (an escort order silently swallowed by social auto-reply on the webhook path) — the gate now prevents it, live, in production.
+
+**Step 3 (destination-leak fix):** not separately smoke-tested with a live blank-destination admin-confirmation message this session (would require simulating an authoritative bridge confirmation from a real admin number, out of scope for a quick smoke test) — verification for this step remains the 4 standalone regex tests plus the completed data backfill recorded above. The regex fix is confirmed loaded in the running process (same restart, same commit range).
+
+**Both Step 1 and Step 3 are now considered fully live**, not just committed to the working tree.
+
