@@ -839,3 +839,25 @@ All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier
 
 **Group B (both wrappers) now complete.** Remaining for `payroll.html`: Group C (10 ad-hoc `fetch()` calls, not yet started), `api()`/`adminApi()` deferred per Tier 2 note above.
 
+---
+
+### Management Authorization (Session 20, Step 2 — Group C1)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-04 | 3 employee ad-hoc `fetch()` calls migrated to `FazleAuthFetch` | First of 4 planned sub-groups (Group C, 10 ad-hoc calls total, split by feature area: C1 Employees, C2 Transactions, C3 Escort, C4 Income). Owner reviewed and approved the exact diff for all 3 calls before implementation. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 2 — Group C1)
+
+| ID | File | Change |
+|---|---|---|
+| S20-04 | `app/static/payroll.html` | `submitNewEmployeeFromTab()` (create employee, POST `/api/admin/employees`): raw `fetch()` + manual `r.json()`-then-check replaced with `FazleAuthFetch.postJson(...)`. `deactivateEmployee()` (2 calls): the by-phone lookup (GET) now uses `FazleAuthFetch.fetch()` as a raw-Response primitive, preserving its existing manual `if (!wr.ok)` check and curated "No WBOM record found for this employee" toast unchanged; the deactivate call (PATCH) replaced with `FazleAuthFetch.patchJson(...)`. |
+
+**Behavior changes (all pre-reviewed and approved by Owner, no happy-path change on any of the 3):**
+- Create (POST) and deactivate (PATCH): error-message text improves (same class as Group B), **and** fixes a real pre-existing bug — both old call sites did `const d = await r.json()` *before* checking `r.ok`, so a non-JSON error response body would have thrown an unreadable parse error instead of a clean message. `postJson`/`patchJson` read text first and only attempt JSON parsing for the `detail` field, falling back gracefully.
+- Lookup-by-phone (GET): functionally a no-op — the only observable difference is an added `Content-Type: application/json` header on this GET request (previously sent only `X-Internal-Key`), consistent with the same unconditional-Content-Type pattern already used and approved in the Group B wrappers. The curated error toast and early-return control flow are byte-for-byte unchanged.
+
+**Verification:** `git diff` reviewed — confirmed exactly the 2 intended hunks (create + deactivate/lookup), no unrelated changes; the other 7 ad-hoc calls (C2/C3/C4) and the 2 bootstrap calls (`resolveUserAccess`/`doLogin`) and 2 deferred wrappers (`api`/`adminApi`) untouched — confirmed via `grep -n "fetch("` before/after showing only the 3 expected lines changed. `node -e "new Function(...)"` syntax check on the extracted inline `<script>` block passed. Committed as `6feffd1`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`, `/static/payroll.html` served `200`.
+
+**Remaining for Group C:** C2 (Transactions, 4 calls), C3 (Escort, 2 calls), C4 (Income, 1 call) — not yet started, plan to be presented and approved per sub-group before each is touched.
+
