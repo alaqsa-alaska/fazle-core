@@ -5780,12 +5780,9 @@ async function deleteIncomeTxn(id) {
   if (!confirmed) return;
 
   try {
-    const res = await fetch('/api/admin/income/' + id + '?deleted_by=admin_manual', {
-      method: 'DELETE',
-      headers: {'X-Internal-Key': API_KEY},
-    });
+    const res = await FazleAuthFetch.fetch('/api/admin/income/' + id + '?deleted_by=admin_manual', API_KEY, { method: 'DELETE' });
+    if (!res.ok) throw new Error(await FazleAuthFetch.readError(res));
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
     closePanel();
     showToast('Income transaction #' + id + ' deleted', 'ok');
     await loadIncome(true);
