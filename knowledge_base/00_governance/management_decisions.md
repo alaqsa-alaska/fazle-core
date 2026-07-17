@@ -1321,3 +1321,46 @@ changed to fail closed? is webhook LID resolution in scope for this same effort 
 separate item?
 
 **Not implemented. No code, schema, or config changed for this proposal.**
+
+### Session 21, Deployment — Phase 1B Pushed, Deployed, Production-Certified (2026-07-17)
+
+Owner authorized push + deploy of the 4 already-reviewed Phase 1B/reconciliation
+commits (`aee44bc`, `bcb5a53`, `393781f`, `ba1ac40`). Pushed (fast-forward, no
+force), `HEAD` == `origin/main` confirmed at `ba1ac40`. Restarted via
+`scripts/restart_gate.sh --restart` (Owner ran it directly): all 7 pre-checks
+PASS (working-tree clean, 0 secrets, xfail count unchanged at 13, targeted
+tests 100%, migration inventory clean, `.env` flags unchanged, backup 18h
+old), pre-restart health `ok`, post-restart health `ok` within 6s. New PID
+confirmed (`788177` → `1515204`), clean startup log (no import/Pydantic
+errors), no new ERROR/Exception log lines after the restart timestamp
+(20:56:47 CEST) — all remaining log noise predates the restart (known
+Ollama timeout/rate-limit class, unrelated).
+
+**Live production smoke tests, all 7 passed**, using a disposable phone
+(`8801799990001`, confirmed via read-only query to collide with nothing in
+`fazle_contact_roles`/`wbom_contacts`/`wbom_employees`/`fpe_employees`, and
+not in `ESCORT_CLIENT_PHONES`/`ACCOUNTANT_PHONE`/admin/FPE-authorized lists):
+`candidate` create (200), whitespace `" vendor "` → stored `vendor` (200),
+`Vendor` → 422 with a clear enum message, role unchanged; `admin` → 422;
+`accountant` → 422, role still unchanged; `client_escort_buyer` → 200
+(confirms the canonical escort-client identity remains assignable); PUT
+omitting `role` while updating `priority` → role preserved; unauthenticated
+GET (missing key, invalid key) → both 403. Disposable row deleted via the
+API's own `DELETE` endpoint afterward, confirmed empty (`{"items":[],"count":0}`).
+No other production row touched.
+
+**Phase 1B: CERTIFIED.** All required conditions met — pushed, restarted,
+health OK, allowed/forbidden/case/omission behavior all verified live (not
+just in the isolated test DB), `client_escort_buyer` confirmed still
+assignable, disposable record cleaned up, zero new runtime errors, zero
+unintended data changes.
+
+**Not certified — deliberately out of scope:** the wider escort-client
+identity/routing convergence question (Phase 1B.2). Phase 1B only certifies
+the API-boundary role whitelist; it does not certify or claim to fix the
+Source A/B/C convergence gap, the empty-list conditional risk, or the
+webhook/poller LID parity gap documented in the Phase 1B.2 proposal above.
+
+**Rollback (not needed, recorded for completeness):** `git revert ba1ac40
+393781f bcb5a53 aee44bc && git push origin main && scripts/restart_gate.sh
+--restart`. No database rollback required — no schema/data change shipped.
