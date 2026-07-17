@@ -743,3 +743,17 @@ recorded in the KB doc for future sessions.
 
 **Confirmed LIVE (2026-07-17, 04:04:09 CEST restart, Main PID 73731):** Owner restarted `fazle-core.service`; `logs/fazle-core-error.log` shows a clean `Started server process [73731]` → `Application startup complete` → `Uvicorn running` sequence with no exceptions. This is meaningful, not just an absence-of-errors check: three of the seven files (`modules/contact_sync/__init__.py`, `modules/fazle_payroll_engine/historical_sync.py`, `shared/bridge_orchestrator.py`) build their settings-derived values at **module import time** — any error in those specific fixes would have thrown during Python's import phase and crashed startup entirely, not merely logged a warning. A clean startup is direct, positive evidence those three fixes are correct, not absence-of-proof. The pre-existing `TypeError: expected str, got int` / `asyncpg.exceptions.DataError` tracebacks visible in the log are all timestamped 2026-07-16 (a full day before this restart) — an unrelated, pre-existing bug in a different query path, not a regression from this step. Only new log entry post-restart is a benign HuggingFace read-timeout warning (RAG's embedding-model version check, unrelated to this step).
 
+### Session 19, Step 6B — Rate limiter mark_sent() int→str type mismatch fixed
+
+Found during Step 6's own log review (not part of the original audit list): `modules/social_auto_reply/rate_limiter.py::mark_sent()`'s query casts its second parameter with `$2::text`, which tells asyncpg to expect a Python `str` — but the code passed `delay` (a raw `int` from `random.randint(...)`) directly. Confirmed as the cause of 5+ recurring `TypeError: expected str, got int` / `asyncpg.exceptions.DataError` failures across the prior ~22 hours of logs, all caught by `daemon_worker.py`'s outer `except Exception` (logged, 30s fallback sleep, loop continues) — meaning `social_rate_limit_state.next_allowed_at`/`sent_count_window` were never actually persisted; the DB-backed cross-restart rate limit had been silently non-functional.
+
+**Fix:** `str(delay)` for the query parameter only; the function's own `return delay` stays a raw `int` (the caller does `asyncio.sleep(delay)`, which requires a number, not a string). Re-read the full function first to confirm no other `$N` placeholder in the query needed the same fix — only `$2` is cast to `::text`; the `ON CONFLICT DO UPDATE` block introduces no additional placeholders (only references `EXCLUDED.*` and the table's own columns).
+
+**Verified:** `py_compile` clean. Type-fix verified via an isolated check (`str(delay)` confirmed to produce a `str`) rather than actually invoking `mark_sent()`, to avoid writing to `social_rate_limit_state` from a throwaway test run.
+
+### Files Authorized for Change (Session 19, Step 6B)
+
+| ID | File | Change |
+|---|---|---|
+| S19-6B | `modules/social_auto_reply/rate_limiter.py` | `mark_sent()`: `delay` → `str(delay)` as the `$2::text` query parameter. One-line fix. |
+

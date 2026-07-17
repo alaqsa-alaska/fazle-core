@@ -45,6 +45,6 @@ async def mark_sent(channel: str = "global") -> int:
             END
         """,
         channel,
-        delay,
+        str(delay),
     )
     return delay
