@@ -305,6 +305,110 @@ async def _b_cash_position(days: int = 30) -> dict:
     }
 
 
+async def _b_unresolved_fpe_employees() -> dict:
+    """Read-only report: fpe_employees rows needing human review for WBOM
+    linkage. Distinguishes truly-unlinked rows from rows that are already
+    correctly linked but still carry a stale resolution_status (Session 20
+    Phase 2 finding, S20-10 governance entry) -- never conflates the two.
+    Phone matching uses last-10-digit, digit-only comparison (same
+    normalization style as match_employee() in modules/payment_ingest),
+    checked against wbom_employees.employee_mobile/bkash_number/nagad_number
+    -- the same three fields payment_ingest and fazle_payroll_engine.employee
+    already treat as authoritative WBOM phone-identity anchors elsewhere in
+    this codebase, not a new matching rule invented for this report.
+
+    NO WRITES. This function issues one SELECT only. No auto-linking, no
+    guessing, no bulk mutation -- output is for human review through the
+    existing wbom-create-link.html / wbom-link-review.html tools (report
+    field names documented below map to those tools' candidate shapes;
+    wiring this report's live output into those static-array tools is a
+    separate, not-yet-scoped task).
+
+    Column mapping for future wiring:
+      no_wbom_match       -> wbom-create-link.html: fpe_name==full_name,
+                              phone, salary, joining_date, created_source, txn_count
+      wbom_match_unlinked -> wbom-link-review.html: fpe_id, fpe_name, wbom_match_id==wbom_id,
+                              wbom_match_name==wbom_name, phone, name_mismatch==mismatch
+    """
+    rows = await fetch_all(
+        """
+        SELECT
+            fe.id AS fpe_id, fe.full_name AS fpe_name,
+            fe.primary_phone, fe.employee_id_phone,
+            fe.resolution_status, fe.wbom_employee_id,
+            fe.created_source, fe.designation, fe.basic_salary, fe.joining_date,
+            (SELECT COUNT(*) FROM fpe_cash_transactions t WHERE t.employee_id = fe.id) AS txn_count,
+            wm.employee_id AS wbom_match_id,
+            wm.employee_name AS wbom_match_name,
+            wm.employee_mobile AS wbom_match_mobile
+        FROM fpe_employees fe
+        LEFT JOIN LATERAL (
+            SELECT we.employee_id, we.employee_name, we.employee_mobile
+            FROM wbom_employees we
+            WHERE RIGHT(regexp_replace(we.employee_mobile, '\\D', '', 'g'), 10)
+                    = RIGHT(regexp_replace(COALESCE(fe.primary_phone, fe.employee_id_phone, ''), '\\D', '', 'g'), 10)
+               OR RIGHT(regexp_replace(COALESCE(we.bkash_number, ''), '\\D', '', 'g'), 10)
+                    = RIGHT(regexp_replace(COALESCE(fe.primary_phone, fe.employee_id_phone, ''), '\\D', '', 'g'), 10)
+               OR RIGHT(regexp_replace(COALESCE(we.nagad_number, ''), '\\D', '', 'g'), 10)
+                    = RIGHT(regexp_replace(COALESCE(fe.primary_phone, fe.employee_id_phone, ''), '\\D', '', 'g'), 10)
+            LIMIT 1
+        ) wm ON TRUE
+        WHERE fe.resolution_status = 'unresolved' OR fe.wbom_employee_id IS NULL
+        ORDER BY fe.id
+        """
+    )
+
+    rows_out: list[dict] = []
+    for r in rows:
+        base = {
+            "fpe_id": r["fpe_id"],
+            "fpe_name": r["fpe_name"],
+            "resolution_status": r["resolution_status"],
+            "phone": r["primary_phone"] or r["employee_id_phone"],
+            "salary": float(r["basic_salary"]) if r["basic_salary"] is not None else None,
+            "joining_date": r["joining_date"].isoformat() if r["joining_date"] else None,
+            "created_source": r["created_source"],
+            "designation": r["designation"],
+            "txn_count": int(r["txn_count"]),
+        }
+        if r["wbom_employee_id"] is not None:
+            rows_out.append({
+                **base, "bucket": "linked_but_mislabeled",
+                "wbom_employee_id": r["wbom_employee_id"],
+                "wbom_match_id": None, "wbom_match_name": None, "name_mismatch": None,
+            })
+        elif r["wbom_match_id"] is not None:
+            fpe_name = (r["fpe_name"] or "").strip().lower()
+            wbom_name = (r["wbom_match_name"] or "").strip().lower()
+            rows_out.append({
+                **base, "bucket": "wbom_match_unlinked",
+                "wbom_employee_id": None,
+                "wbom_match_id": r["wbom_match_id"],
+                "wbom_match_name": r["wbom_match_name"],
+                "name_mismatch": fpe_name != wbom_name,
+                "phone": r["wbom_match_mobile"],
+            })
+        else:
+            rows_out.append({
+                **base, "bucket": "no_wbom_match",
+                "wbom_employee_id": None,
+                "wbom_match_id": None, "wbom_match_name": None, "name_mismatch": None,
+            })
+
+    return {
+        "report": "unresolved_fpe_employees",
+        "args": {},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "no_wbom_match_count": sum(1 for x in rows_out if x["bucket"] == "no_wbom_match"),
+            "wbom_match_unlinked_count": sum(1 for x in rows_out if x["bucket"] == "wbom_match_unlinked"),
+            "linked_but_mislabeled_count": sum(1 for x in rows_out if x["bucket"] == "linked_but_mislabeled"),
+            "total_reviewed": len(rows_out),
+        },
+        "rows": rows_out,
+    }
+
+
 # ── registry + dispatch ─────────────────────────────────────────────────────
 _BUILDERS: dict[str, Callable[..., Awaitable[dict]]] = {
     "daily_summary":          _b_daily_summary,
@@ -312,6 +416,7 @@ _BUILDERS: dict[str, Callable[..., Awaitable[dict]]] = {
     "escort_utilization":     _b_escort_utilization,
     "payment_reconciliation": _b_payment_reconciliation,
     "cash_position":          _b_cash_position,
+    "unresolved_fpe_employees": _b_unresolved_fpe_employees,
 }
 
 
