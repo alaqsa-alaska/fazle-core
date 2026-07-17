@@ -5146,13 +5146,7 @@ async function rvApproveOneClick(id) {
   if (!item) return;
   if (item.item_type === 'escort_roster') {
     try {
-      await fetch('/api/escort-roster/change-requests/' + id + '/approve', {
-        method: 'POST',
-        headers: { 'X-Internal-Key': API_KEY },
-      }).then(async r => {
-        if (!r.ok) throw new Error(await r.text() || ('HTTP ' + r.status));
-        return r.json();
-      });
+      await FazleAuthFetch.postJson('/api/escort-roster/change-requests/' + id + '/approve', API_KEY);
       showToast('Escort request approved', 'ok');
       closeModal();
       closePanel();
@@ -5192,13 +5186,7 @@ async function rvDismissOneClick(id, asDuplicate) {
     const reviewer = rvGetReviewer();
     const reason = asDuplicate ? 'duplicate' : 'rejected';
     try {
-      await fetch('/api/escort-roster/change-requests/' + id + '/reject?note=' + encodeURIComponent(reason), {
-        method: 'POST',
-        headers: { 'X-Internal-Key': API_KEY },
-      }).then(async r => {
-        if (!r.ok) throw new Error(await r.text() || ('HTTP ' + r.status));
-        return r.json();
-      });
+      await FazleAuthFetch.postJson('/api/escort-roster/change-requests/' + id + '/reject?note=' + encodeURIComponent(reason), API_KEY);
       showToast(asDuplicate ? 'Escort request marked duplicate' : 'Escort request rejected', 'ok');
       closeModal();
       loadReview(true);
