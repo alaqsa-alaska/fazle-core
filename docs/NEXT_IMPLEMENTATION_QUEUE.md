@@ -162,6 +162,37 @@ session.
 9. **[ ] NEW (found in Session 19 Step 8) — `modules/escort_roster/history_sync.py:779`
    blocking SQLite call in async context.** Same bug class as the `bridge_poller` fix
    (commit `a5d3871`), not yet applied here. See "Technical Debt" below for full detail.
+10. **[x] RESOLVED 2026-07-17 (Session 20 Step 3, Phase 1) — unknown/untrusted-sender
+    auto-create of `wbom_employees`/`fpe_employees` rows.** `message_router.py::
+    _seed_unknown_employee_identity()` disabled — every sender reaching it had already
+    failed every trust check identity_brain has (not admin, not accountant, not
+    escort-client, not an existing employee/contact), so auto-creating a row from
+    nothing more than a message shaped like an attendance/escort/advance-request was
+    exactly the "random/unapproved number" auto-create pattern the Owner's finance-
+    integrity audit flagged. Disabled, not deleted — full rationale in the function's
+    own docstring. See `management_decisions.md` Session 20 Step 3 Phase 1 (S20-09),
+    commit `47018f7`.
+11. **[x] RESOLVED 2026-07-17 (Session 20 Step 3, Phase 2) — trusted admin→accountant
+    finance path employee-search gap.** `payment_ingest::_match_or_create_instruction_employee()`
+    collapsed `employee_id_mobile`/`payout_mobile` into one search key before ever
+    calling `match_employee()`, so an explicit ID-mobile miss never fell back to a
+    second search against the payout number — risking a duplicate `wbom_employees`/
+    `fpe_employees` row for an already-registered employee. Fixed with a 2-line
+    fallback; trusted auto-create, no-reply, and no-review-queue behavior all
+    preserved and verified unchanged. See `management_decisions.md` Session 20 Step 3
+    Phase 2 (S20-10), commit `38dbedd`.
+12. **[x] DONE 2026-07-17 (Session 20 Step 3, Phase 3) — `unresolved_fpe_employees`
+    read-only report.** New builder in `modules/reports/__init__.py`, served via the
+    existing `GET /reports/{name}` dispatcher (no new route). Splits `fpe_employees`
+    rows needing review into `no_wbom_match`, `wbom_match_unlinked`, and
+    `linked_but_mislabeled` (the last is the Phase 2 "already linked, stale label"
+    finding — reported separately, not flagged as broken). Confirmed live against
+    production: 172 + 81 = 253, matching Phase 2's live-audit number exactly. See
+    `management_decisions.md` Session 20 Step 3 Phase 3 (S20-11), commit `b0c0057`.
+    **Not done:** wiring this report's live output into `wbom-create-link.html`/
+    `wbom-link-review.html` — both still run on a one-time hardcoded `CANDIDATES`
+    snapshot from when they were built (S15-18), not live data; a separate,
+    not-yet-scoped task.
 
 ---
 
