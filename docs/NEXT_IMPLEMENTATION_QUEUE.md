@@ -402,8 +402,7 @@ functions" would look first.
 ## Technical Debt
 
 **`sqlite3.connect()` used outside `bridge_poller` — audited 2026-07-17 during Step 8
-(Session 19), 4 of 5 confirmed safe, 1 confirmed NOT safe (same bug class as the
-`bridge_poller` fix, just not yet applied here):**
+(Session 19), all 5 now confirmed safe:**
 
 - 🟢 **Confirmed safe** (call-site verified, not just function shape — each is a plain
   `def` helper actually dispatched via `loop.run_in_executor(None, ...)`, not merely
@@ -413,25 +412,27 @@ functions" would look first.
     `_fetch_messages_sync`, `_load_lid_map_sync` — the last is called from inside
     `_fetch_messages_sync`, itself already dispatched, so nested sync-to-sync is fine)
   - `modules/fazle_payroll_engine/gap_scan.py` (`_fetch_sqlite_rows_for_diff`)
-- 🔴 **`modules/escort_roster/history_sync.py:779`, inside `async def
-  sync_from_bridge_sqlite()` — genuinely broken, not just "worth a future audit."** The
-  `sqlite3.connect()`/`execute()`/close sequence sits directly inside the async function
-  body with zero executor/`to_thread()` dispatch — the exact same bug class fixed in
-  `bridge_poller/__init__.py` by Step 8 (commit `a5d3871`), just not yet applied here.
-  Lower urgency than the `bridge_poller` case was, since this function backs the
-  admin-triggered `/backfill-sqlite` route (`escort_roster/routes.py:536`) rather than the
-  continuous inbound-message poll loop — but while it runs, it blocks the entire app's
-  event loop for every other concurrent request, not just its own caller. Worth its own
-  small fix (same pattern: extract a sync helper, dispatch via `asyncio.to_thread()`),
-  not bundled into Step 8 since that step was scoped to `bridge_poller` only.
+- 🟢 **RESOLVED 2026-07-17 (Session 20) — `modules/escort_roster/history_sync.py:779`,
+  inside `async def sync_from_bridge_sqlite()`.** This entry previously read "genuinely
+  broken, not yet applied here" — that was stale; Session 20 Step 1 already fixed it the
+  same day (this entry just wasn't updated at the time). The blocking sequence was
+  extracted into `_fetch_backfill_messages()`, a plain sync helper, dispatched via
+  `asyncio.to_thread()` — same pattern as `bridge_poller`'s fix (commit `a5d3871`).
+  Commit `e3c1f58`. Re-verified live in code at a later baseline check (HEAD `b9cd43b`) —
+  do not re-open.
 
-**`POST /admin/contact-roles` accepts a free-text `role` field with no enum/whitelist
-— found 2026-07-17 during Session 20 Phase 2 (finance-integrity audit):** an admin
-could assign `role=accountant` to a second phone number without touching `.env`,
-conflicting with `CANONICAL_BUSINESS_RULES.md` §Role, which ratifies `.env` as the
-sole authoritative source for functional roles. Touches RBAC/admin tooling. Needs its
-own scoped fix, not bundled into finance-integrity work. See `management_decisions.md`
-Session 20 Step 3 Phase 2 for the full finding.
+**🟢 RESOLVED 2026-07-17 — `POST /admin/contact-roles` free-text `role` field.** an admin
+could previously assign `role=accountant` (or `admin`/`employee`/`family`) to a phone
+number without touching `.env`, conflicting with `CANONICAL_BUSINESS_RULES.md`'s
+`.env`-authority Structural Rule. Fixed with a closed `AssignableContactRole` enum
+(`vip_client`, `client_escort_buyer`, `repeat_client`, `vendor`, `supervisor`,
+`candidate`) validated at the API boundary in `modules/contact_roles/routes.py` —
+`admin`/`accountant`/`employee`/`family`/`blocked` are rejected outright (422), not
+cross-checked against `.env`. Pre-existing rows using a forbidden legacy value (found
+live: `accountant` ×4, `employee` ×5, `family` ×8) are left untouched and remain
+readable/updatable via `PUT` as long as `role` itself isn't part of the update — no
+data migration, no schema change. See `management_decisions.md` for the full record
+and existing-role audit.
 
 **`fpe_employees.resolution_status` stays `'unresolved'` on rows that are actually
 correctly linked — found 2026-07-17 during Session 20 Phase 2/3:**

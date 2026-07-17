@@ -1039,3 +1039,89 @@ New scope opened this session: a read-only audit of unlinked/out-of-sync row cre
 | 2 | `payout_mobile` fallback search (`_match_or_create_instruction_employee`) | `38dbedd` | `80de8e3` |
 | 3 | `unresolved_fpe_employees` read-only report builder | `b0c0057` | (this entry) |
 
+
+### Session 21, Phase 1B — Contact-Role API Whitelist (2026-07-17)
+
+New scope this session: closed the `POST /admin/contact-roles` free-text `role` gap
+flagged as Technical Debt in Session 20 Step 3 Phase 2 (S20-10's writeup) and in
+`docs/NEXT_IMPLEMENTATION_QUEUE.md`. Preceded by a Phase 0 baseline revalidation that
+found the queue file's own "Technical Debt" section was stale on a separate item
+(`modules/escort_roster/history_sync.py:779` was already fixed by Session 20 Step 1,
+commit `e3c1f58` — the file's "What shipped" section said so, but its Technical Debt
+section, written during Session 19 before the fix, was never updated) — corrected as
+an isolated documentation fix, no code change needed for that item.
+
+**Call-path verification performed before writing the proposal:** confirmed
+`modules/identity_brain/__init__.py::_lookup_seed()` reads `fazle_contact_roles.role`
+unfiltered and returns it as `identity_role`, consumed directly by
+`modules/message_router/__init__.py:330,349` for WhatsApp trust decisions (e.g.
+`role_str == "admin"` bypasses the escort-review-draft safety net) — a real trust
+surface, distinct from RBAC command permission. Confirmed the two places money/RBAC
+actually move — `message_router.py:253`'s `accountant_phone` check and
+`admin_commands`'s `rbac.check_permission()` — read `.env`/`fazle_admins` directly and
+never touch this table, so blast radius is message-routing trust, not fund movement or
+command execution. Confirmed `shared/auth_deps.require_api_key` accepts the master
+`internal_api_key` **or any active admin's personal API key** — i.e. any active
+admin-tier account, not just Owner/superadmin, could reach this endpoint.
+
+**Approved policy (Owner, in writing, before implementation):**
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S21-01 | Restrict `/admin/contact-roles` to a closed contact-role enum | Allowed: `vip_client`, `client_escort_buyer`, `repeat_client`, `vendor`, `supervisor`, `candidate`. Forbidden outright (422), even if the phone exists in `.env`: `admin`, `accountant`, `employee`, `family`, `blocked` — no conditional `.env` cross-check, by explicit Owner choice (simpler, can't drift out of sync with `.env`). Outer whitespace stripped before validation; case variants (`Admin`, `Vip_Client`) rejected, not normalized. `PUT` with `role` omitted preserves the stored value unconditionally (existing `COALESCE` behavior), including on rows already carrying a forbidden legacy value. | 2026-07-17 |
+
+**Existing-role audit (read-only, run before finalizing the enum, via the same
+DB-resolution mechanism `fazle-core.service`'s systemd unit itself uses —
+`/home/azim/core/.env` + `/home/azim/secure-env-backup/runtime-services.env` —
+no credentials logged):**
+
+| role | total | active | inactive |
+|---|---:|---:|---:|
+| accountant | 4 | 2 | 2 |
+| client_escort_buyer | 7 | 3 | 4 |
+| employee | 5 | 5 | 0 |
+| family | 8 | 8 | 0 |
+| repeat_client | 8 | 8 | 0 |
+| supervisor | 5 | 5 | 0 |
+| vendor | 6 | 6 | 0 |
+| vip_client | 2 | 2 | 0 |
+
+No `admin` rows, no null/blank roles. `accountant`/`employee`/`family` rows already
+exist and are actively relied upon by `identity_brain` — none created via this HTTP
+endpoint (grepped for internal callers of `modules/contact_roles`: none found outside
+the module itself and test files), so locking down `POST`/explicit-`role` `PUT` for
+these values doesn't break any in-app provisioning path. These rows remain untouched,
+readable, and updatable (for non-`role` fields, or via direct DB access) — not migrated
+or deactivated, per the approved existing-data policy.
+
+**Files Authorized for Change:**
+
+| ID | File | Change |
+|---|---|---|
+| S21-01 | `modules/contact_roles/routes.py` | Added `AssignableContactRole(str, Enum)` (6 members) and a shared whitespace-stripping `field_validator("role", mode="before")` on both `ContactRoleBody.role` (now required, enum-typed) and `ContactRoleUpdate.role` (now `Optional[AssignableContactRole]`, unchanged default `None`/preserve-on-omit semantics). Both DB-write call sites and the one log line updated to pass `.value` explicitly (avoids `str,Enum.__str__` surprises in logs/params). No schema change, no RBAC change, no change to `identity_brain`/`message_router`. |
+| S21-01 | `tests/unit/test_contact_roles.py` (new) | POST allow-matrix (all 6 enum values), POST reject-matrix (`admin`/`accountant`/`employee`/`family`/`blocked`/`client`/`unknown`/case variants/blank), whitespace-strip-then-validate behavior (`" vendor "` accepted, `" Vendor "` rejected), PUT allow/reject/omit-preserves-existing (including a seeded legacy `family` row updated via a non-`role` field, confirming the mandatory legacy-compatibility case), 404 on unknown phone, auth-gate regression (missing/invalid/valid key unchanged). |
+
+**Verification:** `py_compile` clean on both files. Interactive Pydantic-model check
+(no test DB needed) confirmed all POST/PUT allow/reject/whitespace/case cases behave
+exactly as specified before the test file was even run. `pytest tests/unit/test_contact_roles.py`
+and `tests/unit/test_shared_auth_deps.py` (a pre-existing file exercising the same
+endpoint's auth gate) both error at fixture setup with
+`password authentication failed for user "postgres"` — **confirmed pre-existing and
+environmental, not caused by this change**, via `git stash` isolation: the identical
+15/15 errors reproduce on unmodified `main` with zero code changes, matching the same
+`TEST_DB_PASSWORD`-not-set limitation this repo's own prior sessions have hit and
+documented repeatedly. `tests/unit/test_identity_brain.py` (mocks the DB, doesn't need
+`test_db_pool`) ran clean — 17 passed — confirming no regression in the module that
+actually consumes `fazle_contact_roles.role`, which this change doesn't touch.
+Full DB-backed integration verification (the POST/PUT matrix in the new test file)
+could not be executed end-to-end in this session for the same environmental reason and
+is flagged as outstanding — see "Remaining Risks" in the session report.
+
+**Not done, deliberately out of scope this session:** conditional `.env` cross-check
+for `admin`/`accountant` (Owner chose reject-outright instead), any data migration/
+backfill of the existing forbidden-role rows, any change to `identity_brain` or
+`message_router`'s consumption of this table, deploy/push/restart (local commit only,
+pending Owner review), Phase 1C (`fpe_employees.resolution_status`) or any later phase.
+
+**Commit:** `aee44bc` (`fix(contact-roles): restrict API-assigned identity roles`) —
+local only, not pushed, not deployed, no restart performed.
