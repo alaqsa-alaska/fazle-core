@@ -14,7 +14,7 @@ p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
 #loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
 #loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
 #app{display:none;max-width:900px;margin:0 auto}
-#progress{font-size:13px;color:var(--muted);margin-bottom:14px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+#progress{font-size:13px;color:var(--muted);margin-bottom:14px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07);display:flex;justify-content:space-between;align-items:center;gap:10px}
 #progress b{color:var(--accent2)}
 .card{background:#fff;border-radius:10px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:14px}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
@@ -306,17 +306,17 @@ let _summaryLine = '';
 function renderCard() {
   const host = document.getElementById('cardHost');
   if (CANDIDATES.length === 0) {
-    document.getElementById('progress').innerHTML = _summaryLine;
+    document.getElementById('progress').innerHTML = `<span>${_summaryLine}</span><button class="btn" onclick="loadCandidates()">↻ Refresh</button>`;
     host.innerHTML = '<div class="done-empty">✅ Nothing to review — no_wbom_match is empty.</div>';
     return;
   }
   if (idx >= CANDIDATES.length) {
-    document.getElementById('progress').innerHTML = _summaryLine;
+    document.getElementById('progress').innerHTML = `<span>${_summaryLine}</span><button class="btn" onclick="loadCandidates()">↻ Refresh</button>`;
     host.innerHTML = `<div class="done-empty">✅ All ${CANDIDATES.length} processed this session. <button class="btn" onclick="loadCandidates()">Reload from server</button></div>`;
     return;
   }
   document.getElementById('progress').innerHTML =
-    `<b>${idx}</b> of <b>${CANDIDATES.length}</b> processed this session &nbsp;·&nbsp; ${_summaryLine}`;
+    `<span><b>${idx}</b> of <b>${CANDIDATES.length}</b> processed this session &nbsp;·&nbsp; ${_summaryLine}</span><button class="btn" onclick="loadCandidates()">↻ Refresh</button>`;
   const c = CANDIDATES[idx];
   host.innerHTML = `
     <div class="card">

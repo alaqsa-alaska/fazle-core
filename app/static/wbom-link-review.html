@@ -14,7 +14,8 @@ p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
 #loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
 #loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
 #app{display:none;max-width:1100px;margin:0 auto}
-table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+#tableHost{overflow-x:auto}
+table{width:100%;min-width:600px;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07)}
 th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:13px}
 th{background:var(--surface);color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.5px}
 tr.mismatch{background:#fff7ed}
@@ -46,7 +47,7 @@ tr.skipped{opacity:.4;text-decoration:line-through}
 <div id="app">
   <h1>WBOM Link Review</h1>
   <p class="sub">Phone-matched FPE ↔ WBOM employee records with no existing link (live from <code>GET /reports/unresolved_fpe_employees</code>, category <code>wbom_match_unlinked</code>). Review each pair, then click Link or Skip. Nothing is changed until you click Link on that specific row — no bulk action exists on this page.</p>
-  <div id="progress" style="font-size:13px;color:var(--muted);margin-bottom:14px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07)"></div>
+  <div id="progress" style="font-size:13px;color:var(--muted);margin-bottom:14px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07);display:flex;justify-content:space-between;align-items:center;gap:10px"></div>
   <div id="tableHost">
   <table>
     <thead><tr><th>FPE #</th><th>Pair (FPE name / WBOM name)</th><th>Phone</th><th>WBOM #</th><th>Action</th></tr></thead>
@@ -114,8 +115,9 @@ async function loadCandidates() {
   const mislabeled = rows.filter(r => r.bucket === 'linked_but_mislabeled');
   const s = data.summary || {};
   progress.innerHTML =
-    `<b>${s.wbom_match_unlinked_count ?? CANDIDATES.length}</b> unlinked candidate pairs` +
-    (s.no_wbom_match_count ? ` &nbsp;·&nbsp; ${s.no_wbom_match_count} in wbom-create-link.html` : '');
+    `<span><b>${s.wbom_match_unlinked_count ?? CANDIDATES.length}</b> unlinked candidate pairs` +
+    (s.no_wbom_match_count ? ` &nbsp;·&nbsp; ${s.no_wbom_match_count} in wbom-create-link.html` : '') +
+    `</span><button class="btn" onclick="loadCandidates()">↻ Refresh</button>`;
   renderRows();
   renderMislabeledSection(mislabeled);
 }
