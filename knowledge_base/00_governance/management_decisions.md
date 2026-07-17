@@ -799,3 +799,23 @@ All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier
 
 **Verification:** `py_compile` clean. Targeted tests green — `tests/unit/test_stage2_stability_fixes.py` (4/4, includes `test_history_sync_duplicate_message_counts_reused_group`, the one existing test that exercises `history_sync.py`), plus a broader sweep of `tests/unit/test_bridge_poller_legacy_gate.py`, `tests/unit/test_escort_roster_routes.py`, and related escort/bridge unit tests (31 passed, 6 xfailed as baseline, 1 pre-existing unrelated failure in `test_escort_source_of_truth_refactor.py` confirmed present identically on unmodified `main` via `git stash`, not caused by this change). Committed as `e3c1f58`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 pre-restart checks PASS, pre/post health snapshots both `ok`), `curl localhost:8200/health` returned `"status":"ok"` with all probes healthy post-restart, and `logs/fazle-core.log` shows clean `Application startup complete` with no import/exception errors traceable to this change (the one `ImportError` present in the error log is a stale entry from a prior, unrelated Session 19 incident, not from this restart).
 
+---
+
+### Management Authorization (Session 20, Step 2 — Group B1)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-02 | `payroll.html::clientBillingFetch()` migrated to `shared-auth-fetch.js` | Owner-approved audit (`docs/NEXT_IMPLEMENTATION_QUEUE.md` "URL / Route-Based Functions Needing Attention" #2, frontend shared-fetch migration, 8-page scope) identified `payroll.html` as the largest/highest-risk of the 8 pages still on hand-rolled fetch code. Owner scoped this step to `clientBillingFetch()` only (Group B1 of a larger, explicitly staged plan — `attendanceFetch()` is Group B2, not yet done; `api()`/`adminApi()` explicitly deferred, see below). Exact diff shown to Owner and approved before implementation. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 2 — Group B1)
+
+| ID | File | Change |
+|---|---|---|
+| S20-02 | `app/static/payroll.html` | Added `<script src="/static/shared-auth-fetch.js"></script>` before the page's existing inline `<script>` (same placement pattern as `escort-roster.html`). Reimplemented `clientBillingFetch(path, opts = {})` to call `FazleAuthFetch.fetch('/admin' + path, API_KEY, opts)` and `FazleAuthFetch.readError(r)` on non-ok, instead of its own inline header-building/error-parsing block. Function name, signature, route prefix (`/admin`), and all 9 call sites unchanged. |
+
+**Behavior change (Owner pre-approved as the only allowed change):** error-message text only. Old code only ever extracted a string-shaped `detail` field, falling back to `r.statusText` for anything else (including FastAPI's array-shaped 422 validation-error `detail`, which it silently dropped). `FazleAuthFetch.readError()` additionally handles the array case and falls back to raw response text (not just `statusText`) when the body isn't JSON. Happy path (header set built, success path returning `r.json()`) is byte-for-byte identical — confirmed by diff review with the Owner before implementation.
+
+**Verification:** `git diff` reviewed — confirmed only the two intended hunks (script tag + `clientBillingFetch` body), no unrelated changes. `node -e "new Function(...)"` syntax check on the extracted inline `<script>` block passed; `node -c shared-auth-fetch.js` passed. No existing pytest suite covers this static frontend file (confirmed via repo-wide grep for `payroll.html`/`clientBillingFetch`/`shared-auth-fetch` in `tests/`, zero hits) — `scripts/restart_gate.sh`'s "Targeted tests" check (807 collected) still ran clean as part of the standard gate. All 9 `clientBillingFetch()` call sites already pass pre-stringified `body: JSON.stringify(...)` via `opts`, which `FazleAuthFetch.fetch()` passes through unmodified — no call-site changes needed. Committed as `d76a7ff`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 checks PASS, pre/post health `ok`), `curl localhost:8200/health` returned `"status":"ok"`, and both `/static/payroll.html` and `/static/shared-auth-fetch.js` served `200`.
+
+**Not done, deferred per Owner scope:** `attendanceFetch()` (Group B2), `api()`/`adminApi()` (explicitly deferred — see `docs/NEXT_IMPLEMENTATION_QUEUE.md` Tier 2 addition), the 10 ad-hoc `fetch()` calls (Group C), `resolveUserAccess()`/`doLogin()` (permanently out of scope per Owner decision).
+

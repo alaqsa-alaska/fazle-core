@@ -336,6 +336,20 @@ functions" would look first.
   budgeted, not as a quick cleanup pass — diagnostic SQL ready in
   `knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md`.
 
+- [ ] **NEW (Session 20, found during the payroll.html shared-fetch audit) —
+  `payroll.html`'s `adminApi()` and `api()` wrappers not migrated to
+  `shared-auth-fetch.js`, deferred by Owner decision.** `adminApi()`'s
+  dual-prefix routing (`/users*` and `/audit*` → `/admin`, everything else →
+  `/api/admin`) and auto-serialize behavior (non-string `opts.body` gets
+  `JSON.stringify`'d for you) have no equivalent in `shared-auth-fetch.js` —
+  needs design decision before migration, not a mechanical swap. `api()` (its
+  own `/api/fpe`-prefixed wrapper, simpler but still a distinct error-handling
+  shape) deferred alongside it for the same reason — not attempted this
+  session. Group B (`clientBillingFetch()`, `attendanceFetch()`) and Group C
+  (10 ad-hoc `fetch()` calls) are the in-progress, Owner-approved migration
+  track for this page; see `management_decisions.md` Session 20 for the
+  call-by-call audit and per-group authorization records.
+
 ---
 
 ## Phase 2
