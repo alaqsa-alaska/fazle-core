@@ -3671,8 +3671,7 @@ async function _fetchTxnSuggest(q) {
   if (_txnSuggestController) { _txnSuggestController.abort(); }
   _txnSuggestController = new AbortController();
   try {
-    const res = await fetch('/api/fpe/employees/suggest?q=' + encodeURIComponent(q) + '&limit=8', {
-      headers: {'X-Internal-Key': API_KEY},
+    const res = await FazleAuthFetch.fetch('/api/fpe/employees/suggest?q=' + encodeURIComponent(q) + '&limit=8', API_KEY, {
       signal: _txnSuggestController.signal,
     });
     const data = await res.json();
@@ -3786,13 +3785,7 @@ async function saveNewPayment() {
   }
 
   try {
-    const res = await fetch('/api/admin/transactions', {
-      method: 'POST',
-      headers: {'X-Internal-Key': API_KEY, 'Content-Type': 'application/json'},
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
+    const data = await FazleAuthFetch.postJson('/api/admin/transactions', API_KEY, payload);
     closeModal();
     showToast('Payment saved — ' + (data.employee_code || data.employee_id), 'ok');
     await loadTransactions(true);
@@ -3868,13 +3861,7 @@ async function saveEditTxn(id) {
   if (saveBtn) setButtonLoading(saveBtn, true, 'Saving...');
 
   try {
-    const res = await fetch('/api/admin/transactions/' + id, {
-      method: 'PUT',
-      headers: {'X-Internal-Key': API_KEY, 'Content-Type': 'application/json'},
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
+    const data = await FazleAuthFetch.putJson('/api/admin/transactions/' + id, API_KEY, payload);
     closeModal();
     showToast('Transaction #' + id + ' updated', 'ok');
     await loadTransactions(true);
@@ -3893,12 +3880,9 @@ async function confirmDeleteTxn(id) {
   if (!confirmed) return;
 
   try {
-    const res = await fetch('/api/admin/transactions/' + id + '?deleted_by=admin_manual', {
-      method: 'DELETE',
-      headers: {'X-Internal-Key': API_KEY},
-    });
+    const res = await FazleAuthFetch.fetch('/api/admin/transactions/' + id + '?deleted_by=admin_manual', API_KEY, { method: 'DELETE' });
+    if (!res.ok) throw new Error(await FazleAuthFetch.readError(res));
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
     showToast('Transaction #' + id + ' deleted', 'ok');
     closePanel();
     await loadTransactions(true);
