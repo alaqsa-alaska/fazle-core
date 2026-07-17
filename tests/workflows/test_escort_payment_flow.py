@@ -178,7 +178,7 @@ async def flow_accountant(test_db_pool):
     """Accountant contact role."""
     async with test_db_pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO fazle_contact_roles (phone, role, label, source)
+            INSERT INTO fazle_contact_roles (phone, role, name, source)
             VALUES ($1, 'accountant', 'Test Accountant', 'seed')
             RETURNING *
         """, ACCOUNTANT_PHONE)

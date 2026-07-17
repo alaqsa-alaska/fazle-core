@@ -111,7 +111,7 @@ class TestEscortOrderViaWebhook:
         # Seed client as escort buyer
         async with test_db_pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO fazle_contact_roles (phone, role, label)
+                INSERT INTO fazle_contact_roles (phone, role, name)
                 VALUES ($1, 'client_escort_buyer', 'Test Client')
                 ON CONFLICT (phone) DO NOTHING
             """, CLIENT_PHONE)

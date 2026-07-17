@@ -389,19 +389,32 @@ CREATE TABLE IF NOT EXISTS wbom_whatsapp_messages (
 -- fazle_contact_roles (pre-migration: migration 004 ALTERs it, but we pre-add
 -- the columns so they survive even if migration 004's BEGIN/COMMIT transaction
 -- rolls back due to seed INSERT failures)
+--
+-- SCHEMA DRIFT FIX (2026-07-18, Phase 1D): this stub previously defined a
+-- shape (id SERIAL, a 'label' column, no sub_role/language_pref/is_active/
+-- metadata) that never matched production and never matched migration
+-- 029_bootstrap_core_tables_schema_record.sql's own CREATE TABLE IF NOT
+-- EXISTS for this table either — because this stub runs first, migration
+-- 029's version silently no-op'd against an already-existing (wrong) table
+-- every time the test schema was built. Corrected to match migration 029
+-- (and live production) exactly. See knowledge_base/00_governance/
+-- management_decisions.md, Phase 1D, for the full drift table.
 CREATE TABLE IF NOT EXISTS fazle_contact_roles (
-    id            SERIAL PRIMARY KEY,
-    phone         TEXT NOT NULL,
-    name          TEXT,
-    role          TEXT,
-    label         TEXT,
-    platform      TEXT DEFAULT 'whatsapp',
-    confidence    INTEGER NOT NULL DEFAULT 0,
-    source        TEXT    NOT NULL DEFAULT 'seed_rule',
-    priority      INTEGER NOT NULL DEFAULT 50,
-    notes         TEXT    NOT NULL DEFAULT '',
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ DEFAULT NOW(),
+    id              uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    phone           character varying(20) NOT NULL,
+    name            character varying(200) DEFAULT ''::character varying NOT NULL,
+    role            character varying(30) DEFAULT 'unknown'::character varying NOT NULL,
+    sub_role        character varying(30) DEFAULT ''::character varying NOT NULL,
+    language_pref   character varying(10) DEFAULT ''::character varying NOT NULL,
+    platform        character varying(20) DEFAULT 'whatsapp'::character varying NOT NULL,
+    is_active       boolean DEFAULT true,
+    metadata        jsonb DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    confidence      INTEGER NOT NULL DEFAULT 0,
+    source          TEXT    NOT NULL DEFAULT 'seed_rule',
+    priority        INTEGER NOT NULL DEFAULT 50,
+    notes           TEXT    NOT NULL DEFAULT '',
     UNIQUE (phone),
     UNIQUE (phone, platform)
 );
@@ -1086,7 +1099,7 @@ async def seed_accountant(test_db_pool) -> dict:
     """Seed an accountant contact role entry."""
     async with test_db_pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO fazle_contact_roles (phone, role, label, source)
+            INSERT INTO fazle_contact_roles (phone, role, name, source)
             VALUES ('8801944444444', 'accountant', 'Test Accountant', 'seed')
             RETURNING *
         """)
