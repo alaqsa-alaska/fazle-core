@@ -231,6 +231,34 @@ functions" would look first.
 
 ---
 
+## Technical Debt
+
+**`sqlite3.connect()` used outside `bridge_poller` — audited 2026-07-17 during Step 8
+(Session 19), 4 of 5 confirmed safe, 1 confirmed NOT safe (same bug class as the
+`bridge_poller` fix, just not yet applied here):**
+
+- 🟢 **Confirmed safe** (call-site verified, not just function shape — each is a plain
+  `def` helper actually dispatched via `loop.run_in_executor(None, ...)`, not merely
+  written as sync and assumed safe):
+  - `modules/contact_sync/__init__.py` (`_read_bridge_contacts`)
+  - `modules/fazle_payroll_engine/historical_sync.py` (`_fetch_all_dm_jids_sync`,
+    `_fetch_messages_sync`, `_load_lid_map_sync` — the last is called from inside
+    `_fetch_messages_sync`, itself already dispatched, so nested sync-to-sync is fine)
+  - `modules/fazle_payroll_engine/gap_scan.py` (`_fetch_sqlite_rows_for_diff`)
+- 🔴 **`modules/escort_roster/history_sync.py:779`, inside `async def
+  sync_from_bridge_sqlite()` — genuinely broken, not just "worth a future audit."** The
+  `sqlite3.connect()`/`execute()`/close sequence sits directly inside the async function
+  body with zero executor/`to_thread()` dispatch — the exact same bug class fixed in
+  `bridge_poller/__init__.py` by Step 8 (commit `a5d3871`), just not yet applied here.
+  Lower urgency than the `bridge_poller` case was, since this function backs the
+  admin-triggered `/backfill-sqlite` route (`escort_roster/routes.py:536`) rather than the
+  continuous inbound-message poll loop — but while it runs, it blocks the entire app's
+  event loop for every other concurrent request, not just its own caller. Worth its own
+  small fix (same pattern: extract a sync helper, dispatch via `asyncio.to_thread()`),
+  not bundled into Step 8 since that step was scoped to `bridge_poller` only.
+
+---
+
 ## Tier 2 (carried forward, unresolved)
 
 - [ ] **Escort roster/lifecycle dual-write fix — ATTEMPTED 2026-07-13, REVERTED after
