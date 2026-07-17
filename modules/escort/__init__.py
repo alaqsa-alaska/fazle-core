@@ -142,7 +142,12 @@ _CD_MASTER_MOB_RE = re.compile(
     re.IGNORECASE,
 )
 _CD_DEST_RE = re.compile(
-    r"destination\s*:\s*(.+?)(?=\s*\n|$)",
+    # [ \t]* (not \s*) around the colon and in the lookahead so this can never
+    # cross a newline into the following line -- \s* previously let a blank
+    # "Destination:" line consume the newline and capture the next label's
+    # whole line (e.g. "Escort Name: X") instead of empty. See
+    # docs/AUDIT_REPORT_2026-07-17.md Section 1C.
+    r"destination[ \t]*:[ \t]*(.+?)(?=[ \t]*\n|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 _AL_AQSA_RE = re.compile(r"al.?aqsa|আল.?আকসা", re.IGNORECASE)

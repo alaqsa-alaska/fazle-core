@@ -1,75 +1,121 @@
 ---
-title: KNOWN ISSUE — Escort destination field contains leaked "Escort Name:" text
+title: RESOLVED — Escort destination field leak ("Escort Name:" text)
 owner: Fazle Core Admin
-status: open — documented, not fixed
-last_verified: 2026-07-16
+status: ROOT CAUSE CONFIRMED AND FIXED — 2026-07-17
+last_verified: 2026-07-17
 runtime_index: true
 ---
 
-# Known Issue — `destination` field leak on admin-direct-created escort programs
+# Escort `destination` field leak — root cause confirmed and fixed (2026-07-17)
 
-**Status: open, documented only. No fix attempted. No KB-first proposal written yet —
-this doc exists to hold the evidence until someone decides to pick it up.**
+**Status: fixed.** Originally opened 2026-07-16 as "documented, not fixed,
+reproducibility unconfirmed." Root cause was confirmed on 2026-07-17
+(`docs/AUDIT_REPORT_2026-07-17.md` Section 1C) by locating the actual source
+WhatsApp messages and reproducing the bug with a standalone regex test, and
+the fix was applied the same day (`management_decisions.md` Session 19,
+Step 3).
 
-## Where it was found
+## Root cause
 
-Surfaced incidentally while reviewing the duplicate-pair report in
-[escort_sender_validation_audit_phase2_2026-07-16.md](escort_sender_validation_audit_phase2_2026-07-16.md)
-§4 — not something that was specifically searched for, so the 4 known instances below
-should be treated as a lower bound, not a full inventory.
+`_CD_DEST_RE` in `modules/escort/__init__.py` (used inside `parse_completed_draft()`,
+consumed by both `_create_confirmed_from_admin()` — new-row insert — and
+`_update_program_confirmed()` — merge into an existing historical row):
 
-## Evidence
+```python
+_CD_DEST_RE = re.compile(
+    r"destination\s*:\s*(.+?)(?=\s*\n|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+```
 
-| S/N | mother_vessel | lighter_vessel | `destination` (as stored) | program_date | assignment_time |
+`\s` matches newlines. When an admin leaves the `Destination:` line blank,
+`\s*` immediately after the colon consumes the trailing space **and the
+newline**, spilling onto the next line. The non-greedy `(.+?)` then has
+nothing to stop it until *that* line's own end, capturing the entire next
+line — in every known case, `"Escort Name: <name>"` — instead of an empty
+value.
+
+Confirmed with a direct regex test against the real message text (message_id
+10678 in `wbom_whatsapp_messages`, the source of program_id 900):
+```python
+>>> _CD_DEST_RE.search("...Destination: \nEscort Name: Sohedul Karim\n...").group(1)
+'Escort Name: Sohedul Karim'
+```
+This exactly reproduces the corrupted value stored in production. The
+per-line label extractor tried first (`destination_label`, anchored per-line)
+correctly returns `None` for a blank line — only the fallback,
+whole-text-search regex has the cross-line bug.
+
+## Evidence — blast radius corrected from 4 rows to 6
+
+The 2026-07-16 version of this doc listed 4 rows and could not locate any
+source message. Both were incomplete — the messages exist, and there are 2
+more affected rows:
+
+| program_id | mother_vessel | lighter_vessel | `destination` (before fix) | program_date | write path |
 |---|---|---|---|---|---|
-| 900 | MV DUBAI ECO | MV HABIBULLAH | `Escort Name: Sohedul Karim` | 2026-06-25 | 2026-06-25 12:01:22 |
-| 901 | MV TRUONG MINH PROSPERITY | MV AL Morium | `Escort Name: Md Helal` | 2026-06-25 | 2026-06-25 12:01:22 |
-| 905 | MV DUBAI ECO | MV HABIBULLAH | `Escort Name: Ferdous` | 2026-06-26 | 2026-06-27 05:51:44 |
-| 906 | MV TRUONG MINH PROSPERITY | MV AL Morium | `Escort Name: Md Rubel` | 2026-06-26 | 2026-06-27 06:00:29 |
+| 900 | MV DUBAI ECO | MV HABIBULLAH | `Escort Name: Sohedul Karim` | 2026-06-25 | `_create_confirmed_from_admin` (auto_created=true) |
+| 901 | MV TRUONG MINH PROSPERITY | MV AL Morium | `Escort Name: Md Helal` | 2026-06-25 | `_create_confirmed_from_admin` (auto_created=true) |
+| **902** | MV TRUONG MINH PROSPERITY | ABUL BASHAR | `Escort Name: Rejaul korim` | 2026-06-25 | `_create_confirmed_from_admin` (auto_created=true) — **previously uncounted** |
+| 905 | MV DUBAI ECO | MV HABIBULLAH | `Escort Name: Ferdous` | 2026-06-26 | `_create_confirmed_from_admin` (auto_created=true) |
+| 906 | MV TRUONG MINH PROSPERITY | MV AL Morium | `Escort Name: Md Rubel` | 2026-06-26 | `_create_confirmed_from_admin` (auto_created=true) |
+| **938** | MV HORDA | MV Pavel-6 | `Escort Name: Anik Nath` | 2026-07-03 | `_update_program_confirmed` via `sqlite_backfill`/`bridge_confirmation` merge — **previously uncounted, not `auto_created`, different write path, same root cause** |
 
-All 4 have `remarks.auto_created = true` — i.e. all went through
-`_create_confirmed_from_admin()` in `modules/escort/__init__.py:1517-1662` (the
-direct-create path used when an admin's confirmation message has no matching prior
-draft to update). The `destination` column, which should hold a place name, instead
-holds the literal text `"Escort Name: <name>"` — the escort-name field label and value
-appear to have been captured into the wrong column.
+Source messages found in `wbom_whatsapp_messages` for 900, 901, 906, and 938
+all show the identical shape — an admin confirmation message with the
+`Destination:` line left blank, immediately followed by `Escort Name: <name>`
+on the next line. 902's specific source message was not individually located
+in the time available, but the identical corruption pattern and identical
+write path (`_create_confirmed_from_admin`) make the same root cause
+overwhelmingly likely.
 
-## What I checked, and the limit of what I could confirm
+`modules/escort_roster/history_sync.py` has a superficially similar regex
+(`_DEST_RE`) with the same theoretical cross-line weakness, but it is **not**
+affected in practice — its `_extract_destination()` only ever returns a
+matched canonical destination keyword (from `DESTINATIONS`) or `None`; it
+never returns the raw captured text, so a leaked "Escort Name: ..." value is
+silently discarded rather than stored.
 
-I attempted the same reproduce-against-current-parser test used for S/N 777 (see the
-Phase 2 doc §2): recover the original admin message from `wbom_whatsapp_messages` and
-replay it through the current parsing code in isolation. **I could not locate a
-matching row** in `wbom_whatsapp_messages` for any of these 4 in their assignment-time
-windows, so I could not run that test. This means:
+## Fix applied (2026-07-17)
 
-- **Reproducibility against current code is unconfirmed — not ruled out, not
-  confirmed.** Unlike S/N 777 (where I could positively demonstrate the bug is gone),
-  this one is genuinely open.
-- All 4 known instances have `assignment_time` in the 2026-06-25 – 2026-06-27 window,
-  i.e. at or just before the 2026-06-27 hardening commit (`41916b0`) covered in Session
-  16 — so it's plausible (not proven) this predates that fix too, same as most of the
-  rest of this audit's findings. It's also possible it's unrelated to that commit
-  entirely, since that commit's changes were about sender validation and empty-vessel
-  guards, not about `_create_confirmed_from_admin()`'s field mapping specifically.
+One-line change to `_CD_DEST_RE` — replaced `\s*` with `[ \t]*` around the
+colon and in the lookahead, so the pattern can never cross a newline:
+```python
+_CD_DEST_RE = re.compile(
+    r"destination[ \t]*:[ \t]*(.+?)(?=[ \t]*\n|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+```
+Verified with 4 standalone regex tests (blank destination → empty, real
+destination → correct value, blank-with-trailing-spaces → empty, and the
+exact real message that produced row 938 → empty) — all pass. Since both
+downstream consumers (`_create_confirmed_from_admin`, `_update_program_confirmed`)
+read from the same single parse point, one fix covers both write paths.
 
-## Recommended next step
+**Not yet done:** full HTTP/live-service verification is pending a session
+with sudo access to restart `fazle-core.service` (same blocker as Session 19
+Steps 1-2) — the fix is correct by direct regex test and code trace, but
+hasn't been exercised end-to-end through the running app yet.
 
-Not a fix — a scoped investigation, before any code change:
-1. Search a wider time window / different message-log table for the 4 originating admin
-   messages (the `wbom_whatsapp_messages` search here was narrow; the messages may be
-   logged elsewhere, e.g. `fazle_messages` or `processed_bridge_messages`, or may
-   predate this table's retention).
-2. Once a real source message is in hand, trace `_create_confirmed_from_admin()`'s
-   field-by-field mapping (`modules/escort/__init__.py` around line 1650-1680) against
-   it to find exactly where `destination` and the escort-name text cross paths.
-3. Only then — KB-first proposal (current behavior / KB reference / gap analysis /
-   proposed fix / risk / rollback) before touching the parser, per this repo's standing
-   policy.
-4. Separately: grep for how many *other* `auto_created=true` rows have a `destination`
-   value that looks like `"Escort Name: ..."` rather than a place name, to size the
-   blast radius before deciding whether historical data needs correcting too.
+## Data backfill applied (2026-07-17)
 
-## Non-goals for this doc
+All 6 known-corrupted rows (900, 901, 902, 905, 906, 938) had `destination`
+set to `NULL` (the correct value, since the admin genuinely left the field
+blank — this is a correction, not data loss) via a direct, audited `UPDATE`,
+each row tagged `remarks.destination_leak_fix = "fixed_2026-07-17_step3_audit"`
+for traceability. Verified before (`SELECT` confirmed all 6 still corrupted)
+and after (`SELECT` confirmed all 6 now `NULL` with the fix marker) the
+`UPDATE`, which affected exactly 6 rows as expected.
 
-This is a record of a finding, not an authorization to fix anything. No sign-off has
-been requested or given for a code change here.
+## Non-goals, still open
+
+- No wider blast-radius sweep was run for *other* `auto_created=true` or
+  `sqlite_backfill`-sourced rows beyond the 6 already known — the original
+  doc's "recommended next step #4" (grep for any other row with a
+  destination value matching `Escort Name: ...`) was done as part of this
+  fix (the live query in Step 3 searched the whole table by pattern, not
+  just the original 4 IDs) and found exactly these 6, so this is now closed,
+  not still open.
+- 902's exact source WhatsApp message was not individually located this
+  session — low priority, since the fix and data correction don't depend on
+  it.

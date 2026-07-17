@@ -603,3 +603,20 @@ just never logged here at the time.
 | S19-01a | `tests/resilience/test_failure_recovery.py` | `test_missing_sender_field_returns_422` renamed to `test_missing_sender_field_returns_200`; assertion changed from `status_code in (400, 422)` to `== 200`; intent comment added. |
 
 **Verification status:** static/code-read only — confirmed via re-read of `_handle_bridge_event()` (unchanged by Step 1's edits in this respect) that a missing-sender event is always skipped, never raised, so the route's behavior for this payload is unconditionally 200. The test itself was not executed this session (test DB unreachable, same blocker as Step 1). No route code was changed for this step.
+
+### Management Authorization (Session 19, Step 3)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S19-02 | Destination-field leak — root cause confirmed and fixed | `docs/AUDIT_REPORT_2026-07-17.md` §1C traced the bug to `_CD_DEST_RE` (`modules/escort/__init__.py`): `\s*` after the colon matches newlines, so a blank `Destination:` line lets the pattern spill into and capture the entire next line ("Escort Name: ..."). Confirmed by a standalone regex test against the real source message (message_id 10678). Fixed by changing `\s*` to `[ \t]*` around the colon and in the lookahead. Blast radius corrected from 4 rows (`escort_destination_field_leak_issue_2026-07-16.md`'s original count) to 6 — program_id 902 and 938 were previously uncounted; 938 came through a second consumer of the same parse output (`_update_program_confirmed`, not `_create_confirmed_from_admin`), confirming the bug wasn't confined to one write path. | 2026-07-17 |
+| S19-03 | Data backfill: 6 corrupted `destination` values set to `NULL` | program_id 900, 901, 902, 905, 906, 938 — all had `destination` starting with `"Escort Name:"` (verified via `SELECT` immediately before the fix). `UPDATE` set `destination = NULL` (the correct value, since the admin genuinely left the field blank on all known source messages — a correction, not data loss) and tagged each row's `remarks` with `destination_leak_fix = "fixed_2026-07-17_step3_audit"` for traceability. `UPDATE` affected exactly 6 rows as expected, confirmed via a post-update `SELECT`. | 2026-07-17 |
+
+### Files Authorized for Change (Session 19, Step 3)
+
+| ID | File | Change |
+|---|---|---|
+| S19-02 | `modules/escort/__init__.py` | `_CD_DEST_RE`: `\s*` → `[ \t]*` around the colon and in the lookahead (one regex, both occurrences). |
+| S19-02 | `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md` | Status changed from "open, unconfirmed" to "ROOT CAUSE CONFIRMED AND FIXED"; evidence table corrected to 6 rows; root cause, fix, and data-backfill sections added. |
+| S19-03 | *(data only)* | `UPDATE wbom_escort_programs SET destination = NULL, remarks = ... WHERE program_id IN (900,901,902,905,906,938) AND destination LIKE 'Escort Name:%'` — 6 rows affected, verified before and after. |
+
+**Verification status:** regex fix verified via 4 standalone tests (blank destination, real destination, blank-with-trailing-spaces, and the exact real message that produced row 938 — all pass) plus `ast`/`py_compile` syntax check. Data backfill verified via `SELECT` before (6/6 still corrupted) and after (6/6 now `NULL` with the fix marker) the `UPDATE`. **Not yet done:** full HTTP/live-service verification (posting a blank-destination admin confirmation through the running app) — pending sudo access to restart `fazle-core.service`, same blocker as Steps 1-2.
