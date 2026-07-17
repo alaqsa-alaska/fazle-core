@@ -783,3 +783,19 @@ Session 19 complete — Steps 0-8 implemented, tested, and committed. Service he
 
 All Session 19 commits (`5ad65f3` through `e458158`, 19 commits) plus 65 earlier unpushed commits from prior sessions — 84 total — pushed to `origin/main` this session (`46acd44..e458158`, clean fast-forward, confirmed `origin/main` == local `HEAD`).
 
+---
+
+### Management Authorization (Session 20, Step 1)
+
+| ID | Decision | Details | Date |
+|---|---|---|---|
+| S20-01 | `history_sync.py`'s blocking SQLite read dispatched off the event loop | `docs/NEXT_IMPLEMENTATION_QUEUE.md` "Immediate Next" #9 / "Technical Debt": `modules/escort_roster/history_sync.py::sync_from_bridge_sqlite()` ran a raw `sqlite3.connect()`/`execute()`/`close()` sequence directly inside its `async def` body with no executor/`to_thread()` dispatch — found (not fixed) in Session 19 Step 8 as the same bug class already fixed in `modules/bridge_poller/__init__.py` (commit `a5d3871`). Backs the admin-triggered `/backfill-sqlite` route (`escort_roster/routes.py:536`), lower frequency than the continuous poller loop but still blocks the whole app's event loop for every other concurrent request while it runs. Fixed using the identical pattern: extracted the connect/execute/close sequence into a new sync helper, `_fetch_backfill_messages(db_path, jid_patterns)`, dispatched via `asyncio.to_thread()`. Same query, same params, same 5.0s timeout, same outer `try/except` and error handling (`stats["errors"]` append + early return on failure) — only the execution now happens off the event loop. No business logic changed, matching the session's explicit scope. | 2026-07-17 |
+
+### Files Authorized for Change (Session 20, Step 1)
+
+| ID | File | Change |
+|---|---|---|
+| S20-01 | `modules/escort_roster/history_sync.py` | Added `import asyncio` at module top. Extracted the `sqlite3.connect()/execute()/close()` block from `sync_from_bridge_sqlite()` into a new module-level sync helper `_fetch_backfill_messages(db_path, jid_patterns)`. `sync_from_bridge_sqlite()` now calls `await asyncio.to_thread(_fetch_backfill_messages, db_path, jid_patterns)` instead of running the SQLite calls inline. |
+
+**Verification:** `py_compile` clean. Targeted tests green — `tests/unit/test_stage2_stability_fixes.py` (4/4, includes `test_history_sync_duplicate_message_counts_reused_group`, the one existing test that exercises `history_sync.py`), plus a broader sweep of `tests/unit/test_bridge_poller_legacy_gate.py`, `tests/unit/test_escort_roster_routes.py`, and related escort/bridge unit tests (31 passed, 6 xfailed as baseline, 1 pre-existing unrelated failure in `test_escort_source_of_truth_refactor.py` confirmed present identically on unmodified `main` via `git stash`, not caused by this change). Committed as `e3c1f58`. **Confirmed LIVE:** `scripts/restart_gate.sh --restart` ran clean (all 7 pre-restart checks PASS, pre/post health snapshots both `ok`), `curl localhost:8200/health` returned `"status":"ok"` with all probes healthy post-restart, and `logs/fazle-core.log` shows clean `Application startup complete` with no import/exception errors traceable to this change (the one `ImportError` present in the error log is a stale entry from a prior, unrelated Session 19 incident, not from this restart).
+
