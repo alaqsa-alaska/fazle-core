@@ -656,3 +656,36 @@ Re-verified `~/chat_sync_staging/` (`sync.py`, `chat-sync.service`) against the 
 |---|---|---|
 | S19-04 | *(none — verification only)* | No files changed. Staged files re-verified correct as-is; install deferred to a manual sudo session. |
 
+### Session 19, Step 5 — Dual-write concurrency diagnostic (no code changed)
+
+Documented all three writers to `escort_roster_entries` in
+`knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md`:
+(1) `escort_lifecycle`'s direct atomic `INSERT...ON CONFLICT` (safe, already
+shipped); (2) `escort_roster.sync_program_to_roster()` — check-then-act
+(SELECT then branch UPDATE/INSERT), the function the reverted 2026-07-13
+refactor tried to route Writer 1 through, which is what surfaced the hang;
+(3) `escort_roster.create_roster_entry()` — a previously-undiscussed third
+writer (manual admin "add roster entry" tool) with its own two separate
+check-then-act races (program_id collision, duplicate-entry bypass),
+unrelated to the release-event path and not part of the 2026-07-13 refactor
+attempt at all.
+
+Ran `tests/workflows/test_escort_payment_flow.py::TestRaceConditions::test_concurrent_release_events`
+against current (reverted) code: **passed, no hang** — expected, since this
+test currently exercises only the already-safe Writer 1 path. Reproducing
+the actual 2026-07-13 hang would require temporarily reintroducing the
+reverted refactor, which this diagnosis-only step was not authorized to do.
+No `pg_locks` snapshot captured (no hang window existed to observe). Test DB
+connectivity note: unreachable via a raw TCP probe from this session's shell,
+but reachable by `pytest` itself with `TEST_DB_PASSWORD` set correctly —
+recorded in the KB doc for future sessions.
+
+**No code changed** in `modules/escort_lifecycle/__init__.py` or
+`modules/escort_roster/db.py` this step, per instruction.
+
+### Files Authorized for Change (Session 19, Step 5)
+
+| ID | File | Change |
+|---|---|---|
+| S19-05 | `knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md` | New — three-writer comparison table, test-run result, recommended next step for an actual fix session. |
+
