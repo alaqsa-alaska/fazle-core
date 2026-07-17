@@ -2075,3 +2075,84 @@ PID/health/log detail.
 
 **Phase 1C: CERTIFIED.** Both the future-write fix and the historical
 correction are live and verified.
+
+### Session 24, Phase 1D — `fazle_contact_roles` Test-Schema Drift (2026-07-18)
+
+**Drift table (production vs. previous test schema):**
+
+| Element | Production (migration 029) | Previous test schema | Impact |
+|---|---|---|---|
+| `id` | `uuid DEFAULT gen_random_uuid()` | `SERIAL` (integer) | Type mismatch, not itself test-breaking |
+| `sub_role` | `character varying(30) NOT NULL DEFAULT ''` | **missing** | `UndefinedColumnError` on any INSERT/UPDATE touching it (Phase 1B's whitelist code) |
+| `language_pref` | `character varying(10) NOT NULL DEFAULT ''` | **missing** | Same class |
+| `is_active` | `boolean DEFAULT true` | **missing** | Same class |
+| `metadata` | `jsonb DEFAULT '{}'` | **missing** | Same class |
+| `label` | **does not exist** | present (`TEXT`) | 4 test files seeded via this nonexistent-in-production column |
+| `name` | `character varying(200) NOT NULL DEFAULT ''` | present, nullable | Minor nullability drift, not independently test-breaking |
+
+**Root cause — not simply "incomplete," but permanently shadowed:**
+`tests/conftest.py`'s own pre-migration `_BASE_SCHEMA_SQL` creates
+`fazle_contact_roles` with a stale, hand-written shape (comment: "migration
+004 ALTERs it, but we pre-add the columns so they survive"). Migration
+029's own `CREATE TABLE IF NOT EXISTS public.fazle_contact_roles (...)` —
+verified, already 100% correct, matches live production column-for-column
+— runs later in the sequence but silently no-ops, because `IF NOT EXISTS`
+sees the table already created by conftest's stub. **Migration 029 itself
+was never the problem** — the test fixture was shadowing it.
+
+**Canonical-source decision:** per the preferred order (run governed
+migrations → reuse canonical builder → update test fixture to match →
+avoid duplicated definitions), corrected `_BASE_SCHEMA_SQL`'s stub to
+match migration 029 exactly (including both `UNIQUE` constraints migration
+004/029 both rely on) rather than writing a new migration or a separate
+schema builder — the stub has to keep existing (migration 004 requires the
+table to pre-exist for its `ALTER TABLE`/seed `INSERT`), it just needed to
+stop being wrong.
+
+**Necessary consequence, not scope creep:** 3 other test files
+(`test_webhooks.py`, `test_full_workflows.py`, `test_escort_payment_flow.py`)
+plus conftest's own `seed_accountant` fixture seeded rows via the
+now-removed `label` column — confirmed via repo-wide grep that `label`
+exists in no production code path (`modules/contact_roles/routes.py`'s
+INSERT/UPDATE column lists never include it). Renamed to `name` (the real
+column serving the same "human-readable label" purpose) in all 4 locations
+— required for these tests to keep passing after the schema fix, not
+unrelated cleanup.
+
+**No production schema or data changed.** No production restart required
+(test-only change).
+
+**Verification:**
+- The exact 16 previously-failing tests: **45/45 pass**
+  (`test_contact_roles.py` + `test_shared_auth_deps.py`)
+- `test_webhooks.py` (directly modified): **10/10 pass**
+- `test_identity_brain.py` + `test_fpe_employee_resolution_status.py`
+  (unaffected by this change): **30/30 pass**
+- `test_full_workflows.py` (directly modified): the one test exercising
+  this fixture (`test_full_escort_lifecycle`) correctly resolved identity
+  via the seeded `name`-column row (`client_escort_buyer (seed, conf=0,
+  pri=50)` in the log) before failing later for an **unrelated,
+  pre-existing** reason — a hardcoded release date now stale relative to
+  "today." The file's other 5 failures are unrelated pre-existing
+  function-signature drift (`compute_run()`, `save_attendance()`,
+  `finalize_payment()` all called with outdated argument lists) — a
+  separate technical-debt cluster, not touched.
+- `test_escort_payment_flow.py` (directly modified): **could not be
+  verified this session** — hangs in this environment independent of this
+  change (killed after 100s with `--timeout=15` per-test still not
+  interrupting it), matching the same "incompletely-mocked external call"
+  pattern already found and fixed once this session (the Stage A LID
+  tests needed `mock_all_services`) — flagged as a known, separate,
+  pre-existing risk in this file, not fixed here.
+
+**Test-infrastructure security re-confirmed:** disposable Postgres bound
+`127.0.0.1:5433` only throughout, random `TEST_DB_PASSWORD`, containers/
+volumes torn down after use.
+
+**Phase 1D: schema drift precisely identified and corrected. The 16
+originally-reported failures are resolved. Two adjacent files
+(`test_full_workflows.py`'s non-fixture failures, `test_escort_payment_flow.py`'s
+hang) are explicitly NOT part of this fix and remain open, unrelated
+technical debt.**
+
+**Git:** `9fea840`. Pushed. No restart performed (test-only).

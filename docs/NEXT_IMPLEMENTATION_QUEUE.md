@@ -460,16 +460,29 @@ correctly omitted optional fields per the API's own stated contract. Cheap fix
 (`COALESCE($n, '')` in the `INSERT`, or `Field(default="")` instead of `None` on the
 three models), not bundled into Phase 1B since it's unrelated to the role-whitelist scope.
 
-**Test-schema drift confirmed on `fazle_contact_roles` — a concrete instance of the
-long-documented "no migration source of truth" problem, found 2026-07-17 while getting
-Phase 1B's tests running against an isolated disposable test DB:** the migration-built
-test schema (`db/migrations/029_bootstrap_core_tables_schema_record.sql`, captured
-2026-07-08) has `id integer` and is missing `sub_role`/`is_active`/`language_pref`/
-`metadata` entirely; live production has `id uuid DEFAULT gen_random_uuid()` and all
-four columns present. The table was altered in production after migration 029 was
-captured, with no migration ever recording the change. Same class of gap as the
-27-table "no schema source of truth" finding from the 2026-07-08 audit — this is one
-more confirmed instance, not a new category of problem.
+**🟢 RESOLVED 2026-07-18 (Phase 1D) — `fazle_contact_roles` test-schema drift.** Was:
+migration 029's own `CREATE TABLE IF NOT EXISTS` for this table was already 100%
+correct (matches production exactly, confirmed) — the actual cause was
+`tests/conftest.py`'s own pre-migration schema stub creating the table FIRST with a
+stale shape (`id SERIAL`, a `label` column that exists in no production code path,
+missing `sub_role`/`language_pref`/`is_active`/`metadata`), causing migration 029's
+correct definition to silently no-op every time. Fixed by correcting the stub to match
+migration 029 exactly; 4 test files that seeded via the now-removed `label` column
+updated to use `name` instead. No production schema change. The 16 originally-affected
+tests (`test_contact_roles.py`, `test_shared_auth_deps.py`) now pass, 45/45. Full
+record: `management_decisions.md` Session 24 Phase 1D. Commit `9fea840`.
+
+**Two new, unrelated technical-debt items found during Phase 1D verification, not
+fixed:**
+- `tests/workflows/test_full_workflows.py` has 5 failures unrelated to any contact-role
+  fixture — stale function-signature drift (`compute_run()`, `save_attendance()`,
+  `finalize_payment()` all called with argument lists that no longer match their real
+  signatures) plus one hardcoded release-confirmation date that's now stale relative to
+  "today." Pre-existing, not touched.
+- `tests/workflows/test_escort_payment_flow.py` hangs in the current test environment,
+  independent of the Phase 1D change — matches the same "incompletely-mocked external
+  call" pattern already found and fixed once this session elsewhere (needs
+  `mock_all_services` or equivalent). Not fixed here.
 
 **`escort_roster_audit_logs` relation missing from the test schema — found
 2026-07-17 during Phase 1B.2 Stage A live-verification testing.** Caught and logged
