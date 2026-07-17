@@ -84,6 +84,20 @@ class Env:
         Return True if phone is in the escort_client_phones whitelist.
         When the whitelist is EMPTY, all phones are considered allowed
         (open mode — same behaviour as before Rule 7 was implemented).
+
+        DEAD CODE — found unused (zero callers repo-wide) during the Phase
+        1B.2 escort-client identity convergence audit (2026-07-17); a
+        second, divergent implementation of the same allowlist check exists
+        at modules.escort._is_allowed_escort_client() / _escort_client_phone_list(),
+        which is the one actually used by the parser gate, and
+        modules.identity_brain._matches_env_escort_phone(), which is the one
+        used by identity resolution (that one deliberately does NOT treat an
+        empty list as "match" — see its own docstring). Kept, not deleted,
+        per this repo's standing "document dead code, don't clean it up
+        inline" convention — do not add a new caller here; use the
+        canonical implementations above instead. See
+        knowledge_base/00_governance/management_decisions.md, Session 21
+        Phase 1B.2.
         """
         clients = self.escort_client_numbers()
         if not clients:

@@ -7,15 +7,29 @@ Resolution order (highest priority wins):
   → repeat_client → vendor → employee → supervisor → candidate → unknown
 
 Sources (checked in order):
-  1. seed_rule     — static entries in fazle_contact_roles (highest trust)
-  2. db_employee   — wbom_employees.employee_mobile match
-  3. escort_roster — wbom_escort_programs active duty (Assigned/Running)
-  4. db_contact    — wbom_contacts / wbom_relation_types match
-  5. text_hint     — keyword analysis of message text (candidate detection)
-  6. unknown       — no match found
+  1. seed_rule      — static entries in fazle_contact_roles (highest trust)
+  2. db_employee     — wbom_employees.employee_mobile match
+  3. escort_roster   — wbom_escort_programs active duty (Assigned/Running)
+  3.7. env_phone     — ESCORT_CLIENT_PHONES explicit match (Phase 1B.2,
+                       source A — verified client_escort_buyer; empty list
+                       never matches, see _matches_env_escort_phone)
+  4. db_contact       — wbom_contacts.relation match, OR (checked first,
+                       Phase 1B.2 source B) a contact-name "escort" token
+                       match — both verified client_escort_buyer
+  5. text_hint (candidate) — keyword analysis (candidate detection)
+  6. text_hint (escort content) — UNVERIFIED keyword-only fallback (Phase
+                       1B.2 Owner Decision 5); never persisted as identity,
+                       see resolve_escort_client_identity()
+  7. unknown        — no match found
 
 Returns a dict compatible with the legacy UserRole TypedDict plus:
   identity_role, identity_confidence, identity_source, identity_priority
+
+Phase 1B.2 (escort-client identity convergence, 2026-07-17): see
+resolve_escort_client_identity() below for the canonical, verified/unverified-
+aware resolver that webhook, poller, and message_router should use instead of
+re-deriving escort-client trust independently. Full design in
+knowledge_base/00_governance/management_decisions.md, Session 21 Phase 1B.2.
 """
 
 import logging
@@ -53,6 +67,43 @@ _ESCORT_CONTENT_RE = re.compile(
     r"destination|lighter\s*vessel)\b",
     re.IGNORECASE,
 )
+
+# ── Phase 1B.2 — escort-client identity convergence ────────────────────────────
+# Contact-book name marker (source B/priority 3): a recognizable "escort"
+# token, word-boundary matched so "escorted"/"escorting"/any name that merely
+# contains the letters as part of a longer word never matches.
+_ESCORT_NAME_MARKER_RE = re.compile(r"\bescort\b", re.IGNORECASE)
+
+
+def _matches_escort_name_marker(name: str) -> bool:
+    """True if a resolved contact-book name contains the "escort" token as a
+    recognizable word (case-insensitive, punctuation/whitespace-tolerant via
+    \\b word boundaries) — not a bare substring. Matches "Escort ABC Shipping",
+    "ABC Escort Client", "MV Agent - Escort", "Client (Escort)",
+    "escort-client"; rejects "escorted", "escorting", or any name where the
+    letters are part of a different word."""
+    return bool(name) and bool(_ESCORT_NAME_MARKER_RE.search(name))
+
+
+def _matches_env_escort_phone(norm_phone: str) -> bool:
+    """Phase 1B.2 source A — explicit ESCORT_CLIENT_PHONES membership.
+    Empty list = no match (never "every phone matches"); that "open mode"
+    semantics belongs solely to modules.escort's parser-stage gate
+    (_is_allowed_escort_client), not to identity resolution. Reuses the one
+    canonical, actually-used phone-list parser
+    (modules.escort._escort_client_phone_list) rather than the dead,
+    divergent shared/env.py implementation — see Session 21 Phase 1B.2 audit.
+    Function-local import to avoid a circular import with modules.escort."""
+    if not norm_phone:
+        return False
+    try:
+        from modules.escort import _escort_client_phone_list
+    except ImportError:
+        return False
+    clients = _escort_client_phone_list()
+    if not clients:
+        return False
+    return norm_phone in clients
 
 
 def _normalize_phone(phone: str) -> Optional[str]:
@@ -149,9 +200,35 @@ async def detect_identity(phone: str, text: str = "") -> dict:
                 notes=f"escort_duty:{_esc_status}:{_esc_date}",
             )
 
+        # ── Step 3.7: explicit ESCORT_CLIENT_PHONES match (Phase 1B.2, source A) ──
+        # Runs only once no seed row, employee record, cash/attendance signal, or
+        # active escort-roster duty already matched above — an explicit .env
+        # allowlist entry is the highest-priority *escort-client* source, but
+        # must never shadow a real employee/admin/family/seed-role identity.
+        # Empty list = no match here (never "every phone matches") — that
+        # "open mode" semantics belongs solely to modules.escort's parser-stage
+        # gate (_is_allowed_escort_client), not to identity resolution.
+        if _matches_env_escort_phone(norm):
+            log.info("[identity] %s → client_escort_buyer (env_phone)", norm)
+            return _build(_phone=norm, role="client_escort_buyer", confidence=95, source="env_phone",
+                          priority=_ROLE_PRIORITY["client_escort_buyer"])
+
         # ── Step 4: contact DB lookup ──────────────────────────────────────────
         contact = await _lookup_contact(norm)
         if contact:
+            display_name = contact.get("display_name") or ""
+            if _matches_escort_name_marker(display_name):
+                # Phase 1B.2, source B — contact-book name contains a
+                # recognizable "escort" token. Checked before the legacy
+                # relation-based mapping below since it's a named, ratified
+                # source (Owner priority #3); the relation column is a
+                # separate, largely-unpopulated legacy mechanism.
+                log.info("[identity] %s → client_escort_buyer (contact_name_marker)", norm)
+                return _build_contact(
+                    _phone=norm, role="client_escort_buyer", confidence=85,
+                    source="contact_name_marker", priority=_ROLE_PRIORITY["client_escort_buyer"],
+                    contact=contact,
+                )
             relation = (contact.get("relation_name") or "").lower()
             role = _map_relation(relation)
             pri = _ROLE_PRIORITY.get(role, 50)
@@ -166,6 +243,17 @@ async def detect_identity(phone: str, text: str = "") -> dict:
                           priority=_ROLE_PRIORITY["candidate"])
 
         # ── Step 6: escort content from unknown sender ─────────────────────────
+        # UNVERIFIED (Phase 1B.2, Owner Decision 5) — keyword-only inference
+        # from message content, not a verified source (A/B/C above never
+        # matched or this step wouldn't be reached). role/source deliberately
+        # left as "repeat_client"/"text_hint" exactly as before this change —
+        # repeat_client has other legitimate, unrelated uses elsewhere
+        # (message_router KB/AI routing, DRAFT_ALWAYS_ROLES) that must not
+        # regress. Callers that need the explicit verified/unverified split
+        # should use resolve_escort_client_identity() below, which recognizes
+        # this exact (role="repeat_client", source="text_hint") combination
+        # as is_verified=False, source="unverified_message_content" — never
+        # to be persisted as a fazle_contact_roles row from this signal alone.
         if text and _ESCORT_CONTENT_RE.search(text):
             log.info("[identity] %s → repeat_client (text_hint, escort content)", norm)
             return _build(_phone=norm, role="repeat_client", confidence=40, source="text_hint",
@@ -435,4 +523,80 @@ def _unknown(_phone: str) -> dict:
         "identity_source":     "none",
         "identity_priority":   0,
         "identity_notes":      "",
+    }
+
+
+# ── Phase 1B.2 — canonical escort-client identity resolver ────────────────────
+# Single source of truth for "is this sender a verified escort client, and via
+# which source" — a thin translation layer over detect_identity() (itself
+# already the one place webhook and poller both call), so no ingestion path
+# or business module re-implements escort-client detection independently.
+# See knowledge_base/00_governance/management_decisions.md, Session 21 Phase
+# 1B.2, for the full design and the Owner's ratified priority order.
+_VERIFIED_ESCORT_SOURCES = frozenset({"env_phone", "contact_name_marker"})
+
+
+async def resolve_escort_client_identity(
+    phone: str,
+    text: str = "",
+    original_jid: str = "",
+) -> dict:
+    """
+    Resolve the canonical escort-client identity for a sender, converging the
+    three verified sources (env phone allowlist, stored contact-role,
+    contact-name marker — checked by detect_identity() in that priority
+    order) plus an explicitly *unverified* message-content fallback.
+
+    Returns:
+        is_escort_client: bool
+        canonical_role: "client_escort_buyer" or None
+        is_verified: bool — True only for a genuine verified source; the
+            keyword-only Step 6 fallback is never verified, per Owner
+            Decision 5, and must never be persisted as a contact-role row.
+        source: "env_phone" | "stored_contact_role" | "contact_name_marker"
+            | "unverified_message_content" | None
+        normalized_phone, original_jid, resolved_contact_name: evidence
+        evidence: dict with the raw identity_source/confidence for audit
+    """
+    identity = await detect_identity(phone, text)
+    role = identity.get("identity_role") or identity.get("role")
+    raw_source = identity.get("identity_source")
+    norm = _normalize_phone(phone)
+    base = {
+        "normalized_phone": norm,
+        "original_jid": original_jid or None,
+        "resolved_contact_name": identity.get("display_name"),
+    }
+
+    if role == "client_escort_buyer":
+        source = raw_source if raw_source in _VERIFIED_ESCORT_SOURCES else "stored_contact_role"
+        return {
+            "is_escort_client": True,
+            "canonical_role": "client_escort_buyer",
+            "is_verified": True,
+            "source": source,
+            "evidence": {"identity_source": raw_source, "identity_confidence": identity.get("identity_confidence")},
+            **base,
+        }
+
+    if role == "repeat_client" and raw_source == "text_hint":
+        # The keyword-only Step 6 fallback — a real, previously-unseen
+        # sender whose message merely looked escort-shaped. Never verified,
+        # never persisted, regardless of ESCORT_CLIENT_PHONES list state.
+        return {
+            "is_escort_client": False,
+            "canonical_role": None,
+            "is_verified": False,
+            "source": "unverified_message_content",
+            "evidence": {"identity_source": raw_source, "identity_confidence": identity.get("identity_confidence")},
+            **base,
+        }
+
+    return {
+        "is_escort_client": False,
+        "canonical_role": None,
+        "is_verified": False,
+        "source": None,
+        "evidence": {},
+        **base,
     }
