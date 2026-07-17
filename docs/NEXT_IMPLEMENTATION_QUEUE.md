@@ -447,6 +447,55 @@ column added to one `INSERT`/`UPDATE`), but only worth doing if something starts
 `resolution_status` as a filter without also checking `wbom_employee_id IS NULL` the way
 the new report already does — not urgent on its own.
 
+**`modules/contact_roles/routes.py::upsert_contact_role()` raises a raw 500 (
+`NotNullViolationError`) if `name`/`sub_role`/`notes` are omitted from the POST body
+— found 2026-07-17 during Phase 1B test verification.** All three are
+`Optional[str] = None` on `ContactRoleBody`, but the live schema has them `NOT NULL
+DEFAULT ''` and the `INSERT` passes the Python `None` straight through instead of
+falling back to `''`. Never hit in practice if every real caller already supplies
+these fields; surfaced only because the new test suite (`tests/unit/test_contact_roles.py`)
+correctly omitted optional fields per the API's own stated contract. Cheap fix
+(`COALESCE($n, '')` in the `INSERT`, or `Field(default="")` instead of `None` on the
+three models), not bundled into Phase 1B since it's unrelated to the role-whitelist scope.
+
+**Test-schema drift confirmed on `fazle_contact_roles` — a concrete instance of the
+long-documented "no migration source of truth" problem, found 2026-07-17 while getting
+Phase 1B's tests running against an isolated disposable test DB:** the migration-built
+test schema (`db/migrations/029_bootstrap_core_tables_schema_record.sql`, captured
+2026-07-08) has `id integer` and is missing `sub_role`/`is_active`/`language_pref`/
+`metadata` entirely; live production has `id uuid DEFAULT gen_random_uuid()` and all
+four columns present. The table was altered in production after migration 029 was
+captured, with no migration ever recording the change. Same class of gap as the
+27-table "no schema source of truth" finding from the 2026-07-08 audit — this is one
+more confirmed instance, not a new category of problem.
+
+**Escort-client identity does not actually converge across its three intended
+sources — found 2026-07-17 during a routing-convergence audit requested after Phase
+1B. Full trace and proposal in `management_decisions.md` Session 21 Phase 1B.2 (not
+yet implemented, awaiting Owner decision):**
+- `ESCORT_CLIENT_PHONES` (`.env`) is **not** an identity-assignment source at all —
+  `modules/escort/__init__.py::_is_allowed_escort_client()` only gates order-parsing
+  *after* `identity_brain` has already decided the sender's role via some other path.
+- Contact-book name substring matching (e.g. a contact named "Escort ABC Shipping")
+  — the Owner's originally-intended detection method — **does not exist anywhere in
+  the codebase.** `identity_brain._lookup_contact()`/`_map_relation()` match
+  `wbom_contacts.relation` (a separate, 99.9%-`'unknown'` structured field), never
+  `display_name`.
+- `fazle_contact_roles.role = client_escort_buyer` (Phase 1B's allowed value) is the
+  **only** fully-implemented identity source for this role.
+- **Live conditional risk, previously footnoted (S20-08) but not fully traced until
+  now:** `identity_brain`'s Step 6 text-hint fallback assigns `role="repeat_client"`
+  (which `message_router._ESCORT_ROLES` treats identically to `client_escort_buyer`)
+  to *any never-before-seen sender* whose message merely contains escort keywords —
+  gated only by `_is_allowed_escort_client()`, which returns `True` for *any* phone
+  the moment `ESCORT_CLIENT_PHONES` is ever emptied ("open mode"). Not exercised
+  live today (the list currently has 3 phones) but is a live landmine if the list is
+  ever cleared.
+- **Newly found parity gap:** the webhook path (`app/main.py::_handle_bridge_event()`)
+  never resolves `@lid`-suffixed senders to a phone number (only the SQLite poller
+  does, via `_load_lid_map()`) — a LID-only sender is always `unknown` on the webhook
+  path regardless of any of the above three sources.
+
 ---
 
 ## Tier 2 (carried forward, unresolved)

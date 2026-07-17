@@ -1125,3 +1125,199 @@ pending Owner review), Phase 1C (`fpe_employees.resolution_status`) or any later
 
 **Commit:** `aee44bc` (`fix(contact-roles): restrict API-assigned identity roles`) —
 local only, not pushed, not deployed, no restart performed.
+
+### Session 21, Reconciliation — Escort-Client Identity Convergence Audit (2026-07-17)
+
+Follow-up requested after the Owner clarified the intended business architecture:
+`client_escort_buyer` is the one canonical escort-client identity, meant to be
+reachable via three convergent sources — `ESCORT_CLIENT_PHONES` (`.env` fallback),
+contact-book name containing "escort" (the originally-intended detection method), and
+a stored `fazle_contact_roles` row. Audited whether Phase 1B's already-committed code
+(`aee44bc`, `bcb5a53`) was compatible with this clarification, and whether the three
+sources actually converge in current code.
+
+**Phase 1B diff re-audit (9-point checklist, all confirmed):** `client_escort_buyer`
+remains allowed; functional roles remain rejected; POST/PUT validation unchanged from
+the prior session; PUT omission still preserves legacy stored roles (including
+pre-existing `family`/`employee`/`accountant` rows); no `message_router`, identity
+priority, `.env`, or database-row changes; the added documentation never mischaracterizes
+`ESCORT_CLIENT_PHONES` vs `client_escort_buyer` as unrelated (it simply never discussed
+that relationship — `client_escort_buyer` was already correctly in the allowed set).
+**Conclusion: Phase 1B's code is unchanged and correct as committed (Outcome A) — no
+correction needed.**
+
+**Full identity-source trace performed against live code** (`modules/identity_brain/__init__.py`,
+`modules/message_router/__init__.py`, `modules/escort/__init__.py`, `shared/env.py`,
+`app/main.py`, `modules/bridge_poller/__init__.py`):
+
+| Source | Implemented | Function | Canonical result reaches identity_brain | Webhook | Poller |
+|---|---|---|---|---|---|
+| A — `ESCORT_CLIENT_PHONES` | Partial — order-parsing gate only, not an identity source | `modules/escort/__init__.py::_is_allowed_escort_client()` (used) vs. `shared/env.py::EscortEnv.is_escort_client()` (dead code, unused — a 2nd divergent implementation) | No — runs *after* identity is already decided | Yes (shared function) | Yes (shared function) |
+| B — contact-name contains "escort" | **Not implemented at all** | None exists; `identity_brain._lookup_contact()`/`_map_relation()` match `wbom_contacts.relation` (a separate, 99.9%-`'unknown'` field), never `display_name` | No | N/A | N/A |
+| C — `fazle_contact_roles.role` | Yes | `identity_brain._lookup_seed()`, Step 2 | Yes — directly, highest non-admin/family priority | Yes | Yes |
+
+**Convergence verdict: NOT converged.** Source C is the only reliable identity-assignment
+path. Source A never assigns identity — it only gates whether an *already-classified*
+escort-role sender's message reaches the order parser. Source B was never built,
+contradicting the Owner's stated original intent; `wbom_contacts.relation` sits at
+~0.1% population, making even the implemented relation-string-match path effectively
+dead in practice.
+
+**Two additional risks found during the trace, not previously fully documented:**
+1. **Conditional risk (was a footnote in S20-08, now fully traced):** `identity_brain`
+   Step 6's text-hint fallback assigns `role="repeat_client"` to *any never-before-seen
+   sender* whose message contains escort keywords (`_ESCORT_CONTENT_RE`); `repeat_client`
+   is a member of `message_router._ESCORT_ROLES`, so this sender reaches
+   `handle_escort_client_message()` gated only by `_is_allowed_escort_client()` — which
+   returns `True` for *any* phone the instant `ESCORT_CLIENT_PHONES` is emptied ("open
+   mode", per its own `.env` comment and `shared/env.py`'s docstring). Not exercised
+   live today (3 phones currently configured) but a live landmine if the list is ever
+   cleared — the same "random/unapproved number" risk class the Session 20 finance-integrity
+   audit already flagged and fixed for `_seed_unknown_employee_identity`, here unfixed
+   for escort-order creation.
+2. **Webhook/poller LID parity gap (newly found):** `app/main.py::_handle_bridge_event()`
+   only strips `@s.whatsapp.net`/`+` from the sender string — it never resolves an
+   `@lid`-suffixed sender to a real phone number. `modules/bridge_poller/__init__.py::_load_lid_map()`
+   does this resolution (via the bridge's own `whatsmeow_lid_map` SQLite table) before
+   calling `process_message()`. Net effect: a LID-only sender is always classified
+   `identity_role="unknown"` on the webhook path, regardless of which of the three
+   escort-identity sources would otherwise have matched — a real parity gap, same
+   family as (but distinct from) the Session 19 `_requires_legacy_workflow()` fix.
+
+**`ESCORT_CLIENT_PHONES` empty-mode semantics (S21 §9) — Interpretation confirmed by
+code, not assumption:** matches **Interpretation A/C combined**, not B. An empty list
+does not itself make every sender `client_escort_buyer` (Interpretation B is false —
+identity assignment doesn't come from this setting at all). It disables the
+allowlist *gate* (Interpretation C) on order-parsing eligibility, while identity is
+still decided upstream by Source C or the Step 6 fallback. The practical effect is
+close to the Owner's concern in spirit even though the mechanism differs from what
+was assumed: an ordinary, unverified sender can still end up in `_ESCORT_ROLES` (via
+Step 6, not via becoming `client_escort_buyer`) and, in open mode, would not be
+blocked from creating a real booking.
+
+**Decision: Outcome C — routing convergence defect found.** Not bundled into Phase
+1B (which stays exactly as committed). A full Phase 1B.2 proposal was produced (see
+below) and **implementation was not started** — this is a design decision requiring
+Owner input (does the fix add real contact-name-substring matching for Source B?
+does it change the Step 6/`_ESCORT_ROLES`/empty-list interaction? does it fix LID
+handling on the webhook path?), not a mechanical bug fix.
+
+**`FPE_SYNC_CHAT_JIDS`/`FPE_HSYNC_INTERVAL_S` independence confirmed:** both consumed
+exclusively by `modules/fazle_payroll_engine` (`historical_sync.py`, `ingestion.py`,
+`workers.py`) for payroll-engine historical-sync chat selection and polling interval —
+zero coupling to contact roles, RBAC, or escort identity. Untouched, as required.
+
+**DB-backed test verification completed for real this session** (previously blocked
+by `TEST_DB_PASSWORD` not being set in-session): spun up the repo's own disposable
+`docker-compose.test.yml` `postgres-test` service (a fully separate container/volume
+from production, trivial checked-in dev password, port 5433) — the "isolated
+temporary test database" path the prior report flagged as untried. Found and worked
+around a **pre-existing, separate test-schema drift** (migration
+`029_bootstrap_core_tables_schema_record.sql`'s `fazle_contact_roles` snapshot is
+missing `sub_role`/`is_active`/`language_pref`/`metadata` and has `id integer` where
+production now has `id uuid` — production was altered after migration 029 was
+captured, with no migration recording it; filed in `NEXT_IMPLEMENTATION_QUEUE.md`
+Technical Debt, not fixed) via a temporary, uncommitted `ALTER TABLE` shim in
+`tests/unit/conftest.py`, reverted via `git checkout` immediately after the run
+completed — confirmed via `git diff`/`git status` that no trace of it remains.
+Also found and fixed for real (commit `393781f`): `name`/`sub_role`/`notes` are
+`Optional[str]=None` in `ContactRoleBody` but `NOT NULL` in the live schema with no
+`COALESCE`-to-default in the `INSERT`, raising a raw 500 instead of using the
+column's own default — filed in `NEXT_IMPLEMENTATION_QUEUE.md` Technical Debt (not
+fixed, out of Phase 1B's scope), test payloads updated to supply all three explicitly.
+
+**Full results:** `tests/unit/test_contact_roles.py` (30), `tests/unit/test_shared_auth_deps.py`
+(15), `tests/unit/test_identity_brain.py` (17) — **62 passed, 0 failed, 0 errors.**
+`tests/unit/test_message_router_identity_seed.py`, `test_escort_module.py`,
+`test_escort_lifecycle.py`, `test_escort_roster_routes.py`,
+`test_escort_source_of_truth_refactor.py` also run: 2 failures
+(`test_escort_module.py::test_creates_escort_program_and_draft`,
+`test_escort_source_of_truth_refactor.py::test_draft_updated_by_bridge_confirmation`)
+— **both exactly match the 2 pre-existing failures already on record from Session 20's
+own verification sweep** (same test names, same root cause already confirmed via
+`git stash` isolation that session); this session's changes never touch
+`modules/escort`/`modules/escort_lifecycle`/`modules/message_router` at all (read-only
+trace only), so no new isolation check was needed.
+
+**Files touched this session:** `tests/unit/test_contact_roles.py` (payload fix,
+commit `393781f`), `docs/NEXT_IMPLEMENTATION_QUEUE.md` (3 new Technical Debt items:
+contact-roles NOT NULL gap, test-schema drift instance, escort-identity-convergence
+gap — doc commit to follow), this governance entry. `tests/unit/conftest.py`'s
+temporary shim reverted, leaves no diff. Disposable `postgres-test` container and
+volume fully torn down (`docker compose -f docker-compose.test.yml down -v`).
+
+**Deployment recommendation for Phase 1B itself: safe to deploy as committed**
+(`aee44bc`, `bcb5a53`, `393781f`) — the role-whitelist change is independently correct
+and now genuinely verified end-to-end. **Not safe to consider the wider escort-client
+routing workflow "fixed" or "converged"** — that remains open pending the Phase 1B.2
+proposal below and an explicit Owner decision.
+
+**Commits this session:** `393781f` (test fix, code), doc commit for
+`NEXT_IMPLEMENTATION_QUEUE.md` to follow this entry. Still local only — nothing
+pushed, no restart performed.
+
+---
+
+## Phase 1B.2 — Escort-Client Identity and Routing Convergence Proposal (NOT IMPLEMENTED — awaiting Owner decision)
+
+**1. Current production behavior:** see the identity-source trace and convergence
+table above. In short: only `fazle_contact_roles.role='client_escort_buyer'` reliably
+assigns the canonical identity; `ESCORT_CLIENT_PHONES` only gates order-parsing after
+the fact; contact-name-based detection doesn't exist; an empty `ESCORT_CLIENT_PHONES`
+combined with `identity_brain`'s Step 6 text-hint fallback can let an unverified,
+never-before-seen sender reach the order parser; the webhook path never resolves LIDs.
+
+**2. Relevant KB and Owner decisions:** `CANONICAL_BUSINESS_RULES.md`'s `.env`-authority
+Structural Rule (functional roles only — escort-client identity is explicitly NOT a
+functional-authority role, so this doesn't conflict with it); this session's Owner
+clarification (§1.1–1.4 of the reconciliation request) establishing `client_escort_buyer`
+as the single canonical identity with three intended convergent sources; the Session 20
+finance-integrity audit's precedent for disabling unverified-sender auto-create
+(`_seed_unknown_employee_identity`) — the same risk class applies here for escort orders.
+
+**3. Exact gap:** no single function decides "is this sender a `client_escort_buyer`" by
+consulting all three intended sources with a defined priority; the three mechanisms
+don't share a code path, a priority order, or evidence/source metadata; Source B doesn't
+exist; Source A/Step-6-fallback interaction is an unaudited live risk contingent on
+`.env` state; webhook/poller diverge on LID handling.
+
+**4. Smallest proposed implementation (design sketch, not yet approved):** one canonical
+resolver — conceptually `resolve_escort_client_identity(sender_phone, sender_jid,
+resolved_contact_name, stored_contact_role, settings)` — called from `identity_brain`
+in place of (or ahead of) today's separate Step 2/Step 4/Step 6 partial matches,
+checking in a defined priority order: (a) stored `fazle_contact_roles` row (highest
+trust, unchanged from today), (b) `ESCORT_CLIENT_PHONES` explicit match (elevated from
+"parser-stage gate" to "actual identity source"), (c) contact-name "escort" prefix/word
+match (new — the Owner's originally-intended source, needs a precise, false-positive-aware
+matcher), each result carrying explicit source/evidence metadata for audit logging.
+Separately: decide whether Step 6's keyword-only fallback should still be allowed to
+land a never-verified sender in `_ESCORT_ROLES` at all when none of A/B/C matched, and
+whether `_is_allowed_escort_client()`'s "open mode" should remain fail-open when the
+`.env` list is empty. Separately: port `_load_lid_map()`-based resolution (or equivalent)
+into the webhook path for parity with the poller.
+
+**5. Risk assessment:** touches the sender-identity resolution used by every WhatsApp
+message, not just escort — high blast radius if implemented carelessly. The empty-list
+fail-open question and the Step 6 fallback question each have real behavior
+implications for live traffic (today's 3-phone list currently masks both). LID-handling
+parity touches the webhook ingestion path directly.
+
+**6. Verification plan:** would need new tests for each of the 12 audit questions in
+the original request (phone/JID/LID normalization, each source in isolation and in
+combination, webhook/poller parity, auto-reply suppression, parser routing, complete/
+incomplete/non-order message handling, dedup, audit logging) before any deployment —
+none of this exists as test coverage today.
+
+**7. Rollback strategy:** would depend on the chosen design; a single new resolver
+function called from one call site is revertable via `git revert` with no schema
+change if no new table/column is introduced.
+
+**Owner decisions needed before implementation:** should Source B be built as literal
+name-substring matching (with what false-positive guard)? should `ESCORT_CLIENT_PHONES`
+become an actual identity source or stay a parsing-stage gate? should Step 6's
+unverified-sender fallback be disabled or restricted (mirroring the
+`_seed_unknown_employee_identity` precedent)? should empty-list "open mode" be
+changed to fail closed? is webhook LID resolution in scope for this same effort or a
+separate item?
+
+**Not implemented. No code, schema, or config changed for this proposal.**
