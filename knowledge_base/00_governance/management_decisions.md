@@ -2995,3 +2995,33 @@ transaction-scoped, nothing persisted). No production-data rollback needed
 (`sync_program_to_roster`, Phase 1I) — Writer 3 (`create_roster_entry`,
 this phase).
 
+
+---
+
+## Phase 2C — Escort Payment Workflow Failure Classification (2026-07-18)
+
+**Objective:** classify all 11 pre-existing `test_escort_payment_flow.py`
+failures; fix only genuine production bugs or stale tests whose production
+contract has intentionally changed; leave documented-historical ones alone.
+
+| Test | Root Cause | Production Bug | Test Drift | Legacy | Action |
+|---|---|---|---|---|---|
+| `test_step3_escort_active_visible_via_api` | `GET /admin/escort-programs` route removed, no replacement | No | No | Yes | Not fixed |
+| `test_step8_cash_transaction_inserted` | Legacy `wbom_cash_transactions` | No | No | Yes | Not fixed |
+| `test_cash_transaction_links_to_program` | Legacy `wbom_cash_transactions` | No | No | Yes | Not fixed |
+| `test_payroll_run_items_are_complete` | Legacy `wbom_cash_transactions` | No | No | Yes | Not fixed |
+| `test_advance_deducted_in_payroll` (this file) | Legacy `wbom_cash_transactions` | No | No | Yes | Not fixed |
+| `test_duplicate_release_webhook_idempotent` | `POST /escort/release` intentionally hardened 2026-06-19 | No | No | Yes | Not fixed |
+| `test_duplicate_payment_finalize_not_allowed` | Legacy `wbom_cash_transactions` count check | No | No | Yes | Not fixed |
+| `test_escort_release_api_full_flow` | Same disabled-endpoint hardening | No | No | Yes | Not fixed |
+| `test_payroll_transitions_write_approval_log` | Missing linked active `fpe_employees` row (2026-07-15 `mark_paid()` fail-closed fix) | No | **Yes** | No | **Fixed** |
+| `test_two_employees_independent_payrolls` | Unrelated test-data flaw: emp2's `basic_salary` exceeded emp1's basic+program total | No | **Yes** | No | **Fixed** |
+| `test_payroll_transition_api_full_chain` | Same missing-FPE-link issue | No | **Yes** | No | **Fixed** |
+
+**Result:** 3/11 fixed. Suite now 51 passed / 8 failed (was 48/11). The
+remaining 8 are the same, already-documented (Phase 1H) legacy-table and
+disabled-endpoint issues — none are production bugs, none are blocking.
+
+**Git:** `7b9fe41`, pushed. Test-only change — no restart required or
+performed.
+
