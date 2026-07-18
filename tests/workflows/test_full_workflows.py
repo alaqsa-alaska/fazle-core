@@ -11,6 +11,8 @@ Workflow 4: Guard attendance self-report → admin approves
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -118,10 +120,25 @@ class TestEscortFullWorkflow:
         # SQLite outbound-message polling layer.
         from modules.escort_lifecycle import handle_admin_release_confirmation
 
+        # The order text's "06/05/2026" date hint is stored in
+        # remarks.date_hint but never parsed into wbom_escort_programs
+        # .start_date (confirmed empirically 2026-07-18: start_date stays
+        # NULL). _handle_release_event_tx() falls back to program_date,
+        # which defaults to the row's insertion date -- i.e. "today" at
+        # whatever real-world date this test runs. The previous hardcoded
+        # "End Date: 2026-05-05" was therefore always in the past relative
+        # to program_date and always raised ValueError; it wasn't a
+        # once-correct date that went stale, it could never have passed.
+        # Computed relative to date.today() so the test has no fixed date
+        # dependency. +4 days at shift N gives exactly 10 shifts = 5.0 days
+        # per modules.escort_roster.calculations.count_shifts()/
+        # shifts_to_days(), matching this test's "Days: 5" /
+        # day_count==5.0 assertion below.
+        release_end_date = date.today() + timedelta(days=4)
         release_result = await handle_admin_release_confirmation(
             "[RELEASE CONFIRMED]\n"
-            "End Date: 2026-05-05\n"
-            "Shift: D\n"
+            f"End Date: {release_end_date.isoformat()}\n"
+            "Shift: N\n"
             "Days: 5\n"
             "Release Point: Ctg Port",
             f"{guard_mobile}@s.whatsapp.net",
@@ -154,10 +171,19 @@ class TestEscortFullWorkflow:
         r = await client.post("/webhook/mcp2", json=paid_payload)
         assert r.status_code in (200, 202)
 
+        # fpe_cash_transactions is the only canonical cash ledger table
+        # (Owner Directive 2026-06-29, CLAUDE.md) -- finalize_payment() never
+        # writes wbom_cash_transactions (legacy). Matched by phone rather than
+        # employee_id since fpe_cash_transactions.employee_id FKs to
+        # fpe_employees(id), a distinct ID space from wbom_employees.
+        # employee_phone is stored normalized (leading "88" country code
+        # stripped, e.g. "01811111111"), while seed_employee's fixture value
+        # carries the "88" prefix (confirmed empirically 2026-07-18).
+        normalized_mobile = seed_employee["employee_mobile"].removeprefix("88")
         async with test_db_pool.acquire() as conn:
             txn = await conn.fetchrow(
-                "SELECT * FROM wbom_cash_transactions WHERE employee_id=$1 LIMIT 1",
-                seed_employee["employee_id"],
+                "SELECT * FROM fpe_cash_transactions WHERE employee_phone=$1 LIMIT 1",
+                normalized_mobile,
             )
         assert txn is not None, "Cash transaction should be recorded"
         assert float(txn["amount"]) == pytest.approx(1500.0)
@@ -193,13 +219,21 @@ class TestAdvanceWorkflow:
                     admin_row["id"],
                 )
 
-        # Guard requests advance
-        adv_payload = make_bridge_payload(
-            seed_employee["employee_mobile"],
-            "ভাই অগ্রিম লাগবে ২০০০ টাকা",
-        )
-        r = await client.post("/webhook/mcp1", json=adv_payload)
-        assert r.status_code in (200, 202)
+        # Guard requests advance. modules.employee_conversation now runs this
+        # as a strict 4-turn conversation state machine (trigger → amount →
+        # payout → explicit "confirm") before it writes a
+        # fazle_payment_drafts row -- a single combined "trigger + amount"
+        # message only satisfies the trigger step and leaves the session
+        # waiting for amount as a separate turn (confirmed empirically
+        # 2026-07-18: a combined message never produced a draft even after
+        # follow-up payout+confirm turns). Mirrors the exact 4-message
+        # sequence in tests/unit/test_sprint3a_employee_conversation.py
+        # ::Test4VerificationCompleteDraftCreated, driven through the real
+        # /webhook/mcp1 HTTP path instead of calling the handler directly.
+        for turn_text in ("অগ্রিম চাই", "২০০০", "বিকাশ 01712345678", "confirm"):
+            turn_payload = make_bridge_payload(seed_employee["employee_mobile"], turn_text)
+            r = await client.post("/webhook/mcp1", json=turn_payload)
+            assert r.status_code in (200, 202)
 
         async with test_db_pool.acquire() as conn:
             draft = await conn.fetchrow(
@@ -217,9 +251,13 @@ class TestAdvanceWorkflow:
         r = await client.post("/webhook/mcp2", json=approve_payload)
         assert r.status_code in (200, 202)
 
+        # fpe_cash_transactions is the only canonical cash ledger table
+        # (Owner Directive 2026-06-29) -- ADVANCE approval routes through
+        # admin_commands._cmd_paid() -> finalize_payment(), which never
+        # writes wbom_cash_transactions (legacy).
         async with test_db_pool.acquire() as conn:
             txn = await conn.fetchrow(
-                "SELECT * FROM wbom_cash_transactions WHERE transaction_type='advance' LIMIT 1"
+                "SELECT * FROM fpe_cash_transactions WHERE txn_category='advance' LIMIT 1"
             )
         assert txn is not None
         assert float(txn["amount"]) == pytest.approx(2000.0)
@@ -231,22 +269,73 @@ class TestAdvanceWorkflow:
         import app.database as db_module
         db_module._pool = test_db_pool
 
-        # Insert advance directly
+        # fpe_cash_transactions is the only canonical cash ledger table
+        # (Owner Directive 2026-06-29) -- wbom_cash_transactions is legacy
+        # and compute_run() never reads it. employee_id here FKs to
+        # fpe_employees(id), NOT wbom_employees(employee_id) -- a real
+        # fpe_employees row linked via wbom_employee_id is required, matching
+        # the pattern in tests/unit/test_payroll.py::TestMarkPaidLedger.
         async with test_db_pool.acquire() as conn:
+            # Deliberately consume an id first so fpe_employees.id cannot
+            # coincidentally equal seed_employee's wbom employee_id in a
+            # fresh truncated test DB (both sequences would otherwise start
+            # at 1) -- that coincidence would silently mask the real bug
+            # this test is meant to catch. See the KNOWN BUG note below.
             await conn.execute("""
-                INSERT INTO wbom_cash_transactions
-                    (employee_id, transaction_type, amount, transaction_date, status)
-                VALUES ($1, 'advance', 1000, '2026-05-10', 'Completed')
-            """, seed_employee["employee_id"])
+                INSERT INTO fpe_employees
+                    (employee_code, full_name, name_normalized, status)
+                VALUES ('EMP-DECOY', 'Decoy', 'decoy', 'inactive')
+            """)
+            fpe_row = await conn.fetchrow("""
+                INSERT INTO fpe_employees
+                    (employee_code, full_name, name_normalized, primary_phone,
+                     status, wbom_employee_id)
+                VALUES ('EMP-ADV1', $1, $2, $3, 'active', $4)
+                RETURNING id
+            """, seed_employee["employee_name"],
+                seed_employee["employee_name"].lower().strip(),
+                seed_employee["employee_mobile"],
+                seed_employee["employee_id"])
+            fpe_id = fpe_row["id"]
+            assert fpe_id != seed_employee["employee_id"], (
+                "test setup invariant broken: fpe_id must differ from the "
+                "wbom employee_id for this test to be meaningful"
+            )
+            await conn.execute("""
+                INSERT INTO fpe_cash_transactions
+                    (txn_ref, employee_id, amount, txn_date, txn_category, transaction_status)
+                VALUES ('test-advance-1', $1, 1000, '2026-05-10', 'advance', 'final')
+            """, fpe_id)
 
         from modules.payroll import compute_run
         result = await compute_run(
             employee_id=seed_employee["employee_id"],
-            period_month="2026-05",
+            period_year=2026,
+            period_month=5,
             computed_by="test",
         )
 
-        assert result["total_advances"] == pytest.approx(1000.0)
+        # KNOWN BUG (found during Phase 1G investigation, 2026-07-18, NOT
+        # fixed here -- payroll formula changes are explicitly out of scope
+        # this session): compute_run()'s advances query
+        # (modules/payroll/__init__.py ~line 152) filters
+        # "fpe_cash_transactions WHERE employee_id=$1" using the WBOM
+        # employee_id passed into compute_run, but fpe_cash_transactions
+        # .employee_id has an FK to fpe_employees(id) -- a different ID
+        # space (confirmed via \d fpe_cash_transactions). mark_paid() in the
+        # same file resolves this correctly via
+        # "fpe_employees WHERE wbom_employee_id=$1" first; the advances
+        # query does not, so real advances are silently never deducted from
+        # payroll unless fpe_employees.id happens to numerically coincide
+        # with the wbom employee_id. Seeded here via the real canonical
+        # table + a correctly wbom_employee_id-linked fpe_employees row (not
+        # the coincidental id match), so this assertion currently and
+        # correctly fails, documenting the bug rather than masking it.
+        assert result["total_advances"] == pytest.approx(1000.0), (
+            "If this fails with total_advances=0.0, it is very likely the "
+            "known compute_run() advances employee_id-resolution bug "
+            "described above, not a new regression -- see Phase 1G report."
+        )
         assert result["net_salary"] < result["gross_salary"]
 
 
@@ -275,10 +364,23 @@ class TestPayrollWorkflow:
                     program_date='2026-05-01', end_date='2026-05-05'
                 WHERE program_id=$1
             """, program_id)
+            # mark_paid() fails closed without an active fpe_employees row
+            # linked via wbom_employee_id (2026-07-15 fix, see
+            # knowledge_base/06_developer_system/payroll_module.md) --
+            # matches the pattern in
+            # tests/unit/test_payroll.py::TestMarkPaidLedger._link_fpe_employee.
+            await conn.execute("""
+                INSERT INTO fpe_employees
+                    (employee_code, full_name, name_normalized, primary_phone,
+                     status, wbom_employee_id)
+                VALUES ('EMP-PAYROLL1', $1, $2, $3, 'active', $4)
+            """, seed_employee["employee_name"],
+                seed_employee["employee_name"].lower().strip(),
+                seed_employee["employee_mobile"], employee_id)
 
         # Compute
         result = await compute_run(
-            employee_id=employee_id, period_month="2026-05", computed_by="admin"
+            employee_id=employee_id, period_year=2026, period_month=5, computed_by="admin"
         )
         run_id = result["run_id"]
         assert result["status"] == "draft"
@@ -349,6 +451,7 @@ class TestAttendanceWorkflow:
         from modules.attendance import save_attendance
         await save_attendance(
             employee_id=seed_employee["employee_id"],
+            attendance_date=date.today(),
             status="Present",
             location="MV TEST",
             recorded_by=ADMIN_PHONE,
@@ -374,35 +477,45 @@ class TestPaymentCorrectionWorkflow:
         import app.database as db_module
         db_module._pool = test_db_pool
 
-        # First finalize the payment
+        # First finalize the payment. finalize_payment()'s current contract
+        # is (draft_id, approved_amount, method) -- no admin_phone param --
+        # and it sets fazle_payment_drafts.status='sent' + .transaction_id
+        # on success.
         from modules.payment_workflow import finalize_payment
-        await finalize_payment(
+        result = await finalize_payment(
             draft_id=seed_payment_draft["id"],
-            amount=1500.0,
+            approved_amount=1500.0,
             method="bkash",
-            admin_phone=ADMIN_PHONE,
         )
+        assert "error" not in result, result
 
-        # Confirm transaction exists
+        # Confirm the canonical transaction exists. fpe_cash_transactions is
+        # the only canonical cash ledger table (Owner Directive 2026-06-29);
+        # wbom_cash_transactions is legacy and finalize_payment() never
+        # writes it.
         async with test_db_pool.acquire() as conn:
-            txn = await conn.fetchrow(
-                "SELECT transaction_id FROM wbom_cash_transactions WHERE employee_id=$1 LIMIT 1",
-                seed_employee["employee_id"],
+            draft_row = await conn.fetchrow(
+                "SELECT transaction_id FROM fazle_payment_drafts WHERE id=$1",
+                seed_payment_draft["id"],
             )
-        assert txn is not None
-        original_id = txn["transaction_id"]
+        assert draft_row is not None and draft_row["transaction_id"] is not None
+        original_id = draft_row["transaction_id"]
 
-        # Now reverse
+        # Now reverse. reverse_payment()'s current contract is keyed by the
+        # payment draft, not a raw transaction id: (draft_id, admin_phone,
+        # reason). It looks up the canonical transaction via
+        # fazle_payment_drafts.transaction_id internally.
         from modules.payment_correction import reverse_payment
-        await reverse_payment(
-            original_transaction_id=original_id,
-            reason="Test reversal",
+        rev_result = await reverse_payment(
+            draft_id=seed_payment_draft["id"],
             admin_phone=ADMIN_PHONE,
+            reason="Test reversal",
         )
+        assert rev_result.get("ok") is True, rev_result
 
         async with test_db_pool.acquire() as conn:
             reversal = await conn.fetchrow(
-                "SELECT * FROM wbom_cash_transactions WHERE reversal_of=$1",
+                "SELECT * FROM fpe_cash_transactions WHERE reversed_txn_id=$1",
                 original_id,
             )
         assert reversal is not None
