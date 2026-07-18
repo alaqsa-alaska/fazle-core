@@ -215,6 +215,44 @@ async def api_assign_program(
         raise HTTPException(status_code=e.http_status, detail=detail) from None
 
 
+class OverrideAssignRequest(BaseModel):
+    escort_employee_id: int
+    expected_current_employee_id: Optional[int] = None
+    override_reason: str
+    acknowledged_conflict_program_ids: list[int] = []
+
+
+@router.post("/programs/{program_id}/assign-override", dependencies=[Depends(_require_admin_or_above)])
+async def api_assign_program_override(
+    program_id: int,
+    body: OverrideAssignRequest,
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Controlled conflict override (Phase 2A.3 sec.11/28/30), admin/
+    superadmin only -- a SEPARATE, more privileged route from /assign, never
+    the same operator-reachable endpoint with an optional flag. Requires a
+    mandatory override_reason and the caller to explicitly acknowledge the
+    exact conflicting program_ids being overridden; if the conflict set
+    re-checked under lock differs, the override is rejected as stale."""
+    performed_by = await _resolve_performed_by(key)
+    try:
+        return await dispatch_svc.assign_program(
+            program_id=program_id,
+            escort_employee_id=body.escort_employee_id,
+            expected_current_employee_id=body.expected_current_employee_id,
+            performed_by=performed_by,
+            override=True,
+            override_reason=body.override_reason,
+            acknowledged_conflict_program_ids=body.acknowledged_conflict_program_ids,
+        )
+    except dispatch_svc.DispatchAssignmentError as e:
+        detail = {"detail": e.message, "code": e.code}
+        if e.conflicts is not None:
+            detail["escort_employee_id"] = body.escort_employee_id
+            detail["conflicts"] = e.conflicts
+        raise HTTPException(status_code=e.http_status, detail=detail) from None
+
+
 class ReplaceEscortRequest(BaseModel):
     mother_vessel: str
     lighter_vessel: str
@@ -432,3 +470,43 @@ async def api_upload_release_slip(
         "escort_mobile": result.get("escort_mobile"),
         "missing_fields": result.get("missing_fields"),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2A.3 Stage 6 — Conflict-pair review and same-vessel review queue
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ConflictReviewRequest(BaseModel):
+    program_id_a: int
+    program_id_b: int
+    decision: str
+    note: str
+
+
+@router.post("/overlaps/review", dependencies=[Depends(_require_admin_or_above)])
+async def api_review_conflict_pair(
+    body: ConflictReviewRequest,
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Records a keep-both/defer decision on an existing conflicting pair
+    (Phase 2A.3 sec.9/30, Decision 5), admin/superadmin only. Audit-only --
+    never mutates wbom_escort_programs. 'Correct one' and 'unassign one'
+    reuse /assign, /assign-override, and /unassign instead of this route."""
+    performed_by = await _resolve_performed_by(key)
+    try:
+        return await dispatch_svc.record_conflict_pair_review(
+            program_id_a=body.program_id_a, program_id_b=body.program_id_b,
+            decision=body.decision, note=body.note, performed_by=performed_by,
+        )
+    except dispatch_svc.DispatchAssignmentError as e:
+        raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None
+
+
+@router.get("/same-vessel-review", dependencies=[Depends(_require_viewer_or_above)])
+async def api_same_vessel_review(include_terminal: bool = Query(False)):
+    """Read-only same-vessel review queue (Phase 2A.3 sec.9.2/30):
+    same_date_historical, under_seven_day, seven_plus_day, insufficient_data,
+    and bulk_import_artifact candidates. Classification only -- no mutation
+    is applied. Every listed candidate requires the applicable guarded
+    workflow (replace-escort / manual review) before any real change."""
+    return await dispatch_svc.find_same_vessel_review_candidates(include_terminal=include_terminal)

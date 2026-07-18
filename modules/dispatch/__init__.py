@@ -558,6 +558,9 @@ async def assign_program(
     escort_employee_id: int,
     expected_current_employee_id: Optional[int],
     performed_by: str,
+    override: bool = False,
+    override_reason: Optional[str] = None,
+    acknowledged_conflict_program_ids: Optional[list] = None,
 ) -> dict:
     """
     Controlled manual assignment/reassignment of one escort worker to one
@@ -584,7 +587,19 @@ async def assign_program(
     Raises DispatchAssignmentError for every rejection path -- the routes
     layer translates .http_status/.code/.message/.conflicts into the exact
     HTTP response.
-    """
+
+    Phase 2A.3 Stage 6 controlled override (override=True): admin/superadmin
+    only -- enforced by the route layer routing override requests through
+    _require_admin_or_above, never checked here since this function has no
+    role context. Requires a mandatory override_reason AND
+    acknowledged_conflict_program_ids naming exactly the conflicts the
+    caller is knowingly overriding -- if the freshly recomputed conflict set
+    (inside this transaction, under lock) contains any program_id NOT in the
+    acknowledged set, the override is rejected as stale rather than silently
+    accepted, the same optimistic-concurrency discipline expected_current_
+    employee_id already uses. Overridden assignments are audited with an
+    explicit authorized_override marker and stay visible to
+    list_overlaps() (never hidden from review)."""
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -663,11 +678,27 @@ async def assign_program(
                 if window.overlaps(w):
                     conflicts.append(_program_summary(p))
 
+            overridden = False
             if conflicts:
-                raise DispatchAssignmentError(
-                    "dispatch_conflict", 409,
-                    "escort employee has an overlapping assignment", conflicts=conflicts,
-                )
+                if not override:
+                    raise DispatchAssignmentError(
+                        "dispatch_conflict", 409,
+                        "escort employee has an overlapping assignment", conflicts=conflicts,
+                    )
+                if not override_reason or not override_reason.strip():
+                    raise DispatchAssignmentError(
+                        "override_reason_required", 422,
+                        "a mandatory reason is required to override a detected conflict", conflicts=conflicts,
+                    )
+                conflict_ids = {c["program_id"] for c in conflicts}
+                acknowledged_ids = set(acknowledged_conflict_program_ids or [])
+                if not conflict_ids.issubset(acknowledged_ids):
+                    raise DispatchAssignmentError(
+                        "conflict_acknowledgment_stale", 409,
+                        "the conflict set changed since it was last shown -- re-review and re-acknowledge "
+                        "before overriding", conflicts=conflicts,
+                    )
+                overridden = True
 
             await execute(
                 "UPDATE wbom_escort_programs SET escort_employee_id = $1 WHERE program_id = $2",
@@ -679,21 +710,29 @@ async def assign_program(
             from modules.escort_roster.db import sync_program_to_roster, log_audit
             await sync_program_to_roster(program_id, actor=performed_by, conn=conn)
 
-            action = "dispatch_reassign" if current_employee_id is not None else "dispatch_assign"
+            if overridden:
+                action = "dispatch_override_assign"
+            else:
+                action = "dispatch_reassign" if current_employee_id is not None else "dispatch_assign"
+            audit_new_data = {
+                "escort_employee_id": escort_employee_id,
+                "program_status": status,
+                "conflict_check": "overridden" if overridden else "passed",
+                "assignment_window": {
+                    "start_date": str(window.start_date), "start_shift": window.start_shift,
+                    "end_date": str(window.end_date) if window.end_date != date.max else None,
+                    "end_shift": window.end_shift,
+                },
+            }
+            if overridden:
+                audit_new_data["authorized_override"] = True
+                audit_new_data["override_reason"] = override_reason
+                audit_new_data["overridden_conflicts"] = conflicts
             await log_audit(
                 program_id=program_id,
                 action=action,
                 old_data={"escort_employee_id": current_employee_id},
-                new_data={
-                    "escort_employee_id": escort_employee_id,
-                    "program_status": status,
-                    "conflict_check": "passed",
-                    "assignment_window": {
-                        "start_date": str(window.start_date), "start_shift": window.start_shift,
-                        "end_date": str(window.end_date) if window.end_date != date.max else None,
-                        "end_shift": window.end_shift,
-                    },
-                },
+                new_data=audit_new_data,
                 performed_by=performed_by,
                 source="dispatch_ui",
                 conn=conn,
@@ -712,7 +751,57 @@ async def assign_program(
                 "start_shift": window.start_shift,
                 "end_date": str(window.end_date) if window.end_date != date.max else None,
                 "end_shift": window.end_shift,
+                "authorized_override": overridden,
             }
+
+
+async def _fetch_pair_review_markers(program_ids: list) -> dict:
+    """Phase 2A.3 Stage 6 -- batch-fetch the latest override/review audit
+    marker per program_id, keyed for pair enrichment in list_overlaps().
+    Read-only, never mutates anything."""
+    if not program_ids:
+        return {}
+    rows = await fetch_all(
+        """SELECT DISTINCT ON (program_id, action) program_id, action, new_data, performed_by, created_at
+           FROM escort_roster_audit_logs
+           WHERE program_id = ANY($1::int[])
+             AND action IN ('dispatch_override_assign', 'dispatch_conflict_review')
+           ORDER BY program_id, action, created_at DESC""",
+        program_ids,
+    )
+    by_program: dict = {}
+    for r in rows:
+        by_program.setdefault(r["program_id"], []).append(dict(r))
+    return by_program
+
+
+def _enrich_pair_with_review(pair_markers: dict, p1_id: int, p2_id: int) -> dict:
+    """Returns {'authorized_override': bool, 'review': dict|None} for one
+    conflicting pair, derived purely from prior audit entries -- never a
+    new mutation."""
+    result = {"authorized_override": False, "review": None}
+    for pid, other_id in ((p1_id, p2_id), (p2_id, p1_id)):
+        for entry in pair_markers.get(pid, []):
+            new_data = entry.get("new_data") or {}
+            if isinstance(new_data, str):
+                try:
+                    new_data = json.loads(new_data)
+                except Exception:
+                    new_data = {}
+            if entry["action"] == "dispatch_override_assign":
+                overridden = new_data.get("overridden_conflicts") or []
+                if any(c.get("program_id") == other_id for c in overridden):
+                    result["authorized_override"] = True
+            elif entry["action"] == "dispatch_conflict_review":
+                if new_data.get("pair_program_id") == other_id and result["review"] is None:
+                    # record_conflict_pair_review() writes one identical entry to
+                    # EACH side of the pair in the same transaction -- both sides
+                    # match here, so the first hit (either side) is authoritative.
+                    result["review"] = {
+                        "decision": new_data.get("decision"), "note": new_data.get("note"),
+                        "performed_by": entry.get("performed_by"), "recorded_at": str(entry.get("created_at")),
+                    }
+    return result
 
 
 async def list_overlaps(
@@ -726,6 +815,14 @@ async def list_overlaps(
     the current overlap set live using the SAME certified AssignmentWindow
     logic as availability/conflict-check/suggestions -- never a second,
     divergent overlap algorithm. Never mutates anything.
+
+    Phase 2A.3 Stage 6: each conflicting pair is enriched with
+    authorized_override (True if an admin override-assigned one side while
+    knowingly acknowledging the other) and review (the latest keep-both/
+    defer decision recorded via record_conflict_pair_review(), if any) --
+    both derived read-only from escort_roster_audit_logs, per Decision 5's
+    requirement that overridden/reviewed conflicts stay visible here, never
+    hidden from ongoing review.
     """
     where = ["p.escort_employee_id IS NOT NULL", "p.status <> 'completed'", "p.status <> 'cancelled'",
               "p.status <> 'escort_changed'"]
@@ -752,6 +849,8 @@ async def list_overlaps(
     by_employee: dict[int, list[dict]] = {}
     for r in rows:
         by_employee.setdefault(r["escort_employee_id"], []).append(dict(r))
+
+    pair_markers = await _fetch_pair_review_markers([r["program_id"] for r in rows])
 
     groups = []
     for eid, progs in by_employee.items():
@@ -784,9 +883,12 @@ async def list_overlaps(
                         cls = "active-confirmed"
                     else:
                         cls = "legacy/unknown"
+                    review_info = _enrich_pair_with_review(pair_markers, p1["program_id"], p2["program_id"])
                     pairs.append({
                         "program_a": _program_summary(p1), "program_b": _program_summary(p2),
                         "classification": cls,
+                        "authorized_override": review_info["authorized_override"],
+                        "review": review_info["review"],
                     })
         if pairs:
             groups.append({
@@ -1491,3 +1593,214 @@ async def approve_release_slip(
                 "end_date": str(completion_date_v), "end_shift": norm_end_shift,
                 "day_count": result.get("day_count"),
             }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2A.3 Stage 6 — Controlled Override Review and Same-Vessel Review Queue
+#
+# Owner-approved (2026-07-19), Decision 5: the existing 48 different-vessel
+# conflict pairs (and any future ones) are manual-review-only. Of the five
+# reviewed actions Decision 5 names, three already have a dedicated guarded
+# workflow (correct one -> assign_program()/create_replacement_segment();
+# unassign one safe draft/confirmed assignment -> unassign_program(); cancel
+# invalid duplicate -> explicitly NOT built, no separately-supported cancel
+# workflow exists). Only the remaining two -- keep both as an authorized
+# overlap, or defer for investigation -- have no mutation to perform, so
+# record_conflict_pair_review() below records them as audit-only markers,
+# never touching wbom_escort_programs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CONFLICT_REVIEW_DECISIONS = ("keep_both_authorized", "defer_for_investigation")
+
+
+async def record_conflict_pair_review(
+    program_id_a: int,
+    program_id_b: int,
+    decision: str,
+    note: str,
+    performed_by: str,
+) -> dict:
+    """Pure review-decision recording (Phase 2A.3 sec.9/30, Decision 5).
+    Never mutates wbom_escort_programs -- writes one audit entry to EACH
+    program in the pair so either side's history shows the decision, and so
+    list_overlaps() can surface it back via _enrich_pair_with_review()."""
+    if decision not in _CONFLICT_REVIEW_DECISIONS:
+        raise DispatchAssignmentError(
+            "invalid_decision", 422, f"decision must be one of {_CONFLICT_REVIEW_DECISIONS}")
+    if not note or not note.strip():
+        raise DispatchAssignmentError(
+            "note_required", 422, "a mandatory note is required to record a conflict review")
+    if program_id_a == program_id_b:
+        raise DispatchAssignmentError("invalid_pair", 422, "a program cannot be reviewed against itself")
+
+    pool = get_pool()
+    lo, hi = sorted((program_id_a, program_id_b))
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", lo)
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", hi)
+
+            progs = await fetch_all(
+                "SELECT program_id FROM wbom_escort_programs WHERE program_id = ANY($1::int[])",
+                [program_id_a, program_id_b], conn=conn,
+            )
+            found_ids = {p["program_id"] for p in progs}
+            if program_id_a not in found_ids or program_id_b not in found_ids:
+                raise DispatchAssignmentError(
+                    "program_not_found", 404, "one or both programs in the pair were not found")
+
+            from modules.escort_roster.db import log_audit
+            for pid, other in ((program_id_a, program_id_b), (program_id_b, program_id_a)):
+                await log_audit(
+                    program_id=pid,
+                    action="dispatch_conflict_review",
+                    old_data=None,
+                    new_data={"decision": decision, "note": note, "pair_program_id": other},
+                    performed_by=performed_by,
+                    source="dispatch_ui",
+                    conn=conn,
+                )
+            return {
+                "program_id_a": program_id_a, "program_id_b": program_id_b,
+                "decision": decision, "note": note, "performed_by": performed_by,
+            }
+
+
+# ── Same-vessel review queue (Phase 2A.3 sec.9.2/30) ───────────────────────────
+#
+# Read-only. Reuses the EXACT two-part method from the Decision Report's own
+# historical audit: group all non-terminal programs by normalized
+# (mother_vessel, lighter_vessel) pair (not by employee -- one side of a
+# same-vessel change often has escort_employee_id IS NULL, invisible to
+# list_overlaps()'s per-employee grouping), then classify each adjacent,
+# different-escort transition inside a group using classify_vessel_match()
+# and Decision 6's seven-day boundary. Never mutates anything -- this feeds
+# the UI review queue AND the (separate, still-pending) Historical Overlap
+# Recommendation Report.
+
+_BULK_IMPORT_WINDOW_SECONDS = 60
+
+
+def _escort_identity(p: dict) -> tuple:
+    return (
+        (p.get("escort_mobile") or "").strip(),
+        (p.get("escort_name") or "").strip().lower(),
+        p.get("escort_employee_id"),
+    )
+
+
+async def find_same_vessel_review_candidates(include_terminal: bool = False) -> dict:
+    """Returns candidates grouped by category: same_date_historical,
+    under_seven_day, seven_plus_day, insufficient_data, bulk_import_artifact.
+    Each item names program IDs, current values, the rule/evidence behind
+    the classification, and NO proposed mutation is applied -- classification
+    only, exactly like the Decision Report's own read-only analysis."""
+    status_filter = "" if include_terminal else (
+        "WHERE status NOT IN ('completed', 'cancelled', 'expired', 'escort_changed')")
+    rows = await fetch_all(
+        f"""SELECT program_id, mother_vessel, lighter_vessel, escort_name, escort_mobile,
+                   escort_employee_id, COALESCE(start_date, program_date) AS eff_start, shift,
+                   status, remarks, created_at
+            FROM wbom_escort_programs
+            {status_filter}
+            ORDER BY mother_vessel, lighter_vessel, COALESCE(start_date, program_date)"""
+    )
+
+    groups: dict = {}
+    for r in rows:
+        d = dict(r)
+        n_mv = _normalize_vessel_for_matching(d.get("mother_vessel"))
+        n_lv = _normalize_vessel_for_matching(d.get("lighter_vessel"))
+        if not n_mv:
+            continue  # no vessel identity at all -- nothing to group on
+        groups.setdefault((n_mv, n_lv), []).append(d)
+
+    same_date_historical, under_seven_day, seven_plus_day = [], [], []
+    insufficient_data, bulk_import_artifact = [], []
+    seen_insufficient_pairs = set()
+
+    for (n_mv, n_lv), progs in groups.items():
+        if len(progs) < 2:
+            continue
+        progs.sort(key=lambda p: (p["eff_start"] or date.min, normalize_shift(p["shift"]) or "D"))
+        for i in range(len(progs) - 1):
+            a, b = progs[i], progs[i + 1]
+            if _escort_identity(a) == _escort_identity(b):
+                continue  # same escort re-appearing -- not a change candidate
+
+            a_remarks = (a.get("remarks") or "")
+            b_remarks = (b.get("remarks") or "")
+            bulk_marker = ("source_bridge" in a_remarks or "auto_created" in a_remarks) and \
+                          ("source_bridge" in b_remarks or "auto_created" in b_remarks)
+            created_delta = abs((b["created_at"] - a["created_at"]).total_seconds()) \
+                if a.get("created_at") and b.get("created_at") else None
+            is_bulk_artifact = bulk_marker and created_delta is not None \
+                and created_delta <= _BULK_IMPORT_WINDOW_SECONDS
+
+            # Bulk-import artifacts are checked BEFORE the generic
+            # insufficient_data fallback below -- they are definitionally a
+            # more specific case of it (Decision 3: the exact false-match
+            # pattern found in a real bulk-import batch during the Decision
+            # Report's historical audit had an empty lighter_vessel).
+            if is_bulk_artifact:
+                bulk_import_artifact.append({
+                    "program_id_earlier": a["program_id"], "program_id_later": b["program_id"],
+                    "mother_vessel": a.get("mother_vessel"), "lighter_vessel": a.get("lighter_vessel"),
+                    "escort_earlier": {"name": a.get("escort_name"), "mobile": a.get("escort_mobile"),
+                                        "employee_id": a.get("escort_employee_id")},
+                    "escort_later": {"name": b.get("escort_name"), "mobile": b.get("escort_mobile"),
+                                      "employee_id": b.get("escort_employee_id")},
+                    "reason": (
+                        f"same/insufficient lighter_vessel, created within {created_delta:.0f}s of each other "
+                        f"-- likely a bulk-import duplicate, not a real change"),
+                })
+                continue
+
+            if not n_lv:
+                key = (n_mv, a["program_id"], b["program_id"])
+                if key not in seen_insufficient_pairs:
+                    seen_insufficient_pairs.add(key)
+                    insufficient_data.append({
+                        "program_id_earlier": a["program_id"], "program_id_later": b["program_id"],
+                        "mother_vessel": a.get("mother_vessel"), "lighter_vessel": a.get("lighter_vessel"),
+                        "reason": "lighter_vessel empty on at least one side -- Decision 3 requires manual review",
+                    })
+                continue
+
+            if a["eff_start"] is None or b["eff_start"] is None:
+                continue  # cannot classify without both dates -- leave to manual review elsewhere
+
+            same_date = a["eff_start"] == b["eff_start"]
+            delta_days = (b["eff_start"] - a["eff_start"]).days if not same_date else 0
+
+            item = {
+                "program_id_earlier": a["program_id"], "program_id_later": b["program_id"],
+                "mother_vessel": a.get("mother_vessel"), "lighter_vessel": a.get("lighter_vessel"),
+                "escort_earlier": {"name": a.get("escort_name"), "mobile": a.get("escort_mobile"),
+                                    "employee_id": a.get("escort_employee_id")},
+                "escort_later": {"name": b.get("escort_name"), "mobile": b.get("escort_mobile"),
+                                  "employee_id": b.get("escort_employee_id")},
+                "status_earlier": a.get("status"), "status_later": b.get("status"),
+                "start_date_earlier": str(a["eff_start"]), "start_date_later": str(b["eff_start"]),
+                "date_delta_days": delta_days,
+            }
+
+            if same_date:
+                item["reason"] = "identical start_date -- predates or was missed by the Stage 2 correction guard"
+                same_date_historical.append(item)
+            elif delta_days < _REPLACEMENT_UNDER_DAYS_THRESHOLD:
+                item["reason"] = f"date_delta={delta_days}d < 7 -- Decision 6 candidate for escort_changed"
+                under_seven_day.append(item)
+            else:
+                item["reason"] = f"date_delta={delta_days}d >= 7 -- Decision 6 candidate for completed"
+                seven_plus_day.append(item)
+
+    return {
+        "same_date_historical": same_date_historical,
+        "under_seven_day": under_seven_day,
+        "seven_plus_day": seven_plus_day,
+        "insufficient_data": insufficient_data,
+        "bulk_import_artifact": bulk_import_artifact,
+        "note": "Classification only -- no mutation is applied by this function. Every listed candidate "
+                "requires the applicable guarded workflow (replace-escort / manual review) before any change.",
+    }

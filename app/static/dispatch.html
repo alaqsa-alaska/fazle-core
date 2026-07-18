@@ -118,6 +118,73 @@ details.conflict-detail summary{cursor:pointer;color:var(--accent2)}
     <div id="overlapsProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
     <div id="overlapsHost"></div>
   </div>
+
+  <div id="sameVesselCard" class="card">
+    <h2>Same-Vessel Review Queue</h2>
+    <p class="sub">Read-only classification of possible same-vessel escort changes/corrections (Phase 2A.3 Decision 3/6). Nothing here is applied automatically — every candidate requires the applicable guarded workflow (Replace Escort below, or manual review) before any real change.</p>
+    <button class="btn" onclick="loadSameVesselQueue()">Refresh Queue</button>
+    <div id="sameVesselProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
+    <div id="sameVesselHost"></div>
+  </div>
+
+  <div id="replaceCard" class="card hidden">
+    <h2>Replace Escort (Historical Correction / Manual Trigger)</h2>
+    <p class="sub">Manually create a replacement segment for an earlier program (Phase 2A.3 Stage 3) — the same workflow the automatic admin-message pipeline uses. Requires the earlier program's ID and the full new-segment details.</p>
+    <div class="filter-grid">
+      <div class="field"><label>Earlier Program ID</label><input id="rProgramId" type="number"></div>
+      <div class="field"><label>Mother Vessel</label><input id="rMotherVessel" type="text"></div>
+      <div class="field"><label>Lighter Vessel</label><input id="rLighterVessel" type="text"></div>
+      <div class="field"><label>New Escort Employee ID (optional)</label><input id="rEmployeeId" type="number"></div>
+      <div class="field"><label>New Escort Name</label><input id="rEscortName" type="text"></div>
+      <div class="field"><label>New Escort Mobile</label><input id="rEscortMobile" type="text"></div>
+      <div class="field"><label>New Start Date</label><input id="rStartDate" type="date"></div>
+      <div class="field"><label>New Start Shift</label><select id="rStartShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select></div>
+    </div>
+    <button class="btn primary" onclick="submitReplaceEscort()">Submit Replacement</button>
+    <div id="replaceStatus" class="status"></div>
+  </div>
+
+  <div id="unassignCard" class="card hidden">
+    <h2>Safe Unassignment</h2>
+    <p class="sub">Draft/confirmed programs only — blocked by accepted attendance or an existing payment draft. Never hard-deletes the program.</p>
+    <div class="filter-grid">
+      <div class="field"><label>Program ID</label><input id="uProgramId" type="number"></div>
+      <div class="field"><label>Expected Current Employee ID</label><input id="uEmployeeId" type="number"></div>
+    </div>
+    <div class="field"><label>Reason (mandatory)</label><input id="uReason" type="text" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px"></div>
+    <button class="btn primary" onclick="submitUnassign()" style="margin-top:8px">Unassign</button>
+    <div id="unassignStatus" class="status"></div>
+  </div>
+
+  <div id="incompleteDraftsCard" class="card hidden">
+    <h2>Incomplete Drafts</h2>
+    <p class="sub">Draft programs with no escort identity yet — TTL-eligible for cleanup 24h after creation.</p>
+    <button class="btn" onclick="loadIncompleteDrafts()">Refresh</button>
+    <div id="incompleteDraftsProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
+    <div id="incompleteDraftsHost"></div>
+  </div>
+
+  <div id="releaseSlipCard" class="card hidden">
+    <h2>Release-Slip Review</h2>
+    <p class="sub">OCR extractions awaiting admin review. Approval calls the same certified completion path as a [RELEASE CONFIRMED] WhatsApp message.</p>
+    <button class="btn" onclick="loadReleaseSlips()">Refresh Pending Slips</button>
+    <div id="releaseSlipProgress" style="font-size:12.5px;color:var(--muted);margin:8px 0"></div>
+    <div id="releaseSlipHost"></div>
+  </div>
+
+  <div id="completeCard" class="card hidden">
+    <h2>Manual Completion</h2>
+    <p class="sub">Admin/superadmin only. Reuses the same idempotent completion path [RELEASE CONFIRMED] messages use.</p>
+    <div class="filter-grid">
+      <div class="field"><label>Program ID</label><input id="cProgramId" type="number"></div>
+      <div class="field"><label>End Date</label><input id="cEndDate" type="date"></div>
+      <div class="field"><label>End Shift</label><select id="cEndShift"><option value="N">Night (N)</option><option value="D">Day (D)</option></select></div>
+      <div class="field"><label>Release Point (optional)</label><input id="cReleasePoint" type="text"></div>
+    </div>
+    <div class="field"><label>Reason (mandatory)</label><input id="cReason" type="text" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px"></div>
+    <button class="btn primary" onclick="submitManualCompletion()" style="margin-top:8px">Complete Program</button>
+    <div id="completeStatus" class="status"></div>
+  </div>
 </div>
 
 <script src="/static/shared-auth-fetch.js"></script>
@@ -135,6 +202,7 @@ function doLogin() {
 }
 
 let CAN_ASSIGN = false;
+let CAN_ADMIN = false;
 
 async function boot() {
   document.getElementById('loginBox').style.display = 'none';
@@ -145,16 +213,23 @@ async function boot() {
   await resolveUserAccess();
   loadAllWorkers();
   loadOverlaps();
+  loadSameVesselQueue();
+  if (CAN_ADMIN) { loadIncompleteDrafts(); loadReleaseSlips(); }
 }
 
 // Reuses the exact same /api/admin/session mechanism payroll.html and
 // escort-roster.html already use to resolve role-based UI visibility --
 // not a new endpoint. operator/accountant/admin/superadmin/owner may
-// assign; viewer/office_assistant may not (Phase 2A.2 RBAC).
+// assign; viewer/office_assistant may not (Phase 2A.2 RBAC). Phase 2A.3
+// Stage 5/6 admin-only actions (manual completion, release-slip approval,
+// controlled override, conflict-pair review) use the stricter ADMIN_ROLES
+// set, matching modules.dispatch.routes._require_admin_or_above exactly.
 const ASSIGN_ROLES = ['operator', 'accountant', 'admin', 'superadmin', 'owner'];
+const ADMIN_ROLES = ['admin', 'superadmin', 'owner'];
 
 async function resolveUserAccess() {
   CAN_ASSIGN = false;
+  CAN_ADMIN = false;
   try {
     const r = await FazleAuthFetch.fetch('/api/admin/session', API_KEY);
     if (r.status === 403 || r.status === 401) return handleAuthFailure();
@@ -162,11 +237,18 @@ async function resolveUserAccess() {
     const data = await r.json();
     const roles = Array.isArray(data.user && data.user.normalized_roles) ? data.user.normalized_roles : [];
     CAN_ASSIGN = roles.some(role => ASSIGN_ROLES.includes(String(role || '').toLowerCase()));
+    CAN_ADMIN = roles.some(role => ADMIN_ROLES.includes(String(role || '').toLowerCase()));
   } catch (e) {
     CAN_ASSIGN = false;
+    CAN_ADMIN = false;
   }
   document.getElementById('assignCard').classList.toggle('hidden', !CAN_ASSIGN);
   document.getElementById('assignBanner').classList.toggle('hidden', !CAN_ASSIGN);
+  document.getElementById('replaceCard').classList.toggle('hidden', !CAN_ASSIGN);
+  document.getElementById('unassignCard').classList.toggle('hidden', !CAN_ASSIGN);
+  document.getElementById('incompleteDraftsCard').classList.toggle('hidden', !CAN_ADMIN);
+  document.getElementById('releaseSlipCard').classList.toggle('hidden', !CAN_ADMIN);
+  document.getElementById('completeCard').classList.toggle('hidden', !CAN_ADMIN);
 }
 
 function handleAuthFailure() {
@@ -366,6 +448,7 @@ async function previewConflictAndConfirm() {
       });
       if (r.ok) {
         const d = await r.json();
+        PENDING_ASSIGN.conflicts = d.conflicts || [];
         conflictHtml = d.available === true
           ? '<span style="color:var(--ok)">✓ No conflict detected for this employee/window</span>'
           : d.available === false
@@ -382,6 +465,18 @@ async function previewConflictAndConfirm() {
   }
 
   const action = PENDING_ASSIGN.expectedCurrentEmployeeId ? 'Reassign' : 'Assign';
+  const hasConflict = (PENDING_ASSIGN.conflicts || []).length > 0;
+  const overrideBlock = (hasConflict && CAN_ADMIN) ? `
+      <div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:10px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600">
+          <input type="checkbox" id="aOverrideCheck" onchange="document.getElementById('aOverrideReasonRow').classList.toggle('hidden', !this.checked)">
+          Override this conflict (admin only)
+        </label>
+        <div id="aOverrideReasonRow" class="hidden field" style="margin-top:6px">
+          <label>Override reason (mandatory)</label>
+          <input id="aOverrideReason" type="text" placeholder="e.g. Owner-approved double booking for urgent job">
+        </div>
+      </div>` : '';
   confirmHost.innerHTML = `
     <div class="confirm-box">
       <b>Confirm ${esc(action)}</b>
@@ -393,6 +488,7 @@ async function previewConflictAndConfirm() {
         <dt>Destination</dt><dd>${esc(p.destination || '—')}</dd>
         <dt>Conflict check</dt><dd>${conflictHtml}</dd>
       </dl>
+      ${overrideBlock}
       <button class="btn primary" onclick="submitAssignment()">Confirm ${esc(action)}</button>
       <button class="btn" onclick="cancelAssign()">Cancel</button>
     </div>`;
@@ -409,15 +505,25 @@ async function submitAssignment() {
   const confirmHost = document.getElementById('confirmHost');
   status.textContent = 'Submitting…';
   status.className = 'status';
+  const overrideCheck = document.getElementById('aOverrideCheck');
+  const isOverride = !!(overrideCheck && overrideCheck.checked);
   try {
-    const r = await FazleAuthFetch.fetch(
-      `/api/dispatch/programs/${PENDING_ASSIGN.programId}/assign`, API_KEY, {
-        method: 'POST',
-        body: JSON.stringify({
-          escort_employee_id: PENDING_ASSIGN.employeeId,
-          expected_current_employee_id: PENDING_ASSIGN.expectedCurrentEmployeeId,
-        }),
-      });
+    let path = `/api/dispatch/programs/${PENDING_ASSIGN.programId}/assign`;
+    let payload = {
+      escort_employee_id: PENDING_ASSIGN.employeeId,
+      expected_current_employee_id: PENDING_ASSIGN.expectedCurrentEmployeeId,
+    };
+    if (isOverride) {
+      const reason = (document.getElementById('aOverrideReason').value || '').trim();
+      if (!reason) {
+        status.innerHTML = '<span style="color:var(--err)">An override reason is required.</span>';
+        return;
+      }
+      path = `/api/dispatch/programs/${PENDING_ASSIGN.programId}/assign-override`;
+      payload.override_reason = reason;
+      payload.acknowledged_conflict_program_ids = (PENDING_ASSIGN.conflicts || []).map(c => c.program_id);
+    }
+    const r = await FazleAuthFetch.fetch(path, API_KEY, { method: 'POST', body: JSON.stringify(payload) });
     if (r.status === 403) return handleAuthFailure();
     const body = await r.json().catch(() => ({}));
     if (r.status === 409) {
@@ -484,11 +590,275 @@ async function loadOverlaps() {
           ${g.programs.map(p => `<div style="font-size:12px">#${esc(p.program_id)} ${esc(p.status)} — ${esc(p.mother_vessel || '—')} ${esc(p.start_date)} ${esc(p.start_shift || '')} → ${esc(p.end_date || 'open')} ${esc(p.end_shift || '')} ${esc(p.destination ? '(' + p.destination + ')' : '')}</div>`).join('')}
         </div>
         <div style="margin-top:6px">
-          ${g.conflicting_pairs.map(pr => `<div class="overlap-pair">⚠ #${esc(pr.program_a.program_id)} ↔ #${esc(pr.program_b.program_id)} — <span class="pill err">${esc(pr.classification)}</span></div>`).join('')}
+          ${g.conflicting_pairs.map(pr => `
+            <div class="overlap-pair">
+              ⚠ #${esc(pr.program_a.program_id)} ↔ #${esc(pr.program_b.program_id)} — <span class="pill err">${esc(pr.classification)}</span>
+              ${pr.authorized_override ? '<span class="pill warn">authorized override</span>' : ''}
+              ${pr.review ? `<span class="pill ok">reviewed: ${esc(pr.review.decision)} by ${esc(pr.review.performed_by)}</span>` : ''}
+              ${CAN_ADMIN && !pr.review ? `
+                <button class="btn" style="padding:3px 8px;font-size:11px" onclick="promptConflictReview(${esc(pr.program_a.program_id)},${esc(pr.program_b.program_id)},'keep_both_authorized')">Keep Both</button>
+                <button class="btn" style="padding:3px 8px;font-size:11px" onclick="promptConflictReview(${esc(pr.program_a.program_id)},${esc(pr.program_b.program_id)},'defer_for_investigation')">Defer</button>` : ''}
+            </div>`).join('')}
         </div>
       </div>`).join('');
   } catch (e) {
     progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 6: conflict-pair review (Decision 5) ───────────────────
+
+async function promptConflictReview(programIdA, programIdB, decision) {
+  const note = window.prompt(
+    decision === 'keep_both_authorized'
+      ? 'Note for keeping both as an authorized overlap (mandatory):'
+      : 'Note for deferring this pair for investigation (mandatory):');
+  if (note === null) return;
+  if (!note.trim()) { alert('A note is required.'); return; }
+  const progress = document.getElementById('overlapsProgress');
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/overlaps/review', API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({ program_id_a: programIdA, program_id_b: programIdB, decision, note: note.trim() }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    await loadOverlaps();
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 6: read-only same-vessel review queue ──────────────────
+
+const SAME_VESSEL_CATEGORIES = [
+  ['under_seven_day', 'Under 7 Days (escort_changed candidate)'],
+  ['seven_plus_day', 'Seven+ Days (completed candidate)'],
+  ['same_date_historical', 'Same-Date (historical correction)'],
+  ['insufficient_data', 'Insufficient Data (empty lighter vessel)'],
+  ['bulk_import_artifact', 'Bulk-Import Artifact (likely duplicate, not a real change)'],
+];
+
+async function loadSameVesselQueue() {
+  const progress = document.getElementById('sameVesselProgress');
+  const host = document.getElementById('sameVesselHost');
+  progress.textContent = 'Loading…';
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/same-vessel-review', API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    const total = SAME_VESSEL_CATEGORIES.reduce((sum, [key]) => sum + (data[key] || []).length, 0);
+    progress.textContent = `${total} candidate(s) across ${SAME_VESSEL_CATEGORIES.length} categories. ${esc(data.note || '')}`;
+    if (!total) { host.innerHTML = '<div class="empty">No same-vessel review candidates found.</div>'; return; }
+    host.innerHTML = SAME_VESSEL_CATEGORIES.map(([key, label]) => {
+      const items = data[key] || [];
+      if (!items.length) return '';
+      return `<div class="overlap-group"><b>${esc(label)}</b> — ${esc(items.length)} candidate(s)
+        <div style="margin-top:6px">
+          ${items.map(c => `<div style="font-size:12px;margin:3px 0">
+            #${esc(c.program_id_earlier)} → #${esc(c.program_id_later)} — ${esc(c.mother_vessel || '—')} / ${esc(c.lighter_vessel || '—')}
+            ${c.escort_earlier ? `(${esc(c.escort_earlier.name || '—')} → ${esc(c.escort_later.name || '—')})` : ''}
+            <span class="reasons">${esc(c.reason)}</span>
+          </div>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 3 manual trigger: replace escort ────────────────────────
+
+async function submitReplaceEscort() {
+  const status = document.getElementById('replaceStatus');
+  const programId = document.getElementById('rProgramId').value.trim();
+  if (!programId) { status.innerHTML = '<span style="color:var(--err)">Earlier Program ID is required.</span>'; return; }
+  status.textContent = 'Submitting…';
+  try {
+    const employeeIdRaw = document.getElementById('rEmployeeId').value.trim();
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/programs/${encodeURIComponent(programId)}/replace-escort`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({
+        mother_vessel: document.getElementById('rMotherVessel').value.trim(),
+        lighter_vessel: document.getElementById('rLighterVessel').value.trim(),
+        escort_employee_id: employeeIdRaw ? Number(employeeIdRaw) : null,
+        escort_name: document.getElementById('rEscortName').value.trim(),
+        escort_mobile: document.getElementById('rEscortMobile').value.trim(),
+        start_date: document.getElementById('rStartDate').value,
+        start_shift: document.getElementById('rStartShift').value,
+      }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      status.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    status.innerHTML = `<span style="color:var(--ok)">✓ Replacement segment created — new program #${esc(body.new_program_id)}, earlier program #${esc(body.earlier_program_id)} set to ${esc(body.earlier_status)}</span>`;
+    await loadOverlaps();
+    await loadSameVesselQueue();
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 4: safe unassignment ────────────────────────────────────
+
+async function submitUnassign() {
+  const status = document.getElementById('unassignStatus');
+  const programId = document.getElementById('uProgramId').value.trim();
+  const employeeId = document.getElementById('uEmployeeId').value.trim();
+  const reason = document.getElementById('uReason').value.trim();
+  if (!programId || !employeeId || !reason) {
+    status.innerHTML = '<span style="color:var(--err)">Program ID, Expected Current Employee ID, and Reason are all required.</span>';
+    return;
+  }
+  status.textContent = 'Submitting…';
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/programs/${encodeURIComponent(programId)}/unassign`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({ expected_current_employee_id: Number(employeeId), reason }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      status.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    status.innerHTML = `<span style="color:var(--ok)">✓ Unassigned — program #${esc(body.program_id)} is now unassigned</span>`;
+    await loadAllWorkers();
+    await loadOverlaps();
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 5: incomplete drafts (read-only) ────────────────────────
+
+async function loadIncompleteDrafts() {
+  const progress = document.getElementById('incompleteDraftsProgress');
+  const host = document.getElementById('incompleteDraftsHost');
+  progress.textContent = 'Loading…';
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/incomplete-drafts', API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    progress.textContent = `${data.total} incomplete draft(s)`;
+    if (!data.items.length) { host.innerHTML = '<div class="empty">No incomplete drafts.</div>'; return; }
+    host.innerHTML = `<table><thead><tr><th>Program</th><th>Vessel</th><th>Age (h)</th></tr></thead><tbody>
+      ${data.items.map(i => `<tr><td class="mono">#${esc(i.program_id)}</td><td>${esc(i.mother_vessel || '—')} / ${esc(i.lighter_vessel || '—')}</td><td>${esc(i.age_hours)}</td></tr>`).join('')}
+    </tbody></table>`;
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 5: release-slip review ──────────────────────────────────
+
+async function loadReleaseSlips() {
+  const progress = document.getElementById('releaseSlipProgress');
+  const host = document.getElementById('releaseSlipHost');
+  progress.textContent = 'Loading…';
+  try {
+    const r = await FazleAuthFetch.fetch('/api/dispatch/release-slips/pending', API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    progress.textContent = `${data.total} pending release slip(s)`;
+    if (!data.items.length) { host.innerHTML = '<div class="empty">No pending release slips.</div>'; return; }
+    host.innerHTML = data.items.map(s => `
+      <div class="overlap-group" id="slip-${esc(s.id)}">
+        <b>Extraction #${esc(s.id)}</b> — ${esc(s.mother_vessel || '—')} / ${esc(s.lighter_vessel || '—')}
+        — escort ${esc(s.escort_name || '—')} — confidence ${esc(s.confidence ?? '—')}
+        <div style="margin-top:6px">
+          <button class="btn" onclick="loadSlipCandidates(${esc(s.id)})">Show Candidate Programs</button>
+        </div>
+        <div id="slip-candidates-${esc(s.id)}" style="margin-top:6px"></div>
+      </div>`).join('');
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function loadSlipCandidates(extractionId) {
+  const host = document.getElementById(`slip-candidates-${extractionId}`);
+  host.innerHTML = 'Loading candidates…';
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/release-slips/${extractionId}/candidates`, API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { host.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    if (!data.candidates.length) { host.innerHTML = '<div class="empty">No candidate programs found.</div>'; return; }
+    host.innerHTML = data.candidates.map(c => `
+      <div style="font-size:12px;margin:4px 0;padding:6px;border:1px solid var(--border);border-radius:6px">
+        #${esc(c.program_id)} — ${esc(c.mother_vessel || '—')} / ${esc(c.lighter_vessel || '—')} — confidence ${esc(c.confidence)}
+        <button class="btn" style="padding:3px 8px;font-size:11px;margin-left:6px" onclick="approveReleaseSlip(${esc(extractionId)}, ${esc(c.program_id)})">Approve</button>
+      </div>`).join('');
+  } catch (e) {
+    host.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function approveReleaseSlip(extractionId, programId) {
+  const endShift = window.prompt('End shift for this release (D or N)?', 'D');
+  if (!endShift) return;
+  const host = document.getElementById(`slip-candidates-${extractionId}`);
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/release-slips/${extractionId}/approve`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({ program_id: programId, end_shift: endShift }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      host.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    host.innerHTML = `<span style="color:var(--ok)">✓ Approved — program #${esc(body.program_id)} completed on ${esc(body.end_date)}</span>`;
+    await loadReleaseSlips();
+    await loadAllWorkers();
+  } catch (e) {
+    host.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Phase 2A.3 Stage 5: manual completion ────────────────────────────────────
+
+async function submitManualCompletion() {
+  const status = document.getElementById('completeStatus');
+  const programId = document.getElementById('cProgramId').value.trim();
+  const endDate = document.getElementById('cEndDate').value;
+  const endShift = document.getElementById('cEndShift').value;
+  const reason = document.getElementById('cReason').value.trim();
+  if (!programId || !endDate || !reason) {
+    status.innerHTML = '<span style="color:var(--err)">Program ID, End Date, and Reason are all required.</span>';
+    return;
+  }
+  status.textContent = 'Submitting…';
+  try {
+    const r = await FazleAuthFetch.fetch(`/api/dispatch/programs/${encodeURIComponent(programId)}/complete`, API_KEY, {
+      method: 'POST',
+      body: JSON.stringify({
+        end_date: endDate, end_shift: endShift,
+        release_point: document.getElementById('cReleasePoint').value.trim() || null,
+        reason,
+      }),
+    });
+    if (r.status === 403) return handleAuthFailure();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      status.innerHTML = `<span style="color:var(--err)">${esc((body.detail && body.detail.detail) || body.detail || 'error')}</span>`;
+      return;
+    }
+    status.innerHTML = `<span style="color:var(--ok)">✓ Program #${esc(body.program_id)} completed on ${esc(body.end_date)}</span>`;
+    await loadAllWorkers();
+    await loadOverlaps();
+    await loadIncompleteDrafts();
+  } catch (e) {
+    status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
   }
 }
 
