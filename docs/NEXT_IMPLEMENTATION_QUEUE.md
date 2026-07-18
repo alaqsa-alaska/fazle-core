@@ -298,6 +298,22 @@ literal "release + sync_program_to_roster running concurrently" scenario). Zero
 regressions across the full escort/payroll test surface. Full record:
 `management_decisions.md` Phase 1I. Commit `2d712f9`.
 
+**🟢 RESOLVED 2026-07-18 (Phase 2B) — Writer 3 (`create_roster_entry()`).** Was the
+last unfixed writer. Reproduced both races before any code change: (1) `program_id`
+generation (`SELECT MAX+1` then a separate `INSERT`) — 9/10 concurrent calls hit a
+live `UniqueViolationError` on the identical computed id; (2)
+`_find_duplicate_roster_entry()`'s check-then-act had no DB constraint backing it.
+Fixed by wrapping the whole check+generate+insert sequence in one transaction
+serialized with `pg_advisory_xact_lock()` — smallest fix, no schema change, no new
+unique constraint; this is a low-frequency admin-only tool with no legitimate need
+for concurrent throughput. Re-verified: 10/10 distinct-vessel calls now succeed with
+10 distinct ids; 10/10 identical-vessel calls now correctly produce exactly 1 row.
+New `tests/unit/test_roster_writer3_concurrency.py` (4 tests) — no test anywhere in
+the repo previously exercised this function at all. Production-verified live via two
+synthetic, clearly-marked rows (created, duplicate-blocked, then deleted). **All
+three escort-roster writers are now resolved.** Full record: `management_decisions.md`
+Phase 2B. Commit `5bab26a`.
+
 **Where:** `modules/escort_lifecycle/__init__.py` (~line 315-390, the raw `INSERT INTO
 escort_roster_entries ... ON CONFLICT DO UPDATE` block) vs. `modules/escort_roster`'s own
 `sync_program_to_roster()` API, which is never called from this path.
