@@ -113,18 +113,33 @@ async def create_escort_payment_draft(
         conveyance = float(prog.get("conveyance") or 0)
 
         # Only advances tied to this escort program and current payroll month.
-        advances = await fetch_val(
-            """SELECT COALESCE(SUM(amount), 0)
-               FROM fpe_cash_transactions
-               WHERE employee_id = $1 AND txn_category = 'advance'
-                 AND program_id = $2
-                 AND txn_date >= DATE_TRUNC('month', CURRENT_DATE)::date
-                 AND txn_date < (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month')::date
-                 AND transaction_status = 'final'
-                 AND deleted_at IS NULL""",
-            employee_id, escort_program_id,
+        # fpe_cash_transactions.employee_id FKs to fpe_employees(id), not
+        # wbom_employees.employee_id (this function's own `employee_id`
+        # param) -- same cross-system ID-space bug fixed in
+        # modules/payroll/__init__.py::compute_run() (2026-07-18). Resolve
+        # the linked, active fpe_employees row first; no link -> zero
+        # advances (a missing link is a data-completeness fact, not an
+        # error -- the draft still generates).
+        fpe_link = await fetch_one(
+            "SELECT id FROM fpe_employees WHERE wbom_employee_id=$1 AND status='active'",
+            employee_id,
             conn=conn,
-        ) or 0.0
+        )
+        if fpe_link:
+            advances = await fetch_val(
+                """SELECT COALESCE(SUM(amount), 0)
+                   FROM fpe_cash_transactions
+                   WHERE employee_id = $1 AND txn_category = 'advance'
+                     AND program_id = $2
+                     AND txn_date >= DATE_TRUNC('month', CURRENT_DATE)::date
+                     AND txn_date < (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month')::date
+                     AND transaction_status = 'final'
+                     AND deleted_at IS NULL""",
+                fpe_link["id"], escort_program_id,
+                conn=conn,
+            ) or 0.0
+        else:
+            advances = 0.0
         net_payable = max(gross_amount - food_bill + conveyance - float(advances), 0)
 
         bkash = emp.get("bkash_number") or emp.get("nagad_number") or "?"
@@ -253,17 +268,28 @@ async def create_advance_request_draft(
         if not emp:
             return {"error": f"Employee {employee_id} not found", "draft_id": None}
 
-        # Recent payments this month
+        # Recent payments this month. fpe_cash_transactions.employee_id FKs
+        # to fpe_employees(id), not the WBOM employee_id -- same
+        # cross-system ID bug fixed in compute_run() (2026-07-18). This
+        # figure is display-only (shown to the approving admin, does not
+        # gate/cap the request), but must still be accurate.
         month_start = date.today().replace(day=1)
-        paid_this_month = await fetch_val(
-            """SELECT COALESCE(SUM(amount), 0)
-               FROM fpe_cash_transactions
-               WHERE employee_id = $1
-                 AND txn_date >= $2
-                 AND transaction_status = 'final'
-                 AND deleted_at IS NULL""",
-            employee_id, month_start,
-        ) or 0.0
+        fpe_link = await fetch_one(
+            "SELECT id FROM fpe_employees WHERE wbom_employee_id=$1 AND status='active'",
+            employee_id,
+        )
+        if fpe_link:
+            paid_this_month = await fetch_val(
+                """SELECT COALESCE(SUM(amount), 0)
+                   FROM fpe_cash_transactions
+                   WHERE employee_id = $1
+                     AND txn_date >= $2
+                     AND transaction_status = 'final'
+                     AND deleted_at IS NULL""",
+                fpe_link["id"], month_start,
+            ) or 0.0
+        else:
+            paid_this_month = 0.0
 
         # Active duties count
         active_duties = await fetch_val(

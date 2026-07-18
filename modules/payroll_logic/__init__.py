@@ -62,36 +62,50 @@ async def get_payroll_summary(employee_id: int) -> PayrollSummary:
     if not emp:
         return _empty_summary(employee_id)
 
-    # C1B: Payments this month from canonical fpe_cash_transactions
-    month_txns = await fetch_all(
-        """SELECT amount, payout_method, txn_date, transaction_status
-           FROM fpe_cash_transactions
-           WHERE employee_id = $1
-             AND txn_date >= $2
-             AND transaction_status = 'final'
-           ORDER BY txn_date DESC""",
-        employee_id, month_start,
+    # C1B: Payments this month from canonical fpe_cash_transactions.
+    # fpe_cash_transactions.employee_id FKs to fpe_employees(id), not the
+    # WBOM employee_id used everywhere else in this function -- same
+    # cross-system ID bug fixed in compute_run() (2026-07-18). Resolve the
+    # linked, active fpe_employees row first; no link -> no payment history
+    # (matches this function's existing "missing data -> under_review=True"
+    # contract, not an error).
+    fpe_link = await fetch_one(
+        "SELECT id FROM fpe_employees WHERE wbom_employee_id=$1 AND status='active'",
+        employee_id,
     )
+    fpe_id = fpe_link["id"] if fpe_link else None
+
+    if fpe_id is not None:
+        month_txns = await fetch_all(
+            """SELECT amount, payout_method, txn_date, transaction_status
+               FROM fpe_cash_transactions
+               WHERE employee_id = $1
+                 AND txn_date >= $2
+                 AND transaction_status = 'final'
+               ORDER BY txn_date DESC""",
+            fpe_id, month_start,
+        )
+        last_txn = await fetch_one(
+            """SELECT amount, payout_method, txn_date
+               FROM fpe_cash_transactions
+               WHERE employee_id = $1
+                 AND transaction_status = 'final'
+               ORDER BY txn_date DESC
+               LIMIT 1""",
+            fpe_id,
+        )
+        total_paid = await fetch_val(
+            "SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions "
+            "WHERE employee_id = $1 AND transaction_status = 'final'",
+            fpe_id,
+        )
+    else:
+        month_txns = []
+        last_txn = None
+        total_paid = 0
+
     paid_this_month = sum(
         float(r["amount"]) for r in month_txns if r["amount"]
-    )
-
-    # Last payment (all time)
-    last_txn = await fetch_one(
-        """SELECT amount, payout_method, txn_date
-           FROM fpe_cash_transactions
-           WHERE employee_id = $1
-             AND transaction_status = 'final'
-           ORDER BY txn_date DESC
-           LIMIT 1""",
-        employee_id,
-    )
-
-    # Total ever paid
-    total_paid = await fetch_val(
-        "SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions "
-        "WHERE employee_id = $1 AND transaction_status = 'final'",
-        employee_id,
     )
 
     # Duty count last 30 days
@@ -142,8 +156,8 @@ async def get_payroll_summary(employee_id: int) -> PayrollSummary:
         paid_this_month=paid_this_month,
         payment_count_this_month=len(month_txns),
         last_payment_amount=float(last_txn["amount"]) if last_txn and last_txn["amount"] else None,
-        last_payment_date=str(last_txn["transaction_date"]) if last_txn else None,
-        last_payment_method=last_txn.get("payment_method") if last_txn else None,
+        last_payment_date=str(last_txn["txn_date"]) if last_txn else None,
+        last_payment_method=last_txn.get("payout_method") if last_txn else None,
         duty_count_30d=int(duty_count or 0),
         active_duties=int(active_duties or 0),
         total_paid_ever=float(total_paid or 0),

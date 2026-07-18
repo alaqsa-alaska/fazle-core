@@ -287,14 +287,25 @@ async def get_employee(emp_id: int):
     if not row:
         raise HTTPException(404, "Employee not found")
 
+    # fpe_cash_transactions.employee_id FKs to fpe_employees(id), not this
+    # WBOM emp_id -- same cross-system ID bug fixed in compute_run()
+    # (2026-07-18). Resolve the linked, active fpe_employees row first;
+    # $2 is NULL (matches nothing) when there is no link, so txn_count
+    # correctly reads 0 rather than counting an unrelated employee's rows.
+    fpe_link = await fetch_one(
+        "SELECT id FROM fpe_employees WHERE wbom_employee_id=$1 AND status='active'",
+        emp_id,
+    )
+    fpe_id = fpe_link["id"] if fpe_link else None
+
     counts = await fetch_one(
         """SELECT
-               (SELECT COUNT(*) FROM fpe_cash_transactions   WHERE employee_id=$1 AND transaction_status='final') AS txn_count,
+               (SELECT COUNT(*) FROM fpe_cash_transactions   WHERE employee_id=$2 AND transaction_status='final') AS txn_count,
                (SELECT COUNT(*) FROM wbom_escort_programs    WHERE escort_employee_id=$1) AS escort_count,
                (SELECT COUNT(*) FROM wbom_attendance         WHERE employee_id=$1) AS attendance_count,
                (SELECT COUNT(*) FROM wbom_salary_records     WHERE employee_id=$1) AS salary_record_count
         """,
-        emp_id,
+        emp_id, fpe_id,
     )
 
     return {

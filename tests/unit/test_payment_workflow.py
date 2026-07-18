@@ -92,6 +92,14 @@ class TestCreateEscortPaymentDraft:
         fpe_employee_id = seed_fpe_employee["id"]
         program_id = seed_escort_program["program_id"]
         async with test_db_pool.acquire() as conn:
+            # seed_fpe_employee sets canonical_employee_id, not
+            # wbom_employee_id -- the actual bridge column
+            # create_escort_payment_draft()'s advances resolution reads
+            # (2026-07-18 fix). Link it explicitly.
+            await conn.execute(
+                "UPDATE fpe_employees SET wbom_employee_id=$1 WHERE id=$2",
+                employee_id, fpe_employee_id,
+            )
             await conn.execute(
                 """UPDATE wbom_escort_programs
                    SET end_date=CURRENT_DATE, day_count=2, status='completed',
@@ -132,19 +140,25 @@ class TestCreateEscortPaymentDraft:
 
         # Insert an advance transaction into the canonical FPE table
         async with test_db_pool.acquire() as conn:
+            # seed_fpe_employee sets canonical_employee_id, not
+            # wbom_employee_id -- link it explicitly (2026-07-18 fix).
+            await conn.execute(
+                "UPDATE fpe_employees SET wbom_employee_id=$1 WHERE id=$2",
+                employee_id, fpe_employee_id,
+            )
             await conn.execute("""
                 INSERT INTO fpe_cash_transactions
-                    (txn_ref, employee_id, txn_category, amount, payout_method,
+                    (txn_ref, employee_id, program_id, txn_category, amount, payout_method,
                      txn_date, transaction_status, source, source_channel)
-                VALUES ($1, $2, 'advance', 500.00, 'cash', CURRENT_DATE, 'final', 'test', 'test')
-            """, f"test-adv-{employee_id}", fpe_employee_id)
+                VALUES ($1, $2, $3, 'advance', 500.00, 'cash', CURRENT_DATE, 'final', 'test', 'test')
+            """, f"test-adv-{employee_id}", fpe_employee_id, program_id)
             await conn.execute("""
                 UPDATE wbom_escort_programs
                 SET end_date='2026-05-05', day_count=5, status='completed'
                 WHERE program_id=$1
             """, program_id)
 
-        await create_escort_payment_draft(
+        result = await create_escort_payment_draft(
             escort_program_id=program_id,
             employee_id=employee_id,
             override_days=5.0,
@@ -156,9 +170,9 @@ class TestCreateEscortPaymentDraft:
                 "SELECT * FROM fazle_payment_drafts WHERE employee_id=$1 LIMIT 1",
                 employee_id,
             )
-        # net = expected(1500) - advance(500) = 1000
-        # approved_amount field may reflect this
         assert draft is not None
+        # Formula 1: 5 days * 400 = 2000 gross - advance 500 = 1500
+        assert result["expected_amount"] == pytest.approx(1500.0)
 
 
 class TestFinalizePayment:
