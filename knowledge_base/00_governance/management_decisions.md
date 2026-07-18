@@ -2818,3 +2818,70 @@ existing, safe, already-approved transition for that.
 - The 11 pre-existing `test_escort_payment_flow.py` failures remain open,
   unrelated, already documented in Phase 1H.
 
+
+---
+
+## Phase 2A — Complete Remaining Money Correctness (2026-07-18)
+
+**Objective:** search the whole repository for the same WBOM-employee_id-used-
+directly-against-fpe_cash_transactions bug fixed in `compute_run()`, and fix
+every live-money and customer-visible instance.
+
+### Audit table
+
+| Function | Correct before | Bug | Live money | Customer visible | Action |
+|---|---|---|---|---|---|
+| `modules/payroll/__init__.py::compute_run()` | No | Yes | No (dormant pipeline, see prior entry) | No | Fixed earlier this session |
+| `modules/payment_workflow/__init__.py::create_escort_payment_draft()` | No | Yes | **Yes — computes every real escort payment draft on release** | Indirectly (guard's payout amount) | **Fixed** |
+| `modules/payment_workflow/__init__.py::create_advance_request_draft()` | No | Yes | No (display-only, doesn't gate the transaction) | Admin-facing only | **Fixed** |
+| `modules/payroll_logic/__init__.py::get_payroll_summary()` | No | Yes | No (read-only reply) | **Yes — WhatsApp "কত টাকা পেয়েছি" replies** | **Fixed** (also exposed 2 separate pre-existing KeyError/wrong-column bugs, fixed in the same change) |
+| `modules/admin_employees/__init__.py::get_employee()` | No | Yes | No (cosmetic count) | Admin-facing only | **Fixed** |
+| `modules/social_auto_reply/employee_lookup.py::get_payment_history()`/`get_total_paid()` | No | Yes | No — **dead code, zero callers anywhere** (confirmed via repo-wide search) | No | Not fixed — no live impact, not worth the risk of touching unused code |
+
+### Fix
+
+Same pattern as `compute_run()`: resolve `SELECT id FROM fpe_employees WHERE
+wbom_employee_id=$1 AND status='active'` first, use the resolved id in the
+`fpe_cash_transactions` query, no link → the safe default for that function's
+own contract (zero deduction / zero payment history / draft still created,
+never fail closed). No formula changes, no filter changes beyond the
+employee-id parameter itself.
+
+**Bonus fix surfaced by this work:** `get_payroll_summary()`'s `last_txn`
+row access used `last_txn["transaction_date"]` (real column: `txn_date`) and
+`last_txn.get("payment_method")` (real column: `payout_method`) — both
+silently never triggered before because `last_txn` was always `None` under
+the old buggy query. Fixing the identity bug would have turned this into a
+500 (`KeyError`) for every newly-resolving employee if left alone — fixed in
+the same commit since it's a direct, unavoidable consequence, not scope
+creep.
+
+### Tests
+
+`tests/unit/test_money_correctness_identity.py` (new, 7 tests). Fixed 2
+existing `tests/unit/test_payment_workflow.py` tests whose `seed_fpe_employee`
+fixtures never set `wbom_employee_id` (same masking pattern as before).
+Full regression: `test_payment_workflow.py` 23/23,
+`test_full_workflows.py`/`test_payroll.py`/`test_payroll_advance_identity.py`
+all green, `test_escort_payment_flow.py` identical 11/59 pre-existing
+failures, zero new regressions.
+
+### Production verification
+
+`create_escort_payment_draft()`'s identity-resolution SQL is byte-for-byte
+identical to the pattern already live-verified in `compute_run()` (see the
+prior "Payroll Advance Deduction Employee-ID Resolution Fix" entry:
+`total_advances: 3500.0` for a real employee). Deliberately **did not**
+trigger a live call to `create_escort_payment_draft()` for verification,
+since unlike `compute_run()`'s draft-run artifact (an expected, normal
+record), a payment draft appears in an admin's approval queue and creating
+one outside a real release event would be a confusing, avoidable side
+effect for a human reviewer. Relying instead on: identical SQL pattern
+already proven live, full new unit coverage, and zero regressions across
+the entire test surface. Health `ok` before/after; the one error log entry
+found post-restart (`admin_employees/__init__.py:348, update_employee`) is
+confirmed stale (line 4676 of 5718 in the error log, well before this
+deployment) and in a function never touched by this change.
+
+**Git:** `69897d7`, pushed. Restart gate: 9/9 checks passed.
+
