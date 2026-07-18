@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dispatch — Read-Only Availability Preview</title>
+<style>
+:root{--bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;--surface:#f8fafc;--text:#1e293b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:20px}
+h1{color:var(--accent);font-size:20px;margin-bottom:4px}
+h2{font-size:15px;margin:18px 0 10px;color:var(--accent2)}
+p.sub{color:var(--muted);font-size:13px;margin-bottom:12px}
+#loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
+#loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
+#loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
+#app{display:none;max-width:1100px;margin:0 auto}
+.readonly-banner{background:#fef3c7;color:#92400e;border:1.5px solid #fcd34d;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;font-weight:600;text-align:center}
+.card{background:#fff;border-radius:10px;padding:16px 18px;box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:16px}
+.filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px}
+.field label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+.field input,.field select{width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px}
+.btn{padding:9px 16px;border-radius:7px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:13px;font-weight:600}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+#tableHost{overflow-x:auto}
+table{width:100%;min-width:640px;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:12.5px}
+th{background:var(--surface);color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.4px}
+tr.available td{color:var(--ok)}
+.pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.pill.ok{background:#dcfce7;color:#166534}
+.pill.err{background:#fee2e2;color:#991b1b}
+.pill.warn{background:#fef3c7;color:#92400e}
+.status{font-size:12px;margin-top:6px}
+.status.err{color:var(--err)}
+.empty{text-align:center;padding:30px 20px;color:var(--muted)}
+.rank-badge{display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;margin-right:6px}
+.reasons{font-size:11.5px;color:var(--muted)}
+.mono{font-family:monospace}
+details.conflict-detail{margin-top:4px;font-size:12px}
+details.conflict-detail summary{cursor:pointer;color:var(--accent2)}
+@media (max-width:640px){.filter-grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>Dispatch Preview</h1>
+  <p class="sub">Read-only availability and conflict detection. Requires the same admin key as other internal tools.</p>
+  <input id="keyInput" type="password" placeholder="API Key">
+  <button onclick="doLogin()">Continue</button>
+  <div id="loginErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+</div>
+
+<div id="app">
+  <h1>Dispatch Preview</h1>
+  <div class="readonly-banner">🔒 Read-only Dispatch Preview — No assignment changes are made</div>
+  <p class="sub">Escort-worker availability and conflict detection, derived from <code>wbom_escort_programs</code> (the canonical assignment source). No employee is assigned, reserved, or contacted from this page.</p>
+
+  <div class="card">
+    <h2>Check Availability</h2>
+    <div class="filter-grid">
+      <div class="field"><label>Start Date</label><input id="fStartDate" type="date"></div>
+      <div class="field"><label>Start Shift</label>
+        <select id="fStartShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select></div>
+      <div class="field"><label>End Date</label><input id="fEndDate" type="date"></div>
+      <div class="field"><label>End Shift</label>
+        <select id="fEndShift"><option value="N" selected>Night (N)</option><option value="D">Day (D)</option></select></div>
+      <div class="field"><label>Employee ID (optional)</label><input id="fEmployeeId" type="number" placeholder="e.g. 143"></div>
+      <div class="field"><label>Destination (optional)</label><input id="fDestination" type="text" placeholder="e.g. Narayanganj"></div>
+    </div>
+    <button class="btn primary" onclick="checkAvailability()">Check Availability</button>
+    <button class="btn" onclick="loadAllWorkers()">List All Escort Workers</button>
+    <div id="filterStatus" class="status"></div>
+  </div>
+
+  <div class="card">
+    <h2>Availability Results</h2>
+    <div id="progress" style="font-size:12.5px;color:var(--muted);margin-bottom:10px"></div>
+    <div id="tableHost"></div>
+  </div>
+
+  <div class="card">
+    <h2>Ranked Suggestions</h2>
+    <p class="sub">Deterministic ranking — no AI/LLM involved. Only eligible, available employees are shown.</p>
+    <div id="suggestionsHost"></div>
+  </div>
+</div>
+
+<script src="/static/shared-auth-fetch.js"></script>
+<script>
+let API_KEY = '';
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function doLogin() {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  localStorage.setItem('fpe_api_key', key);
+  boot();
+}
+
+function boot() {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('fStartDate').value = today;
+  document.getElementById('fEndDate').value = today;
+  loadAllWorkers();
+}
+
+function handleAuthFailure() {
+  localStorage.removeItem('fpe_api_key');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginBox').style.display = 'block';
+  document.getElementById('loginErr').textContent = 'Unauthorized — the API key was rejected. Log in again.';
+}
+
+function renderConflict(c) {
+  if (!c) return '—';
+  return `<details class="conflict-detail"><summary>Program #${esc(c.program_id)} (${esc(c.status)})</summary>
+    <div>Vessel: ${esc(c.mother_vessel || '—')}</div>
+    <div>Window: ${esc(c.start_date)} ${esc(c.start_shift)} → ${esc(c.end_date || 'open')} ${esc(c.end_shift || '')}</div>
+    <div>Destination: ${esc(c.destination || '—')}</div>
+  </details>`;
+}
+
+function renderWorkersTable(items) {
+  const host = document.getElementById('tableHost');
+  if (!items.length) {
+    host.innerHTML = '<div class="empty">No escort workers match this query.</div>';
+    return;
+  }
+  host.innerHTML = `<table>
+    <thead><tr><th>ID</th><th>Name</th><th>Mobile</th><th>Available</th><th>Current Assignment</th><th>Last Assignment</th><th>Active Count</th></tr></thead>
+    <tbody>${items.map(i => `
+      <tr class="${i.available === true ? 'available' : ''}">
+        <td class="mono">#${esc(i.employee_id)}</td>
+        <td>${esc(i.employee_name)}</td>
+        <td class="mono">${esc(i.employee_mobile || '—')}</td>
+        <td>${i.available === true
+              ? '<span class="pill ok">Available</span>'
+              : i.available === false
+                ? '<span class="pill err">Unavailable</span>'
+                : '<span class="pill warn">Unknown</span>'}</td>
+        <td>${renderConflict(i.current_conflict)}</td>
+        <td>${esc(i.last_assignment_date || 'never')}</td>
+        <td>${esc(i.active_assignment_count)}</td>
+      </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+async function loadAllWorkers() {
+  const progress = document.getElementById('progress');
+  progress.textContent = 'Loading…';
+  try {
+    const empId = document.getElementById('fEmployeeId').value.trim();
+    const path = '/api/dispatch/availability' + (empId ? `?employee_id=${encodeURIComponent(empId)}` : '');
+    const r = await FazleAuthFetch.fetch(path, API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { progress.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+    const data = await r.json();
+    progress.innerHTML = `<b>${data.total}</b> active escort worker(s) — page ${data.page} of ${data.pages || 1}`;
+    renderWorkersTable(data.items);
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function checkAvailability() {
+  const status = document.getElementById('filterStatus');
+  const startDate = document.getElementById('fStartDate').value;
+  const startShift = document.getElementById('fStartShift').value;
+  const endDate = document.getElementById('fEndDate').value;
+  const endShift = document.getElementById('fEndShift').value;
+  const destination = document.getElementById('fDestination').value.trim();
+  if (!startDate || !endDate) { status.innerHTML = '<span style="color:var(--err)">Start and end date are required.</span>'; return; }
+  status.textContent = 'Checking…';
+  status.className = 'status';
+
+  const empId = document.getElementById('fEmployeeId').value.trim();
+  if (empId) {
+    try {
+      const r = await FazleAuthFetch.fetch('/api/dispatch/check-conflict', API_KEY, {
+        method: 'POST',
+        body: JSON.stringify({
+          escort_employee_id: Number(empId),
+          start_date: startDate, start_shift: startShift,
+          end_date: endDate, end_shift: endShift,
+        }),
+      });
+      if (r.status === 403) return handleAuthFailure();
+      if (!r.ok) { status.innerHTML = `<span style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</span>`; return; }
+      const d = await r.json();
+      status.innerHTML = d.available === true
+        ? '<span style="color:var(--ok)">✓ Available for this window</span>'
+        : d.available === false
+          ? `<span style="color:var(--err)">✗ Unavailable — ${esc(d.conflicts.length)} conflict(s)</span>`
+          : '<span style="color:var(--warn)">⚠ Availability unknown (data quality)</span>';
+      renderWorkersTable([{
+        employee_id: d.escort_employee_id, employee_name: '(queried employee)', employee_mobile: '',
+        available: d.available, current_conflict: d.conflicts[0] || null,
+        last_assignment_date: null, active_assignment_count: d.conflicts.length,
+      }]);
+    } catch (e) {
+      status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
+    }
+  } else {
+    status.textContent = '';
+    await loadAllWorkers();
+  }
+  await loadSuggestions(startDate, startShift, endDate, endShift, destination);
+}
+
+async function loadSuggestions(startDate, startShift, endDate, endShift, destination) {
+  const host = document.getElementById('suggestionsHost');
+  host.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    let path = `/api/dispatch/suggestions?start_date=${startDate}&start_shift=${startShift}&end_date=${endDate}&end_shift=${endShift}`;
+    if (destination) path += `&destination=${encodeURIComponent(destination)}`;
+    const r = await FazleAuthFetch.fetch(path, API_KEY);
+    if (r.status === 403) return handleAuthFailure();
+    if (!r.ok) { host.innerHTML = `<div class="empty" style="color:var(--err)">${esc(await FazleAuthFetch.readError(r))}</div>`; return; }
+    const data = await r.json();
+    if (!data.items.length) { host.innerHTML = '<div class="empty">No eligible, available workers found for this window.</div>'; return; }
+    host.innerHTML = data.items.map(s => `
+      <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <span class="rank-badge">${esc(s.rank)}</span>
+        <b>${esc(s.employee_name)}</b> <span class="mono">#${esc(s.employee_id)}</span>
+        <div class="reasons">${s.reasons.map(esc).join(' · ')}</div>
+      </div>`).join('');
+  } catch (e) {
+    host.innerHTML = `<div class="empty" style="color:var(--err)">Network error: ${esc(e.message)}</div>`;
+  }
+}
+
+(function () {
+  const saved = localStorage.getItem('fpe_api_key');
+  if (saved) {
+    API_KEY = saved;
+    boot();
+  }
+})();
+</script>
+</body>
+</html>
