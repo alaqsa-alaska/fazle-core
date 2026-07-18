@@ -315,27 +315,17 @@ class TestAdvanceWorkflow:
             computed_by="test",
         )
 
-        # KNOWN BUG (found during Phase 1G investigation, 2026-07-18, NOT
-        # fixed here -- payroll formula changes are explicitly out of scope
-        # this session): compute_run()'s advances query
-        # (modules/payroll/__init__.py ~line 152) filters
-        # "fpe_cash_transactions WHERE employee_id=$1" using the WBOM
-        # employee_id passed into compute_run, but fpe_cash_transactions
-        # .employee_id has an FK to fpe_employees(id) -- a different ID
-        # space (confirmed via \d fpe_cash_transactions). mark_paid() in the
-        # same file resolves this correctly via
-        # "fpe_employees WHERE wbom_employee_id=$1" first; the advances
-        # query does not, so real advances are silently never deducted from
-        # payroll unless fpe_employees.id happens to numerically coincide
-        # with the wbom employee_id. Seeded here via the real canonical
-        # table + a correctly wbom_employee_id-linked fpe_employees row (not
-        # the coincidental id match), so this assertion currently and
-        # correctly fails, documenting the bug rather than masking it.
-        assert result["total_advances"] == pytest.approx(1000.0), (
-            "If this fails with total_advances=0.0, it is very likely the "
-            "known compute_run() advances employee_id-resolution bug "
-            "described above, not a new regression -- see Phase 1G report."
-        )
+        # FIXED 2026-07-18 (was a KNOWN BUG documented in Phase 1G):
+        # compute_run()'s advances query now resolves the linked, active
+        # fpe_employees row via wbom_employee_id first (matching
+        # mark_paid()'s existing pattern in the same file) before querying
+        # fpe_cash_transactions.employee_id -- see
+        # management_decisions.md's payroll advance identity fix record.
+        # Seeded via a correctly wbom_employee_id-linked fpe_employees row
+        # (not a coincidental id match, per the decoy-row invariant above),
+        # so this assertion now genuinely proves the fix rather than
+        # accidentally passing.
+        assert result["total_advances"] == pytest.approx(1000.0)
         assert result["net_salary"] < result["gross_salary"]
 
 

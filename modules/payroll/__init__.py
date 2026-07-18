@@ -147,13 +147,28 @@ async def compute_run(
     total_programs = len(prog_rows)
     program_allowance = round(total_days * rate, 2)
 
-    # C1B: Sum advances from canonical fpe_cash_transactions within period
-    advances = await fetch_val(
-        """SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions
-           WHERE employee_id=$1 AND txn_category='advance' AND transaction_status='final'
-             AND txn_date BETWEEN $2 AND $3""",
-        employee_id, period_start, period_end,
-    ) or 0
+    # C1B: Sum advances from canonical fpe_cash_transactions within period.
+    # fpe_cash_transactions.employee_id FKs to fpe_employees(id) -- a
+    # different ID space from wbom_employees.employee_id (this function's
+    # own `employee_id` param, confirmed by the wbom_employees lookup
+    # above). Must resolve the linked FPE employee first, matching the
+    # same wbom_employee_id -> fpe_employees resolution _transition()
+    # already uses elsewhere in this file for the "paid" fail-closed check.
+    # No linked (active) FPE employee -> zero advances, not an error and
+    # not a reason to fail the run (Owner decision, 2026-07-18 fix).
+    fpe_link = await fetch_one(
+        "SELECT id FROM fpe_employees WHERE wbom_employee_id=$1 AND status='active'",
+        employee_id,
+    )
+    if fpe_link:
+        advances = await fetch_val(
+            """SELECT COALESCE(SUM(amount), 0) FROM fpe_cash_transactions
+               WHERE employee_id=$1 AND txn_category='advance' AND transaction_status='final'
+                 AND txn_date BETWEEN $2 AND $3""",
+            fpe_link["id"], period_start, period_end,
+        ) or 0
+    else:
+        advances = 0
     total_advances = float(advances)
 
     # Sum non-advance deductions (none recorded yet, but reserve hook)

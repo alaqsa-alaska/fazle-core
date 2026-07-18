@@ -53,6 +53,16 @@ class TestPayrollCompute:
         program_id = seed_escort_program["program_id"]
 
         async with test_db_pool.acquire() as conn:
+            # seed_fpe_employee sets canonical_employee_id, not
+            # wbom_employee_id -- the actual bridge column compute_run()'s
+            # advances resolution reads (2026-07-18 fix). Link it explicitly
+            # so this test exercises the real resolution path instead of
+            # relying on the two fixtures' ids coincidentally matching in a
+            # fresh truncated test DB.
+            await conn.execute(
+                "UPDATE fpe_employees SET wbom_employee_id=$1 WHERE id=$2",
+                employee_id, fpe_employee_id,
+            )
             await conn.execute("""
                 UPDATE wbom_escort_programs
                 SET status='completed', day_count=3,
