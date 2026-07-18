@@ -213,6 +213,13 @@ CREATE TABLE IF NOT EXISTS wbom_escort_programs (
     remarks       TEXT,
     whatsapp_message_id INT,
     created_at    TIMESTAMPTZ DEFAULT NOW()
+    -- NOTE (found 2026-07-19, Dispatch Phase 2A.3 Stage 6): production's
+    -- real wbom_escort_programs has NO created_at column (confirmed via
+    -- information_schema.columns) -- this stub column is stale test-only
+    -- drift in the OPPOSITE direction of the escort_shift_logs/
+    -- escort_release_matches gaps above. Do not write application code
+    -- that relies on wbom_escort_programs.created_at existing -- use
+    -- assignment_time (present in both environments) instead.
 );
 
 CREATE TABLE IF NOT EXISTS wbom_attendance (

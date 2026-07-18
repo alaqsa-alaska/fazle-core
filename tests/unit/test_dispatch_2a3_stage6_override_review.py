@@ -13,12 +13,16 @@ pytestmark = pytest.mark.workflow
 
 
 async def _insert_program(test_db_pool, employee_id, **overrides):
+    # NOTE: wbom_escort_programs has NO created_at column in production
+    # (confirmed via information_schema.columns) -- assignment_time is the
+    # real equivalent, present in both environments. Do not reintroduce a
+    # created_at column/kwarg here.
     defaults = dict(
         mother_vessel="MV TEST", lighter_vessel="LT TEST", master_mobile="8801933333333",
         program_date=date(2026, 6, 1), shift="D", status="confirmed",
         start_date=date(2026, 6, 1), end_date=date(2026, 6, 3), end_shift="N",
         destination="Narayanganj", escort_name="", escort_mobile="", remarks=None,
-        created_at=None,
+        assignment_time=None,
     )
     defaults.update(overrides)
     async with test_db_pool.acquire() as conn:
@@ -26,13 +30,13 @@ async def _insert_program(test_db_pool, employee_id, **overrides):
             """INSERT INTO wbom_escort_programs
                   (mother_vessel, lighter_vessel, master_mobile, escort_employee_id,
                    program_date, shift, status, start_date, end_date, end_shift, destination,
-                   escort_name, escort_mobile, remarks, created_at)
+                   escort_name, escort_mobile, remarks, assignment_time)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15, NOW()))
                RETURNING *""",
             defaults["mother_vessel"], defaults["lighter_vessel"], defaults["master_mobile"],
             employee_id, defaults["program_date"], defaults["shift"], defaults["status"],
             defaults["start_date"], defaults["end_date"], defaults["end_shift"], defaults["destination"],
-            defaults["escort_name"], defaults["escort_mobile"], defaults["remarks"], defaults["created_at"],
+            defaults["escort_name"], defaults["escort_mobile"], defaults["remarks"], defaults["assignment_time"],
         )
     return dict(row)
 
@@ -292,13 +296,13 @@ class TestSameVesselReviewQueue:
             test_db_pool, None, mother_vessel="MV QUEUE5", lighter_vessel="",
             escort_name="Escort A", escort_mobile="8801900000009",
             program_date=date(2026, 6, 1), start_date=date(2026, 6, 1),
-            remarks="source_bridge:auto_created", created_at=now,
+            remarks="source_bridge:auto_created", assignment_time=now,
         )
         await _insert_program(
             test_db_pool, None, mother_vessel="MV QUEUE5", lighter_vessel="",
             escort_name="Escort B", escort_mobile="8801900000010",
             program_date=date(2026, 6, 1), start_date=date(2026, 6, 1),
-            remarks="source_bridge:auto_created", created_at=now,
+            remarks="source_bridge:auto_created", assignment_time=now,
         )
         result = await find_same_vessel_review_candidates()
         assert len(result["bulk_import_artifact"]) >= 1

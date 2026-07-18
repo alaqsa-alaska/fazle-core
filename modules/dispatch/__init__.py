@@ -1700,7 +1700,7 @@ async def find_same_vessel_review_candidates(include_terminal: bool = False) -> 
     rows = await fetch_all(
         f"""SELECT program_id, mother_vessel, lighter_vessel, escort_name, escort_mobile,
                    escort_employee_id, COALESCE(start_date, program_date) AS eff_start, shift,
-                   status, remarks, created_at
+                   status, remarks, assignment_time
             FROM wbom_escort_programs
             {status_filter}
             ORDER BY mother_vessel, lighter_vessel, COALESCE(start_date, program_date)"""
@@ -1732,8 +1732,12 @@ async def find_same_vessel_review_candidates(include_terminal: bool = False) -> 
             b_remarks = (b.get("remarks") or "")
             bulk_marker = ("source_bridge" in a_remarks or "auto_created" in a_remarks) and \
                           ("source_bridge" in b_remarks or "auto_created" in b_remarks)
-            created_delta = abs((b["created_at"] - a["created_at"]).total_seconds()) \
-                if a.get("created_at") and b.get("created_at") else None
+            # wbom_escort_programs has no created_at column in production
+            # (confirmed via information_schema -- unlike escort_roster_entries/
+            # escort_slip_extractions/escort_roster_audit_logs, which do) --
+            # assignment_time is the closest equivalent (DEFAULT NOW() on insert).
+            created_delta = abs((b["assignment_time"] - a["assignment_time"]).total_seconds()) \
+                if a.get("assignment_time") and b.get("assignment_time") else None
             is_bulk_artifact = bulk_marker and created_delta is not None \
                 and created_delta <= _BULK_IMPORT_WINDOW_SECONDS
 
