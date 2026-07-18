@@ -253,9 +253,14 @@ detailed under "Technical Debt" below.
     **🟢 DONE 2026-07-18 (Phase 1E):** both pages now load this report live on
     boot instead of the hardcoded `CANDIDATES` snapshot. Full record:
     `management_decisions.md` Session 24 Phase 1E. Commit `fe5b342`.
-    **Remaining risk:** no live browser click-through performed (no browser
-    tooling available this session) — recommend a manual pass before treating
-    interactive behavior as fully certified.
+    **🟢 RESOLVED 2026-07-18 (Phase 1E.1):** real-browser certification completed
+    (Playwright + Chromium, already installed). Found and fixed a genuine mobile
+    horizontal-overflow defect on `wbom-link-review.html` and added a missing
+    refresh control to both pages; all other checks (auth, live counts, XSS incl.
+    attribute-breakout, Unicode/Bangla rendering, 409 handling, cancel-no-write)
+    verified correct. New permanent suite: `tests/e2e/test_employee_review.py`
+    (19 tests). Full record: `management_decisions.md` Phase 1E.1. Commit
+    `03f851a`.
 
 ---
 
@@ -474,17 +479,38 @@ updated to use `name` instead. No production schema change. The 16 originally-af
 tests (`test_contact_roles.py`, `test_shared_auth_deps.py`) now pass, 45/45. Full
 record: `management_decisions.md` Session 24 Phase 1D. Commit `9fea840`.
 
-**Two new, unrelated technical-debt items found during Phase 1D verification, not
-fixed:**
-- `tests/workflows/test_full_workflows.py` has 5 failures unrelated to any contact-role
-  fixture — stale function-signature drift (`compute_run()`, `save_attendance()`,
-  `finalize_payment()` all called with argument lists that no longer match their real
-  signatures) plus one hardcoded release-confirmation date that's now stale relative to
-  "today." Pre-existing, not touched.
-- `tests/workflows/test_escort_payment_flow.py` hangs in the current test environment,
-  independent of the Phase 1D change — matches the same "incompletely-mocked external
-  call" pattern already found and fixed once this session elsewhere (needs
-  `mock_all_services` or equivalent). Not fixed here.
+**🟢 RESOLVED 2026-07-18 (Phase 1G) — `tests/workflows/test_full_workflows.py`'s 6
+failures.** Was: 4 function-signature drift failures (`compute_run()`,
+`save_attendance()`, `finalize_payment()`/`reverse_payment()`), 1 test whose
+release-confirmation date was always chronologically before the program's effective
+start regardless of "today" (not a staleness issue — the program start itself defaults
+to row-insertion date, not the parsed order text), and 1 multi-turn conversation-flow
+drift (advance requests are now a strict 4-turn state machine). All fixed; also
+uncovered and fixed 5 separate legacy-table (`wbom_cash_transactions` →
+`fpe_cash_transactions`) assertion drifts in the same file. **Confirmed real,
+un-fixed production bug found in the process:** `compute_run()`'s advances query
+resolves `fpe_cash_transactions.employee_id` using the WBOM employee_id, but that
+column's FK target is `fpe_employees(id)` — a different ID space; `mark_paid()` in
+the same file resolves this correctly elsewhere. Real advances are silently never
+deducted from payroll unless the two IDs coincidentally match. Needs its own
+Owner-approved proposal (payroll formula change) — not fixed, left as an
+intentionally-failing, clearly-documented test
+(`test_advance_deducted_in_payroll`). Full record: `management_decisions.md` Phase
+1G. Commit `1489bbd`.
+
+**🟢 RESOLVED 2026-07-18 (Phase 1H) — `tests/workflows/test_escort_payment_flow.py`
+"hang."** Was hypothesized above as an incompletely-mocked external call. Actual
+finding: does not reproduce. Two clean back-to-back runs completed deterministically
+in under 5 minutes each (275s, 225s), identical 11 real (non-hang) failures both
+times, zero lock contention (`pg_locks`/`pg_stat_activity` snapshotted mid-run), no
+test approaching its 30s timeout ceiling. Most plausible root cause: the malformed
+multi-line background-bash invocation documented elsewhere in this same session
+(redirection + trailing commands flattened by `eval` into bogus extra pytest
+arguments) — an agent-tooling artifact, not a product or test defect. The file's 11
+real failures are a separate, explicitly out-of-scope backlog item (mostly the same
+`wbom_cash_transactions`/`compute_run()` drift as Phase 1G, plus one deliberately
+removed route and one intentionally-hardened endpoint) — not fixed here. Full
+record: `management_decisions.md` Phase 1H.
 
 **`escort_roster_audit_logs` relation missing from the test schema — found
 2026-07-17 during Phase 1B.2 Stage A live-verification testing.** Caught and logged

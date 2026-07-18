@@ -2235,3 +2235,210 @@ not actual DOM rendering, CSS layout, or interactive click behavior.
 Recommend a manual browser pass (both pages, both action buttons, at least
 one real disposable link action) before treating this as fully certified
 for interactive use, even though the underlying logic is verified correct.
+
+---
+
+## Phase 1E.1 — Real Browser Verification and UI Certification (2026-07-18)
+
+**Objective:** Complete the missing browser-level certification for
+`wbom-create-link.html` / `wbom-link-review.html`, flagged as an open risk
+at the end of Phase 1E.
+
+**Method:** `playwright` + `pytest-playwright` were already installed
+(`pip list` confirmed) with Chromium available under
+`~/.cache/ms-playwright` — used real headless Chromium against the live
+production server, not a simulation. Read-only checks ran directly against
+production data. All state-mutating checks (link/create actions, 409/404
+handling, confirm/cancel dialogs, XSS payloads) used Playwright's
+`page.route()` to intercept the specific `fetch()` calls with synthetic
+data — the real backend was never sent a mutating request, so this needed
+no disposable test-DB app instance and touched zero real unresolved-employee
+records (a stronger safety posture than write-then-cleanup against a
+disposable DB, since no write occurs at all).
+
+**Defects found and fixed:**
+1. `wbom-link-review.html` had no horizontal-scroll container around its
+   table — on a 390px mobile viewport the whole page overflowed and
+   squished unreadably instead of scrolling within its own container.
+   Fixed: `#tableHost{overflow-x:auto}` + `table{min-width:600px}`.
+2. Neither page had a dedicated refresh control in its normal (non-error)
+   load state — only in error/empty fallback states. Added a `↻ Refresh`
+   button to both pages' progress bar, wired to the existing
+   `loadCandidates()`.
+
+**Verified correct (no fix needed):** auth flow (wrong key rejected, no
+`#app` reveal); live counts match API exactly (81/172, matching the
+already-reported 253 total); XSS escaping on both pages, including a
+targeted attribute-breakout payload
+(`Evil" onmouseover="window.__xss_fired=true" x="`) against
+`wbom-create-link.html`'s `<input value=...>` field — confirmed the
+browser treats the whole string as inert text (`window.__xss_fired`
+never set, input count stayed exactly 3); Bangla/Unicode name rendering
+(a real production row, fpe_id 316, contains a Bangla name — rendered
+correctly, screenshotted); a real 37-character English name (fpe_id 122)
+did not break card layout; `linked_but_mislabeled` renders correctly at
+its current real count of 0 (`<details open>`, "None" message); cancel on
+the link-confirmation dialog fires zero network requests; a successful
+link marks the row done and shows "✓ Linked"; a 409 (stale/already-linked)
+response is caught and the row is removed with a clear message, never
+silently overwritten.
+
+**New permanent test file:** `tests/e2e/test_employee_review.py` (19
+tests, `pytest.mark.e2e`, sync Playwright API — matches the existing
+`tests/e2e/test_dashboard.py` convention to avoid the documented
+asyncio-event-loop conflict with `pytest-asyncio`). Verified passing
+against production: `TEST_APP_URL=http://localhost:8200
+TEST_API_KEY=<redacted> pytest tests/e2e/test_employee_review.py -m e2e
+--timeout=60 -v` → 19 passed.
+
+**Git:** `03f851a`, pushed. No restart needed (static-file-only change,
+served live from disk; confirmed via direct Playwright checks against the
+running server both before and after the edit).
+
+**Certification:** Phase 1E.1 CLOSED. The "no live browser interaction
+pass yet" risk flagged at the end of Phase 1E is resolved.
+
+---
+
+## Phase 1G — Repair Workflow-Test Drift (2026-07-18)
+
+**Objective:** Fix the 6 known failures in `tests/workflows/test_full_workflows.py`.
+
+**Root-cause table:**
+
+| Test | Failure | Current production contract | Action |
+|---|---|---|---|
+| `test_full_escort_lifecycle` | `ValueError: release end date/shift is before program start` | The order text's date hint (`"06/05/2026"`) is stored in `remarks.date_hint` but never parsed into `wbom_escort_programs.start_date` (confirmed empirically: stays NULL). `_handle_release_event_tx()` falls back to `program_date`, which defaults to the row's real insertion date — i.e. "today" whenever the test actually runs. The old hardcoded `End Date: 2026-05-05` was therefore never a once-correct date that went stale; it could never have passed on any date. | Updated test: release end date computed as `date.today() + timedelta(days=4)`, shift `N` — verified via direct invocation of `count_shifts()`/`shifts_to_days()` to yield exactly 10 shifts = 5.0 days, matching the test's own `day_count==5.0` assertion. No fixed-date dependency. |
+| `test_advance_request_to_transaction` | `assert draft is not None` (no `fazle_payment_drafts` row created) | `modules.employee_conversation` now runs advance requests as a strict 4-turn state machine (trigger → amount → payout → explicit `"confirm"`); a single combined "trigger + amount" message only satisfies the trigger step, documented & covered by `tests/unit/test_sprint3a_employee_conversation.py::Test4VerificationCompleteDraftCreated`. | Updated test to send the same 4-message sequence through the real `/webhook/mcp1` HTTP path. |
+| `test_advance_deducted_in_payroll` | `TypeError: compute_run() missing period_year` | `compute_run(employee_id, period_year: int, period_month: int, computed_by, ...)` — confirmed against all 3 live production call sites (`modules/admin_commands`, `modules/payroll` x2, `app/main.py`). | Updated test to pass `period_year=2026, period_month=5` as separate ints. **Also uncovered a real production bug — see below.** |
+| `test_full_payroll_state_machine` | same `compute_run()` `TypeError` | same | Same signature fix. Also added a `wbom_employee_id`-linked `fpe_employees` row (`mark_paid()` fails closed without one, 2026-07-15 fix per `knowledge_base/06_developer_system/payroll_module.md`) — the test previously never reached that step. |
+| `test_guard_reports_present_admin_approves` | `TypeError: save_attendance() missing attendance_date` | `attendance_date` is a required, no-default param — confirmed via the real production caller (`modules/attendance/__init__.py:406`) and sibling passing tests in `tests/unit/test_attendance.py`. | Added `attendance_date=date.today()`. |
+| `test_reverse_payment` | `TypeError: finalize_payment() got unexpected kwarg 'amount'` | `finalize_payment(draft_id, approved_amount, method)` — no `admin_phone` param. `reverse_payment(draft_id, admin_phone, reason='')` — now keyed by the payment draft, not a raw transaction id; looks up the canonical transaction via `fazle_payment_drafts.transaction_id`. | Rewrote both calls to the current contracts and rewrote both assertions against `fpe_cash_transactions` (see below). |
+
+**Separate, systemic finding uncovered during investigation:** the whole
+file still asserted against the legacy `wbom_cash_transactions` table (5
+occurrences) instead of the canonical `fpe_cash_transactions` (Owner
+Directive 2026-06-29, `.claude/CLAUDE.md`) — predates that migration.
+Fixed all 5: escort-payment PAID step, advance-approval, advance-seeding,
+and both sides of the reversal check. Two required matching on
+`employee_phone` rather than `employee_id`, since
+`fpe_cash_transactions.employee_id` FKs to `fpe_employees(id)` — a
+distinct ID space from `wbom_employees.employee_id` (confirmed via
+`\d fpe_cash_transactions` on the disposable test DB).
+
+**CONFIRMED REAL PRODUCTION BUG, NOT FIXED (payroll formula work
+explicitly out of scope this session):** `compute_run()`'s advances query
+(`modules/payroll/__init__.py` ~line 152) filters
+`fpe_cash_transactions WHERE employee_id=$1` using the **WBOM**
+`employee_id` passed into `compute_run`, but that column's FK target is
+`fpe_employees(id)` — confirmed via schema inspection
+(`fpe_cash_transactions_employee_id_fkey FOREIGN KEY (employee_id)
+REFERENCES fpe_employees(id)`). `mark_paid()` in the *same file* resolves
+this correctly, first looking up `fpe_employees WHERE wbom_employee_id=$1`
+before using its `id` (see `_transition()`'s fail-closed check and
+`_post_payroll_ledger_entry()`) — the advances query does not do this
+resolution step. **Practical impact: real advances are silently never
+deducted from payroll unless `fpe_employees.id` happens to numerically
+coincide with the WBOM `employee_id`**, which is not guaranteed and not
+the general case (they are independent `SERIAL` sequences).
+`test_advance_deducted_in_payroll` was rewritten to seed through a real,
+correctly `wbom_employee_id`-linked `fpe_employees` row, with a decoy row
+inserted first specifically to rule out an ID-coincidence false pass in a
+fresh, truncated test DB (both sequences start at 1) — confirmed this
+matters: without the decoy the test passed coincidentally; with it, it
+correctly and reproducibly fails with `total_advances=0.0` instead of
+`1000.0`. Left intentionally failing with a clear docstring/assertion
+message pointing to this record, per "do not update tests merely to force
+green results." **Recommend a dedicated Phase 1G.1 (or similar) proposal
+to fix `compute_run()`'s advances query to resolve through
+`fpe_employees.wbom_employee_id`, matching `mark_paid()`'s existing
+pattern — small, well-scoped, but real-money-affecting, so needs its own
+Owner-approved proposal rather than a silent fix here.**
+
+**Tests:** `tests/workflows/test_full_workflows.py` → 6/6 (5 pass, 1
+intentional documented-bug failure). Broader regression:
+`tests/unit/{admin_commands,attendance,attendance_crud,escort_lifecycle,
+payment_workflow,payroll,payroll_dry_run,scheduler_payroll_guard,
+sprint3a_employee_conversation}.py` — exit code 0 (all green).
+
+**Git:** `1489bbd`, pushed. Test-only change, no restart needed/performed.
+
+---
+
+## Phase 1H — Diagnose `test_escort_payment_flow.py` Hang (2026-07-18)
+
+**Objective:** Determine why `tests/workflows/test_escort_payment_flow.py`
+hangs.
+
+**Finding: the hang does not reproduce.** Ran the full file twice, back to
+back, against the disposable test Postgres, with `pytest-timeout` active
+(`--timeout=30`, matching both `pytest.ini` and `tests/pytest.ini`'s
+configured value):
+- Run 1: `11 failed, 48 passed in 275.95s (0:04:35)`
+- Run 2: `11 failed, 48 passed in 224.93s (0:03:44)`
+
+Both runs produced the *identical* set of 11 failures (see below), no
+flakiness, no test hit the 30s per-test timeout ceiling. `pg_stat_activity`
+and `pg_locks` were snapshotted mid-run-2: one `active` connection doing a
+normal between-test `TRUNCATE`, zero ungranted (waiting) locks — no lock
+contention anywhere in the run.
+
+**Most plausible root cause (documented elsewhere in this same session,
+not newly hypothesized here):** earlier in this multi-phase session, a
+malformed multi-line background-bash invocation (a `> file 2>&1`
+redirection followed by `echo`/`tail` on subsequent lines) got flattened
+by `eval` into a single line, causing `pytest` to receive bogus extra
+positional arguments — which manifested as an apparent hang (pytest
+sitting waiting on invalid collection args) rather than a clean error.
+Given (a) this is a documented, confirmed artifact from this exact
+session's own tooling, (b) two clean, correctly-invoked runs just now
+completed deterministically in under 5 minutes each with no lock
+contention and no test approaching its timeout ceiling, and (c) none of
+the 11 real failures below involve blocking calls, deadlocks, or timeouts
+— the "hang" was very likely an invocation artifact, not a product or
+test defect.
+
+**Outcome: A (test-only), no code fix required.** No fixture, mock,
+cleanup, or production change needed for the hang itself. Documenting the
+correct invocation here to prevent recurrence:
+```bash
+export TEST_DATABASE_URL="postgresql://postgres:${TEST_DB_PASSWORD}@127.0.0.1:5433/fazle_test"
+pytest tests/workflows/test_escort_payment_flow.py -v --timeout=30
+```
+— always as a single-line command when run via a background/non-interactive
+shell; never split a redirected command across multiple lines in that
+context.
+
+**The 11 real (non-hang) failures, found and reproduced cleanly, are
+explicitly OUT OF SCOPE for this phase** (Phase 1H's mandate is the hang
+only) and are recorded here for a future dedicated pass:
+- `test_step3_escort_active_visible_via_api` — `GET /admin/escort-programs`
+  returns 404; no such route exists anywhere in the current codebase
+  (route removed/renamed, never replaced under that path).
+- `test_step8_cash_transaction_inserted`,
+  `test_cash_transaction_links_to_program`,
+  `test_duplicate_payment_finalize_not_allowed` — same legacy
+  `wbom_cash_transactions` vs. canonical `fpe_cash_transactions` drift
+  fixed in Phase 1G, present in this file too, not yet fixed here.
+- `test_payroll_run_items_are_complete`, `test_advance_deducted_in_payroll`,
+  `test_payroll_transitions_write_approval_log`,
+  `test_payroll_transition_api_full_chain` — same confirmed
+  `compute_run()` advances-resolution bug and `mark_paid()` fail-closed
+  requirement documented in Phase 1G, present in this file's fixtures too.
+- `test_two_employees_independent_payrolls` — likely a downstream
+  consequence of the same advances/program-linkage issues above, not
+  independently root-caused this session.
+- `test_duplicate_release_webhook_idempotent`, `test_escort_release_api_full_flow`
+  — `POST /escort/release` now returns 409 "Direct release finalization is
+  disabled; send an admin [RELEASE CONFIRMED] message" — a deliberate,
+  already-documented 2026-06-19 hardening (`modules/admin_commands/__init__.py`),
+  not a bug; these two tests simply predate that change.
+
+**Certification:** Phase 1H CLOSED. Hang not reproducible; root cause
+identified as an invocation artifact from earlier in this session, not a
+product defect. `test_escort_payment_flow.py`'s 11 unrelated failures are
+explicitly carried forward as a separate, documented backlog item — not
+silently fixed here, and not blocking Phase 1I (none of them are
+concurrency-related; the file's own `TestRaceConditions` class — the
+closest thing to a Phase 1I precursor — passed cleanly in both runs).
+
