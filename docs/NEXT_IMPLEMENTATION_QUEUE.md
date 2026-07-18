@@ -397,6 +397,16 @@ genuinely left the field blank).
 Full write-up (updated to "ROOT CAUSE CONFIRMED AND FIXED"):
 `knowledge_base/00_governance/escort_destination_field_leak_issue_2026-07-16.md`.
 
+### 3. `test_escort_payment_flow.py` remaining 8 failures — 🟢 CLASSIFIED 2026-07-18 (Phase 2C), 3 fixed
+
+Was 11 pre-existing failures (Phase 1H). Classified every one into Root Cause / Production
+Bug / Test Drift / Legacy. 3 were genuine test drift (missing linked FPE employee for
+`mark_paid()`'s fail-closed check, and one unrelated test-data salary-value flaw) — fixed.
+The other 8 are legacy `wbom_cash_transactions` table drift or intentionally-disabled/
+removed endpoints — confirmed non-blocking, left alone per "do not rewrite legacy
+expectations merely to obtain green tests." Suite now 51 passed / 8 failed. Full record:
+`management_decisions.md` Phase 2C. Commit `7b9fe41`.
+
 ---
 
 ## URL / Route-Based Functions Needing Attention
