@@ -1456,7 +1456,14 @@ async def _update_program_confirmed(
         normalized_destination = _normalize_destination(destination or "") or destination
         columns = await _escort_program_columns()
         args: list[object] = [program_id]
-        set_clauses = ["status = 'confirmed'"]
+        # Phase 2A.3 Decision 4: never downgrade an already-running/completed
+        # program back to 'confirmed' -- both statuses can only be reached
+        # via the attendance-gated lifecycle (mark_program_running_on_attendance/
+        # close_program), so a later admin message re-confirming/correcting
+        # metadata must not silently revert real operational progress.
+        set_clauses = [
+            "status = CASE WHEN status IN ('running', 'completed') THEN status ELSE 'confirmed' END"
+        ]
 
         def push(value: object) -> str:
             args.append(value)
@@ -1610,7 +1617,8 @@ async def _create_confirmed_from_admin(
         # Dedup check: prefer the same vessel/lighter/master/date. This prevents
         # a completed draft from creating a second confirmed row on re-runs.
         existing = await fetch_one(
-            """SELECT program_id FROM wbom_escort_programs
+            """SELECT program_id, status, escort_name, escort_mobile, escort_employee_id, lighter_vessel
+               FROM wbom_escort_programs
                WHERE UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
                  AND ($2::text = '' OR LOWER(lighter_vessel) = LOWER($2))
                  AND ($3::text = '' OR COALESCE(master_mobile, '') = $3)
@@ -1621,6 +1629,104 @@ async def _create_confirmed_from_admin(
         )
         if existing:
             pid = existing["program_id"]
+
+            # Phase 2A.3 Decision 3: this dedup query's own WHERE clause
+            # treats an empty incoming lighter_vessel as "matches anything"
+            # (deliberately, for the master_mobile-based dedup path where
+            # lighter_vessel may legitimately never have been captured) --
+            # that broader matching behavior is intentionally left alone
+            # here (out of scope, real production rows rely on it). But
+            # for the NEW same-date escort-change guard below specifically,
+            # an empty lighter_vessel on either side is insufficient
+            # evidence to run automatic escort-identity resolution against
+            # -- route straight to manual review rather than silently
+            # falling back to mother-vessel-only confidence.
+            lighter_vessel_insufficient = not (lv or "").strip() or not (existing.get("lighter_vessel") or "").strip()
+
+            # Phase 2A.3 Decision 4: same vessel+date match, but the row
+            # already has running/completed (= attendance-gated) evidence.
+            # If the incoming admin message names a DIFFERENT escort, this
+            # is a possible real replacement, not a metadata correction --
+            # do not let _update_program_confirmed() overwrite escort
+            # identity or (previously) silently downgrade status. Route to
+            # manual review instead. A same-date-different-escort case
+            # never qualifies as a Stage 3 automatic replacement segment
+            # either (that requires a LATER start boundary, not an equal
+            # one) -- this is permanent manual-review routing, not a
+            # temporary Stage 2 limitation.
+            existing_escort_name = (existing.get("escort_name") or "").strip().lower()
+            existing_escort_mobile = (existing.get("escort_mobile") or "").strip()
+            incoming_escort_name = (escort_name or "").strip().lower()
+            incoming_escort_mobile = (escort_mobile or "").strip()
+            escort_differs = (
+                (incoming_escort_name and incoming_escort_name != existing_escort_name)
+                or (incoming_escort_mobile and existing_escort_mobile
+                    and incoming_escort_mobile != existing_escort_mobile)
+            )
+            has_duty_evidence = existing["status"] in ("running", "completed")
+
+            # Decision 3 applies even without duty evidence: an empty
+            # lighter_vessel on either side is never confident enough to
+            # auto-apply an escort-identity change, regardless of status.
+            if escort_differs and (has_duty_evidence or lighter_vessel_insufficient):
+                review_reason = (
+                    "same_date_vessel_match_different_escort_with_duty_evidence" if has_duty_evidence
+                    else "insufficient_data_empty_lighter_vessel"
+                )
+                log.warning(
+                    f"[escort] same-date vessel match on program_id={pid} (status={existing['status']}, "
+                    f"lighter_vessel_insufficient={lighter_vessel_insufficient}) but incoming escort "
+                    f"({escort_name!r}/{escort_mobile!r}) differs from existing "
+                    f"({existing['escort_name']!r}/{existing['escort_mobile']!r}) -- routing to manual "
+                    f"review instead of overwriting, per Phase 2A.3 Decision 3/4 (reason={review_reason})"
+                )
+                try:
+                    from modules.escort_roster.db import create_roster_change_request, log_audit
+                    await create_roster_change_request(
+                        program_id=pid,
+                        action="manual_review_same_date_escort_change",
+                        payload={
+                            "reason": review_reason,
+                            "existing_status": existing["status"],
+                            "existing_escort_name": existing["escort_name"],
+                            "existing_escort_mobile": existing["escort_mobile"],
+                            "incoming_escort_name": escort_name,
+                            "incoming_escort_mobile": escort_mobile,
+                            "incoming_source": source,
+                            "mother_vessel": mv,
+                            "lighter_vessel": lv,
+                            "program_date": str(program_date) if program_date else None,
+                        },
+                        requested_by=f"system:{source}",
+                        requested_by_phone=client_phone,
+                    )
+                except Exception as review_exc:
+                    log.error(f"[escort] failed to create manual-review request for program_id={pid}: {review_exc}")
+                return pid
+
+            # Safe correction path: no duty evidence blocks it, or the
+            # escort is unchanged -- audit the before/after and proceed
+            # exactly as before.
+            try:
+                from modules.escort_roster.db import log_audit
+                await log_audit(
+                    program_id=pid,
+                    action="vessel_match_correction",
+                    old_data={
+                        "status": existing["status"], "escort_name": existing["escort_name"],
+                        "escort_mobile": existing["escort_mobile"],
+                        "escort_employee_id": existing["escort_employee_id"],
+                    },
+                    new_data={
+                        "escort_name": escort_name, "escort_mobile": escort_mobile,
+                        "escort_employee_id": emp_id, "mother_vessel": mv, "lighter_vessel": lv,
+                    },
+                    performed_by=f"system:{source}",
+                    source="admin_message",
+                )
+            except Exception as audit_exc:
+                log.error(f"[escort] failed to write vessel_match_correction audit for program_id={pid}: {audit_exc}")
+
             log.info(
                 f"[escort] assigned record already exists (program_id={pid}) "
                 f"— updating missing fields from admin msg"

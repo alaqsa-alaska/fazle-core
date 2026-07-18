@@ -360,7 +360,10 @@ class TestEscortSourceOfTruth:
         )
 
         assert ok is True
-        assert "status = 'confirmed'" in captured["query"]
+        # Phase 2A.3 Decision 4: status is no longer unconditionally reset to
+        # 'confirmed' -- it preserves an existing running/completed status
+        # (attendance-gated progress must never be silently reverted).
+        assert "THEN status ELSE 'confirmed' END" in captured["query"]
         assert "lighter_vessel = COALESCE" in captured["query"]
         assert "destination = COALESCE" in captured["query"]
         assert "cargo_type = COALESCE" in captured["query"]

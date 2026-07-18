@@ -1508,7 +1508,12 @@ async def create_roster_change_request(
     requested_by_phone: Optional[str] = None,
 ) -> dict:
     """Store operator roster mutation requests for admin approval."""
-    if action not in {"edit", "delete"}:
+    # Phase 2A.3 (Dispatch Stage 2+): extended to also carry read-only
+    # review items that don't map to a direct edit/delete action --
+    # decide_roster_change_request()'s approval dispatch only implements
+    # 'edit'/'delete' so far; new action types created here are held
+    # 'pending' until a later stage's review UI/handler processes them.
+    if action not in {"edit", "delete", "manual_review_same_date_escort_change"}:
         raise ValueError("Unsupported change request action")
 
     existing = await fetch_one(

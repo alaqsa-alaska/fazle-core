@@ -21,6 +21,8 @@
 
 **Updated again 2026-07-19** (Dispatch Phase 2A.3 Stage 1): added `049_dispatch_2a3_escort_changed_status.sql` (widens `wbom_escort_programs`'s status CHECK constraint to accept a new `'escort_changed'` value) and `050_dispatch_2a3_replacement_linkage.sql` (adds `wbom_escort_programs.replaces_program_id`, a nullable self-referential FK, plus a regular index, a self-reference CHECK, and a partial UNIQUE index enforcing at most one non-terminal replacement per predecessor). Both purely additive, no existing row rewritten, verified on the disposable test DB before production application. See `knowledge_base/00_governance/management_decisions.md` → "Dispatch Phase 2A.3 Stage 1" for full detail.
 
+**Updated again 2026-07-19** (Dispatch Phase 2A.3 Stage 2): added `051_dispatch_2a3_change_request_action_widen.sql` (widens `escort_roster_change_requests`'s own `action` CHECK constraint -- separate from and in addition to the application-level whitelist in `create_roster_change_request()` -- to accept `'manual_review_same_date_escort_change'`). Discovered mid-implementation, not anticipated in the Decision Report. Purely additive, no existing row rewritten.
+
 ## ✅ `db/migrations/` (canonical, 53+ files as of this update — see 2026-07-15 note above for a known pre-existing count discrepancy not resolved here) — tracked in `schema_migrations` via `db/migrate.py`
 
 ```
@@ -80,6 +82,7 @@
 048_chat_history.sql
 049_dispatch_2a3_escort_changed_status.sql
 050_dispatch_2a3_replacement_linkage.sql
+051_dispatch_2a3_change_request_action_widen.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
