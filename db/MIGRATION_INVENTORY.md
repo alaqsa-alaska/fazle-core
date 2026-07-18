@@ -19,6 +19,8 @@
 
 **Updated again 2026-07-15** (`chat_history` shadow archive): added `048_chat_history.sql` (new, standalone `chat_history` table — not read or written by any fazle-core application code, exists only as the write target for an out-of-repo read-only sync service). Applied directly against `schema_migrations` for this one file only (**not** via a real `db/migrate.py` run — that would have re-attempted the entire `029`-`045` backlog above, which was out of scope for this task and deliberately not touched). `047` was intentionally skipped — it's reserved in `db/migrations_drafts/` for an unrelated, still-pending Owner decision (see `db/.restart_gate_manifest`).
 
+**Updated again 2026-07-19** (Dispatch Phase 2A.3 Stage 1): added `049_dispatch_2a3_escort_changed_status.sql` (widens `wbom_escort_programs`'s status CHECK constraint to accept a new `'escort_changed'` value) and `050_dispatch_2a3_replacement_linkage.sql` (adds `wbom_escort_programs.replaces_program_id`, a nullable self-referential FK, plus a regular index, a self-reference CHECK, and a partial UNIQUE index enforcing at most one non-terminal replacement per predecessor). Both purely additive, no existing row rewritten, verified on the disposable test DB before production application. See `knowledge_base/00_governance/management_decisions.md` → "Dispatch Phase 2A.3 Stage 1" for full detail.
+
 ## ✅ `db/migrations/` (canonical, 53+ files as of this update — see 2026-07-15 note above for a known pre-existing count discrepancy not resolved here) — tracked in `schema_migrations` via `db/migrate.py`
 
 ```
@@ -76,6 +78,8 @@
 045_ai_read_billing_outstanding.sql
 046_employee_edit_requests.sql
 048_chat_history.sql
+049_dispatch_2a3_escort_changed_status.sql
+050_dispatch_2a3_replacement_linkage.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
