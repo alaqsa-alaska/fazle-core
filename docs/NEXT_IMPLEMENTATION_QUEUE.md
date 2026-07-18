@@ -542,6 +542,42 @@ real failures are a separate, explicitly out-of-scope backlog item (mostly the s
 removed route and one intentionally-hardened endpoint) — not fixed here. Full
 record: `management_decisions.md` Phase 1H.
 
+**🟢 RESOLVED 2026-07-18 — `compute_run()`'s advance-deduction employee-ID bug
+(the one flagged as un-fixed in Phase 1G above).** Fixed: resolves the linked,
+active `fpe_employees` row via `wbom_employee_id` first (matching
+`_transition()`'s existing pattern), then queries `fpe_cash_transactions` by
+that id. Production audit (read-only): 194 advance transactions all-time
+(~70 distinct FPE employees, ৳153,408 total); 15/15 sampled real
+advance-bearing employees had `id != wbom_employee_id`. **Zero realized
+financial exposure** — confirmed all 534 sampled `wbom_payroll_runs` rows
+(May/June/July 2026) are 100% `status='draft'`, 0% with `total_programs>0`;
+this pipeline has never paid anyone, so the bug's impact was latent only,
+never historical. Production-verified against real, previously-uncomputed
+data: wbom employee 151 (FPE 177, "Nazmul"), period 2026-01, correctly
+returned `total_advances: 3500.0` matching two real transactions (would have
+been `0.0` before the fix). Full record: `management_decisions.md`
+"Payroll Advance Deduction Employee-ID Resolution Fix". Commit `c2c4256`.
+
+**🔴 NOT RESOLVED — same bug class found in 4 sibling functions, none fixed
+(explicitly out of the above fix's narrow scope; do not assume this whole
+class of ID-resolution issue is closed):**
+- `modules/payment_workflow/__init__.py::create_escort_payment_draft()` —
+  **highest priority of these.** This is the function that computes every
+  real escort payment draft's `net_payable` on release (confirmed live path,
+  `CANONICAL_BUSINESS_RULES.md`) — unlike `compute_run()`'s dormant pipeline,
+  this is real money moving today with the same wrong-ID-space advance
+  subtraction.
+- `modules/payment_workflow/__init__.py::create_advance_request_draft()` —
+  same bug in a display-only "paid this month" figure shown to the admin
+  approving a new advance — misleading but not money-miscalculating.
+- `modules/payroll_logic/__init__.py::get_payroll_summary()` — same bug
+  across 3 queries feeding customer-facing WhatsApp payment-history replies.
+- `modules/admin_employees/__init__.py::get_employee()` — same bug in a
+  cosmetic admin-panel transaction count.
+- (`modules/social_auto_reply/employee_lookup.py`'s two similarly-shaped
+  functions have the same bug but are dead code, zero callers — no live
+  impact, not prioritized.)
+
 **`escort_roster_audit_logs` relation missing from the test schema — found
 2026-07-17 during Phase 1B.2 Stage A live-verification testing.** Caught and logged
 non-fatally (`[audit] log_audit failed: relation "escort_roster_audit_logs" does not

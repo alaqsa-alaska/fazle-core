@@ -2628,3 +2628,193 @@ correctness (pure Python, no schema/env change) but performed anyway per
 this phase's deployment-safety requirement — see the deployment record
 below.
 
+
+---
+
+## Payroll Advance Deduction Employee-ID Resolution Fix (2026-07-18)
+
+**Objective:** Correct `compute_run()` so advance deductions resolve through the
+correct FPE employee ID, per the Owner-authorized narrow scope (identity
+resolution only — no formula redesign, no unrelated payment-flow cleanup).
+
+### Confirmed defect
+
+`modules/payroll/__init__.py::compute_run()`'s advance-deduction query filtered
+`fpe_cash_transactions.employee_id` directly against the WBOM `employee_id`
+parameter passed into `compute_run`. Schema inspection confirms
+`fpe_cash_transactions_employee_id_fkey FOREIGN KEY (employee_id) REFERENCES
+fpe_employees(id)` — a different, independently-sequenced ID space from
+`wbom_employees.employee_id`. `_transition()`'s "paid" fail-closed check
+elsewhere in the same file already resolves this correctly via
+`fpe_employees WHERE wbom_employee_id=$1 AND status='active'`; the advances
+query never did.
+
+### Production data audit (read-only, before any code change)
+
+- `GET /api/fpe/transactions?txn_category=advance`: **194 advance transactions
+  all-time**, ৳153,408 total, spanning 2026-01-22 to 2026-07-09, across ~70
+  distinct FPE employee IDs.
+- Sampled 15 real advance-bearing employees via `GET /api/fpe/employees/{id}`:
+  **15/15 (100%) had `id != wbom_employee_id`** when linked at all; 6/15 (40%)
+  had `wbom_employee_id = NULL` (no link — correctly resolves to $0 under both
+  old and new code; a separate, unrelated unresolved-linkage gap, not this
+  fix's concern).
+- `GET /payroll/runs?period=2026-05|06|07`: **534 sampled runs, 100%
+  `status='draft'`, 0% with `total_programs>0`, 0% with `total_advances>0`**
+  — consistent with `CANONICAL_BUSINESS_RULES.md`'s already-documented fact
+  (703 rows stuck in draft as of 2026-07-09): **this pipeline has never paid
+  anyone.** Confirmed: **zero realized financial exposure** — the bug's
+  impact was entirely latent/forward-looking, never historical, since no run
+  has ever left `draft`.
+
+### Same-bug-class functions found, NOT fixed (explicitly out of this fix's scope)
+
+- **`modules/payment_workflow/__init__.py::create_escort_payment_draft()`
+  — HIGH severity, urgent follow-up recommended.** Per
+  `CANONICAL_BUSINESS_RULES.md`: "the function that actually computes every
+  real escort payment draft on release." Its advance subtraction
+  (`net_payable = gross_amount − food_bill + conveyance − advances`) has the
+  *identical* WBOM-id-against-`fpe_cash_transactions` bug, but unlike
+  `compute_run()` this is a **live, real-money path** — guards may be
+  currently overpaid on every release because their prior advances aren't
+  being deducted.
+- `modules/payment_workflow/__init__.py::create_advance_request_draft()` —
+  same bug in a "paid this month" figure shown to the approving admin, but
+  display-only (doesn't gate or cap the transaction) — lower urgency.
+- `modules/payroll_logic/__init__.py::get_payroll_summary()` — 3 queries
+  (this month's payments, last payment, all-time total) feeding
+  customer-facing WhatsApp "কত টাকা পেয়েছি" replies — same bug, misleads
+  employees about their own payment history.
+- `modules/admin_employees/__init__.py::get_employee()` — cosmetic
+  `txn_count` in an admin detail panel, same bug, low stakes.
+- `modules/social_auto_reply/employee_lookup.py::get_payment_history()` /
+  `get_total_paid()` — same bug present but **dead code, zero callers
+  anywhere in the codebase**, no live impact.
+
+**These are recorded here for a separate, Owner-approved follow-up — not
+fixed in this pass, per the explicit "no unrelated payment-flow cleanup"
+scope boundary.** `create_escort_payment_draft()` is the clear priority given
+it's live money moving today.
+
+### Fix
+
+Single change to `compute_run()`: resolve the linked, active `fpe_employees`
+row via `wbom_employee_id` first (`SELECT id FROM fpe_employees WHERE
+wbom_employee_id=$1 AND status='active'`, the exact pattern already used by
+`_transition()`), then query `fpe_cash_transactions` by the resolved id. No
+FPE link → advances = 0, the run still computes successfully (not fail
+closed — a missing link is a data-completeness fact, not an error condition,
+per Owner-defined policy for this fix). Everything else in the function is
+byte-for-byte unchanged: signature, period bounds, program-days aggregation,
+`prorate_basic` logic, other-deductions hook, status/date filters on the
+advances query itself, output schema, and audit-log writes.
+
+### Tests
+
+`tests/unit/test_payroll_advance_identity.py` (new, 9 tests): cross-system ID
+mapping (the key regression test — WBOM id deliberately desynchronized from
+FPE id via a decoy-row technique, matching the empirically-confirmed real
+production pattern), coincidental-match safety net, another employee's
+advance never leaking in, no-FPE-link → zero deduction (run still succeeds),
+inactive-link treated as no-link, multiple-advance correct summing, status
+filtering (`final` counted, `pending`/`reversed` excluded — confirmed the
+existing filter was already correct, only the ID was wrong), period
+boundaries (inclusive start/end via `BETWEEN`, exclusive outside), and
+idempotency (repeat calls return the same run, no duplicate rows).
+
+Fixed two pre-existing tests whose fixtures never actually exercised
+cross-system resolution (both passed only via `id`/`wbom_employee_id`
+coincidence in a fresh truncated test DB — a "silently masked by ID
+coincidence" pattern, the same class of test-hygiene issue found and fixed
+in Phase 1G):
+- `tests/unit/test_payroll.py::test_advances_deducted_from_net` — its
+  `seed_fpe_employee` fixture sets `canonical_employee_id`, not
+  `wbom_employee_id` (the real bridge column) — a pre-existing fixture gap,
+  first noted in Phase 1G's investigation but not touched then since it
+  wasn't blocking anything at the time. Fixed locally in this one test via
+  an explicit `UPDATE`, not by modifying the shared fixture (used by 5 other
+  test files for unrelated purposes — changing its behavior globally was
+  judged out of scope and riskier than a one-line local fix).
+- `tests/workflows/test_full_workflows.py::test_advance_deducted_in_payroll`
+  — was already correctly seeded in Phase 1G specifically to *reveal* this
+  bug (deliberately not coincidentally matched); now genuinely passes
+  instead of being an intentionally-documented failure.
+
+**Full regression, zero new failures:**
+`tests/unit/test_payroll.py` 12/12. `tests/workflows/test_full_workflows.py`
+6/6 (the previously-documented failure is now a genuine pass — no
+independently-explained failures remain in this file). Full
+`tests/workflows/test_escort_payment_flow.py` run (clean, solo — a
+concurrent-run collision against the shared disposable test DB on the first
+attempt produced spurious schema-corruption errors, re-ran cleanly): the
+same **identical 11/59 pre-existing failures**, confirmed by name and error
+message, before and after this change. None of the 11 are advance-identity
+issues — 3 are legacy `wbom_cash_transactions`-table drift (this file's own
+`test_advance_deducted_in_payroll` and `test_payroll_run_items_are_complete`
+still seed via the legacy table, unrelated to the ID-resolution bug just
+fixed and correctly left untouched per "do not rewrite unrelated
+legacy-table tests"), 1 is unrelated test-employee salary-data design
+(`test_two_employees_independent_payrolls`), the rest are route removal,
+missing-FPE-link-for-`mark_paid`, or deliberately-disabled-endpoint issues
+already documented in Phase 1H.
+
+### Historical correction decision
+
+**No correction performed or required.** Zero payroll runs have ever left
+`draft` status (confirmed above) — there is no paid or approved run
+containing an incorrect deduction to fix. Existing draft runs will simply
+compute correctly the next time anyone explicitly recomputes them (this fix
+doesn't retroactively touch existing rows — `compute_run()`'s own idempotency
+returns the existing draft as-is when one is already present for that
+employee/period, per its documented behavior).
+
+### Production verification
+
+Used a real, previously-uncomputed employee/period combination (wbom
+employee 151 / FPE employee 177 "Nazmul", period 2026-01, which genuinely had
+two real advance transactions totaling ৳3,500 and no prior payroll run) —
+not fake data, per the explicit "do not create fake payroll transactions"
+constraint. `POST /payroll/compute` created a new, real, correctly-computed
+draft run (`run_id=714`): `"total_advances": 3500.0`, exactly matching the
+real underlying transactions (before this fix, this would have returned
+`0.0`, since the query would have searched
+`fpe_cash_transactions WHERE employee_id=151`, but the real rows are keyed by
+`employee_id=177`). A second identical call correctly hit the idempotency
+path (`"already_exists": true`, same `run_id=714`, no duplicate). Health
+`ok` before and after; no new errors in logs; this new draft run is left in
+place as a legitimate, now-correct record (not cleaned up — it reflects real
+underlying data, unlike the disposable-test-DB material which was always
+synthetic).
+
+### Git and deployment
+
+Commit `c2c4256` (fix + tests combined — tightly coupled, both landed
+together per the explicit "two commits are acceptable" allowance), pushed.
+`restart_gate.sh --restart`: all 9 checks passed, health `ok` before and
+after, PID before 1783977 → PID after 2848578.
+
+### Rollback
+
+`git revert c2c4256`, push, `restart_gate.sh --restart`. No schema change
+(nothing to roll back at the DB level). No production-data rollback needed —
+`run_id=714` is a correct draft record, not something requiring reversal;
+if the Owner nonetheless wants it removed, `cancel_run(714, ...)` is the
+existing, safe, already-approved transition for that.
+
+### Remaining risks
+
+- `create_escort_payment_draft()`'s identical, live-money-affecting bug is
+  the clear next priority (see "same-bug-class functions" above) — needs its
+  own Owner-approved proposal.
+- `get_payroll_summary()`'s bug means employees asking WhatsApp "কত টাকা
+  পেয়েছি" may be told incorrect payment history today — customer-facing,
+  worth prioritizing alongside the above.
+- The 40% of sampled advance-bearing employees with no `wbom_employee_id`
+  link at all is a separate, unresolved-employee-linkage gap (distinct bug
+  class from this fix) — those employees' advances will correctly show as
+  $0 under the now-fixed query, but that $0 is only "correct" in the sense
+  of "no crash/no wrong number," not in the sense of "the real advance was
+  accounted for." A dedicated employee-linkage cleanup would close this.
+- The 11 pre-existing `test_escort_payment_flow.py` failures remain open,
+  unrelated, already documented in Phase 1H.
+
