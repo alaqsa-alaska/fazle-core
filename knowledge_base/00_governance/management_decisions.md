@@ -3209,3 +3209,167 @@ Whether/when to authorize write-capable Dispatch (actual assignment,
 reassignment, reservation, conflict override, roster-entry creation) — not
 started, not designed, and explicitly not part of this phase.
 
+---
+
+## Dispatch Phase 2A.2 — Controlled Manual Assignment (2026-07-19)
+
+**Status: COMPLETE — manual-only assignment.** This does NOT mark "Dispatch"
+as a whole complete. Auto-assignment, conflict override, reservations/soft
+holds, unassignment (no governed workflow exists), running-program
+replacement, attendance automation, WhatsApp assignment commands, and
+LLM ranking are all explicitly **out of scope** and deferred to a future,
+separately-authorized Owner decision.
+
+### Canonical assignment field
+
+`wbom_escort_programs.escort_employee_id` (unchanged, existing column). No
+new assignment table. `escort_roster_entries` remains the derived read model,
+synchronized via the existing certified `sync_program_to_roster()`, never
+the source of truth.
+
+### Assignment mode (manual-only, Owner-approved)
+
+Authorized human selects an employee → backend rechecks eligibility and
+conflict inside the write transaction → assignment succeeds or is rejected.
+The system may show ranked suggestions (reused from Phase 2A.1's
+deterministic, non-LLM ranking); it never selects or submits one
+automatically — confirmed by a dedicated e2e test
+(`test_suggestion_click_fills_field_without_submitting`) that a suggestion
+click only fills the employee-id field.
+
+### Program-status assignability matrix (evidence-based, not guessed)
+
+| Program status | Initial assignment | Reassignment | Reason |
+|---|---:|---:|---|
+| `draft` | Yes | N/A (no current employee per every confirmed write-site) | Draft programs structurally have `escort_employee_id IS NULL` |
+| `confirmed` | Yes | Yes | Pre-release; no attendance/payment-draft exists yet for a non-terminal program |
+| `running` | **No** | **No** | `find_active_program_for_employee()` and `mark_program_running_on_attendance()` (`modules/escort_lifecycle/__init__.py`) both key strictly on `escort_employee_id` with no physical-presence check — reassigning a running program would silently misattribute a real attendance/release event to whoever now holds the FK. No ratified workflow exists; excluded on concrete evidence, not assumption. |
+| `completed` | No | No | Terminal, per Owner instruction |
+| `cancelled` | No | No | Terminal, per Owner instruction |
+
+A second, independent risk avoided by this same restriction:
+`modules.payment_workflow.create_escort_payment_draft()` overwrites
+`employee_id` on an *existing* draft if re-invoked for the same
+`escort_program_id` — but drafts are only created at release (a terminal
+transition), so restricting assignment to pre-release statuses (`draft`,
+`confirmed`) structurally avoids that risk too, without needing to
+special-case it.
+
+### Conflict policy
+
+Same `AssignmentWindow.overlaps()` interval logic certified in Phase 2A.1,
+re-run **inside** the write transaction after both locks are held — never
+trusts a browser-side check. `HTTP 409` with `code: "dispatch_conflict"` and
+a `conflicts` array (program_id/status/window/vessel/destination — no
+payroll/financial values exposed). No override capability exists
+(`force=true`/`override=true`/`ignore_conflict=true` and equivalents were
+never added).
+
+### Reassignment / optimistic concurrency
+
+`expected_current_employee_id` is required for every reassignment.
+Mismatch → `HTTP 409` `code: "stale_assignment"`, forcing the frontend to
+refresh before retrying. No blind overwrite of the current employee is
+possible.
+
+### Concurrency design
+
+`pg_advisory_xact_lock`, matching the established precedent in this repo
+(`modules.payment_workflow.create_escort_payment_draft()`, keyed
+identically by `escort_program_id`). Two locks acquired in a **fixed,
+global order — `escort_employee_id` first, then `program_id`** — every
+code path, so two concurrent assignment calls can never deadlock waiting
+on each other in reverse order. Locking the employee (not just the
+program) is what prevents "same employee double-booked through racing
+requests": two concurrent calls targeting the same employee but different,
+mutually-overlapping programs are serialized by the employee-level lock,
+confirmed by a dedicated test
+(`test_concurrent_same_employee_overlapping_programs_no_double_booking`).
+Rollback-on-failure verified by a test that forces
+`sync_program_to_roster()` to raise and confirms the `escort_employee_id`
+UPDATE rolls back too — program and roster can never disagree.
+
+### Roster synchronization
+
+`modules.escort_roster.db.sync_program_to_roster()` — unmodified, called
+with `conn=` to compose into the same transaction as the assignment write.
+Never `create_roster_entry()`'s manual synthetic-row path. Verified: exactly
+one `escort_roster_entries` row remains per program after reassignment.
+
+### RBAC (live-verified, not assumed from documentation)
+
+Write endpoint (`POST /api/dispatch/programs/{id}/assign`): `operator`
+role or above. Read endpoints (`availability`/`check-conflict`/
+`suggestions`/`overlaps`) remain `viewer`-or-above, unchanged. **Correction
+to this KB's own "Roles (RBAC)" section**: that section documents a 4-tier
+hierarchy (`viewer → accountant → admin → superadmin`) — confirmed **stale**
+via a direct live query against `fazle_roles`. The real, live hierarchy has
+6 tiers: `viewer(10) < office_assistant(20) < operator(30) < accountant(50)
+< admin(70) ≤ superadmin(100)`. `operator`'s own role description
+("Approve/reject drafts, escort confirm, mark paid") is a direct semantic
+match for assignment-writing authority. No new role was created.
+
+### Existing overlap review (read-only)
+
+`GET /api/dispatch/overlaps` — same certified interval logic, groups by
+employee, classifies each conflicting pair
+(`same_exact_program_duplication` / `confirmed-confirmed` /
+`active-active` / `active-confirmed` / `legacy/unknown`). No mutation, no
+"resolve automatically" capability anywhere (UI or API). Live recount at
+certification time: **24 employees with actual overlaps** (48 conflicting
+pairs: 42 active-active, 4 confirmed-confirmed, 2 active-confirmed) — up
+from the 23 recorded at Phase 2A.1 certification, because the CSV
+reconciliation work done between 2A.1 and 2A.2 introduced 4 new
+confirmed-confirmed pairs among newly-reconciled employees (680/682/685/722).
+Documented as a finding; no automatic correction performed.
+
+### No-write-outside-transaction proof
+
+Every write in `modules/dispatch/assign_program()` happens inside one
+`pool.acquire()` + `conn.transaction()` block, with both advisory locks
+held before any read. Confirmed via a dedicated production verification
+run (synthetic draft program, real API calls, real active-but-currently-
+free employees 2 and 4 as assignment targets — never a real employee's
+real assignment displaced): authorized assignment (200), unauthorized
+caller (403), conflict correctly detected post-assignment (`available:
+false`), stale assignment blocked (409), reassignment with correct
+`expected_current_employee_id` succeeded (200), overlaps endpoint
+unaffected (200). Zero `fazle_payment_drafts` or `wbom_attendance` rows
+created. All 6 table row counts (`wbom_escort_programs`,
+`escort_roster_entries`, `wbom_employees`, `fazle_payment_drafts`,
+`wbom_attendance`, `escort_roster_audit_logs`) were identical before and
+after the synthetic program was created, exercised, and deleted.
+
+### Tests
+
+37 unit tests (`tests/unit/test_dispatch_assignment.py`) + 15 browser
+tests (`tests/e2e/test_dispatch_assignment.py`, Playwright, role-mocked
+via `page.route()`, run against the live production server) — all
+passing. Full regression: 244/244 (dispatch 2A.1, escort_roster
+concurrency, escort_lifecycle, payment_workflow, payroll ×4, identity
+×4, shared auth) + `test_escort_payment_flow.py` 51 passed / 8
+pre-existing documented failures (unchanged, unrelated). **Grand total:
+295 passed, 8 pre-existing failures, 0 new failures.**
+
+One real bug found and fixed during production e2e testing (not during
+unit/regression testing): `submitAssignment()`'s post-write refresh call
+(`loadProgramForAssign()`, itself resetting `#assignStatus` to "Loading…"
+then clearing it) was silently wiping the just-shown success/conflict/
+stale-assignment message before a user could read it. Fixed by restoring
+the message after the refresh completes (`cb62118`).
+
+### Deployment
+
+4 commits: `ecf0db4` (service), `b82db83` (UI), `cae749f` (tests),
+`cb62118` (UI bug fix found via production e2e testing). Deployed via
+`scripts/restart_gate.sh --restart` (all 9 checks passed). Rollback is
+code-only (`git revert` the 4 commits; no schema/data changes to reverse).
+
+### Next Owner decision required before any further Dispatch work
+
+Whether/when to authorize: a reservation/soft-hold model, controlled
+conflict override, running-program replacement (needs its own ratified
+workflow given the confirmed attendance/release-attribution risk),
+unassignment, attendance integration, or generalized all-employee
+scheduling. None started, none designed, none part of this phase.
+
