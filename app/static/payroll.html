@@ -1745,34 +1745,40 @@ window.addEventListener('keydown', ev => {
 });
 
 // ── API Helper ───────────────────────────────────────────────────────────────
+// Phase 2D (2026-07-18): both wrappers now delegate the actual fetch() call
+// and header-building to shared-auth-fetch.js (FazleAuthFetch), matching
+// the other 6 already-migrated call sites in this file. Each wrapper's own
+// external contract (URL prefix rule, body-serialization behavior, error
+// shape) is preserved EXACTLY -- these are real, load-bearing differences
+// (see shared-auth-fetch.js's own header comment), not just duplicated
+// boilerplate, so this is not a mechanical swap onto FazleAuthFetch.getJson/
+// postJson: api()'s callers always pre-stringify their own body (confirmed
+// via a full audit of every call site -- FazleAuthFetch.sendJson() would
+// have double-JSON-encoded it), and adminApi()'s dual-prefix /users|/audit
+// routing plus explicit cache-busting headers have no equivalent in the
+// shared file and don't belong there (page-specific routing knowledge).
+// The one intentional behavior change: error messages now go through
+// FazleAuthFetch.readError(), which correctly parses FastAPI's
+// {detail: [{msg: "..."}]} validation-error shape into a readable string
+// (previously api() showed the raw, unparsed JSON text; adminApi() didn't
+// handle the array-of-msg shape at all) -- a strict improvement, not a
+// behavior change any call site depends on (confirmed no call site pattern
+// -matches specific error text).
 async function api(path, opts = {}) {
-  const headers = { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json', ...(opts.headers || {}) };
-  const r = await fetch('/api/fpe' + path, { ...opts, headers });
-  if (!r.ok) {
-    const err = await r.text().catch(() => r.statusText);
-    throw new Error(err || r.statusText);
-  }
+  const r = await FazleAuthFetch.fetch('/api/fpe' + path, API_KEY, opts);
+  if (!r.ok) throw new Error(await FazleAuthFetch.readError(r));
   return r.json();
 }
 
 async function adminApi(path, opts = {}) {
-  const headers = { 'X-Internal-Key': API_KEY, 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache', ...(opts.headers || {}) };
-  const requestInit = { cache: 'no-store', ...opts, headers };
-  if (requestInit.body && typeof requestInit.body !== 'string') {
-    requestInit.body = JSON.stringify(requestInit.body);
+  const extraHeaders = { 'Cache-Control': 'no-cache', Pragma: 'no-cache', ...(opts.headers || {}) };
+  const requestOpts = { cache: 'no-store', ...opts, headers: extraHeaders };
+  if (requestOpts.body && typeof requestOpts.body !== 'string') {
+    requestOpts.body = JSON.stringify(requestOpts.body);
   }
   const base = (path.startsWith('/users') || path.startsWith('/audit')) ? '/admin' : '/api/admin';
-  const r = await fetch(base + path, requestInit);
-  if (!r.ok) {
-    let detail = r.statusText;
-    try {
-      const data = await r.json();
-      detail = data.detail || data.message || JSON.stringify(data);
-    } catch (_) {
-      detail = await r.text().catch(() => r.statusText);
-    }
-    throw new Error(detail || r.statusText);
-  }
+  const r = await FazleAuthFetch.fetch(base + path, API_KEY, requestOpts);
+  if (!r.ok) throw new Error(await FazleAuthFetch.readError(r));
   return r.json();
 }
 
