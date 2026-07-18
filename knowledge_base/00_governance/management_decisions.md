@@ -2885,3 +2885,113 @@ deployment) and in a function never touched by this change.
 
 **Git:** `69897d7`, pushed. Restart gate: 9/9 checks passed.
 
+
+---
+
+## Phase 2B — Writer 3 (`create_roster_entry()`) Concurrency Resolution (2026-07-18)
+
+**Objective:** resolve the last unfixed escort-roster dual-write concurrency
+risk, per the diagnostic's own scoping (`escort_dualwrite_concurrency_debug_2026-07-17.md`:
+"Writer 3 was not part of the 2026-07-13 refactor attempt at all and has its
+own, separate race conditions that any future consolidation effort needs to
+account for independently").
+
+### Re-trace
+
+Confirmed both documented races still present, current code:
+`modules/escort_roster/db.py::create_roster_entry()` (line 793 → shifted
+slightly from the doc's "797" after intervening edits, same logic) — (1)
+`max_pid = SELECT GREATEST(MAX(...))+1` then a separate `INSERT`; (2)
+`_find_duplicate_roster_entry()` check then a separate `INSERT`, with no DB
+constraint backing the vessel+lighter+date(+escort) uniqueness rule.
+
+### Reproduction (before any code change)
+
+Two diagnostic tests, git-uncommitted, calling the real unmodified function:
+- **Program_id collision:** 10 concurrent calls with distinct vessel data
+  (duplicate check short-circuited via `start_date=None`) → **9/10 hit a live
+  `UniqueViolationError`** on the identical computed `program_id=900001`.
+  Confirmed real, not a hang.
+- **Duplicate bypass:** could not be cleanly isolated from the program_id
+  race in this reproduction shape (both races share the same "10 calls
+  computing the same max_pid" setup, so the ID-uniqueness constraint
+  coincidentally limited successful inserts to 1 regardless of the
+  duplicate-check race) — the structural TOCTOU gap in
+  `_find_duplicate_roster_entry()` is confirmed by code inspection (no DB
+  constraint backs it) even though this specific reproduction shape
+  couldn't isolate it independently. Not pursued further since the chosen
+  fix (full serialization) eliminates both races by construction regardless
+  of the exact interaction.
+
+**Side-finding while building the reproduction:** `tests/conftest.py`'s
+`escort_roster_entries` stub was missing the `notes` column (present in the
+canonical schema and confirmed live in production via
+`GET /api/escort-roster/{id}`) — an omission from this session's own Phase
+1I stub transcription. Fixed.
+
+### Fix
+
+Wrapped the whole `create_roster_entry()` body (max_pid generation,
+duplicate check, INSERT, audit log, final SELECT) in one transaction
+serialized by `pg_advisory_xact_lock(hashtext('escort_roster.create_roster_entry'))`
+— Option D (advisory lock) from the established decision menu. Smallest
+change: no schema change, no new unique constraint, no restructuring of the
+duplicate-check business logic itself. `create_roster_entry()` is a
+low-frequency, admin-only manual "add roster entry" tool — full
+serialization has no meaningful throughput cost and is a clean, low-risk
+trade-off. Threaded `conn` through `_find_duplicate_roster_entry()`
+(previously had no `conn` parameter at all) and the other internal calls
+(`_get_conveyance_for_destination`, `_get_shift_rate`, `execute`,
+`log_audit`, the final `fetch_one`) so every statement in the sequence
+shares the same connection/lock scope.
+
+**Post-fix re-verification of the same reproduction:** 10/10 concurrent
+distinct-vessel calls now succeed with 10 distinct `program_id`s (0 errors,
+down from 9/10). 10/10 concurrent identical-vessel calls now correctly
+produce exactly 1 row, with the other 9 cleanly blocked by the existing
+`ValueError` (not silently duplicated).
+
+### Tests
+
+`tests/unit/test_roster_writer3_concurrency.py` (new, 4 tests): 10-concurrent
+distinct-vessel no-collision, 10-concurrent identical-vessel exactly-one-row,
+sequential no-deadlock/no-hang, and rollback-leaves-no-partial-row (proves
+the sequence is genuinely one transaction, not just passing a `conn` object
+inertly). **No existing test anywhere in the repository previously exercised
+`create_roster_entry()` at all** (confirmed via repo-wide search) — this also
+closes a real test-coverage gap, not just a concurrency bug.
+
+**Full regression, zero new failures:**
+`tests/unit/{escort_roster_routes,escort_lifecycle,escort_roster_concurrency,
+roster_writer3_concurrency}.py` 45/45 combined.
+`tests/workflows/test_escort_payment_flow.py`: identical 11/59 pre-existing
+failures, confirmed byte-for-byte, before and after this change.
+
+### Production verification
+
+Created two clearly-marked synthetic rows via `POST /api/escort-roster`
+(`mother_vessel: "PHASE2B TEST VERIFY"` / `"PHASE2B DUPE TEST"`, `notes`
+explicitly stating "safe to delete"): first confirmed a normal create
+succeeds (`program_id=957`); second confirmed the duplicate-block path works
+live (`program_id=958` created, then an identical repeat correctly returned
+`409 Duplicate roster blocked`). Both rows deleted via
+`DELETE /api/escort-roster/{program_id}` immediately after — confirmed
+gone (`404`) — since unlike the payroll-run verification in Phase 2A/earlier
+(a legitimate artifact built on real underlying data), these were fully
+synthetic admin-created rows with no real underlying business data, so
+cleanup was both possible and appropriate. Health `ok` before/after, no new
+errors.
+
+**Git:** `5bab26a`, pushed. Restart gate: 9/9 checks passed.
+
+### Rollback
+
+`git revert 5bab26a`. No schema change (advisory locks are session/
+transaction-scoped, nothing persisted). No production-data rollback needed
+(verification rows already cleaned up).
+
+**All three escort-roster writers are now resolved:** Writer 1
+(`escort_lifecycle`, unchanged, canonical) — Writer 2
+(`sync_program_to_roster`, Phase 1I) — Writer 3 (`create_roster_entry`,
+this phase).
+
