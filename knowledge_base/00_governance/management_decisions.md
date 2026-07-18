@@ -2442,3 +2442,189 @@ silently fixed here, and not blocking Phase 1I (none of them are
 concurrency-related; the file's own `TestRaceConditions` class — the
 closest thing to a Phase 1I precursor — passed cleanly in both runs).
 
+
+---
+
+## Phase 1I — Escort-Roster Dual-Write Concurrency Resolution (2026-07-18)
+
+**Objective:** Resolve the open concurrency risk involving multiple writers to
+`escort_roster_entries`, per
+`knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md`.
+
+**Prerequisite re-trace confirmed all documented line references still valid**
+against current code: Writer 1 (`modules/escort_lifecycle/__init__.py:359-388`,
+atomic `INSERT ... ON CONFLICT (program_id) DO UPDATE`), Writer 2
+(`modules/escort_roster/db.py:259` check-then-act SELECT, confirmed
+non-transactional — no `conn.transaction()` anywhere in the function), Writer 3
+(`modules/escort_roster/db.py::create_roster_entry()` — separate races, out of
+scope, matching the diagnostic doc's own framing).
+
+### Reproduction (built before any code change, per the mandatory prerequisite)
+
+Two standalone, git-uncommitted diagnostic tests called the real, unmodified
+`sync_program_to_roster()` directly — no shipped code was changed to build
+these reproductions:
+
+**1. Check-then-act race** — 10 concurrent calls for the same `program_id`,
+no enclosing transaction:
+```
+REPRO RESULTS: ok=6 timeout=0 error=4
+  ERROR: duplicate key value violates unique constraint
+         "escort_roster_entries_program_id_key" (Key (program_id)=(1) already exists.)
+  [× 4]
+FINAL ROW COUNT for program_id=1: 1
+```
+Confirmed real, fast (not a hang) — 4/10 concurrent calls hit a genuine
+UniqueViolationError from the unguarded check-then-act.
+
+**2. Nested-acquire deadlock** — the actual root cause of the "second,
+un-root-caused issue underneath" that made the 2026-07-13 refactor attempt
+hang even after its check-then-act race was believed fixed. Called
+`sync_program_to_roster()` from *inside* an already-held
+`pool.acquire() → conn.transaction()` block (exactly matching
+`escort_lifecycle.handle_release_event()`'s own wrapper, and exactly what the
+reverted refactor did by routing `escort_lifecycle` through this function),
+against the same `test_db_pool` (`max_size=3`):
+```
+POOL: min_size=1 max_size=3
+NESTED REPRO: overall_timeout=True ok=0 timeout=0 error=0
+```
+Genuine ~25-30s hang, reproduced deterministically. Root cause:
+`sync_program_to_roster()` never accepted/threaded a `conn` parameter — every
+internal `fetch_one()`/`execute()`/`fetch_val()` call independently acquired
+a *fresh* connection from the shared pool via `db_conn()`. Under N concurrent
+outer transactions each holding 1 of `max_size` connections, the nested
+acquire has nothing left to grant — total pool deadlock. `pg_stat_activity`/
+`pg_locks` were polled throughout (0 blocked-lock rows — this is pure
+connection-pool exhaustion, not a row/table lock).
+
+**A genuinely useful side-finding while building the reproduction:** the
+disposable test DB was missing `escort_calculation_config` and
+`escort_roster_audit_logs` entirely — both exist in production (confirmed
+`escort_calculation_config` live via `GET /api/escort-roster/config`, 30+
+seeded destination rows returned) but are defined only in
+`migrations/escort_roster_schema.sql`, a separate file never scanned by
+`tests/conftest.py`'s `db/migrations/`-only migration runner. This gap meant
+*no test in this repository* had ever exercised
+`sync_program_to_roster()`'s real pay-calculation branch
+(`if start_date and end_date:`) — only its legacy `total_payment` fallback.
+Fixed by adding both tables (verbatim column shapes) to
+`tests/conftest.py::_BASE_SCHEMA_SQL`.
+
+### Fix
+
+Single change to `modules/escort_roster/db.py::sync_program_to_roster()`:
+1. Replaced the SELECT-then-branch with one atomic
+   `INSERT ... ON CONFLICT (program_id) DO UPDATE ... RETURNING *, (xmax = 0) AS _inserted`
+   — the `xmax = 0` idiom distinguishes insert vs. update for audit-log
+   labeling without a second query.
+2. Added an optional `conn=None` parameter, threaded through every internal
+   DB call (`_get_conveyance_for_destination`, `_get_shift_rate`,
+   `_write_shift_log`, `log_audit`, and the upsert itself) — when a caller
+   passes its own held connection, this function composes into that
+   caller's transaction instead of acquiring a new one; when called
+   standalone (all of its current real callers), behavior is unchanged.
+
+**Post-fix re-verification of both reproductions:**
+```
+# Standalone race, post-fix:
+REPRO RESULTS: ok=10 timeout=0 error=0
+FINAL ROW COUNT for program_id=1: 1
+
+# Nested-acquire, post-fix (now correctly threading conn=outer_conn):
+POOL: min_size=1 max_size=3
+NESTED REPRO: overall_timeout=False ok=10 timeout=0 error=0
+```
+Both fully resolved. The nested-acquire case now completes in ~2.6s versus
+the pre-fix ~25-30s hang.
+
+### Decision: Option A (canonical writer unchanged), Writer 2 hardened, no unification
+
+**A material finding that overrides the prompt's own "likely preferred"
+default (one shared atomic upsert used by both writers):** Writer 1's
+financial fields (`salary`, `conveyance`, `food_bill`, `net_payable`, `total`)
+are sourced from the actual `fazle_payment_drafts` row created earlier in the
+same release-confirmation flow (`d.gross_amount`, `d.conveyance`,
+`d.food_bill`, `d.advance_deduction`, `d.expected_amount`). Writer 2
+independently *recomputes* these same fields via its own `calculate_pay()`
+call against `escort_calculation_config`'s conveyance/shift-rate table, and
+has **no `advance_deduction` concept at all**. Routing Writer 1 through
+Writer 2 — even now that both concurrency bugs are fixed — would silently
+change which numbers land in `escort_roster_entries` for every real release,
+diverging from the actual payment draft/transaction figures. That is an
+unauthorized production financial-calculation change, explicitly out of
+scope this session ("Do not implement... payroll formula changes").
+
+**Decision:** Writer 1 (`escort_lifecycle`) is **unchanged** and remains the
+sole, canonical, financially-authoritative writer for the release-event
+path — Option A from the prompt's menu ("Retain atomic lifecycle upsert").
+Writer 2 (`sync_program_to_roster()`) is hardened (atomic + conn-safe) for
+its **own three other real callers**
+(`modules/escort/__init__.py:1363,1373`,
+`modules/escort_roster/history_sync.py:726,903`,
+`modules/escort_roster/routes.py:730` admin resync API), where both bugs
+were already live, unaddressed, and unrelated to the payment-draft-sourcing
+concern (those callers don't have a competing payment-draft source of
+truth). The "two independent, duplicated write paths" (the Tier-2 cleanup
+item the queue doc names as "the actual defect") therefore remains
+duplicated by design, now that a concrete, evidence-based reason exists to
+keep them separate — recorded here rather than silently left ambiguous.
+Writer 3 (`create_roster_entry()`) is untouched, per the original
+diagnostic's own scoping — separate bug class (ID-collision,
+duplicate-bypass), lower urgency, admin manual-entry tool only.
+
+### Tests
+
+`tests/unit/test_escort_roster_concurrency.py` (new, 6 tests): 10-concurrent
+same-program (no error, 1 row), 10-concurrent different-programs (no
+cross-contamination), nested-conn 10-way (no deadlock), release-path +
+admin-sync running concurrently for the same program (the literal "release +
+sync_program_to_roster" scenario from the required test matrix — both
+writers, unchanged Writer 1 alongside fixed Writer 2, produce exactly 1
+roster row with no hang), idempotent `calc_version` increment on repeat
+calls, and transactional rollback composability (an outer transaction
+rollback correctly rolls back the roster write when `conn` is threaded
+through — proves the fix is genuinely transactional, not just passing an
+inert object). All 6 pass.
+
+`tests/unit/test_escort_roster_routes.py::TestEscortRosterSyncStatus` updated
+— was asserting the *old* implementation's exact 3-call
+SELECT/UPDATE-with-`$18` SQL shape; updated to match the new single
+INSERT-with-RETURNING shape while preserving its original intent
+(`status='confirmed'` must map to `roster_status='confirmed'`).
+
+**Full regression, zero new failures:**
+`tests/unit/{escort_roster_routes,escort_lifecycle,escort_roster_concurrency}.py`
++ `tests/workflows/test_full_workflows.py` → only the already-documented
+Phase 1G `compute_run()` advances bug fails (unrelated, pre-existing,
+intentional). `tests/workflows/test_escort_payment_flow.py` full run →
+identical 11/59 pre-existing failures from Phase 1H (route removal, legacy
+`wbom_cash_transactions` drift, the same `compute_run()` bug, one
+deliberately-disabled endpoint), confirmed byte-for-byte identical test
+names and error messages before and after this change — zero new
+regressions anywhere touched by this fix.
+
+### Rollback
+
+Pure application-code change, no schema migration (the `UNIQUE(program_id)`
+constraint the `ON CONFLICT` clause targets already existed). `git revert
+2d712f9` fully restores the prior (safe-but-duplicated, check-then-act)
+behavior with no data-shape implications either direction.
+
+### Production risk
+
+🟢 Low. The changed function's *current* production callers
+(`modules/escort/__init__.py`, `modules/escort_roster/history_sync.py`,
+`modules/escort_roster/routes.py`) are all called standalone today (no
+enclosing transaction), so the `conn=None` default preserves their exact
+prior behavior byte-for-byte except for the now-atomic upsert (strictly
+safer under concurrency than before, with identical steady-state output for
+non-concurrent calls — confirmed via the idempotency test).
+`modules/escort_lifecycle` (the financially-authoritative release path) is
+completely untouched by this commit.
+
+**Git:** `2d712f9`, pushed. **Restart:** not required for this change's own
+correctness (pure Python, no schema/env change) but performed anyway per
+this phase's deployment-safety requirement — see the deployment record
+below.
+

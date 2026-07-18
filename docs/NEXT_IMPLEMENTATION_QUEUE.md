@@ -171,14 +171,13 @@ detailed under "Technical Debt" below.
 
 ## Immediate Next (genuinely open, ranked)
 
-1. **[ ] Escort-roster/lifecycle dual-write concurrency hang — unresolved, needs dedicated
-   concurrency-debugging time.** See "Known Broken / Conflicting Workflows" below for the
-   full call-path trace. **Session 19 Step 5 completed the diagnostic** (all 3 writers to
-   `escort_roster_entries` documented, including a previously-undiscussed 3rd writer —
-   see `knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md`) but
-   did **not** fix it — reproducing the actual hang requires temporarily reintroducing the
-   reverted refactor, out of scope for a diagnosis-only step. Budget real time for
-   `pg_locks`/`pg_stat_activity` inspection during a live hang.
+1. **[x] 🟢 RESOLVED 2026-07-18 (Phase 1I) — Escort-roster/lifecycle dual-write
+   concurrency hang.** See "Known Broken / Conflicting Workflows" below for the full fix
+   record. Reproduced both the check-then-act race and the actual deadlock root cause
+   (nested pool-connection acquisition), fixed `sync_program_to_roster()` to be atomic
+   and connection-safe, and deliberately left `escort_lifecycle`'s own writer unchanged
+   after finding the two writers compute financial fields from different, incompatible
+   sources. Commit `2d712f9`.
 2. **[x] RESOLVED 2026-07-17 (Session 19 Step 3) — Escort `destination` field leak.** Root
    cause confirmed (`_CD_DEST_RE`'s `\s*` crossing a newline on a blank `Destination:`
    line), fixed, 6 corrupted rows (blast radius corrected from 4) backfilled to `NULL`.
@@ -266,7 +265,38 @@ detailed under "Technical Debt" below.
 
 ## Known Broken / Conflicting Workflows
 
-### 1. Escort release-event dual-write — concurrent releases can hang (UNFIXED, reverted) — diagnostic completed 2026-07-17, still not fixed
+### 1. Escort release-event dual-write — 🟢 RESOLVED 2026-07-18 (Phase 1I)
+
+**Was:** concurrent releases could hang if `escort_lifecycle` were ever routed through
+`sync_program_to_roster()` (attempted 2026-07-13, reverted). Diagnostic completed
+2026-07-17, root cause not yet found.
+
+**Fixed 2026-07-18:** built a deterministic reproduction of both bugs before touching
+any code. (1) `sync_program_to_roster()`'s SELECT-then-branch was a real check-then-act
+race — 4/10 concurrent calls for the same `program_id` raised a live
+`UniqueViolationError`. Fixed with a single atomic `INSERT ... ON CONFLICT (program_id)
+DO UPDATE`. (2) The actual "second, un-root-caused issue" that hung the 2026-07-13
+attempt even after that race looked fixed: `sync_program_to_roster()` never accepted a
+`conn` parameter, so it always acquired its own fresh pool connection — calling it from
+inside a caller's already-held transaction (exactly what the reverted refactor did)
+exhausted the pool and deadlocked every concurrent caller. Reproduced as a genuine
+~25-30s hang, fixed by threading an optional `conn` through every internal call;
+re-verified the same reproduction completes in ~2.6s post-fix.
+
+**Decision: `escort_lifecycle` (Writer 1) is NOT changed and does not call
+`sync_program_to_roster()`.** Found during investigation: Writer 1's financial fields
+come from the real `fazle_payment_drafts` row (including `advance_deduction`, which
+`sync_program_to_roster()` has no concept of at all), while `sync_program_to_roster()`
+independently recomputes them — unifying the writers would have silently changed
+production payment figures. Writer 1 stays canonical and unchanged for the
+release-event path; the fix hardens Writer 2 for its own 3 other real callers where
+both bugs were already live. Writer 3 (`create_roster_entry()`, the admin manual-entry
+API) has its own separate, still-unfixed races — documented, not in scope.
+
+New test suite: `tests/unit/test_escort_roster_concurrency.py` (6 tests, including the
+literal "release + sync_program_to_roster running concurrently" scenario). Zero
+regressions across the full escort/payroll test surface. Full record:
+`management_decisions.md` Phase 1I. Commit `2d712f9`.
 
 **Where:** `modules/escort_lifecycle/__init__.py` (~line 315-390, the raw `INSERT INTO
 escort_roster_entries ... ON CONFLICT DO UPDATE` block) vs. `modules/escort_roster`'s own
