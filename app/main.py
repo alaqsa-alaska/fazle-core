@@ -45,6 +45,7 @@ from shared.queue import record_heartbeat
 from modules.fazle_payroll_engine import start_fpe, stop_fpe
 from modules.fazle_payroll_engine.routes import router as fpe_router
 from modules.escort_roster.routes import router as escort_roster_router
+from modules.dispatch.routes import router as dispatch_router
 from modules.client_billing.routes import router as client_billing_router
 from modules.attendance.routes import router as attendance_router
 from modules.drafts.routes import router as drafts_router
@@ -442,6 +443,7 @@ app = FastAPI(title="Fazle Core", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 app.include_router(fpe_router)
 app.include_router(escort_roster_router)
+app.include_router(dispatch_router)           # Dispatch Phase 2A.1 — read-only availability/conflict
 app.include_router(client_billing_router)     # Phase 2B — Client Billing Profiles
 app.include_router(attendance_router)         # Office Payroll Hardening — Attendance CRUD
 app.include_router(kb_upload_router)
