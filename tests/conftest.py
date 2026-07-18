@@ -503,7 +503,7 @@ CREATE TABLE IF NOT EXISTS escort_roster_entries (
     conveyance NUMERIC(10,2) DEFAULT 0, food_bill NUMERIC(10,2) DEFAULT 0,
     advance_deduction NUMERIC(12,2) DEFAULT 0, net_payable NUMERIC(12,2) DEFAULT 0,
     total NUMERIC(12,2), release_point TEXT, roster_status TEXT DEFAULT 'draft',
-    calc_version INT DEFAULT 1, last_synced_at TIMESTAMPTZ,
+    calc_version INT DEFAULT 1, notes TEXT, last_synced_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 

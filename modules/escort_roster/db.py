@@ -25,7 +25,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from app.config import get_settings
-from app.database import execute, fetch_all, fetch_one, fetch_val
+from app.database import execute, fetch_all, fetch_one, fetch_val, get_pool
 from .calculations import calculate_pay, parse_date_shift
 
 log = logging.getLogger("fazle.escort_roster.db")
@@ -66,6 +66,7 @@ async def _find_duplicate_roster_entry(
     escort_name: Optional[str],
     *,
     exclude_program_id: Optional[int] = None,
+    conn=None,
 ) -> Optional[dict]:
     """
     Detect same-day duplicate entries.
@@ -96,6 +97,7 @@ async def _find_duplicate_roster_entry(
         mv,
         lv,
         exclude_program_id,
+        conn=conn,
     )
     if dup_primary:
         return {"type": "vessel_date", **dict(dup_primary)}
@@ -121,6 +123,7 @@ async def _find_duplicate_roster_entry(
         lv,
         en,
         exclude_program_id,
+        conn=conn,
     )
     if dup_with_escort:
         return {"type": "vessel_escort_date", **dict(dup_with_escort)}
@@ -790,113 +793,148 @@ async def update_roster_entry(
     )
 
 
+# Constant key for the transaction-scoped advisory lock serializing
+# create_roster_entry() (Phase 2B, 2026-07-18). Any fixed 64-bit int works;
+# derived from hashtext() of a unique label so it can't collide with any
+# other advisory lock key used elsewhere in this codebase by accident.
+_CREATE_ROSTER_ENTRY_LOCK_KEY = "escort_roster.create_roster_entry"
+
+
 async def create_roster_entry(data: dict, actor: str = "system") -> dict:
     """
     Manually create a new escort_roster_entries row.
     Generates a safe program_id using the DB sequence gap above any existing value.
+
+    Phase 2B (2026-07-18): the whole check-then-act sequence (max_pid
+    generation, duplicate-vessel check, insert) is wrapped in one
+    transaction serialized by a transaction-scoped advisory lock
+    (pg_advisory_xact_lock) -- reproduced two real, independent races here
+    before this fix: (1) max_pid computed via SELECT MAX+1 then used in a
+    separate INSERT -- concurrent calls could compute the identical
+    "next" id (reproduced: 9/10 concurrent calls hit a live
+    UniqueViolationError on the same program_id); (2) _find_duplicate_
+    roster_entry()'s check-then-act had no DB-level constraint backing it,
+    so two concurrent calls for the same vessel/lighter/date/escort could
+    both pass the check before either commits. The advisory lock
+    serializes all concurrent callers of this one function (a low-
+    frequency, admin-only manual-entry tool -- no legitimate need for
+    concurrent throughput here), eliminating both TOCTOU windows without
+    any schema change or new unique constraint.
     """
-    # Use a transaction-safe ID: max of escort programs or roster entries + 1
-    max_pid = await fetch_val(
-        """
-        SELECT GREATEST(
-            COALESCE((SELECT MAX(program_id) FROM escort_roster_entries), 900000),
-            COALESCE((SELECT MAX(program_id) FROM wbom_escort_programs), 900000)
-        ) + 1
-        """
-    )
-    program_id = int(max_pid)
-
-    dup = await _find_duplicate_roster_entry(
-        data.get("mother_vessel"),
-        data.get("lighter_vessel"),
-        data.get("start_date"),
-        data.get("escort_name"),
-    )
-    if dup:
-        if dup.get("type") == "vessel_date":
-            raise ValueError(
-                "Duplicate roster blocked: same mother vessel + lighter vessel already exists on this date "
-                f"(program_id={dup.get('program_id')})."
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                _CREATE_ROSTER_ENTRY_LOCK_KEY,
             )
-        raise ValueError(
-            "Duplicate roster blocked: same mother vessel + lighter vessel + escort already exists on this date "
-            f"(program_id={dup.get('program_id')})."
-        )
 
-    # Calculate pay if dates are provided
-    salary = None
-    total_shifts = None
-    total_days = None
-    total = None
-    conveyance_val = data.get("conveyance")
-    if data.get("start_date") and data.get("end_date"):
-        destination = data.get("destination")
-        conveyance = (
-            Decimal(str(conveyance_val))
-            if conveyance_val is not None
-            else await _get_conveyance_for_destination(destination)
-        )
-        shift_rate = await _get_shift_rate()
-        pay = calculate_pay(
-            data["start_date"], data.get("start_shift") or "D",
-            data["end_date"], data.get("end_shift") or "N",
-            conveyance, shift_rate,
-        )
-        total_shifts = pay["total_shifts"]
-        total_days = pay["total_days"]
-        salary = pay["salary"]
-        conveyance_val = pay["conveyance"]
-        total = pay["total"]
+            max_pid = await fetch_val(
+                """
+                SELECT GREATEST(
+                    COALESCE((SELECT MAX(program_id) FROM escort_roster_entries), 900000),
+                    COALESCE((SELECT MAX(program_id) FROM wbom_escort_programs), 900000)
+                ) + 1
+                """,
+                conn=conn,
+            )
+            program_id = int(max_pid)
 
-    await execute(
-        """
-        INSERT INTO escort_roster_entries (
-            program_id, mother_vessel, lighter_vessel, master_mobile,
-            escort_name, escort_mobile, destination,
-            start_date, start_shift, end_date, end_shift,
-            total_shifts, total_days, salary, conveyance, total,
-            release_point, roster_status, notes, created_at, updated_at
-        ) VALUES (
-            $1, $2, $3, $4,
-            $5, $6, $7,
-            $8, $9, $10, $11,
-            $12, $13, $14, $15, $16,
-            $17, $18, $19, NOW(), NOW()
-        )
-        """,
-        program_id,
-        data.get("mother_vessel"),
-        data.get("lighter_vessel"),
-        data.get("master_mobile"),
-        data.get("escort_name"),
-        data.get("escort_mobile"),
-        data.get("destination"),
-        data.get("start_date"),
-        data.get("start_shift") or "D",
-        data.get("end_date"),
-        data.get("end_shift") or "N",
-        total_shifts,
-        total_days,
-        salary,
-        conveyance_val,
-        total,
-        data.get("release_point"),
-        data.get("roster_status") or "draft",
-        data.get("notes"),
-    )
+            dup = await _find_duplicate_roster_entry(
+                data.get("mother_vessel"),
+                data.get("lighter_vessel"),
+                data.get("start_date"),
+                data.get("escort_name"),
+                conn=conn,
+            )
+            if dup:
+                if dup.get("type") == "vessel_date":
+                    raise ValueError(
+                        "Duplicate roster blocked: same mother vessel + lighter vessel already exists on this date "
+                        f"(program_id={dup.get('program_id')})."
+                    )
+                raise ValueError(
+                    "Duplicate roster blocked: same mother vessel + lighter vessel + escort already exists on this date "
+                    f"(program_id={dup.get('program_id')})."
+                )
 
-    await log_audit(
-        program_id=program_id,
-        action="create",
-        old_data={},
-        new_data=data,
-        performed_by=actor,
-        source="api",
-    )
-    row = await fetch_one(
-        "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
-    )
-    return dict(row)
+            # Calculate pay if dates are provided
+            salary = None
+            total_shifts = None
+            total_days = None
+            total = None
+            conveyance_val = data.get("conveyance")
+            if data.get("start_date") and data.get("end_date"):
+                destination = data.get("destination")
+                conveyance = (
+                    Decimal(str(conveyance_val))
+                    if conveyance_val is not None
+                    else await _get_conveyance_for_destination(destination, conn=conn)
+                )
+                shift_rate = await _get_shift_rate(conn=conn)
+                pay = calculate_pay(
+                    data["start_date"], data.get("start_shift") or "D",
+                    data["end_date"], data.get("end_shift") or "N",
+                    conveyance, shift_rate,
+                )
+                total_shifts = pay["total_shifts"]
+                total_days = pay["total_days"]
+                salary = pay["salary"]
+                conveyance_val = pay["conveyance"]
+                total = pay["total"]
+
+            await execute(
+                """
+                INSERT INTO escort_roster_entries (
+                    program_id, mother_vessel, lighter_vessel, master_mobile,
+                    escort_name, escort_mobile, destination,
+                    start_date, start_shift, end_date, end_shift,
+                    total_shifts, total_days, salary, conveyance, total,
+                    release_point, roster_status, notes, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7,
+                    $8, $9, $10, $11,
+                    $12, $13, $14, $15, $16,
+                    $17, $18, $19, NOW(), NOW()
+                )
+                """,
+                program_id,
+                data.get("mother_vessel"),
+                data.get("lighter_vessel"),
+                data.get("master_mobile"),
+                data.get("escort_name"),
+                data.get("escort_mobile"),
+                data.get("destination"),
+                data.get("start_date"),
+                data.get("start_shift") or "D",
+                data.get("end_date"),
+                data.get("end_shift") or "N",
+                total_shifts,
+                total_days,
+                salary,
+                conveyance_val,
+                total,
+                data.get("release_point"),
+                data.get("roster_status") or "draft",
+                data.get("notes"),
+                conn=conn,
+            )
+
+            await log_audit(
+                program_id=program_id,
+                action="create",
+                old_data={},
+                new_data=data,
+                performed_by=actor,
+                source="api",
+                conn=conn,
+            )
+            row = await fetch_one(
+                "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id,
+                conn=conn,
+            )
+            return dict(row)
 
 
 async def get_roster_summary() -> dict:
