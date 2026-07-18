@@ -3025,3 +3025,57 @@ disabled-endpoint issues — none are production bugs, none are blocking.
 **Git:** `7b9fe41`, pushed. Test-only change — no restart required or
 performed.
 
+
+---
+
+## Phase 2D — `payroll.html` Wrapper Migration (2026-07-18)
+
+**Objective:** complete the deferred migration of `payroll.html`'s `api()`/
+`adminApi()` wrappers onto `shared-auth-fetch.js`, previously deferred
+because "dual-prefix routing and auto-serialize behavior have no equivalent
+in shared-auth-fetch.js and need a design decision, not a mechanical swap."
+
+### Audit — behavioral differences found
+
+| Aspect | `api()` | `adminApi()` | `shared-auth-fetch.js` |
+|---|---|---|---|
+| URL prefix | Fixed `/api/fpe` | Dual: `/users`\*/`/audit`\* → `/admin`, else `/api/admin` | None (caller passes full path) |
+| Body serialization | Never (caller must pre-stringify) | Conditional (only if not already a string) | `sendJson()`: always unconditional |
+| Cache control | None | `Cache-Control`/`Pragma: no-cache` + `cache:'no-store'` | None built-in, but passthrough via `opts` |
+| Error extraction | Raw, unparsed response text | `JSON.parse` → `.detail \|\| .message`, no array-of-msg handling | `readError()`: handles both string `detail` and array-of-`{msg}` FastAPI validation shape |
+
+**Confirmed via a full call-site audit (48 `api()` calls, 11 `adminApi()`
+calls):** every `api()` call site that passes a body pre-stringifies it
+manually. Delegating to `FazleAuthFetch.sendJson()` (unconditional
+`JSON.stringify`) would have double-encoded these bodies — a real breaking
+bug a mechanical swap would have introduced.
+
+### Decision: no extension needed to `shared-auth-fetch.js`
+
+Both wrappers now delegate to the existing **low-level** primitives
+(`FazleAuthFetch.fetch()` + `readError()`), not the higher-level
+`getJson`/`postJson` (which force serialization). This preserves each
+wrapper's own external contract exactly — **zero call sites needed to
+change** — while gaining the shared header-building and, as an intentional
+improvement, correct FastAPI error-shape parsing (previously `api()` showed
+raw unparsed JSON text as the error message; `adminApi()` didn't handle the
+validation-error array shape at all).
+
+### Verification
+
+Since this repo serves static files directly from the working tree (no
+build step, no restart needed), the edit was live the instant it was saved.
+Verified via Playwright directly against the running production server
+(`page.evaluate()` calling `api()`/`adminApi()` in the real browser
+context, matching the Phase 1E.1-established technique): `api()`'s
+`GET /health`, a `GET` with query params, and the 404 error path (confirmed
+`"Employee not found"`, not raw JSON — proving the improved error
+extraction works); `adminApi()`'s `/api/admin` branch and both `/users` and
+`/audit` special-case `/admin` branches. All 6 checks passed, zero
+unexpected console errors.
+
+New `tests/e2e/test_payroll_wrappers.py` (6 tests) makes this permanent.
+
+**Git:** `0c8afb5`, pushed. No restart required or performed (static-file
+change, confirmed live via direct checks before and after commit).
+
