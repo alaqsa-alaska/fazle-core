@@ -283,6 +283,7 @@ async def sync_program_to_roster(program_id: int, actor: str = "system", conn=No
         "completed": "completed",
         "cancelled": "cancelled",
         "expired": "expired",
+        "escort_changed": "escort_changed",  # Phase 2A.3 (migration 049) -- historical, non-blocking
     }
     roster_status = status_map.get(prog_status.lower(), "draft")
 

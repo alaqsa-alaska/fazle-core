@@ -113,6 +113,7 @@ td.actions{white-space:nowrap;text-align:center}
 .s-assigned{background:#fef3c7;color:#92400e}
 .s-completed{background:#e0e7ff;color:#3730a3}
 .s-cancelled{background:#fee2e2;color:#dc2626}
+.s-changed{background:#fef3c7;color:#92400e}
 .s-paid{background:#fef9c3;color:#92400e}
 
 /* ── Pagination ─────────────────────────────────────────────────────────── */
@@ -940,7 +941,8 @@ function renderRosterRows(items) {
       draft:'s-draft', confirmed:'s-confirmed',
       Running:'s-active', Assigned:'s-assigned',
       Completed:'s-completed', cancelled:'s-cancelled',
-      active:'s-active', completed:'s-completed', paid:'s-paid'
+      active:'s-active', completed:'s-completed', paid:'s-paid',
+      escort_changed:'s-changed'
     }[_opStatus] || 's-draft';
     const _statusLabel = r.program_status || r.roster_status || '—';
     const fmt = v => v != null ? parseFloat(v).toLocaleString('en-BD') : '—';
@@ -1060,7 +1062,8 @@ function renderDetail(d) {
     draft:'s-draft', confirmed:'s-confirmed',
     Running:'s-active', Assigned:'s-assigned',
     Completed:'s-completed', cancelled:'s-cancelled',
-    active:'s-active', completed:'s-completed', paid:'s-paid'
+    active:'s-active', completed:'s-completed', paid:'s-paid',
+    escort_changed:'s-changed'
   }[_opStatus] || 's-draft';
   const _statusLabel = d.program_status || d.roster_status || '—';
 

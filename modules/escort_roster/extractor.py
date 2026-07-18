@@ -377,8 +377,9 @@ async def find_slip_matches(extracted: dict, top_n: int = 5) -> list[dict]:
         SELECT program_id, mother_vessel, lighter_vessel, master_mobile,
                escort_name, escort_mobile, destination, status, start_date
         FROM wbom_escort_programs
-        WHERE status NOT IN ('completed', 'cancelled')
+        WHERE status NOT IN ('completed', 'cancelled', 'escort_changed')
            OR (completion_time > NOW() - INTERVAL '7 days')
+           OR (status = 'escort_changed' AND end_date > CURRENT_DATE - INTERVAL '7 days')
         ORDER BY program_date DESC
         LIMIT 200
         """

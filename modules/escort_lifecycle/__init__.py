@@ -63,7 +63,7 @@ async def find_active_program_for_employee(
                   end_shift, release_point, day_count, conveyance, destination
            FROM wbom_escort_programs
            WHERE escort_employee_id = $1
-             AND COALESCE(status,'') NOT IN ('completed','cancelled')
+             AND COALESCE(status,'') NOT IN ('completed','cancelled','escort_changed')
              AND program_date <= $2
            ORDER BY program_date DESC, program_id DESC
            LIMIT 1""",
@@ -689,7 +689,7 @@ async def handle_admin_release_confirmation(
         emp_row = await fetch_one(
             """SELECT escort_employee_id AS employee_id
                FROM wbom_escort_programs
-               WHERE escort_mobile = $1 AND status NOT IN ('completed', 'cancelled')
+               WHERE escort_mobile = $1 AND status NOT IN ('completed', 'cancelled', 'escort_changed')
                ORDER BY program_date DESC LIMIT 1""",
             phone,
         )
@@ -727,7 +727,7 @@ async def _lookup_active_program_by_phone(phone: str) -> Optional[dict]:
                LEFT JOIN wbom_employees emp ON emp.employee_id = ep.escort_employee_id
                WHERE regexp_replace(ep.escort_mobile, '\\D', '', 'g')
                      LIKE '%' || RIGHT(regexp_replace($1, '\\D', '', 'g'), 11)
-               AND ep.status NOT IN ('completed', 'cancelled')
+               AND ep.status NOT IN ('completed', 'cancelled', 'escort_changed')
                ORDER BY ep.program_date DESC LIMIT 1""",
             phone,
         )
@@ -753,7 +753,7 @@ async def _lookup_active_program_by_slip(ocr_result: dict) -> Optional[dict]:
                       ep.master_mobile AS lighter_master_mobile
                FROM wbom_escort_programs ep
                LEFT JOIN wbom_employees emp ON emp.employee_id = ep.escort_employee_id
-               WHERE ep.status NOT IN ('completed', 'cancelled')
+               WHERE ep.status NOT IN ('completed', 'cancelled', 'escort_changed')
                  AND (
                       ($1 <> '' AND (
                           ep.lighter_vessel ILIKE '%' || $1 || '%'

@@ -121,7 +121,7 @@ async def get_payroll_summary(employee_id: int) -> PayrollSummary:
     active_duties = await fetch_val(
         """SELECT COUNT(*) FROM wbom_escort_programs
            WHERE escort_employee_id = $1
-             AND status NOT IN ('completed', 'cancelled')""",
+             AND status NOT IN ('completed', 'cancelled', 'escort_changed')""",
         employee_id,
     )
 

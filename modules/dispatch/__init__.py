@@ -15,15 +15,21 @@ history (Phase 1I/2B) unrelated to this read-only module.
 Status-to-bookability (reuses the EXACT rule already proven in production
 by modules.escort_lifecycle.find_active_program_for_employee() -- not
 invented here):
-    escort_employee_id IS NOT NULL AND status NOT IN ('completed', 'cancelled')
+    escort_employee_id IS NOT NULL AND status NOT IN ('completed', 'cancelled', 'escort_changed')
 'draft' programs have no escort_employee_id yet (set only by the
 ESCORTCONFIRM admin command, modules/escort/__init__.py) and so can never
 structurally conflict with anyone -- confirmed by code inspection, not
 assumed. Statuses outside the known set {draft, confirmed, running,
-completed, cancelled} (e.g. legacy 'expired'/'assigned' values found only
-in modules/escort_roster/db.py's status_map, with no active setter found
-anywhere in current code) are treated as data-quality-unknown, never
-silently assumed bookable or free.
+completed, cancelled, escort_changed} (e.g. legacy 'expired'/'assigned'
+values found only in modules/escort_roster/db.py's status_map, with no
+active setter found anywhere in current code) are treated as
+data-quality-unknown, never silently assumed bookable or free.
+
+'escort_changed' (Phase 2A.3, migration 049): the earlier segment of a
+vessel operation, replaced by a later escort before normal completion. It
+is historical and non-blocking, exactly like 'completed'/'cancelled' for
+availability purposes -- never treated as cancelled (it's a real duty
+segment that happened), never treated as still-active.
 
 Shift/time model: reuses modules.escort_roster.calculations.SHIFT_ORDER
 (["D", "N"]) verbatim. A (date, shift) pair maps to a single sortable
@@ -57,14 +63,22 @@ SHIFT_ORDER = ["D", "N"]  # matches modules.escort_roster.calculations.SHIFT_ORD
 
 # Statuses that structurally block an escort worker's availability, reusing
 # modules.escort_lifecycle.find_active_program_for_employee()'s own proven
-# rule verbatim (NOT invented here).
-_BOOKING_BLOCKING_EXCLUDED_STATUSES = ("completed", "cancelled")
+# rule verbatim (NOT invented here) -- extended for 'escort_changed'
+# (Phase 2A.3, Owner-approved): a changed-out segment is historical, not
+# blocking, same treatment as completed/cancelled.
+_BOOKING_BLOCKING_EXCLUDED_STATUSES = ("completed", "cancelled", "escort_changed")
 
 # The full set of statuses this module has confirmed, via direct code
 # inspection, are actively set by current production code paths. Any other
 # status value encountered is a data-quality signal, not silently treated
 # as bookable or free.
-_KNOWN_ACTIVE_STATUSES = {"draft", "confirmed", "running", "completed", "cancelled"}
+_KNOWN_ACTIVE_STATUSES = {"draft", "confirmed", "running", "completed", "cancelled", "escort_changed"}
+
+# Statuses considered "terminal" for a replacement segment itself (Phase
+# 2A.3 sec.14/21): a replacement that has itself been superseded or ended
+# is no longer "the" active replacement for its predecessor -- mirrors the
+# partial unique index in migration 050 exactly.
+_REPLACEMENT_TERMINAL_STATUSES = ("completed", "cancelled", "expired", "escort_changed")
 
 
 def normalize_shift(raw: Optional[str]) -> Optional[str]:
@@ -192,7 +206,7 @@ async def _fetch_blocking_programs_for_employees(
             FROM wbom_escort_programs
             WHERE escort_employee_id = ANY($1::int[])
               AND escort_employee_id IS NOT NULL
-              AND status <> 'completed' AND status <> 'cancelled'
+              AND status <> 'completed' AND status <> 'cancelled' AND status <> 'escort_changed'
             ORDER BY escort_employee_id, start_date NULLS LAST, program_date NULLS LAST""",
         employee_ids, conn=conn,
     )
@@ -702,7 +716,8 @@ async def list_overlaps(
     logic as availability/conflict-check/suggestions -- never a second,
     divergent overlap algorithm. Never mutates anything.
     """
-    where = ["p.escort_employee_id IS NOT NULL", "p.status <> 'completed'", "p.status <> 'cancelled'"]
+    where = ["p.escort_employee_id IS NOT NULL", "p.status <> 'completed'", "p.status <> 'cancelled'",
+              "p.status <> 'escort_changed'"]
     params: list = []
     if employee_id is not None:
         params.append(employee_id)
