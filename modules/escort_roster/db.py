@@ -1220,21 +1220,36 @@ async def cleanup_draft_entries(actor: str = "system") -> dict:
 
 async def expire_stale_drafts(hours: int = 24, actor: str = "scheduler") -> dict:
     """
-    Permanently delete stale draft entries and their source draft programs.
+    Permanently delete stale, INCOMPLETE draft entries and their source
+    draft programs.
 
     Requirement: unconfirmed escort drafts must not remain visible in the
     frontend after TTL. We keep audit trail via escort_roster_audit_logs.
+
+    Phase 2A.3 Stage 4 (sec.17): narrowed from "any draft-status row past
+    TTL" to the Owner's exact predicate -- a draft that already has a
+    usable escort_name AND escort_mobile is not "incomplete" even though
+    it hasn't been formally ESCORTCONFIRMed yet, and must be preserved.
+    "No confirmed program"/"no attendance"/"no payment/release side
+    effect" are already structurally guaranteed by roster_status='draft'
+    itself (a program can only reach running/attendance/payment/release
+    after ESCORTCONFIRM moves it out of 'draft' -- confirmed via the full
+    escort_lifecycle trace done for this phase's Decision Report), so no
+    separate join against wbom_attendance/fazle_payment_drafts is needed
+    here to enforce that part of the predicate.
     """
     stale = await fetch_all(
         """
         SELECT * FROM escort_roster_entries
         WHERE roster_status = 'draft'
           AND created_at < NOW() - ($1 || ' hours')::INTERVAL
+          AND (escort_name IS NULL OR TRIM(escort_name) = '')
+          AND (escort_mobile IS NULL OR TRIM(escort_mobile) = '')
         """,
         str(hours),
     )
     if not stale:
-        return {"expired": 0, "message": "No stale drafts found"}
+        return {"expired": 0, "message": "No stale incomplete drafts found"}
 
     for draft in stale:
         d = dict(draft)

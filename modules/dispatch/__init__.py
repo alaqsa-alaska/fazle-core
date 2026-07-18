@@ -1077,3 +1077,112 @@ async def create_replacement_segment(
                 "date_delta_days": date_delta,
                 "classification_rule": classification_rule,
             }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2A.3 Stage 4 — Safe Unassignment
+#
+# Owner-approved (2026-07-19). Supported only for draft/confirmed programs
+# -- never running/completed/cancelled/escort_changed. Never hard-deletes
+# the program; only clears escort_employee_id and restores the
+# pre-assignment state.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_UNASSIGNABLE_FROM_STATUSES = ("draft", "confirmed")
+
+
+async def unassign_program(
+    program_id: int,
+    expected_current_employee_id: int,
+    reason: str,
+    performed_by: str,
+) -> dict:
+    """
+    Phase 2A.3 sec.12/18. Transactional, concurrency-safe (same
+    pg_advisory_xact_lock pattern and lock order as assign_program()/
+    create_replacement_segment(): employee, then program). Sets
+    escort_employee_id = NULL. Blocks whenever accepted attendance or a
+    payment draft already exists for this program -- checked explicitly
+    here, in addition to (not merely inferred from) the draft/confirmed
+    status guard, since attendance is keyed on (employee_id, date) with
+    no direct program_id FK and a self-reported ('whatsapp_escort'
+    source) attendance row could in principle exist before a program
+    formally transitions to 'running'.
+    """
+    if not reason or not reason.strip():
+        raise DispatchAssignmentError("reason_required", 422, "a mandatory reason is required for unassignment")
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", expected_current_employee_id)
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", program_id)
+
+            program = await fetch_one(
+                """SELECT program_id, escort_employee_id, status,
+                          COALESCE(start_date, program_date) AS eff_start, end_date
+                   FROM wbom_escort_programs WHERE program_id = $1""",
+                program_id, conn=conn,
+            )
+            if program is None:
+                raise DispatchAssignmentError("program_not_found", 404, f"program {program_id} not found")
+
+            if program["status"] not in _UNASSIGNABLE_FROM_STATUSES:
+                raise DispatchAssignmentError(
+                    "program_not_unassignable", 409,
+                    f"program status {program['status']!r} is not eligible for unassignment "
+                    f"(allowed: {list(_UNASSIGNABLE_FROM_STATUSES)})",
+                )
+
+            current_employee_id = program["escort_employee_id"]
+            if current_employee_id is None:
+                raise DispatchAssignmentError("not_assigned", 422, "program has no current assignment to remove")
+            if current_employee_id != expected_current_employee_id:
+                raise DispatchAssignmentError(
+                    "stale_assignment", 409,
+                    f"expected_current_employee_id={expected_current_employee_id!r} but the program's "
+                    f"current assignment is {current_employee_id!r}; refresh and retry",
+                )
+
+            eff_start = program["eff_start"]
+            eff_end = program["end_date"] or eff_start
+            if eff_start is not None:
+                attendance_row = await fetch_one(
+                    """SELECT 1 FROM wbom_attendance
+                       WHERE employee_id = $1 AND attendance_date BETWEEN $2 AND $3 LIMIT 1""",
+                    current_employee_id, eff_start, eff_end, conn=conn,
+                )
+                if attendance_row:
+                    raise DispatchAssignmentError(
+                        "attendance_exists", 409,
+                        "cannot unassign -- accepted attendance already exists for this program's window")
+
+            payment_draft_row = await fetch_one(
+                "SELECT 1 FROM fazle_payment_drafts WHERE escort_program_id = $1 LIMIT 1",
+                program_id, conn=conn,
+            )
+            if payment_draft_row:
+                raise DispatchAssignmentError(
+                    "payment_draft_exists", 409,
+                    "cannot unassign -- a payment draft already exists for this program")
+
+            await execute(
+                "UPDATE wbom_escort_programs SET escort_employee_id = NULL WHERE program_id = $1",
+                program_id, conn=conn,
+            )
+            from modules.escort_roster.db import sync_program_to_roster, log_audit
+            await sync_program_to_roster(program_id, actor=performed_by, conn=conn)
+            await log_audit(
+                program_id=program_id,
+                action="dispatch_unassign",
+                old_data={"escort_employee_id": current_employee_id, "status": program["status"]},
+                new_data={"escort_employee_id": None, "reason": reason},
+                performed_by=performed_by,
+                source="dispatch_ui",
+            )
+            return {
+                "program_id": program_id,
+                "previous_employee_id": current_employee_id,
+                "status": program["status"],
+                "reason": reason,
+            }

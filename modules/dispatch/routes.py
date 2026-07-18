@@ -227,3 +227,31 @@ async def api_replace_escort(
         )
     except dispatch_svc.DispatchAssignmentError as e:
         raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None
+
+
+class UnassignRequest(BaseModel):
+    expected_current_employee_id: int
+    reason: str
+
+
+@router.post("/programs/{program_id}/unassign", dependencies=[Depends(_require_operator_or_above)])
+async def api_unassign_program(
+    program_id: int,
+    body: UnassignRequest,
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Safe unassignment (Phase 2A.3 sec.12/18) -- draft/confirmed
+    programs only, blocked by any accepted attendance or existing payment
+    draft. Never hard-deletes the program. Mandatory reason, required
+    expected_current_employee_id (optimistic concurrency, same pattern as
+    /assign)."""
+    performed_by = await _resolve_performed_by(key)
+    try:
+        return await dispatch_svc.unassign_program(
+            program_id=program_id,
+            expected_current_employee_id=body.expected_current_employee_id,
+            reason=body.reason,
+            performed_by=performed_by,
+        )
+    except dispatch_svc.DispatchAssignmentError as e:
+        raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None
