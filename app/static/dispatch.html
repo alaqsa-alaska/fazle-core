@@ -426,9 +426,9 @@ async function submitAssignment() {
       const msg = code === 'stale_assignment'
         ? 'Stale assignment — the program changed since it was loaded. Reloading current state…'
         : `Conflict — ${esc(detail.detail || 'overlapping assignment')} (${esc((detail.conflicts || []).length)} conflict(s))`;
-      status.innerHTML = `<span style="color:var(--err)">${msg}</span>`;
       confirmHost.innerHTML = '';
       await loadProgramForAssign(); // refresh program state per spec, no page reload
+      status.innerHTML = `<span style="color:var(--err)">${msg}</span>`; // restore after refresh (which resets status text)
       return;
     }
     if (r.status === 404) {
@@ -443,17 +443,20 @@ async function submitAssignment() {
       status.innerHTML = `<span style="color:var(--err)">Error (${r.status}): ${esc((body.detail && body.detail.detail) || body.detail || 'unknown error')}</span>`;
       return;
     }
-    status.innerHTML = `<span style="color:var(--ok)">✓ Assignment succeeded — program #${esc(body.program_id)} now assigned to #${esc(body.new_employee_id)} (${esc(body.employee_name || '')})</span>`;
+    const successMsg = `<span style="color:var(--ok)">✓ Assignment succeeded — program #${esc(body.program_id)} now assigned to #${esc(body.new_employee_id)} (${esc(body.employee_name || '')})</span>`;
     confirmHost.innerHTML = '';
     PENDING_ASSIGN = null;
     // Refresh program state, availability, suggestions, and overlap count --
-    // no page reload, per spec.
+    // no page reload, per spec. Each of these touches its own status/progress
+    // element, not #assignStatus, except loadProgramForAssign() which does --
+    // restore the success message afterward so it isn't silently wiped.
     await loadProgramForAssign();
     await loadAllWorkers();
     await loadOverlaps();
     const sd = document.getElementById('fStartDate').value, ss = document.getElementById('fStartShift').value;
     const ed = document.getElementById('fEndDate').value, es = document.getElementById('fEndShift').value;
     if (sd && ed) await loadSuggestions(sd, ss, ed, es, document.getElementById('fDestination').value.trim());
+    status.innerHTML = successMsg;
   } catch (e) {
     status.innerHTML = `<span style="color:var(--err)">Network error: ${esc(e.message)}</span>`;
   }
