@@ -19,10 +19,14 @@ already exists to reuse.
 """
 from __future__ import annotations
 
+import os
+import pathlib
+import time
+import uuid
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
@@ -54,6 +58,27 @@ async def _require_operator_or_above(key: str = Depends(_API_KEY_HEADER)) -> str
     if check.get("allowed"):
         return key
     raise HTTPException(status_code=403, detail="operator role or above required")
+
+
+async def _require_admin_or_above(key: str = Depends(_API_KEY_HEADER)) -> str:
+    """Phase 2A.3 Stage 5/6. Manual completion, release-slip approval, and
+    controlled override are admin/superadmin-only -- mirrors
+    modules.escort_roster.routes._resolve_actor's can_admin_direct role-set
+    intersection (roles are DB data, {"admin","superadmin","owner"}), NOT
+    the COMMAND_ROLE string-command mapping _require_operator_or_above
+    reuses, since no existing command maps to this tier."""
+    settings = get_settings()
+    if key and key == settings.internal_api_key:
+        return key
+    from modules import rbac
+    admin = await rbac.get_admin_by_api_key(key or "")
+    if not admin or admin.get("status") != "active":
+        raise HTTPException(status_code=403, detail="admin role or above required")
+    roles = await rbac.get_roles(int(admin["id"]))
+    normalized_roles = {str(role or "").strip().lower() for role in roles}
+    if normalized_roles.intersection({"admin", "superadmin", "owner"}):
+        return key
+    raise HTTPException(status_code=403, detail="admin role or above required")
 
 
 def _parse_shift_query(value: Optional[str]) -> Optional[str]:
@@ -255,3 +280,155 @@ async def api_unassign_program(
         )
     except dispatch_svc.DispatchAssignmentError as e:
         raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2A.3 Stage 5 — Manual completion and release-slip review (admin+ only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CompleteProgramRequest(BaseModel):
+    end_date: date
+    end_shift: str
+    release_point: Optional[str] = None
+    reason: str
+    expected_status: Optional[str] = None
+
+
+@router.post("/programs/{program_id}/complete", dependencies=[Depends(_require_admin_or_above)])
+async def api_complete_program(
+    program_id: int,
+    body: CompleteProgramRequest,
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Manual completion (Phase 2A.3 sec.16/22), admin/superadmin only.
+    Reuses modules.escort_lifecycle.close_program() directly -- the same
+    idempotent path [RELEASE CONFIRMED] messages use. Never a second
+    completion implementation."""
+    performed_by = await _resolve_performed_by(key)
+    end_shift = _parse_shift_query(body.end_shift)
+    try:
+        return await dispatch_svc.manually_complete_program(
+            program_id=program_id,
+            end_date=body.end_date, end_shift=end_shift,
+            release_point=body.release_point, reason=body.reason,
+            expected_status=body.expected_status, performed_by=performed_by,
+        )
+    except dispatch_svc.DispatchAssignmentError as e:
+        raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None
+
+
+@router.get("/incomplete-drafts", dependencies=[Depends(_require_viewer_or_above)])
+async def api_incomplete_drafts(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """Read-only listing of TTL-eligible incomplete drafts (Phase 2A.3
+    sec.19/24) -- the exact predicate expire_stale_drafts() (Stage 4) uses,
+    surfaced here before cleanup happens. Never mutates anything."""
+    return await dispatch_svc.list_incomplete_drafts(page=page, page_size=page_size)
+
+
+@router.get("/release-slips/pending", dependencies=[Depends(_require_viewer_or_above)])
+async def api_pending_release_slips(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Read-only queue of unreviewed OCR release-slip extractions
+    (Phase 2A.3 sec.19.2/21). Never mutates anything."""
+    return await dispatch_svc.list_pending_release_slips(page=page, page_size=page_size)
+
+
+@router.get("/release-slips/{extraction_id}/candidates", dependencies=[Depends(_require_viewer_or_above)])
+async def api_release_slip_candidates(
+    extraction_id: int,
+    top_n: int = Query(5, ge=1, le=20),
+):
+    """Weighted candidate-program matches for a given OCR extraction
+    (Phase 2A.3 sec.13.2/21), reusing
+    modules.escort_roster.extractor.find_slip_matches() verbatim. Never
+    mutates anything -- the admin picks a candidate, then calls
+    /release-slips/{id}/approve explicitly."""
+    try:
+        return await dispatch_svc.get_release_slip_candidates(extraction_id, top_n=top_n)
+    except dispatch_svc.DispatchAssignmentError as e:
+        raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None
+
+
+class ApproveReleaseSlipRequest(BaseModel):
+    program_id: int
+    end_shift: str
+    release_point: Optional[str] = None
+
+
+@router.post("/release-slips/{extraction_id}/approve", dependencies=[Depends(_require_admin_or_above)])
+async def api_approve_release_slip(
+    extraction_id: int,
+    body: ApproveReleaseSlipRequest,
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Admin approval of a release-slip match (Phase 2A.3 sec.13.1/21),
+    admin/superadmin only. Calls the same close_program() path manual
+    completion uses -- never a parallel completion implementation. The
+    admin must explicitly supply program_id (chosen from
+    /candidates) and end_shift (never parsed/fabricated from OCR text)."""
+    performed_by = await _resolve_performed_by(key)
+    end_shift = _parse_shift_query(body.end_shift)
+    try:
+        return await dispatch_svc.approve_release_slip(
+            extraction_id=extraction_id, program_id=body.program_id,
+            end_shift=end_shift, release_point=body.release_point,
+            performed_by=performed_by,
+        )
+    except dispatch_svc.DispatchAssignmentError as e:
+        raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None
+
+
+@router.post("/release-slips/upload", dependencies=[Depends(_require_operator_or_above)])
+async def api_upload_release_slip(
+    file: UploadFile = File(...),
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Multipart upload entry point into the SAME OCR extraction pipeline
+    the existing WhatsApp-image path uses (modules.escort_slip_extractor.
+    extract_escort_slip -- a plain-file-path function, reused verbatim, not
+    duplicated). This is a second entry point into one pipeline, not a
+    second pipeline: it does not replace the existing POST /escort-slip/
+    extract endpoint (app/main.py), it only gives the Dispatch UI its own
+    upload affordance. OCR extraction never finalizes a release -- only
+    /release-slips/{id}/approve or [RELEASE CONFIRMED] does."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename")
+
+    safe_name = pathlib.Path(file.filename).name
+    ext = os.path.splitext(safe_name)[1].lower()
+    allowed = {".jpg", ".jpeg", ".png", ".pdf", ".webp"}
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}. Allowed: {', '.join(allowed)}")
+
+    content_bytes = await file.read()
+    max_size = 10 * 1024 * 1024
+    if len(content_bytes) > max_size:
+        raise HTTPException(status_code=400, detail=f"File too large: {len(content_bytes)//1024}KB. Max: {max_size//1024}KB")
+    if len(content_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    upload_dir = "/home/azim/core/resources/uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+    upload_id = f"dispatch_slip_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    temp_path = os.path.join(upload_dir, f"{upload_id}{ext}")
+    with open(temp_path, "wb") as fh:
+        fh.write(content_bytes)
+
+    performed_by = await _resolve_performed_by(key)
+    from modules.escort_slip_extractor import extract_escort_slip
+    result = await extract_escort_slip(temp_path, source_label=f"dispatch_ui:{performed_by}", save_to_db=True)
+    return {
+        "extraction_id": result.get("extraction_id"),
+        "document_type": result.get("document_type"),
+        "confidence": result.get("confidence"),
+        "mother_vessel": result.get("mother_vessel"),
+        "lighter_vessel": result.get("lighter_vessel"),
+        "escort_name": result.get("escort_name"),
+        "escort_mobile": result.get("escort_mobile"),
+        "missing_fields": result.get("missing_fields"),
+    }

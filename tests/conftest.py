@@ -567,6 +567,25 @@ CREATE TABLE IF NOT EXISTS escort_shift_logs (
     notes TEXT, recorded_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- escort_release_matches: same gap as escort_shift_logs above (defined
+-- only in migrations/escort_roster_schema.sql, never ported into
+-- db/migrations/ -- confirmed present in production, 0 rows, via direct
+-- to_regclass() check). Found 2026-07-19 (Dispatch Phase 2A.3 Stage 5)
+-- before it could repeat the same transaction-abort masking failure mode.
+-- Column shapes copied verbatim from that file.
+CREATE TABLE IF NOT EXISTS escort_release_matches (
+    id SERIAL PRIMARY KEY,
+    extraction_id INTEGER,
+    program_id INTEGER,
+    match_confidence NUMERIC(5,4) DEFAULT 0,
+    match_reason TEXT,
+    matched_fields JSONB DEFAULT '{}',
+    admin_action VARCHAR(20),
+    admin_phone TEXT,
+    acted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 

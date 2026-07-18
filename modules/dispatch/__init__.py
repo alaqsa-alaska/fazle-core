@@ -1186,3 +1186,308 @@ async def unassign_program(
                 "status": program["status"],
                 "reason": reason,
             }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2A.3 Stage 5 — Manual Completion and Release-Slip Review
+#
+# Owner-approved (2026-07-19). Manual completion reuses
+# modules.escort_lifecycle.close_program() directly -- the same, already
+# certified, idempotent completion path [RELEASE CONFIRMED] messages use --
+# never a second implementation. Release-slip review is built over the
+# EXISTING escort_slip_extractions/escort_release_matches tables and the
+# EXISTING modules.escort_roster.extractor.find_slip_matches() weighted
+# scorer -- confirmed dormant (zero rows, no INSERT site) in the Decision
+# Report; this stage gives escort_release_matches its first real write,
+# without reviving its unused 'keep'/'reject' admin_action semantics --
+# approval calls close_program(), never a parallel completion path.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TERMINAL_PROGRAM_STATUSES = ("completed", "cancelled", "escort_changed", "expired")
+
+
+async def manually_complete_program(
+    program_id: int,
+    end_date: date,
+    end_shift: str,
+    release_point: Optional[str],
+    reason: str,
+    expected_status: Optional[str],
+    performed_by: str,
+) -> dict:
+    """
+    Phase 2A.3 sec.16/22. Admin/superadmin-only (enforced by the route
+    layer, not here). Requires end_date, end_shift, release_point,
+    mandatory reason. Rejects: status already terminal, end boundary
+    before start boundary, duplicate completion. Never fabricates a
+    missing end_shift -- normalize_shift() returning None is a hard
+    rejection, not a silent default.
+    """
+    if not reason or not reason.strip():
+        raise DispatchAssignmentError("reason_required", 422, "a mandatory reason is required for manual completion")
+
+    norm_end_shift = normalize_shift(end_shift)
+    if norm_end_shift is None:
+        raise DispatchAssignmentError(
+            "end_shift_required", 422, "a valid end_shift (D or N) is required -- it is never fabricated")
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", program_id)
+
+            program = await fetch_one(
+                """SELECT program_id, status, COALESCE(start_date, program_date) AS eff_start, shift
+                   FROM wbom_escort_programs WHERE program_id = $1""",
+                program_id, conn=conn,
+            )
+            if program is None:
+                raise DispatchAssignmentError("program_not_found", 404, f"program {program_id} not found")
+
+            if program["status"] in _TERMINAL_PROGRAM_STATUSES:
+                raise DispatchAssignmentError(
+                    "already_terminal", 409,
+                    f"program {program_id} is already {program['status']!r} -- no duplicate completion")
+
+            if expected_status is not None and program["status"] != expected_status:
+                raise DispatchAssignmentError(
+                    "stale_status", 409,
+                    f"expected_status={expected_status!r} but program's current status is "
+                    f"{program['status']!r}; refresh and retry",
+                )
+
+            eff_start = program["eff_start"]
+            start_shift_v = normalize_shift(program["shift"]) or "D"
+            if eff_start is not None:
+                start_ord = shift_ordinal(eff_start, start_shift_v)
+                end_ord = shift_ordinal(end_date, norm_end_shift)
+                if end_ord < start_ord:
+                    raise DispatchAssignmentError(
+                        "invalid_window", 422,
+                        f"end boundary ({end_date} {norm_end_shift}) is before the start boundary "
+                        f"({eff_start} {start_shift_v})",
+                    )
+
+            from modules.escort_lifecycle import close_program
+            from modules.escort_roster.db import sync_program_to_roster, log_audit
+
+            result = await close_program(
+                program_id=program_id, end_date_v=end_date, end_shift=norm_end_shift,
+                release_point=release_point, day_count=None, completed_by=performed_by, conn=conn,
+            )
+            if not result.get("ok"):
+                raise DispatchAssignmentError("completion_failed", 500, result.get("error", "close_program failed"))
+
+            await sync_program_to_roster(program_id, actor=performed_by, conn=conn)
+            await log_audit(
+                program_id=program_id,
+                action="dispatch_manual_completion",
+                old_data={"status": program["status"]},
+                new_data={"status": "completed", "end_date": str(end_date), "end_shift": norm_end_shift,
+                          "release_point": release_point, "reason": reason, "day_count": result.get("day_count")},
+                performed_by=performed_by, source="dispatch_ui",
+            )
+            return {
+                "program_id": program_id, "status": "completed",
+                "end_date": str(end_date), "end_shift": norm_end_shift,
+                "release_point": release_point, "day_count": result.get("day_count"),
+                "already_closed": result.get("already_closed", False),
+            }
+
+
+async def list_incomplete_drafts(page: int = 1, page_size: int = 50) -> dict:
+    """Phase 2A.3 sec.19/24 -- read-only listing of draft programs missing
+    escort identity (the exact TTL-eligible predicate expire_stale_drafts()
+    uses, Stage 4), so the UI can show what's approaching/eligible for
+    cleanup before it happens. Never mutates anything."""
+    total = await fetch_val(
+        """SELECT COUNT(*) FROM escort_roster_entries
+           WHERE roster_status = 'draft'
+             AND (escort_name IS NULL OR TRIM(escort_name) = '')
+             AND (escort_mobile IS NULL OR TRIM(escort_mobile) = '')"""
+    ) or 0
+    offset = (page - 1) * page_size
+    rows = await fetch_all(
+        """SELECT program_id, mother_vessel, lighter_vessel, master_mobile, created_at,
+                  EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600.0 AS age_hours
+           FROM escort_roster_entries
+           WHERE roster_status = 'draft'
+             AND (escort_name IS NULL OR TRIM(escort_name) = '')
+             AND (escort_mobile IS NULL OR TRIM(escort_mobile) = '')
+           ORDER BY created_at ASC
+           LIMIT $1 OFFSET $2""",
+        page_size, offset,
+    )
+    items = []
+    for r in rows:
+        d = dict(r)
+        d["age_hours"] = round(float(d["age_hours"]), 1) if d["age_hours"] is not None else None
+        d["created_at"] = str(d["created_at"])
+        items.append(d)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size if page_size else 0}
+
+
+async def list_pending_release_slips(page: int = 1, page_size: int = 20) -> dict:
+    """Phase 2A.3 sec.19.2/21 -- read-only queue of OCR extractions that
+    have not yet been approved or rejected (no escort_release_matches row
+    with a terminal admin_action). Never mutates anything."""
+    total = await fetch_val(
+        """SELECT COUNT(*) FROM escort_slip_extractions e
+           WHERE NOT EXISTS (
+               SELECT 1 FROM escort_release_matches m
+               WHERE m.extraction_id = e.id AND m.admin_action IN ('keep', 'reject')
+           )"""
+    ) or 0
+    offset = (page - 1) * page_size
+    rows = await fetch_all(
+        """SELECT id, source_file, created_at, document_type, mother_vessel, lighter_vessel,
+                  master_mobile, escort_name, escort_mobile, start_date, completion_date,
+                  release_place, confidence
+           FROM escort_slip_extractions e
+           WHERE NOT EXISTS (
+               SELECT 1 FROM escort_release_matches m
+               WHERE m.extraction_id = e.id AND m.admin_action IN ('keep', 'reject')
+           )
+           ORDER BY created_at DESC
+           LIMIT $1 OFFSET $2""",
+        page_size, offset,
+    )
+    items = [dict(r) for r in rows]
+    for it in items:
+        it["created_at"] = str(it["created_at"])
+        it["confidence"] = float(it["confidence"]) if it["confidence"] is not None else None
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size if page_size else 0}
+
+
+async def get_release_slip_candidates(extraction_id: int, top_n: int = 5) -> dict:
+    """Phase 2A.3 sec.13.2/21 -- weighted deterministic candidate matching,
+    reusing the EXISTING modules.escort_roster.extractor.find_slip_matches()
+    scorer verbatim (never a second matching algorithm). Never mutates."""
+    extraction = await fetch_one("SELECT * FROM escort_slip_extractions WHERE id = $1", extraction_id)
+    if extraction is None:
+        raise DispatchAssignmentError("extraction_not_found", 404, f"extraction {extraction_id} not found")
+
+    from modules.escort_roster.extractor import find_slip_matches
+    extracted = dict(extraction)
+    candidates = await find_slip_matches(extracted, top_n=top_n)
+    return {
+        "extraction": {
+            "id": extraction["id"], "source_file": extraction["source_file"],
+            "document_type": extraction["document_type"], "mother_vessel": extraction["mother_vessel"],
+            "lighter_vessel": extraction["lighter_vessel"], "master_mobile": extraction["master_mobile"],
+            "escort_name": extraction["escort_name"], "escort_mobile": extraction["escort_mobile"],
+            "start_date": extraction["start_date"], "completion_date": extraction["completion_date"],
+            "release_place": extraction["release_place"],
+            "confidence": float(extraction["confidence"]) if extraction["confidence"] is not None else None,
+            "raw_text": extraction["raw_text"],
+        },
+        "candidates": candidates,
+    }
+
+
+async def approve_release_slip(
+    extraction_id: int,
+    program_id: int,
+    end_shift: str,
+    performed_by: str,
+    release_point: Optional[str] = None,
+) -> dict:
+    """
+    Phase 2A.3 sec.13.1/21. Approval calls the SAME certified
+    close_program() path [RELEASE CONFIRMED] messages use -- never a
+    parallel completion implementation. Requires the admin to explicitly
+    confirm end_shift (never parsed/fabricated from OCR text -- the
+    escort_slip_extractions schema itself has no shift column). If
+    multiple programs are plausible, the caller must have already chosen
+    one via get_release_slip_candidates() -- this function does not
+    itself disambiguate.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", program_id)
+
+            extraction = await fetch_one(
+                "SELECT * FROM escort_slip_extractions WHERE id = $1", extraction_id, conn=conn)
+            if extraction is None:
+                raise DispatchAssignmentError("extraction_not_found", 404, f"extraction {extraction_id} not found")
+
+            already_approved = await fetch_one(
+                "SELECT id FROM escort_release_matches WHERE extraction_id = $1 AND admin_action IN ('keep', 'reject')",
+                extraction_id, conn=conn,
+            )
+            if already_approved:
+                raise DispatchAssignmentError(
+                    "already_reviewed", 409, f"extraction {extraction_id} has already been reviewed")
+
+            program = await fetch_one(
+                """SELECT program_id, status, COALESCE(start_date, program_date) AS eff_start, shift
+                   FROM wbom_escort_programs WHERE program_id = $1""",
+                program_id, conn=conn,
+            )
+            if program is None:
+                raise DispatchAssignmentError("program_not_found", 404, f"program {program_id} not found")
+            if program["status"] in _TERMINAL_PROGRAM_STATUSES:
+                raise DispatchAssignmentError(
+                    "already_terminal", 409, f"program {program_id} is already {program['status']!r}")
+
+            norm_end_shift = normalize_shift(end_shift)
+            if norm_end_shift is None:
+                raise DispatchAssignmentError(
+                    "end_shift_required", 422, "a valid end_shift (D or N) is required -- it is never fabricated")
+
+            completion_date_v = None
+            raw_completion_date = extraction.get("completion_date")
+            if raw_completion_date:
+                # modules.escort_slip_extractor._normalize_date() stores DD-MM-YYYY
+                # text, not ISO -- date.fromisoformat() would reject every real
+                # OCR extraction, so this parses the extractor's own format.
+                m = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", str(raw_completion_date).strip())
+                if m:
+                    try:
+                        completion_date_v = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+                    except ValueError:
+                        pass
+            if completion_date_v is None:
+                raise DispatchAssignmentError(
+                    "invalid_completion_date", 422,
+                    "extraction has no usable completion_date -- cannot approve without a real end date")
+
+            from modules.escort_lifecycle import close_program
+            from modules.escort_roster.db import sync_program_to_roster, log_audit
+
+            result = await close_program(
+                program_id=program_id, end_date_v=completion_date_v, end_shift=norm_end_shift,
+                release_point=release_point or extraction.get("release_place"),
+                day_count=None, completed_by=performed_by, conn=conn,
+            )
+            if not result.get("ok"):
+                raise DispatchAssignmentError("completion_failed", 500, result.get("error", "close_program failed"))
+
+            await conn.execute(
+                """INSERT INTO escort_release_matches
+                       (extraction_id, program_id, match_confidence, match_reason, matched_fields,
+                        admin_action, admin_phone, acted_at)
+                   VALUES ($1, $2, $3, 'dispatch_release_slip_approval', $4, 'keep', $5, NOW())""",
+                extraction_id, program_id,
+                float(extraction["confidence"]) if extraction["confidence"] is not None else None,
+                json.dumps({"approved_via": "dispatch_ui"}), performed_by,
+            )
+
+            await sync_program_to_roster(program_id, actor=performed_by, conn=conn)
+            await log_audit(
+                program_id=program_id,
+                action="dispatch_release_slip_approved",
+                old_data={"status": program["status"]},
+                new_data={"status": "completed", "extraction_id": extraction_id,
+                          "end_date": str(completion_date_v), "end_shift": norm_end_shift,
+                          "day_count": result.get("day_count")},
+                performed_by=performed_by, source="dispatch_ui",
+            )
+            return {
+                "program_id": program_id, "extraction_id": extraction_id, "status": "completed",
+                "end_date": str(completion_date_v), "end_shift": norm_end_shift,
+                "day_count": result.get("day_count"),
+            }
