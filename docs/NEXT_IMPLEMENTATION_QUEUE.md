@@ -671,8 +671,17 @@ AI console unification (see roadmap doc referenced in this repo's governance mem
 
 - [ ] Dispatch/scheduling engine (availability calendar, conflict/double-booking
   detection, ranked-assignment suggestions) — chosen by Owner to go first, before
-  accounting. **Not started.** Needs an Owner scope conversation before any code —
-  large, undesigned business system, not something to infer from the codebase.
+  accounting. **Partially started — read-only preview only, see below.** Write-capable
+  Dispatch (actual assignment, reassignment, reservation, conflict override,
+  roster-entry creation) is still not started and needs its own Owner scope
+  conversation before any code.
+  - [x] **Dispatch Phase 2A.1 — read-only availability/conflict preview** shipped and
+    production-verified 2026-07-18: `GET /api/dispatch/availability`,
+    `POST /api/dispatch/check-conflict`, `GET /api/dispatch/suggestions`
+    (deterministic ranking, no LLM), and a read-only `dispatch.html` UI. Scope: escort
+    workers on `wbom_escort_programs` only. No writes anywhere in
+    `modules/dispatch/` (grep-verified + tested). Full detail:
+    `knowledge_base/00_governance/management_decisions.md` → "Dispatch Phase 2A.1".
 - [x] Client Billing / invoicing / accounts receivable (billing-only slice) — Commit D
   (payment recording, outstanding-balance view, mark-paid, audit log, AI read-only tool,
   dashboard summary) shipped and verified live 2026-07-13.

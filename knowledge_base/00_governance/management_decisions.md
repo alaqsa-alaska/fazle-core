@@ -3079,3 +3079,133 @@ New `tests/e2e/test_payroll_wrappers.py` (6 tests) makes this permanent.
 **Git:** `0c8afb5`, pushed. No restart required or performed (static-file
 change, confirmed live via direct checks before and after commit).
 
+---
+
+## Dispatch Phase 2A.1 — Read-Only Availability & Conflict Preview (2026-07-18)
+
+**Status: COMPLETE — read-only preview only.** This does NOT mark "Dispatch"
+as a whole complete. Assignment writes, reassignment, reservations, conflict
+overrides, roster-entry creation, attendance/payroll effects, WhatsApp
+dispatch commands, LLM-based ranking, and all-employee (non-escort)
+scheduling are explicitly **out of scope** and deferred to a future,
+separately-authorized Owner decision.
+
+### Scope (Owner-approved)
+
+- Covers **escort workers assigned to escort programs only** — excludes
+  office employees, generic guards, supervisors, drivers, and any
+  all-company scheduling concept.
+- Canonical source of truth: `wbom_escort_programs`. `escort_roster_entries`
+  is joined only for display/consistency, never treated as primary.
+- No new table, no schema migration.
+
+### Status-to-bookability rule (reused verbatim from production)
+
+Reused `modules.escort_lifecycle.find_active_program_for_employee()`'s exact
+rule rather than inventing a new one: a program blocks its
+`escort_employee_id` when `escort_employee_id IS NOT NULL AND status NOT IN
+('completed', 'cancelled')`. Confirmed via direct code search for every
+`SET status = '...'` against `wbom_escort_programs`: `draft` → `confirmed`
+(ESCORTCONFIRM sets `escort_employee_id`) → `running` (auto, first
+attendance) → `completed` (release confirmation). `cancelled` has no active
+setter in current code but is defensively excluded everywhere. `expired`/
+`assigned` are legacy values with no active setter — excluded from the
+"known status" set; programs in an unrecognized status surface
+`data_quality_warnings` rather than being silently treated as bookable or
+blocking.
+
+### Assignment-window model
+
+One shared, deterministic implementation
+(`modules/dispatch/__init__.py::AssignmentWindow`) — no duplicated interval
+logic anywhere else in the module. Existing shift-based (D/N) model reused,
+no arbitrary hourly scheduling. Missing `end_date` is treated as
+open-ended (blocks indefinitely), matching production's status-based (not
+date-based) blocking. Overlap uses an integer shift-ordinal technique
+(`date.toordinal() * 2 + shift_index`) with an inclusive interval check,
+which naturally implements the Owner-specified boundary rule — **an
+assignment ending at the exact boundary where another starts does not
+conflict** — with no special-case code (verified by a dedicated test,
+`test_adjacent_windows_do_not_overlap`).
+
+### Eligibility rule (empirically confirmed, not assumed)
+
+`wbom_employees.status = 'Active' AND designation ILIKE 'Escort'` —
+confirmed by sampling 5 real, currently-assigned escort employees from
+production and checking their actual `designation` value directly.
+
+### APIs (all read-only, RBAC: viewer or above, reusing existing role
+hierarchy — no new role added)
+
+- `GET /api/dispatch/availability` — paginated escort-worker list with
+  `available`/`reason`/`current_conflict`/`data_quality_warnings`.
+- `POST /api/dispatch/check-conflict` — conflict check for a proposed
+  window against one employee.
+- `GET /api/dispatch/suggestions` — deterministic ranked suggestions.
+
+### Ranking (deterministic, no LLM)
+
+Sort key `(-idle_days, active_assignment_count, employee_id)`. `idle_days`
+sentinel of `10_000` for never-assigned employees. Factors limited to
+availability, no-overlap, longest-idle, lower-workload, active status, and
+valid escort classification — explicitly excludes distance, client
+preference, performance score, wage optimization, and reliability (no
+canonical field found to support them).
+
+### Performance
+
+`list_escort_workers()` and `get_suggestions()` each issue exactly one
+grouped query (`ANY($1::int[])`) for blocking programs and one aggregate
+query for last-assignment-dates, regardless of result-set size — no
+per-employee query loop. No new index created (none needed at current data
+volume: 217 `wbom_employees` rows, 318 `wbom_escort_programs` rows).
+
+### No-write proof
+
+`grep -n "execute(|INSERT|UPDATE|DELETE" modules/dispatch/` returns zero
+matches. `tests/unit/test_dispatch.py::TestDispatchAPI::test_no_database_mutation`
+hits all 3 endpoints then asserts `wbom_escort_programs`/
+`escort_roster_entries` row counts are unchanged. Production verification
+independently confirmed `wbom_escort_programs` (318), `escort_roster_entries`
+(318), and `wbom_employees` (217) row counts identical before and after
+live API exercise.
+
+### UI
+
+`app/static/dispatch.html` — read-only, uses `shared-auth-fetch.js`
+directly (`FazleAuthFetch.fetch()`/`readError()`), no new fetch wrapper.
+Explicit banner: "🔒 Read-only Dispatch Preview — No assignment changes are
+made." No write/save/auto-assign control exists anywhere on the page
+(verified by `tests/e2e/test_dispatch.py::TestDispatchPageLoad::test_no_write_controls_present`).
+
+### Production data quality findings (informational, pre-existing, not
+introduced by this work)
+
+- 23 escort employees currently have **more than one** concurrently
+  "blocking" (`confirmed`/`running`) program in production — a pre-existing
+  data condition the new conflict-detection surfaces (via
+  `current_conflict`/`conflicts` arrays showing multiple entries) but does
+  not attempt to resolve. No invalid shifts, no invalid windows
+  (`end_date < start_date`), no missing `start_date` found among the 95
+  currently-blocking programs.
+
+### Tests
+
+39 unit tests (`tests/unit/test_dispatch.py`) + 15 browser tests
+(`tests/e2e/test_dispatch.py`, Playwright, run against the live production
+server) — all passing.
+
+### Deployment
+
+4 commits: `c63c4d3` (service), `1a49d0b` (UI), `b40d666` (unit tests),
+plus the e2e test commit below. Deployed via
+`scripts/restart_gate.sh --restart` (all 9 checks passed). Rollback is
+code-only (revert the 3 commits + remove the router include line in
+`app/main.py`; no schema/data changes to reverse).
+
+### Next Owner decision required before any further Dispatch work
+
+Whether/when to authorize write-capable Dispatch (actual assignment,
+reassignment, reservation, conflict override, roster-entry creation) — not
+started, not designed, and explicitly not part of this phase.
+
