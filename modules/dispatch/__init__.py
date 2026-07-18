@@ -49,7 +49,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from app.database import fetch_all, fetch_one, fetch_val
+from app.database import execute, fetch_all, fetch_one, fetch_val, get_pool
 
 log = logging.getLogger("fazle.dispatch")
 
@@ -174,11 +174,17 @@ _PROGRAM_FIELDS = (
 )
 
 
-async def _fetch_blocking_programs_for_employees(employee_ids: list[int]) -> dict[int, list[dict]]:
+async def _fetch_blocking_programs_for_employees(
+    employee_ids: list[int], conn=None,
+) -> dict[int, list[dict]]:
     """One query for all given employees' currently-blocking (per
     is_bookable_status()) programs, grouped by escort_employee_id. Also
     includes non-terminal statuses outside the known-active set so callers
-    can surface data-quality warnings rather than silently dropping them."""
+    can surface data-quality warnings rather than silently dropping them.
+    Accepts an optional `conn` so a caller already holding a transaction
+    (Phase 2A.2's assign_program()) can compose this into it atomically,
+    matching modules.escort_roster.db.sync_program_to_roster's own
+    established conn= pattern."""
     if not employee_ids:
         return {}
     rows = await fetch_all(
@@ -188,7 +194,7 @@ async def _fetch_blocking_programs_for_employees(employee_ids: list[int]) -> dic
               AND escort_employee_id IS NOT NULL
               AND status <> 'completed' AND status <> 'cancelled'
             ORDER BY escort_employee_id, start_date NULLS LAST, program_date NULLS LAST""",
-        employee_ids,
+        employee_ids, conn=conn,
     )
     by_employee: dict[int, list[dict]] = {}
     for r in rows:
@@ -460,4 +466,323 @@ async def get_suggestions(
             "destination": destination,
         },
         "total_eligible": len(ranked),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2A.2 — Controlled Manual Assignment (write path)
+#
+# Owner-approved scope (2026-07-19): authorized human selects an employee ->
+# backend rechecks eligibility and conflict -> assignment succeeds or is
+# rejected. No auto-assignment, no override, no reservation, no new
+# assignment table. Canonical field remains wbom_escort_programs.escort_employee_id.
+#
+# Status-eligibility matrix (evidence-based, from a full trace of every
+# current writer of escort_employee_id and every consumer keyed on it):
+#   draft      -> initial assignment only (a draft program's employee_id is
+#                 NULL per every confirmed write-site; see module docstring)
+#   confirmed  -> initial assignment AND reassignment
+#   running    -> EXCLUDED. modules.escort_lifecycle.find_active_program_for_employee()
+#                 and mark_program_running_on_attendance() both key strictly
+#                 on escort_employee_id with no physical-presence check --
+#                 reassigning a running program would silently misattribute
+#                 a real release/attendance event to whoever now holds the
+#                 FK, not whoever actually worked the shift. No ratified
+#                 workflow exists for this; excluded per Owner instruction
+#                 rather than assumed safe.
+#   completed,
+#   cancelled  -> EXCLUDED (terminal, per Owner instruction). Also protects
+#                 against modules.payment_workflow.create_escort_payment_draft()'s
+#                 confirmed behavior of overwriting employee_id on an EXISTING
+#                 draft if re-invoked for the same program_id -- drafts are
+#                 only created at release (a terminal transition), so
+#                 restricting assignment to pre-release statuses structurally
+#                 avoids that risk without needing to special-case it.
+_ASSIGNABLE_STATUSES = {"draft", "confirmed"}
+
+
+class DispatchAssignmentError(Exception):
+    """Carries the HTTP status + machine-readable code the routes layer
+    needs -- keeps modules/dispatch/routes.py a thin FastAPI translation
+    layer instead of duplicating validation logic there."""
+
+    def __init__(self, code: str, http_status: int, message: str, conflicts: Optional[list] = None):
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
+        self.message = message
+        self.conflicts = conflicts
+
+
+def _program_summary(p: dict) -> dict:
+    return {
+        "program_id": p["program_id"],
+        "status": p.get("status"),
+        "start_date": str(p.get("start_date") or p.get("program_date") or ""),
+        "start_shift": p.get("shift"),
+        "end_date": str(p.get("end_date")) if p.get("end_date") else None,
+        "end_shift": p.get("end_shift"),
+        "mother_vessel": p.get("mother_vessel"),
+        "lighter_vessel": p.get("lighter_vessel"),
+        "destination": p.get("destination"),
+    }
+
+
+async def assign_program(
+    program_id: int,
+    escort_employee_id: int,
+    expected_current_employee_id: Optional[int],
+    performed_by: str,
+) -> dict:
+    """
+    Controlled manual assignment/reassignment of one escort worker to one
+    wbom_escort_programs row. Transactional, conflict-checked, and
+    concurrency-safe (see class docstring on DispatchAssignmentError and the
+    module-level comment above for the evidence behind every guard here).
+
+    Locking: pg_advisory_xact_lock, the established precedent in this repo
+    for exactly this "read-then-write with conflict check" shape (used
+    identically, keyed by escort_program_id, in
+    modules.payment_workflow.create_escort_payment_draft() and by
+    modules.escort_roster.db.create_roster_entry()). Two locks are always
+    acquired in the SAME fixed order -- escort_employee_id first, then
+    program_id -- regardless of which is "old" or "new" in a reassignment,
+    so two concurrent assignment calls can never deadlock waiting on each
+    other in reverse order. Locking the employee_id (not just the program_id)
+    is what actually prevents "same employee double-booked through racing
+    requests": two concurrent calls assigning the same employee to two
+    different, mutually-overlapping programs each lock a DIFFERENT
+    program_id, so a program-only lock would let both proceed to conflict-
+    check concurrently against each other's not-yet-committed write; locking
+    the employee_id serializes them.
+
+    Raises DispatchAssignmentError for every rejection path -- the routes
+    layer translates .http_status/.code/.message/.conflicts into the exact
+    HTTP response.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Deterministic lock order (see docstring): employee, then program.
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", escort_employee_id)
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", program_id)
+
+            program = await fetch_one(
+                """SELECT program_id, escort_employee_id, status, mother_vessel, lighter_vessel,
+                          start_date, program_date, shift, end_date, end_shift, destination,
+                          escort_name, escort_mobile
+                   FROM wbom_escort_programs WHERE program_id = $1""",
+                program_id, conn=conn,
+            )
+            if program is None:
+                raise DispatchAssignmentError("program_not_found", 404, f"program {program_id} not found")
+
+            status = (program["status"] or "").strip().lower()
+            if status not in _ASSIGNABLE_STATUSES:
+                raise DispatchAssignmentError(
+                    "program_not_assignable", 409,
+                    f"program status {status!r} is not assignable in Phase 2A.2 "
+                    f"(allowed: {sorted(_ASSIGNABLE_STATUSES)})",
+                )
+
+            current_employee_id = program["escort_employee_id"]
+            if current_employee_id != expected_current_employee_id:
+                raise DispatchAssignmentError(
+                    "stale_assignment", 409,
+                    f"expected_current_employee_id={expected_current_employee_id!r} "
+                    f"but the program's current assignment is {current_employee_id!r}; refresh and retry",
+                )
+
+            employee = await fetch_one(
+                "SELECT employee_id, employee_name, employee_mobile, status, designation "
+                "FROM wbom_employees WHERE employee_id = $1",
+                escort_employee_id, conn=conn,
+            )
+            if employee is None:
+                raise DispatchAssignmentError("employee_not_found", 404, f"employee {escort_employee_id} not found")
+            if (employee.get("status") or "").strip() != "Active":
+                raise DispatchAssignmentError(
+                    "employee_not_active", 422, f"employee {escort_employee_id} is not Active")
+            if (employee.get("designation") or "").strip().lower() != "escort":
+                raise DispatchAssignmentError(
+                    "employee_not_escort", 422,
+                    f"employee {escort_employee_id} designation is not Escort")
+
+            # The proposed window is the PROGRAM's own schedule -- this
+            # endpoint assigns who is on the job, never changes when the job
+            # runs (out of scope, see Owner stop condition: no arbitrary
+            # scheduling).
+            window = AssignmentWindow(program)
+            if not window.valid:
+                raise DispatchAssignmentError(
+                    "invalid_program_window", 422,
+                    f"program {program_id} has an invalid assignment window: {window.data_quality_issue}",
+                )
+
+            blocking = (await _fetch_blocking_programs_for_employees(
+                [escort_employee_id], conn=conn)).get(escort_employee_id, [])
+            conflicts = []
+            unknowns = []
+            for p in blocking:
+                if p["program_id"] == program_id:
+                    continue  # a program never conflicts with itself
+                bookable = is_bookable_status(p.get("status"))
+                if bookable is not True:
+                    if bookable is None:
+                        unknowns.append(p["program_id"])
+                    continue
+                w = AssignmentWindow(p)
+                if not w.valid:
+                    unknowns.append(p["program_id"])
+                    continue
+                if window.overlaps(w):
+                    conflicts.append(_program_summary(p))
+
+            if conflicts:
+                raise DispatchAssignmentError(
+                    "dispatch_conflict", 409,
+                    "escort employee has an overlapping assignment", conflicts=conflicts,
+                )
+
+            await execute(
+                "UPDATE wbom_escort_programs SET escort_employee_id = $1 WHERE program_id = $2",
+                escort_employee_id, program_id, conn=conn,
+            )
+
+            # Certified atomic upsert, same transaction+conn -- never
+            # reproduce roster SQL independently (Owner instruction).
+            from modules.escort_roster.db import sync_program_to_roster, log_audit
+            await sync_program_to_roster(program_id, actor=performed_by, conn=conn)
+
+            action = "dispatch_reassign" if current_employee_id is not None else "dispatch_assign"
+            await log_audit(
+                program_id=program_id,
+                action=action,
+                old_data={"escort_employee_id": current_employee_id},
+                new_data={
+                    "escort_employee_id": escort_employee_id,
+                    "program_status": status,
+                    "conflict_check": "passed",
+                    "assignment_window": {
+                        "start_date": str(window.start_date), "start_shift": window.start_shift,
+                        "end_date": str(window.end_date) if window.end_date != date.max else None,
+                        "end_shift": window.end_shift,
+                    },
+                },
+                performed_by=performed_by,
+                source="dispatch_ui",
+                conn=conn,
+            )
+
+            return {
+                "program_id": program_id,
+                "previous_employee_id": current_employee_id,
+                "new_employee_id": escort_employee_id,
+                "employee_name": employee.get("employee_name"),
+                "employee_mobile": employee.get("employee_mobile"),
+                "status": status,
+                "mother_vessel": program.get("mother_vessel"),
+                "lighter_vessel": program.get("lighter_vessel"),
+                "start_date": str(window.start_date),
+                "start_shift": window.start_shift,
+                "end_date": str(window.end_date) if window.end_date != date.max else None,
+                "end_shift": window.end_shift,
+            }
+
+
+async def list_overlaps(
+    employee_id: Optional[int] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """
+    Read-only overlap-review facility (Phase 2A.2 sec.4/sec.9). Recomputes
+    the current overlap set live using the SAME certified AssignmentWindow
+    logic as availability/conflict-check/suggestions -- never a second,
+    divergent overlap algorithm. Never mutates anything.
+    """
+    where = ["p.escort_employee_id IS NOT NULL", "p.status <> 'completed'", "p.status <> 'cancelled'"]
+    params: list = []
+    if employee_id is not None:
+        params.append(employee_id)
+        where.append(f"p.escort_employee_id = ${len(params)}")
+    if status is not None:
+        params.append(status)
+        where.append(f"LOWER(p.status) = LOWER(${len(params)})")
+    where_sql = " AND ".join(where)
+
+    rows = await fetch_all(
+        f"""SELECT p.program_id, p.escort_employee_id, e.employee_name, e.employee_mobile,
+                   p.status, p.mother_vessel, p.lighter_vessel, p.destination,
+                   p.start_date, p.program_date, p.shift, p.end_date, p.end_shift
+            FROM wbom_escort_programs p
+            LEFT JOIN wbom_employees e ON e.employee_id = p.escort_employee_id
+            WHERE {where_sql}
+            ORDER BY p.escort_employee_id, COALESCE(p.start_date, p.program_date)""",
+        *params,
+    )
+
+    by_employee: dict[int, list[dict]] = {}
+    for r in rows:
+        by_employee.setdefault(r["escort_employee_id"], []).append(dict(r))
+
+    groups = []
+    for eid, progs in by_employee.items():
+        if len(progs) < 2:
+            continue
+        windows = [(p, AssignmentWindow(p)) for p in progs]
+        pairs = []
+        data_quality_warnings = []
+        for i in range(len(windows)):
+            p1, w1 = windows[i]
+            if not w1.valid and p1["program_id"] not in data_quality_warnings:
+                data_quality_warnings.append(p1["program_id"])
+            for j in range(i + 1, len(windows)):
+                p2, w2 = windows[j]
+                if w1.overlaps(w2):
+                    same_exact = (
+                        w1.start_date == w2.start_date and w1.start_shift == w2.start_shift
+                        and w1.end_date == w2.end_date and w1.end_shift == w2.end_shift
+                        and (p1.get("mother_vessel") or "").strip().lower()
+                        == (p2.get("mother_vessel") or "").strip().lower()
+                    )
+                    statuses = tuple(sorted([(p1["status"] or "").lower(), (p2["status"] or "").lower()]))
+                    if same_exact:
+                        cls = "same_exact_program_duplication"
+                    elif statuses == ("confirmed", "confirmed"):
+                        cls = "confirmed-confirmed"
+                    elif statuses == ("running", "running"):
+                        cls = "active-active"
+                    elif set(statuses) == {"running", "confirmed"}:
+                        cls = "active-confirmed"
+                    else:
+                        cls = "legacy/unknown"
+                    pairs.append({
+                        "program_a": _program_summary(p1), "program_b": _program_summary(p2),
+                        "classification": cls,
+                    })
+        if pairs:
+            groups.append({
+                "employee_id": eid,
+                "employee_name": progs[0].get("employee_name"),
+                "employee_mobile": progs[0].get("employee_mobile"),
+                "programs": [_program_summary(p) for p in progs],
+                "conflicting_pairs": pairs,
+                "conflict_count": len(pairs),
+                "data_quality_warnings": data_quality_warnings or None,
+            })
+
+    groups.sort(key=lambda g: g["employee_id"])
+    total = len(groups)
+    offset = (page - 1) * page_size
+    page_items = groups[offset: offset + page_size]
+
+    return {
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size if page_size else 0,
+        "note": "Existing overlaps require manual business review. No automatic correction is performed.",
     }
