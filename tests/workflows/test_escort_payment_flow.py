@@ -635,6 +635,20 @@ class TestAuditLogs:
             compute_run, submit_run, approve_run, lock_run, mark_paid,
         )
 
+        # mark_paid() fails closed without an active fpe_employees row
+        # linked via wbom_employee_id (2026-07-15 fix, see
+        # knowledge_base/06_developer_system/payroll_module.md) -- Phase 2C
+        # test-drift fix, 2026-07-18.
+        async with test_db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO fpe_employees
+                    (employee_code, full_name, name_normalized, primary_phone,
+                     status, wbom_employee_id)
+                VALUES ('EMP-APPROVALLOG', $1, $2, $3, 'active', $4)
+            """, flow_employee["employee_name"],
+                flow_employee["employee_name"].lower().strip(),
+                flow_employee["employee_mobile"], flow_employee["employee_id"])
+
         r = await compute_run(
             flow_employee["employee_id"],
             PERIOD_YEAR, PERIOD_MONTH, "test",
@@ -644,8 +658,9 @@ class TestAuditLogs:
         await submit_run(run_id, "test-operator")
         await approve_run(run_id, "test-admin")
         await lock_run(run_id, "test-admin")
-        await mark_paid(run_id, "test-admin", amount=10000.0,
-                         method="bkash", reference="REF001")
+        result = await mark_paid(run_id, "test-admin", amount=10000.0,
+                                  method="bkash", reference="REF001")
+        assert result.get("ok") is True, result
 
         logs = await _qall(
             test_db_pool,
@@ -1130,10 +1145,16 @@ class TestFinalConsistency:
                 VALUES ('8801811111001', 'Guard One', 'Guard', 'Active', 8000)
                 RETURNING *
             """))
+            # basic_salary deliberately lower than emp1's basic(8000) +
+            # program allowance(3 days * 400tk/day = 1200) = 9200, so the
+            # "emp1 with programs should earn more" assertion below holds
+            # regardless of the program allowance -- previously 10000
+            # (higher than emp1's *total*), an unrelated test-data design
+            # flaw, not a production bug (Phase 2C, 2026-07-18).
             emp2 = dict(await conn.fetchrow("""
                 INSERT INTO wbom_employees
                     (employee_mobile, employee_name, designation, status, basic_salary)
-                VALUES ('8801811111002', 'Guard Two', 'Guard', 'Active', 10000)
+                VALUES ('8801811111002', 'Guard Two', 'Guard', 'Active', 7000)
                 RETURNING *
             """))
 
@@ -1778,6 +1799,19 @@ class TestAPIIntegration:
         """POST /payroll/run/{id}/transition through submit→approve→lock→paid."""
         import app.database as db
         db._pool = test_db_pool
+
+        # mark_paid() fails closed without an active fpe_employees row
+        # linked via wbom_employee_id (2026-07-15 fix) -- Phase 2C
+        # test-drift fix, 2026-07-18.
+        async with test_db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO fpe_employees
+                    (employee_code, full_name, name_normalized, primary_phone,
+                     status, wbom_employee_id)
+                VALUES ('EMP-APIFULLCHAIN', $1, $2, $3, 'active', $4)
+            """, flow_employee["employee_name"],
+                flow_employee["employee_name"].lower().strip(),
+                flow_employee["employee_mobile"], flow_employee["employee_id"])
 
         r = await client.post("/payroll/compute", json={
             "period_year": PERIOD_YEAR,
