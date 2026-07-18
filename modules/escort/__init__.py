@@ -1769,6 +1769,56 @@ async def _create_confirmed_from_admin(
                 await _sync_roster_after_confirm(pid)
                 return pid
 
+        # Phase 2A.3 Stage 3: before falling through to a plain new-program
+        # insert, check whether this is actually a REPLACEMENT segment for
+        # an existing, different-escort, earlier-dated program on the same
+        # vessel pair. Only fires when the vessel-pair match is confident
+        # (Decision 3: both mother_vessel and lighter_vessel non-empty and
+        # matching) and the new start is strictly later than the
+        # predecessor's -- find_replacement_predecessor() already enforces
+        # both. A same-date match belongs to Stage 2's guard above, never
+        # here (this dedup branch structurally never reaches this point
+        # for a same-date match -- it would have already matched the
+        # `existing` branch's date equality condition and returned there).
+        if program_date and mv_clean and lv:
+            try:
+                from modules.dispatch import find_replacement_predecessor, create_replacement_segment, DispatchAssignmentError
+                predecessor = await find_replacement_predecessor(
+                    mother_vessel=mv, lighter_vessel=lv, escort_name=escort_name,
+                    escort_mobile=escort_mobile, start_date=program_date,
+                )
+                if predecessor is not None:
+                    try:
+                        result = await create_replacement_segment(
+                            earlier_program_id=predecessor["program_id"],
+                            mother_vessel=mv, lighter_vessel=lv,
+                            escort_employee_id=emp_id, escort_name=escort_name, escort_mobile=escort_mobile,
+                            start_date=program_date, start_shift=shift,
+                            master_mobile=draft.get("master_mobile"), destination=normalized_destination,
+                            performed_by=f"system:{source}",
+                        )
+                        log.info(
+                            f"[escort] created replacement segment: earlier program_id={predecessor['program_id']} "
+                            f"({result['earlier_status']}) -> new program_id={result['new_program_id']} "
+                            f"(rule={result['classification_rule']}, delta={result['date_delta_days']}d)"
+                        )
+                        await _backfill_contact_id_if_missing(result["new_program_id"], client_phone)
+                        return result["new_program_id"]
+                    except DispatchAssignmentError as repl_exc:
+                        # Re-verification inside create_replacement_segment's
+                        # own transaction disagreed with the read-only
+                        # predecessor lookup above (race, or a condition
+                        # find_replacement_predecessor() doesn't itself
+                        # check) -- fall through to the plain insert rather
+                        # than guessing; never silently drop the message.
+                        log.warning(
+                            f"[escort] replacement segment creation declined for predecessor="
+                            f"{predecessor['program_id']}: {repl_exc.code} -- {repl_exc.message} "
+                            f"-- falling back to plain new-program insert"
+                        )
+            except Exception as repl_lookup_exc:
+                log.error(f"[escort] replacement-predecessor lookup failed, falling back to plain insert: {repl_lookup_exc}")
+
         remarks_data = {
             "auto_created": True,
             "source_bridge": source,

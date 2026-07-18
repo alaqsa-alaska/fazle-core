@@ -548,6 +548,25 @@ CREATE TABLE IF NOT EXISTS escort_roster_audit_logs (
     performed_by TEXT, source TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- escort_shift_logs: same gap as escort_calculation_config/
+-- escort_roster_audit_logs above (defined only in migrations/
+-- escort_roster_schema.sql, never ported into db/migrations/). Found
+-- 2026-07-19 (Dispatch Phase 2A.3 Stage 3): _write_shift_log()
+-- (modules/escort_roster/db.py) swallows the resulting UndefinedTableError
+-- internally, but that does not undo Postgres's transaction-abort state --
+-- every subsequent statement in the same transaction then fails with
+-- "current transaction is aborted", masking the real cause. Column shapes
+-- copied verbatim from that file.
+CREATE TABLE IF NOT EXISTS escort_shift_logs (
+    id SERIAL PRIMARY KEY,
+    program_id INTEGER NOT NULL,
+    shift_date DATE NOT NULL,
+    shift CHAR(1) NOT NULL CHECK (shift IN ('D', 'N')),
+    log_type VARCHAR(20) NOT NULL,
+    notes TEXT, recorded_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 

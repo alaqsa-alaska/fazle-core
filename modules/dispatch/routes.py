@@ -188,3 +188,42 @@ async def api_assign_program(
             detail["escort_employee_id"] = body.escort_employee_id
             detail["conflicts"] = e.conflicts
         raise HTTPException(status_code=e.http_status, detail=detail) from None
+
+
+class ReplaceEscortRequest(BaseModel):
+    mother_vessel: str
+    lighter_vessel: str
+    escort_employee_id: Optional[int] = None
+    escort_name: str
+    escort_mobile: str
+    start_date: date
+    start_shift: str
+    master_mobile: Optional[str] = None
+    destination: Optional[str] = None
+
+
+@router.post("/programs/{program_id}/replace-escort", dependencies=[Depends(_require_operator_or_above)])
+async def api_replace_escort(
+    program_id: int,
+    body: ReplaceEscortRequest,
+    key: str = Depends(_API_KEY_HEADER),
+):
+    """Manual trigger for the same escort-replacement-segment workflow
+    Stage 3's automatic admin-message pipeline uses (Phase 2A.3 sec.20) --
+    for correcting/backfilling historical data through the UI rather than
+    a new WhatsApp message. Same validation, same transaction, same
+    seven-day boundary rule (Decision 6), same audit trail -- this is a
+    thin route wrapper, not a second implementation."""
+    performed_by = await _resolve_performed_by(key)
+    start_shift = _parse_shift_query(body.start_shift)
+    try:
+        return await dispatch_svc.create_replacement_segment(
+            earlier_program_id=program_id,
+            mother_vessel=body.mother_vessel, lighter_vessel=body.lighter_vessel,
+            escort_employee_id=body.escort_employee_id, escort_name=body.escort_name,
+            escort_mobile=body.escort_mobile, start_date=body.start_date, start_shift=start_shift,
+            master_mobile=body.master_mobile, destination=body.destination,
+            performed_by=performed_by,
+        )
+    except dispatch_svc.DispatchAssignmentError as e:
+        raise HTTPException(status_code=e.http_status, detail={"detail": e.message, "code": e.code}) from None

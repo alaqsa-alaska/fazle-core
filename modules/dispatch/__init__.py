@@ -50,7 +50,9 @@ eligibility explicitly excludes designation='Escort').
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -96,6 +98,15 @@ def shift_ordinal(d: date, shift: str) -> int:
     shift must already be normalized ('D' or 'N') -- callers are
     responsible for calling normalize_shift() first and handling None."""
     return d.toordinal() * 2 + SHIFT_ORDER.index(shift)
+
+
+def ordinal_to_shift(ordinal: int) -> tuple[date, str]:
+    """Inverse of shift_ordinal(). Phase 2A.3 sec.12: computing the earlier
+    segment's end boundary as "the shift immediately before the later
+    segment's start" is just ordinal_to_shift(later_start_ordinal - 1) --
+    no special-casing for day-vs-night, matches the exact same boundary
+    arithmetic already certified for conflict detection (2A.1)."""
+    return date.fromordinal(ordinal // 2), SHIFT_ORDER[ordinal % 2]
 
 
 class AssignmentWindow:
@@ -801,3 +812,268 @@ async def list_overlaps(
         "pages": (total + page_size - 1) // page_size if page_size else 0,
         "note": "Existing overlaps require manual business review. No automatic correction is performed.",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2A.3 Stage 3 — Different-Date Segments and Escort Replacement
+#
+# Owner-approved (2026-07-19). A replacement candidate requires: same
+# normalized non-empty mother_vessel AND lighter_vessel, a different
+# escort, and a LATER operational start boundary (start_date/start_shift,
+# never created_at). Decision 6 (seven-day boundary):
+#   date_delta < 7 days  -> earlier segment = escort_changed
+#   date_delta >= 7 days -> earlier segment = completed
+# Explicit completion evidence always outranks this inference (checked
+# fresh inside the transaction -- a program already completed/cancelled
+# is never silently reclassified).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_REPLACEMENT_UNDER_DAYS_THRESHOLD = 7
+
+
+def _normalize_vessel_for_matching(raw: Optional[str]) -> str:
+    """Phase 2A.3 sec.3: normalize a vessel name for same-vessel-pair
+    matching -- case, punctuation, extra spaces, and MV/M.V./M/V-style
+    prefixes. Deliberately a NEW, separate normalizer from the three
+    pre-existing, not-yet-consolidated ones (modules.escort._clean_vessel_name,
+    modules.ocr_processor._normalize_vessel_name,
+    modules.escort_slip_extractor._normalize_vessel -- flagged as an
+    unresolved hygiene item in CANONICAL_BUSINESS_RULES.md) -- unifying
+    them is out of scope here (unrelated roster refactoring)."""
+    if not raw:
+        return ""
+    s = raw.strip().lower()
+    s = re.sub(r"^(mv|m\.v\.|m/v)\s*", "", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return s.strip()
+
+
+def classify_vessel_match(mv_a: Optional[str], lv_a: Optional[str],
+                           mv_b: Optional[str], lv_b: Optional[str]) -> str:
+    """Phase 2A.3 Decision 3: 'match' only when BOTH mother_vessel and
+    lighter_vessel are non-empty (after normalization) on BOTH sides AND
+    both match. 'insufficient_data' whenever either lighter_vessel is
+    empty -- never silently falls back to mother-vessel-only confidence,
+    per the Owner's explicit instruction (this exact gap was found to
+    produce false matches from a real bulk-import artifact during the
+    Decision Report's historical audit). 'no_match' otherwise."""
+    n_mv_a, n_lv_a = _normalize_vessel_for_matching(mv_a), _normalize_vessel_for_matching(lv_a)
+    n_mv_b, n_lv_b = _normalize_vessel_for_matching(mv_b), _normalize_vessel_for_matching(lv_b)
+    if not n_mv_a or not n_mv_b or not n_lv_a or not n_lv_b:
+        return "insufficient_data"
+    if n_mv_a == n_mv_b and n_lv_a == n_lv_b:
+        return "match"
+    return "no_match"
+
+
+async def find_replacement_predecessor(
+    mother_vessel: str, lighter_vessel: str, escort_name: str, escort_mobile: str,
+    start_date: date, conn=None,
+) -> Optional[dict]:
+    """Phase 2A.3 sec.11: read-only lookup for a same-vessel-pair,
+    non-terminal, DIFFERENT-escort program with a strictly EARLIER
+    operational start boundary than the given one -- the precondition for
+    treating a new admin confirmation as a replacement segment rather than
+    an unrelated new program. Matches only on the stored operational
+    start_date/program_date, never on created_at/message-arrival time.
+    Returns None (not "insufficient_data") for any non-confident case --
+    callers must never guess a replacement into existence."""
+    candidates = await fetch_all(
+        """SELECT program_id, status, mother_vessel, lighter_vessel, escort_name, escort_mobile,
+                  escort_employee_id, COALESCE(start_date, program_date) AS eff_start, shift
+           FROM wbom_escort_programs
+           WHERE status NOT IN ('completed', 'cancelled', 'expired', 'escort_changed')
+           ORDER BY COALESCE(start_date, program_date) DESC
+           LIMIT 500""",
+        conn=conn,
+    )
+    for c in candidates:
+        if classify_vessel_match(mother_vessel, lighter_vessel, c["mother_vessel"], c["lighter_vessel"]) != "match":
+            continue
+        existing_name = (c["escort_name"] or "").strip().lower()
+        existing_mobile = (c["escort_mobile"] or "").strip()
+        if (escort_name or "").strip().lower() == existing_name and (escort_mobile or "").strip() == existing_mobile:
+            continue  # same escort -- not a replacement candidate
+        if c["eff_start"] is None or c["eff_start"] >= start_date:
+            continue  # not a clear earlier boundary (equal-date is Stage 2's job)
+        return dict(c)
+    return None
+
+
+async def create_replacement_segment(
+    earlier_program_id: int,
+    mother_vessel: str,
+    lighter_vessel: str,
+    escort_employee_id: Optional[int],
+    escort_name: str,
+    escort_mobile: str,
+    start_date: date,
+    start_shift: str,
+    master_mobile: Optional[str] = None,
+    destination: Optional[str] = None,
+    performed_by: str = "system",
+) -> dict:
+    """
+    Phase 2A.3 Stage 3. Creates a new 'running' escort-duty segment that
+    replaces an earlier segment for the same vessel operation, applying
+    Decision 6's seven-day boundary rule. Transactional and concurrency-
+    safe, following the exact same pattern as assign_program() (Phase
+    2A.2): pg_advisory_xact_lock in a fixed order (the NEW segment's
+    escort_employee_id first if known, then the earlier program_id --
+    matching assign_program()'s "employee, then program" global lock
+    order so the two functions can never deadlock against each other),
+    fresh re-reads inside the transaction, and never trusting a caller-
+    supplied classification.
+
+    Never transfers attendance or payment records -- each segment keeps
+    its own history untouched; only the earlier program's status/end
+    boundary and the new program's row are written here.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if escort_employee_id is not None:
+                await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", escort_employee_id)
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", earlier_program_id)
+
+            earlier = await fetch_one(
+                """SELECT program_id, status, mother_vessel, lighter_vessel, escort_name, escort_mobile,
+                          escort_employee_id, COALESCE(start_date, program_date) AS eff_start, shift,
+                          end_date, end_shift
+                   FROM wbom_escort_programs WHERE program_id = $1""",
+                earlier_program_id, conn=conn,
+            )
+            if earlier is None:
+                raise DispatchAssignmentError("program_not_found", 404, f"program {earlier_program_id} not found")
+
+            # Explicit completion/terminal evidence always outranks
+            # inference (sec.13/23) -- re-checked fresh, not trusted from
+            # whatever the caller observed before acquiring the lock.
+            if earlier["status"] in ("completed", "cancelled", "escort_changed"):
+                raise DispatchAssignmentError(
+                    "already_terminal", 409,
+                    f"program {earlier_program_id} is already {earlier['status']!r} -- "
+                    f"explicit prior evidence outranks replacement inference",
+                )
+
+            match = classify_vessel_match(
+                mother_vessel, lighter_vessel, earlier["mother_vessel"], earlier["lighter_vessel"])
+            if match != "match":
+                raise DispatchAssignmentError(
+                    "insufficient_vessel_match", 422,
+                    f"vessel-pair match classification={match!r} -- cannot create an "
+                    f"automatic replacement segment (Decision 3)",
+                )
+
+            existing_name = (earlier["escort_name"] or "").strip().lower()
+            existing_mobile = (earlier["escort_mobile"] or "").strip()
+            if (escort_name or "").strip().lower() == existing_name and (escort_mobile or "").strip() == existing_mobile:
+                raise DispatchAssignmentError(
+                    "same_escort", 422, "incoming escort matches the earlier segment's escort -- not a replacement")
+
+            new_shift = normalize_shift(start_shift)
+            earlier_shift = normalize_shift(earlier["shift"]) or "D"
+            if new_shift is None or earlier["eff_start"] is None:
+                raise DispatchAssignmentError(
+                    "invalid_window", 422, "cannot compute a valid start boundary for replacement")
+            earlier_ord = shift_ordinal(earlier["eff_start"], earlier_shift)
+            new_ord = shift_ordinal(start_date, new_shift)
+            if new_ord <= earlier_ord:
+                raise DispatchAssignmentError(
+                    "not_later", 422,
+                    f"new start ({start_date} {new_shift}) is not later than the earlier segment's "
+                    f"start ({earlier['eff_start']} {earlier_shift}) -- replacement requires a later boundary",
+                )
+
+            # Prevent duplicate active replacement (sec.21). The partial
+            # unique index (migration 050) enforces this at the DB level
+            # too -- this pre-check just produces a clean structured error
+            # instead of a raw UniqueViolationError bubbling up.
+            existing_active_replacement = await fetch_one(
+                """SELECT program_id FROM wbom_escort_programs
+                   WHERE replaces_program_id = $1
+                     AND status NOT IN ('completed', 'cancelled', 'expired', 'escort_changed')""",
+                earlier_program_id, conn=conn,
+            )
+            if existing_active_replacement:
+                raise DispatchAssignmentError(
+                    "duplicate_active_replacement", 409,
+                    f"program {earlier_program_id} already has an active replacement "
+                    f"(program_id={existing_active_replacement['program_id']})",
+                )
+
+            date_delta = (start_date - earlier["eff_start"]).days
+            if date_delta < _REPLACEMENT_UNDER_DAYS_THRESHOLD:
+                earlier_new_status = "escort_changed"
+                classification_rule = "under_7_days_escort_changed"
+            else:
+                earlier_new_status = "completed"
+                classification_rule = "7_days_or_more_completed"
+
+            # Earlier segment's end boundary: the shift immediately before
+            # the later segment's start (sec.12) -- pure ordinal
+            # arithmetic, matches AssignmentWindow's own boundary
+            # semantics exactly, no day/night special-casing.
+            end_date_v, end_shift_v = ordinal_to_shift(new_ord - 1)
+
+            before_earlier_status = earlier["status"]
+            before_earlier_end_date = earlier["end_date"]
+            await execute(
+                """UPDATE wbom_escort_programs
+                   SET status = $1, end_date = $2, end_shift = $3
+                   WHERE program_id = $4""",
+                earlier_new_status, end_date_v, end_shift_v, earlier_program_id, conn=conn,
+            )
+
+            remarks = json.dumps({
+                "source_of_truth": "dispatch_replacement_segment",
+                "auto_created": True,
+                "replaces_program_id": earlier_program_id,
+                "classification_rule": classification_rule,
+                "date_delta_days": date_delta,
+            })
+            new_program_id = await fetch_val(
+                """INSERT INTO wbom_escort_programs
+                       (mother_vessel, lighter_vessel, master_mobile, destination, escort_name, escort_mobile,
+                        escort_employee_id, program_date, start_date, shift, status, replaces_program_id,
+                        assignment_time, remarks, is_historical)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,'running',$10,NOW(),$11,FALSE)
+                   RETURNING program_id""",
+                mother_vessel, lighter_vessel, master_mobile or "", destination, escort_name, escort_mobile,
+                escort_employee_id, start_date, new_shift, earlier_program_id, remarks, conn=conn,
+            )
+
+            from modules.escort_roster.db import sync_program_to_roster, log_audit
+            await sync_program_to_roster(earlier_program_id, actor=performed_by, conn=conn)
+            await sync_program_to_roster(new_program_id, actor=performed_by, conn=conn)
+
+            await log_audit(
+                program_id=earlier_program_id,
+                action="escort_replacement_earlier",
+                old_data={"status": before_earlier_status,
+                          "end_date": str(before_earlier_end_date) if before_earlier_end_date else None},
+                new_data={"status": earlier_new_status, "end_date": str(end_date_v), "end_shift": end_shift_v,
+                          "replaced_by_program_id": new_program_id, "date_delta_days": date_delta,
+                          "classification_rule": classification_rule},
+                performed_by=performed_by, source="dispatch_replacement",
+            )
+            await log_audit(
+                program_id=new_program_id,
+                action="escort_replacement_new_segment",
+                old_data=None,
+                new_data={"replaces_program_id": earlier_program_id, "escort_name": escort_name,
+                          "escort_mobile": escort_mobile, "start_date": str(start_date), "start_shift": new_shift,
+                          "date_delta_days": date_delta},
+                performed_by=performed_by, source="dispatch_replacement",
+            )
+
+            return {
+                "earlier_program_id": earlier_program_id,
+                "earlier_status": earlier_new_status,
+                "earlier_end_date": str(end_date_v),
+                "earlier_end_shift": end_shift_v,
+                "new_program_id": new_program_id,
+                "new_escort_employee_id": escort_employee_id,
+                "date_delta_days": date_delta,
+                "classification_rule": classification_rule,
+            }
