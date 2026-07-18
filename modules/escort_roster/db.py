@@ -128,7 +128,7 @@ async def _find_duplicate_roster_entry(
     return None
 
 
-async def _get_conveyance_for_destination(destination: Optional[str]) -> Decimal:
+async def _get_conveyance_for_destination(destination: Optional[str], conn=None) -> Decimal:
     """Look up conveyance amount for a destination key."""
     if not destination:
         return Decimal("0")
@@ -136,6 +136,7 @@ async def _get_conveyance_for_destination(destination: Optional[str]) -> Decimal
     row = await fetch_one(
         "SELECT conveyance_amount FROM escort_calculation_config WHERE destination_key = $1",
         key,
+        conn=conn,
     )
     if row:
         return Decimal(str(row["conveyance_amount"]))
@@ -145,16 +146,18 @@ async def _get_conveyance_for_destination(destination: Optional[str]) -> Decimal
         "WHERE $1 ILIKE '%' || destination_key || '%' OR destination_key ILIKE '%' || $1 || '%' "
         "ORDER BY LENGTH(destination_key) DESC LIMIT 1",
         key,
+        conn=conn,
     )
     if row:
         return Decimal(str(row["conveyance_amount"]))
     return Decimal("0")
 
 
-async def _get_shift_rate() -> Decimal:
+async def _get_shift_rate(conn=None) -> Decimal:
     """Default shift rate from config (uses first row's value)."""
     val = await fetch_val(
-        "SELECT shift_rate FROM escort_calculation_config ORDER BY id LIMIT 1"
+        "SELECT shift_rate FROM escort_calculation_config ORDER BY id LIMIT 1",
+        conn=conn,
     )
     return Decimal(str(val)) if val else Decimal("200")
 
@@ -170,6 +173,7 @@ async def _write_shift_log(
     log_type: str,
     notes: Optional[str] = None,
     recorded_by: str = "system",
+    conn=None,
 ) -> None:
     """Insert a shift log entry. ON CONFLICT DO NOTHING keeps it idempotent."""
     try:
@@ -186,6 +190,7 @@ async def _write_shift_log(
             log_type,
             notes,
             recorded_by,
+            conn=conn,
         )
     except Exception as e:
         log.debug(f"[escort_roster] _write_shift_log skipped: {e}")
@@ -195,11 +200,33 @@ async def _write_shift_log(
 # Core sync
 # ────────────────────────────────────────────────────────────────────────────
 
-async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict:
+async def sync_program_to_roster(program_id: int, actor: str = "system", conn=None) -> dict:
     """
     Upsert a wbom_escort_programs row into escort_roster_entries.
     Computes pay fields from start_date/shift → end_date/end_shift.
     Returns the upserted row dict.
+
+    Single atomic `INSERT ... ON CONFLICT (program_id) DO UPDATE` (Phase 1I,
+    2026-07-18) -- previously a SELECT-existing-row-then-branch (UPDATE vs
+    INSERT), a real check-then-act race under concurrent calls for the same
+    program_id (reproduced: concurrent calls raised
+    "duplicate key value violates unique constraint
+    escort_roster_entries_program_id_key"). Matches
+    modules.escort_lifecycle's own proven atomic upsert pattern.
+
+    Accepts an optional `conn` so a caller already holding a transaction
+    (e.g. escort_lifecycle) can compose this into it atomically instead of
+    this function acquiring its own connection from the shared pool --
+    reproduced and confirmed as a genuine deadlock otherwise: this function
+    never accepted/threaded a `conn` before, so calling it from inside an
+    already-open `pool.acquire()` block (holding 1 of N pool connections)
+    while it tried to acquire its own connection could exhaust a small pool
+    and hang all concurrent callers forever (see
+    knowledge_base/00_governance/escort_dualwrite_concurrency_debug_2026-07-17.md
+    and the Phase 1I reproduction in management_decisions.md for the exact
+    evidence -- this is the "second, un-root-caused issue" that made the
+    2026-07-13 refactor attempt hang even after its check-then-act race was
+    fixed).
     """
     prog = await fetch_one(
         """
@@ -209,6 +236,7 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
         WHERE p.program_id = $1
         """,
         program_id,
+        conn=conn,
     )
     if not prog:
         raise ValueError(f"Program {program_id} not found")
@@ -227,8 +255,8 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
     # Build pay calculation if dates available
     pay: dict = {}
     if start_date and end_date:
-        conveyance = await _get_conveyance_for_destination(prog.get("destination"))
-        shift_rate = await _get_shift_rate()
+        conveyance = await _get_conveyance_for_destination(prog.get("destination"), conn=conn)
+        shift_rate = await _get_shift_rate(conn=conn)
         pay = calculate_pay(start_date, start_shift, end_date, end_shift, conveyance, shift_rate)
     elif prog.get("total_payment"):
         # Legacy: use existing total_payment
@@ -255,115 +283,84 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
     }
     roster_status = status_map.get(prog_status.lower(), "draft")
 
-    existing = await fetch_one(
-        "SELECT id, calc_version FROM escort_roster_entries WHERE program_id = $1",
-        program_id,
-    )
-
     # food_bill + net_payable from source program (migration 018 columns)
     food_bill_val = float(prog.get("food_bill") or 0)
     roster_total = float(pay.get("total") or 0)
     net_payable_val = max(roster_total - food_bill_val, 0.0)
 
-    if existing:
-        old_version = existing["calc_version"]
-        await execute(
-            """
-            UPDATE escort_roster_entries SET
-                mother_vessel       = $2,
-                lighter_vessel      = $3,
-                master_mobile       = $4,
-                escort_name         = $5,
-                escort_mobile       = $6,
-                destination         = $7,
-                start_date          = $8,
-                start_shift         = $9,
-                end_date            = $10,
-                end_shift           = $11,
-                total_shifts        = $12,
-                total_days          = $13,
-                salary              = $14,
-                conveyance          = $15,
-                total               = $16,
-                release_point       = $17,
-                roster_status       = $18,
-                calc_version        = $19,
-                escort_employee_id  = $20,
-                food_bill           = $21,
-                net_payable         = $22,
-                last_synced_at      = NOW(),
-                updated_at          = NOW()
-            WHERE program_id = $1
-            """,
-            program_id,
-            prog["mother_vessel"],
-            prog["lighter_vessel"],
-            prog.get("master_mobile"),
-            escort_name,
-            prog.get("escort_mobile"),
-            prog.get("destination"),
-            start_date,
-            start_shift,
-            end_date,
-            end_shift,
-            pay.get("total_shifts"),
-            pay.get("total_days"),
-            pay.get("salary"),
-            pay.get("conveyance"),
-            pay.get("total"),
-            prog.get("release_point") or prog.get("release_location"),
-            roster_status,
-            old_version + 1,
-            prog.get("escort_employee_id"),
-            food_bill_val,
-            net_payable_val,
+    # xmax = 0 is the standard Postgres idiom for "this row was just
+    # inserted, never updated" -- lets us know insert-vs-update from the
+    # single atomic statement without a separate existence check.
+    upserted = await fetch_one(
+        """
+        INSERT INTO escort_roster_entries (
+            program_id, mother_vessel, lighter_vessel, master_mobile,
+            escort_name, escort_mobile, destination,
+            start_date, start_shift, end_date, end_shift,
+            total_shifts, total_days, salary, conveyance, total,
+            release_point, roster_status, escort_employee_id,
+            food_bill, net_payable, calc_version, last_synced_at
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1,NOW()
         )
-        action = "sync_update"
-    else:
-        await execute(
-            """
-            INSERT INTO escort_roster_entries (
-                program_id, mother_vessel, lighter_vessel, master_mobile,
-                escort_name, escort_mobile, destination,
-                start_date, start_shift, end_date, end_shift,
-                total_shifts, total_days, salary, conveyance, total,
-                release_point, roster_status, escort_employee_id,
-                food_bill, net_payable, calc_version, last_synced_at
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,1,NOW()
-            )
-            """,
-            program_id,
-            prog["mother_vessel"],
-            prog["lighter_vessel"],
-            prog.get("master_mobile"),
-            escort_name,
-            prog.get("escort_mobile"),
-            prog.get("destination"),
-            start_date,
-            start_shift,
-            end_date,
-            end_shift,
-            pay.get("total_shifts"),
-            pay.get("total_days"),
-            pay.get("salary"),
-            pay.get("conveyance"),
-            pay.get("total"),
-            prog.get("release_point") or prog.get("release_location"),
-            roster_status,
-            prog.get("escort_employee_id"),
-            food_bill_val,
-            net_payable_val,
-        )
-        action = "sync_insert"
+        ON CONFLICT (program_id) DO UPDATE SET
+            mother_vessel       = EXCLUDED.mother_vessel,
+            lighter_vessel      = EXCLUDED.lighter_vessel,
+            master_mobile       = EXCLUDED.master_mobile,
+            escort_name         = EXCLUDED.escort_name,
+            escort_mobile       = EXCLUDED.escort_mobile,
+            destination         = EXCLUDED.destination,
+            start_date          = EXCLUDED.start_date,
+            start_shift         = EXCLUDED.start_shift,
+            end_date            = EXCLUDED.end_date,
+            end_shift           = EXCLUDED.end_shift,
+            total_shifts        = EXCLUDED.total_shifts,
+            total_days          = EXCLUDED.total_days,
+            salary              = EXCLUDED.salary,
+            conveyance          = EXCLUDED.conveyance,
+            total               = EXCLUDED.total,
+            release_point       = EXCLUDED.release_point,
+            roster_status       = EXCLUDED.roster_status,
+            escort_employee_id  = EXCLUDED.escort_employee_id,
+            food_bill           = EXCLUDED.food_bill,
+            net_payable         = EXCLUDED.net_payable,
+            calc_version        = escort_roster_entries.calc_version + 1,
+            last_synced_at      = NOW(),
+            updated_at          = NOW()
+        RETURNING *, (xmax = 0) AS _inserted
+        """,
+        program_id,
+        prog["mother_vessel"],
+        prog["lighter_vessel"],
+        prog.get("master_mobile"),
+        escort_name,
+        prog.get("escort_mobile"),
+        prog.get("destination"),
+        start_date,
+        start_shift,
+        end_date,
+        end_shift,
+        pay.get("total_shifts"),
+        pay.get("total_days"),
+        pay.get("salary"),
+        pay.get("conveyance"),
+        pay.get("total"),
+        prog.get("release_point") or prog.get("release_location"),
+        roster_status,
+        prog.get("escort_employee_id"),
+        food_bill_val,
+        net_payable_val,
+        conn=conn,
+    )
+    action = "sync_insert" if upserted.get("_inserted") else "sync_update"
 
     # Write shift log entries so the detail timeline has real data
     if roster_status == "active" and start_date:
         await _write_shift_log(program_id, start_date, start_shift, "start",
-                               f"Duty started on {prog.get('mother_vessel','')}", actor)
+                               f"Duty started on {prog.get('mother_vessel','')}", actor, conn=conn)
     elif roster_status == "completed" and end_date:
         await _write_shift_log(program_id, end_date, end_shift, "release",
-                               f"Released at {prog.get('release_point','')}", actor)
+                               f"Released at {prog.get('release_point','')}", actor, conn=conn)
 
     await log_audit(
         program_id=program_id,
@@ -371,12 +368,11 @@ async def sync_program_to_roster(program_id: int, actor: str = "system") -> dict
         new_data={**dict(prog), **pay, "roster_status": roster_status},
         performed_by=actor,
         source="sync",
+        conn=conn,
     )
 
-    row = await fetch_one(
-        "SELECT * FROM escort_roster_entries WHERE program_id = $1", program_id
-    )
-    return dict(row) if row else {}
+    upserted.pop("_inserted", None)
+    return dict(upserted)
 
 
 async def sync_all_programs(actor: str = "system") -> dict:
@@ -1077,6 +1073,7 @@ async def log_audit(
     new_data: Optional[dict] = None,
     performed_by: str = "system",
     source: str = "system",
+    conn=None,
 ) -> None:
     """Append a row to escort_roster_audit_logs."""
     def _safe(d: Optional[dict]) -> Optional[str]:
@@ -1104,6 +1101,7 @@ async def log_audit(
             _safe(new_data),
             performed_by,
             source,
+            conn=conn,
         )
     except Exception as e:
         log.warning(f"[audit] log_audit failed: {e}")

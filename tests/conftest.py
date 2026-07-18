@@ -506,6 +506,48 @@ CREATE TABLE IF NOT EXISTS escort_roster_entries (
     calc_version INT DEFAULT 1, last_synced_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- escort_calculation_config / escort_roster_audit_logs: defined in the
+-- separate, non-db/migrations/ file migrations/escort_roster_schema.sql
+-- (production has both, confirmed live via GET /api/escort-roster/config
+-- and the "[audit] log_audit failed: relation ... does not exist" warning
+-- seen in test runs) -- never ported into the db/migrations/ set this
+-- fixture's _run_all_migrations() scans, so they were missing from every
+-- test DB. Added here 2026-07-18 (Phase 1I) after this gap blocked a
+-- concurrency reproduction from exercising sync_program_to_roster()'s real
+-- pay-calculation code path. Column shapes copied verbatim from that file.
+CREATE TABLE IF NOT EXISTS escort_calculation_config (
+    id SERIAL PRIMARY KEY,
+    destination VARCHAR(120) NOT NULL,
+    destination_key VARCHAR(120) NOT NULL UNIQUE,
+    conveyance_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+    shift_rate NUMERIC(10,2) NOT NULL DEFAULT 200,
+    notes TEXT, updated_by TEXT, updated_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO escort_calculation_config
+    (destination, destination_key, conveyance_amount, shift_rate)
+VALUES
+    ('Narayanganj', 'narayanganj', 600,  200),
+    ('Noapara',     'noapara',     1000, 200),
+    ('Nagarbari',   'nagarbari',   900,  200),
+    ('Aricha',      'aricha',      900,  200),
+    ('Bhairab',     'bhairab',     800,  200),
+    ('Ashuganj',    'ashuganj',    800,  200),
+    ('Chandpur',    'chandpur',    700,  200),
+    ('Barishal',    'barishal',    1200, 200),
+    ('Mongla',      'mongla',      1500, 200)
+ON CONFLICT (destination_key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS escort_roster_audit_logs (
+    id SERIAL PRIMARY KEY,
+    program_id INTEGER NOT NULL,
+    roster_entry_id INTEGER,
+    action VARCHAR(60) NOT NULL,
+    old_data JSONB, new_data JSONB,
+    performed_by TEXT, source TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 

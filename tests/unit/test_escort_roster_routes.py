@@ -230,37 +230,39 @@ class TestEscortRosterSyncStatus:
             "release_location": None,
             "total_payment": None,
         }
-        existing_row = {"id": 99, "calc_version": 2}
-        final_row = {"program_id": 12, "roster_status": "confirmed", "program_status": "confirmed"}
+        # Phase 1I (2026-07-18): sync_program_to_roster() now does a single
+        # atomic INSERT ... ON CONFLICT (program_id) DO UPDATE ... RETURNING
+        # (fixed a real check-then-act race + a nested-pool-acquire
+        # deadlock -- see management_decisions.md Phase 1I). It now issues
+        # exactly 2 fetch_one() calls (program lookup, then the upsert
+        # itself via RETURNING) and zero execute() calls for the write
+        # itself -- this test's mocks are updated to match that shape while
+        # preserving its original intent: status='confirmed' must map to
+        # roster_status='confirmed', not silently fall back to 'draft'.
+        upserted_row = {
+            "id": 99, "program_id": 12, "calc_version": 3,
+            "roster_status": "confirmed", "_inserted": False,
+        }
 
         fetch_one_calls = {"count": 0}
-        execute_calls = []
 
         async def _fake_fetch_one(query, *args, **kwargs):
             fetch_one_calls["count"] += 1
             if fetch_one_calls["count"] == 1:
                 return program_row
-            if fetch_one_calls["count"] == 2:
-                return existing_row
-            return final_row
-
-        async def _fake_execute(query, *args, **kwargs):
-            execute_calls.append((query, args))
-            return "UPDATE 1"
+            return upserted_row
 
         async def _fake_log_audit(**kwargs):
             return None
 
         monkeypatch.setattr(roster_db, "fetch_one", _fake_fetch_one)
-        monkeypatch.setattr(roster_db, "execute", _fake_execute)
         monkeypatch.setattr(roster_db, "log_audit", _fake_log_audit)
 
         row = await roster_db.sync_program_to_roster(12, actor="test")
 
-        update_query, update_args = execute_calls[0]
-        assert "roster_status       = $18" in update_query
-        assert update_args[17] == "confirmed"
+        assert fetch_one_calls["count"] == 2
         assert row["roster_status"] == "confirmed"
+        assert "_inserted" not in row
 
 
 class TestEscortClientRoutes:
