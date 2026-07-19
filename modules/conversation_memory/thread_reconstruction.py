@@ -194,20 +194,65 @@ async def _observe_stage1(*, text: str, sender_phone: str, source: str, message_
 # production until its own checkpoint).
 # ===========================================================================
 
+_DEFAULT_FIELD_CONFIDENCE = {
+    "mother_vessel": 0.7, "importer": 0.6, "cargo_type": 0.6,
+    "lighter_vessel": 0.7, "master_mobile": 0.8, "destination": 0.6, "capacity": 0.6,
+}
+
+
 async def _observe_stage2(*, text: str, sender_phone: str, source: str, message_id: Optional[str], sender_role: str) -> Optional[int]:
     import modules.conversation_memory as cm
     from modules.conversation_memory.grouping import classify_threads_for_message, check_existing_draft_relation
     from modules.escort import parse_escort_message
 
+    settings = get_settings()
+    bangla_enabled = settings.bangla_semantic_parser_enabled
+
     order = parse_escort_message(text)
     parsed = _order_to_fields(order)
+    # "current parser result" for the shadow comparison record is always
+    # the EXISTING single-message parser alone, unenhanced -- the whole
+    # point of Section 9's comparison is showing what the OLD parser
+    # would have produced next to what this module produces.
     current_parser_result = {k: v for k, v in parsed.items() if v}
     current_alone_complete = REQUIRED_COMPLETENESS_FIELDS.issubset(current_parser_result.keys())
 
+    field_meta: dict = {
+        f: {"value": v, "confidence": _DEFAULT_FIELD_CONFIDENCE.get(f, 0.6),
+            "is_explicit_label": False, "extraction_method": "single_message_parser"}
+        for f, v in parsed.items() if v
+    }
+
+    bangla_mother_vessel_candidate: Optional[dict] = None
+    if bangla_enabled:
+        from modules.conversation_memory.bangla_extraction import extract_labeled_fields, split_trip_suffix
+
+        bangla_fields = extract_labeled_fields(text, has_lighter=False, has_master_mobile=False)
+        bangla_mother_vessel_candidate = bangla_fields.pop("mother_vessel", None)
+        # Bangla explicit labels take priority over the English parser's
+        # guess for every field except mother_vessel (held back for
+        # context-sensitive re-derivation once the target thread's prior
+        # state is known -- Part 12).
+        field_meta.update(bangla_fields)
+
+        # Trip normalization (Section 12) is language-independent -- it
+        # applies to whichever lighter_vessel this message ended up with,
+        # from either parser.
+        if "lighter_vessel" in field_meta:
+            clean, trip = split_trip_suffix(field_meta["lighter_vessel"]["value"])
+            if clean:
+                field_meta["lighter_vessel"]["value"] = clean
+            if trip and "trip" not in field_meta:
+                field_meta["trip"] = {
+                    "value": trip, "confidence": 0.8,
+                    "is_explicit_label": True, "extraction_method": "trip_suffix_split",
+                }
+
+    grouping_input = {f: v["value"] for f, v in field_meta.items()}
     threads = await cm.get_open_threads(bridge_id=source, counterparty_phone=sender_phone, business_domain="escort")
     naive_stage1_target = threads[0] if threads else None  # what Stage 1's single-most-recent lookup would have picked
 
-    decision = classify_threads_for_message(threads, parsed)
+    decision = classify_threads_for_message(threads, grouping_input)
 
     thread: Optional[dict] = None
     fields: dict = {}
@@ -224,18 +269,38 @@ async def _observe_stage2(*, text: str, sender_phone: str, source: str, message_
             business_intent="escort_order", first_message_id=message_id,
         )
 
+    if bangla_enabled and bangla_mother_vessel_candidate is not None:
+        resolved_candidate = bangla_mother_vessel_candidate
+        if (
+            bangla_mother_vessel_candidate.get("extraction_method") == "bangla_label_generic_ambiguous"
+            and "lighter_vessel" in fields and "master_mobile" in fields
+        ):
+            # Context-sensitive promotion (Part 12): the thread this
+            # message actually landed in already has lighter+master, so
+            # the generic "ভেসেল নেম" label can only sensibly mean the
+            # missing mother vessel -- re-derive with that context rather
+            # than trusting the pre-grouping ambiguous guess.
+            from modules.conversation_memory.bangla_extraction import extract_labeled_fields
+            promoted = extract_labeled_fields(text, has_lighter=True, has_master_mobile=True)
+            resolved_candidate = promoted.get("mother_vessel", bangla_mother_vessel_candidate)
+        # A Bangla label was explicitly found for this field -- always
+        # replaces whatever the English-only parser guessed (it has no
+        # Bangla awareness and is known-unreliable on Bangla-labeled
+        # text), even when the Bangla read itself is only low-confidence.
+        field_meta["mother_vessel"] = resolved_candidate
+
     applied_any = False
     field_provenance: dict = {}
 
     if thread is not None:
-        def _merge(field_name: str, value, confidence: float) -> None:
-            nonlocal fields, applied_any
+        for field_name, meta in field_meta.items():
+            value = meta.get("value")
             if not value:
-                return
+                continue
             fields, result = cm.merge_field(
                 fields, field_name, value=value, source_message_id=message_id,
-                confidence=confidence, extraction_method="single_message_parser",
-                is_system_generated=False,
+                confidence=meta["confidence"], extraction_method=meta["extraction_method"],
+                is_system_generated=False, is_explicit_label=meta.get("is_explicit_label", False),
             )
             field_provenance[field_name] = result.reason
             if result.applied:
@@ -246,14 +311,6 @@ async def _observe_stage2(*, text: str, sender_phone: str, source: str, message_
                     "existing_value": fields.get(field_name, {}).get("value"),
                     "source_message_id": message_id,
                 })
-
-        _merge("mother_vessel", parsed.get("mother_vessel"), 0.7)
-        _merge("importer", parsed.get("importer"), 0.6)
-        _merge("cargo_type", parsed.get("cargo_type"), 0.6)
-        _merge("lighter_vessel", parsed.get("lighter_vessel"), 0.7)
-        _merge("master_mobile", parsed.get("master_mobile"), 0.8)
-        _merge("destination", parsed.get("destination"), 0.6)
-        _merge("capacity", parsed.get("capacity"), 0.6)
 
         is_complete = REQUIRED_COMPLETENESS_FIELDS.issubset(fields.keys())
         new_state = thread["state"]
