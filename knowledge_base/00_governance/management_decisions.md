@@ -3986,10 +3986,17 @@ overclaim a deployment that hasn't happened yet at commit time).
 
 ## Draft-Confirmation Invariant, Workstream 2 Stage 1 (2026-07-19)
 
-**Status: Stage 1 only (migration + read-only queue visibility) — code not
-yet deployed to the running service. Stage 2 (the actual no-match behavior
-change) deliberately not started**, per Owner's own staged-deployment
-instruction: don't enable the new no-match branch before the queue table
+**Status: 🟢 DEPLOYED AND LIVE (updated same day, after Stage 2 landed —
+see below).** Committed `8afa1ab`, pushed, deployed together with Stage 2
+in one restart (`scripts/restart_gate.sh --restart`, all 9 checks passed,
+`RESTART: SUCCESS`, post-restart health `ok`). Originally written up
+below as Stage-1-only/not-yet-deployed; both stages shipped together in
+practice, per Owner decision after Stage 2 was also ready the same
+session — full detail unchanged below, status line corrected here rather
+than rewriting the historical record.
+
+Per Owner's own staged-deployment instruction, don't enable the new
+no-match branch before the queue table
 and review visibility are verified.
 
 ### Origin and the design question resolved before any code
@@ -4127,9 +4134,11 @@ no-match branch change) as its own reviewed step.
 
 ## Draft-Confirmation Invariant, Workstream 2 Stage 2 (2026-07-19)
 
-**Status: code complete and unit-tested, NOT YET committed/pushed/deployed
-— held for the same commit+push+restart checkpoint as Stage 1, batched
-together.** This is the actual behavior change: `handle_admin_escort_
+**Status: 🟢 DEPLOYED AND LIVE.** Committed `84cb932`, pushed, deployed
+together with Stage 1 in one restart (`scripts/restart_gate.sh --restart`,
+all 9 checks passed, `RESTART: SUCCESS`, post-restart health `ok`, process
+confirmed started ~2 minutes after this commit). This is the actual
+behavior change: `handle_admin_escort_
 completion()`'s no-match path no longer auto-creates a second confirmed
 program row.
 
