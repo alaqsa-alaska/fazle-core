@@ -4412,4 +4412,97 @@ go-ahead each time, not assumed). After that, the only work remaining in
 this workstream is the frontend review UI and Workstream 5's historical
 reclassification — both separate, later checkpoints.
 
+## Draft-Confirmation Invariant, Workstream 2 Stage 4 (2026-07-19)
+
+**Status: code complete, tested, NOT YET committed/pushed/deployed.** Admin
+review UI for the queue Stage 1-3 built — a queued item can now actually
+be resolved through a browser, not just via direct API calls.
+
+### UI placement
+
+New dedicated page (`app/static/unmatched-confirmations.html`), not
+folded into Dispatch or Escort Roster — this repo has no central
+sidebar/nav (`escort-roster.html`/`dispatch.html`/`wbom-link-review.html`
+are each linked only from directly-related pages, confirmed by grep —
+not a gap specific to this feature). Registered via the same
+`GET /unmatched-confirmations` + `.html` route pattern as
+`escort-roster`. Discoverable via a new link on `dispatch.html`'s header
+(the closest sibling admin review workflow).
+
+### Real bug found and fixed while writing the Playwright suite
+
+`postAction()`'s success path wrote the result message to `#actionStatus`,
+then called `loadQueue()` + `openDetail(itemId)` to refresh — but
+`openDetail()` re-renders the entire `#detail` panel from scratch,
+replacing `#actionStatus` with a fresh, empty element. The success
+message was being written, then immediately erased by the refresh it
+triggered — every successful action would show a blank status. Not
+caught by manual testing (a human re-reading the panel wouldn't notice a
+message that flashed then vanished within the same render cycle) — found
+by the Playwright suite's own `to_contain_text("succeeded")` assertion.
+Fixed: capture the message before refreshing, re-apply it to the new
+element afterward.
+
+### Test-locator bugs found in the test suite itself (not product bugs)
+
+Three Playwright tests used Playwright's default substring `text=`
+locator for button clicks (`text=Reject`, `text=Defer`, `text=Link to
+Existing Draft`), which also matched unrelated page text containing the
+same substring (the "Rejected"/"Deferred" filter tab labels; a duplicate
+label div next to the Link button) — a strict-mode ambiguity that caused
+Playwright's actionability wait to retry indefinitely, compounding with a
+known pytest-timeout-vs-playwright-sync limitation (SIGALRM can't
+interrupt a blocking `os.waitpid()` in the driver's reaper thread) into a
+genuine multi-minute hang, not a flaky-slow test. Diagnosed by isolating
+each test as its own process with a hard bash-level `timeout` wrapper
+(pytest-level `--timeout` alone did not reliably stop it), then fixing
+each ambiguous locator to `button:has-text(...)`, scoped to the
+`<button>` tag only. All 17 tests pass cleanly together, ~39s, after the
+fix — confirmed not a resource-contention artifact (matches the same
+class of issue noted in the AI Console Stage D-F record, but that one
+really was contention; this one was a genuine locator bug, verified by
+reproducing and root-causing it directly rather than assuming).
+
+### RBAC (closes the gap flagged in Stage 3's report)
+
+`tests/unit/test_unmatched_confirmations_rbac.py` — tests
+`_require_admin_or_above` directly (not a full HTTP round trip, since the
+route handlers need a live DB this session doesn't have) across all six
+canonical roles (`viewer`, `office_assistant`, `operator`, `accountant`,
+`admin`, `superadmin`), plus missing-key/invalid-key/inactive-admin/
+internal-api-key-bypass. All 6 routes in this router share this exact
+dependency, so this is complete coverage for the whole router, not a
+single endpoint. 10/10 passing.
+
+### Verification performed
+
+- `tests/e2e/test_unmatched_confirmations.py`: 17/17 passing (page load,
+  auth, mobile no-overflow, XSS/Unicode rendering, filter tabs, candidate
+  comparison including a "candidate program no longer exists" case,
+  all 4 actions including validation-required paths, 409 handling,
+  resolved-item-has-no-actions). Same safe pattern as the pre-existing
+  `test_employee_review.py`: every mutating call is intercepted via
+  `page.route()` with synthetic data — never writes to whatever backend
+  `TEST_APP_URL` points at, safe to run against production for the
+  read-only page-load checks.
+- `tests/unit/test_unmatched_confirmations_rbac.py`: 10/10 passing.
+- Full regression (`test_escort_source_of_truth_refactor.py` +
+  `test_escort_module.py` + `test_message_router_identity_seed.py` +
+  `test_bridge_poller_legacy_gate.py`): same baseline as Stage 2/3 (1
+  pre-existing unrelated failure, 3 DB-gated errors from missing
+  `TEST_DB_PASSWORD`), zero new regressions.
+
+### Not done this pass
+
+Full RBAC coverage at the HTTP layer (only the dependency function
+itself was tested, not a live 200 through the real handler, per the
+standing `TEST_DB_PASSWORD` constraint). No "unauthorized controls
+hidden" UI-level check beyond the existing "403 → back to login" flow
+(the page has no separate reduced-permission view; RBAC is binary
+admin-or-above vs. rejected, matching the backend's own model — a
+lower-privileged "read-only" tier was optional per the spec's own
+wording ("may have no access or read-only access") and not built,
+since the backend itself doesn't offer a read-only tier for this
+resource today).
+
 

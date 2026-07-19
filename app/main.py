@@ -1920,6 +1920,13 @@ async def escort_roster_spa():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "escort-roster.html"))
 
 
+@app.get("/unmatched-confirmations", response_class=HTMLResponse)
+@app.get("/unmatched-confirmations.html", response_class=HTMLResponse)
+async def unmatched_confirmations_spa():
+    """Draft-Confirmation Invariant review queue (Workstream 2 Stage 4)."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "unmatched-confirmations.html"))
+
+
 @app.get("/drafts", response_class=HTMLResponse)
 async def drafts_spa():
     """Draft Messages dashboard SPA."""

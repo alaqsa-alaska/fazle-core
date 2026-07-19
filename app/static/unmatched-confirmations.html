@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Unmatched Confirmations — Draft-Confirmation Review</title>
+<style>
+:root{--bg:#fff8f5;--card:#fff;--accent:#FD3101;--accent2:#db2800;--err:#dc2626;--warn:#d97706;--ok:#16a34a;--muted:#64748b;--border:#e2e8f0;--surface:#f8fafc;--text:#1e293b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:20px}
+h1{color:var(--accent);font-size:20px;margin-bottom:2px}
+h1 .bn{font-size:13px;color:var(--muted);font-weight:normal;display:block;margin-top:2px}
+p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+#loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
+#loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
+#loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
+#app{display:none;max-width:1200px;margin:0 auto}
+.tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.tab{padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:12px}
+.tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+#tableHost{overflow-x:auto}
+table{width:100%;min-width:760px;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+th,td{padding:9px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:12.5px}
+th{background:var(--surface);color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.5px}
+tr.clickable{cursor:pointer}
+tr.clickable:hover{background:var(--surface)}
+.badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:600}
+.badge.pending{background:#fef3c7;color:#92400e}
+.badge.deferred{background:#e0e7ff;color:#3730a3}
+.badge.linked_existing{background:#dcfce7;color:#166534}
+.badge.confirmed_new{background:#dbeafe;color:#1e40af}
+.badge.rejected{background:#fee2e2;color:#991b1b}
+.btn{padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:12px;margin-right:6px}
+.btn.primary{background:var(--ok);color:#fff;border-color:var(--ok)}
+.btn.danger{background:var(--err);color:#fff;border-color:var(--err)}
+.btn.warn{background:var(--warn);color:#fff;border-color:var(--warn)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.status{font-size:12px;margin-top:6px}
+.status.ok{color:var(--ok)}
+.status.err{color:var(--err)}
+#overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:10}
+#detail{display:none;position:fixed;top:0;right:0;bottom:0;width:min(880px,96vw);background:#fff;z-index:11;overflow-y:auto;padding:20px;box-shadow:-4px 0 20px rgba(0,0,0,.15)}
+#detail .close{float:right;cursor:pointer;font-size:20px;color:var(--muted)}
+.cols{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px}
+.col{flex:1;min-width:300px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px}
+.card h3{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+pre.raw{white-space:pre-wrap;font-family:inherit;font-size:12.5px;background:#fff;border:1px solid var(--border);border-radius:6px;padding:8px;max-height:180px;overflow-y:auto}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:12.5px}
+.kv b{color:var(--muted);font-weight:600}
+.candidate{border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;cursor:pointer}
+.candidate.selected{border-color:var(--accent);background:#fff5f2}
+.candidate .score{float:right;font-weight:700;color:var(--accent2)}
+.matched-field{display:inline-block;background:#dcfce7;color:#166534;font-size:10px;padding:1px 6px;border-radius:8px;margin:2px 3px 0 0}
+.warning-field{display:inline-block;background:#fef3c7;color:#92400e;font-size:10px;padding:1px 6px;border-radius:8px;margin:2px 3px 0 0}
+.gone{color:var(--err);font-size:11px}
+.actions{margin-top:14px;border-top:1px solid var(--border);padding-top:14px}
+.actions textarea{width:100%;padding:8px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;min-height:60px;margin-bottom:8px}
+.warn-box{background:#fef3c7;color:#78350f;border:1px solid #fcd34d;border-radius:6px;padding:10px;font-size:12.5px;margin-bottom:8px}
+label.ack{display:flex;align-items:flex-start;gap:6px;font-size:12.5px;margin-bottom:8px}
+@media(max-width:480px){#detail{width:100vw}}
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>Unmatched Confirmations</h1>
+  <input id="keyInput" type="password" placeholder="API Key">
+  <button onclick="doLogin()">Continue</button>
+  <div id="loginErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
+</div>
+
+<div id="app">
+  <h1>Unmatched Confirmations <span class="bn">অমিল এস্কর্ট কনফার্মেশন</span></h1>
+  <p class="sub">Admin confirmations that couldn't be confidently linked to a draft (Draft-Confirmation Invariant, Workstream 2). No program is created until you resolve an item here. Admin/superadmin only.</p>
+  <div class="tabs" id="tabs"></div>
+  <div id="progress" style="font-size:13px;color:var(--muted);margin-bottom:12px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07);display:flex;justify-content:space-between;align-items:center;gap:10px"></div>
+  <div id="tableHost"></div>
+</div>
+
+<div id="overlay" onclick="closeDetail()"></div>
+<div id="detail"></div>
+
+<script>
+let API_KEY = '';
+let ITEMS = [];
+let ACTIVE_STATUS = 'pending_deferred';
+let SELECTED_ID = null;
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtTime(s){ if(!s) return '—'; try{ return new Date(s).toLocaleString(); }catch(e){ return s; } }
+
+function doLogin() {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  localStorage.setItem('fazle_api_key', key);
+  boot();
+}
+
+function boot() {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  renderTabs();
+  loadQueue();
+}
+
+const TABS = [
+  { key: 'pending_deferred', label: 'Pending + Deferred' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'deferred', label: 'Deferred' },
+  { key: 'linked_existing', label: 'Linked' },
+  { key: 'confirmed_new', label: 'Confirmed New' },
+  { key: 'rejected', label: 'Rejected' },
+  { key: 'all', label: 'All' },
+];
+
+function renderTabs() {
+  document.getElementById('tabs').innerHTML = TABS.map(t =>
+    `<div class="tab ${t.key === ACTIVE_STATUS ? 'active' : ''}" onclick="setTab('${t.key}')">${esc(t.label)}</div>`
+  ).join('');
+}
+
+function setTab(key) {
+  ACTIVE_STATUS = key;
+  renderTabs();
+  loadQueue();
+}
+
+async function apiFetch(path, opts = {}) {
+  const headers = Object.assign({ 'X-Internal-Key': API_KEY }, opts.headers || {});
+  if (opts.body) headers['Content-Type'] = 'application/json';
+  const resp = await fetch(path, Object.assign({}, opts, { headers }));
+  if (resp.status === 403) {
+    localStorage.removeItem('fazle_api_key');
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('loginBox').style.display = 'block';
+    document.getElementById('loginErr').textContent = 'Unauthorized — admin/superadmin role required.';
+    throw new Error('403 unauthorized');
+  }
+  return resp;
+}
+
+async function loadQueue() {
+  const progress = document.getElementById('progress');
+  const tableHost = document.getElementById('tableHost');
+  progress.textContent = 'Loading…';
+  let url = '/api/escort/unmatched-confirmations?page_size=100';
+  if (ACTIVE_STATUS !== 'all' && ACTIVE_STATUS !== 'pending_deferred') url += `&status=${ACTIVE_STATUS}`;
+  let resp;
+  try {
+    resp = await apiFetch(url);
+  } catch (e) {
+    progress.innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
+    return;
+  }
+  if (!resp.ok) {
+    progress.innerHTML = `<span style="color:var(--err)">Request failed (HTTP ${resp.status}). <button class="btn" onclick="loadQueue()">Retry</button></span>`;
+    return;
+  }
+  const data = await resp.json();
+  let items = data.items || [];
+  if (ACTIVE_STATUS === 'pending_deferred') {
+    items = items.filter(i => i.status === 'pending' || i.status === 'deferred');
+  }
+  ITEMS = items;
+  progress.innerHTML = `<span><b>${ITEMS.length}</b> item${ITEMS.length === 1 ? '' : 's'}</span><button class="btn" onclick="loadQueue()">↻ Refresh</button>`;
+  renderTable();
+}
+
+function renderTable() {
+  const host = document.getElementById('tableHost');
+  if (ITEMS.length === 0) {
+    host.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--muted)">✅ Nothing in this view.</div>';
+    return;
+  }
+  host.innerHTML = `<table>
+    <thead><tr>
+      <th>ID</th><th>Created</th><th>Status</th><th>Mother Vessel</th><th>Lighter Vessel</th>
+      <th>Master Mobile</th><th>Escort</th><th>Score</th><th>Candidates</th><th>Source</th>
+    </tr></thead>
+    <tbody>
+      ${ITEMS.map(it => {
+        const pc = it.parsed_confirmation || {};
+        return `<tr class="clickable" onclick="openDetail(${it.id})">
+          <td>#${it.id}</td>
+          <td>${fmtTime(it.created_at)}</td>
+          <td><span class="badge ${esc(it.status)}">${esc(it.status)}</span></td>
+          <td>${esc(pc.mother_vessel)}</td>
+          <td>${esc(pc.lighter_vessel)}</td>
+          <td>${esc(pc.master_mobile)}</td>
+          <td>${esc(pc.escort_name)} <span style="color:var(--muted)">${esc(it.client_phone_masked || '')}</span></td>
+          <td>${it.best_candidate_score ?? '—'}</td>
+          <td>${(it.candidate_matches || []).length}</td>
+          <td>${esc(it.source)} / ${esc(it.admin_phone_masked || '')}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+
+async function openDetail(id) {
+  SELECTED_ID = id;
+  const resp = await apiFetch(`/api/escort/unmatched-confirmations/${id}`);
+  if (!resp.ok) {
+    alert(`Could not load item #${id} (HTTP ${resp.status})`);
+    return;
+  }
+  const item = await resp.json();
+  renderDetail(item);
+  document.getElementById('overlay').style.display = 'block';
+  document.getElementById('detail').style.display = 'block';
+}
+
+function closeDetail() {
+  document.getElementById('overlay').style.display = 'none';
+  document.getElementById('detail').style.display = 'none';
+  SELECTED_ID = null;
+}
+
+let SELECTED_CANDIDATE = null;
+
+function renderDetail(item) {
+  const pc = item.parsed_confirmation || {};
+  const candidates = item.candidate_matches || [];
+  SELECTED_CANDIDATE = null;
+  const resolvable = item.status === 'pending' || item.status === 'deferred';
+
+  document.getElementById('detail').innerHTML = `
+    <span class="close" onclick="closeDetail()">&times;</span>
+    <h1>Confirmation #${item.id} <span class="badge ${esc(item.status)}">${esc(item.status)}</span></h1>
+    <p class="sub">Created ${fmtTime(item.created_at)} · source ${esc(item.source)} · admin ${esc(item.admin_phone_masked || '—')}${item.reviewed_by ? ` · reviewed by ${esc(item.reviewed_by)} at ${fmtTime(item.reviewed_at)}` : ''}</p>
+
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <h3>Incoming Admin Confirmation</h3>
+          <div class="kv">
+            <b>Mother Vessel</b><span>${esc(pc.mother_vessel)}</span>
+            <b>Lighter Vessel</b><span>${esc(pc.lighter_vessel)}</span>
+            <b>Master Mobile</b><span>${esc(pc.master_mobile)}</span>
+            <b>Escort Name</b><span>${esc(pc.escort_name)}</span>
+            <b>Escort Mobile</b><span>${esc(pc.escort_mobile)}</span>
+            <b>Shift</b><span>${esc(pc.shift)}</span>
+            <b>Start Date</b><span>${esc(pc.date_str)}</span>
+            <b>Client (masked)</b><span>${esc(item.client_phone_masked || '—')}</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Raw Confirmation Text</h3>
+          <pre class="raw">${esc(item.raw_confirmation_text)}</pre>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="card">
+          <h3>Candidate Programs (${candidates.length})</h3>
+          ${candidates.length === 0 ? '<p class="sub">No candidate drafts were found at admission time.</p>' :
+            candidates.map((c, i) => {
+              const live = c.current_live_state;
+              return `<div class="candidate" id="cand-${i}" onclick="selectCandidate(${i}, ${live ? live.program_id : c.program_id})">
+                <span class="score">${c.score}</span>
+                <b>Program #${c.program_id}</b>
+                ${live ? `
+                  <div class="kv" style="margin-top:6px">
+                    <b>Live Status</b><span>${esc(live.status)}</span>
+                    <b>Mother Vessel</b><span>${esc(live.mother_vessel)}</span>
+                    <b>Lighter Vessel</b><span>${esc(live.lighter_vessel)}</span>
+                    <b>Master Mobile</b><span>${esc(live.master_mobile)}</span>
+                    <b>Escort</b><span>${esc(live.escort_name)} / ${esc(live.escort_mobile)}</span>
+                    <b>Program Date</b><span>${esc(live.program_date)}</span>
+                  </div>` : '<div class="gone">This candidate program no longer exists.</div>'}
+                <div>
+                  ${(c.matched_fields || []).map(f => `<span class="matched-field">✓ ${esc(f)}</span>`).join('')}
+                  ${(c.warnings || []).map(w => `<span class="warning-field">⚠ ${esc(w)}</span>`).join('')}
+                </div>
+              </div>`;
+            }).join('')}
+        </div>
+      </div>
+    </div>
+
+    ${resolvable ? renderActions(item) : `<p class="sub" style="margin-top:14px">This item is already resolved (${esc(item.status)}) — no further action available. Reason: ${esc(item.review_reason || '—')}</p>`}
+    <div id="actionStatus" class="status"></div>
+  `;
+}
+
+function selectCandidate(i, programId) {
+  document.querySelectorAll('.candidate').forEach(el => el.classList.remove('selected'));
+  document.getElementById(`cand-${i}`).classList.add('selected');
+  SELECTED_CANDIDATE = programId;
+}
+
+function renderActions(item) {
+  return `
+    <div class="actions">
+      <h3 style="font-size:13px;margin-bottom:8px">Resolve This Confirmation</h3>
+
+      <div style="margin-bottom:16px">
+        <div style="font-size:12.5px;color:var(--muted);margin-bottom:4px">Link to Existing Draft — select a candidate above, then:</div>
+        <textarea id="linkReason" placeholder="Review reason (required)"></textarea>
+        <button class="btn primary" onclick="doLink(${item.id})">Link to Existing Draft</button>
+      </div>
+
+      <div style="margin-bottom:16px">
+        <div class="warn-box">⚠ This action creates a separate escort program. Use only when this confirmation represents a genuinely separate duty.</div>
+        <textarea id="newReason" placeholder="Mandatory reason: why is this genuinely a new, separate duty?"></textarea>
+        <label class="ack"><input type="checkbox" id="newAck"> I confirm this is genuinely a separate duty segment, not a match to any candidate above.</label>
+        <button class="btn warn" onclick="doConfirmNew(${item.id})">Confirm as Separate New Duty</button>
+      </div>
+
+      <div style="margin-bottom:16px">
+        <textarea id="rejectReason" placeholder="Reason (required)"></textarea>
+        <button class="btn danger" onclick="doReject(${item.id})">Reject</button>
+      </div>
+
+      <div>
+        <textarea id="deferReason" placeholder="Note (optional)"></textarea>
+        <button class="btn" onclick="doDefer(${item.id})">Defer</button>
+      </div>
+    </div>
+  `;
+}
+
+function describeError(status, detail) {
+  if (status === 403) return 'Unauthorized — admin/superadmin role required.';
+  if (status === 404) return 'Item no longer found — it may have been resolved elsewhere.';
+  if (status === 400) return 'Missing/invalid input: ' + detail;
+  if (status === 409) return 'Conflict — ' + detail + ' (someone else may be reviewing this, or it changed since you loaded it).';
+  if (status >= 500) return 'Unexpected server error — check logs. ' + detail;
+  return detail;
+}
+
+async function postAction(itemId, action, body) {
+  const statusEl = document.getElementById('actionStatus');
+  statusEl.textContent = 'Submitting…';
+  statusEl.className = 'status';
+  try {
+    const r = await apiFetch(`/api/escort/unmatched-confirmations/${itemId}/${action}`, {
+      method: 'POST', body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      const detail = Array.isArray(d.detail) ? d.detail.map(x => x.msg).join('; ') : (d.detail || ('HTTP ' + r.status));
+      statusEl.textContent = describeError(r.status, detail);
+      statusEl.className = 'status err';
+      return false;
+    }
+    const successMsg = `✓ ${action} succeeded (queue #${d.queue_id}${d.resolved_program_id ? `, program #${d.resolved_program_id}` : ''})`;
+    statusEl.textContent = successMsg;
+    statusEl.className = 'status ok';
+    await loadQueue();
+    await openDetail(itemId);
+    // openDetail() re-renders #detail from scratch, replacing statusEl --
+    // re-apply the success message to the new element so it isn't silently
+    // wiped by the refresh it triggers.
+    const freshStatusEl = document.getElementById('actionStatus');
+    if (freshStatusEl) {
+      freshStatusEl.textContent = successMsg;
+      freshStatusEl.className = 'status ok';
+    }
+    return true;
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e.message;
+    statusEl.className = 'status err';
+    return false;
+  }
+}
+
+function doLink(itemId) {
+  if (!SELECTED_CANDIDATE) { alert('Select a candidate program first.'); return; }
+  const reason = document.getElementById('linkReason').value.trim();
+  if (!reason) { alert('A review reason is required.'); return; }
+  if (!confirm(`Link confirmation #${itemId} to program #${SELECTED_CANDIDATE}?`)) return;
+  postAction(itemId, 'link-existing', {
+    target_program_id: SELECTED_CANDIDATE, reason, expected_queue_status: null, expected_target_status: null,
+  });
+}
+
+function doConfirmNew(itemId) {
+  const reason = document.getElementById('newReason').value.trim();
+  const ack = document.getElementById('newAck').checked;
+  if (!reason) { alert('A mandatory reason is required.'); return; }
+  if (!ack) { alert('You must acknowledge this creates a separate program.'); return; }
+  if (!confirm(`This creates a NEW escort program for confirmation #${itemId}. Continue?`)) return;
+  postAction(itemId, 'confirm-new', { reason });
+}
+
+function doReject(itemId) {
+  const reason = document.getElementById('rejectReason').value.trim();
+  if (!reason) { alert('A reason is required to reject.'); return; }
+  if (!confirm(`Reject confirmation #${itemId}?`)) return;
+  postAction(itemId, 'reject', { reason });
+}
+
+function doDefer(itemId) {
+  const reason = document.getElementById('deferReason').value.trim();
+  postAction(itemId, 'defer', { reason: reason || null });
+}
+
+(function () {
+  const saved = localStorage.getItem('fazle_api_key');
+  if (saved) {
+    API_KEY = saved;
+    boot();
+  }
+})();
+</script>
+</body>
+</html>
