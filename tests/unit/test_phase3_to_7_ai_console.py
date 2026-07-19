@@ -8,6 +8,26 @@ import pytest
 
 pytestmark = pytest.mark.asyncio
 
+_FAKE_ROLE_LEVELS = {
+    "viewer": 10, "office_assistant": 20, "operator": 30,
+    "accountant": 50, "admin": 70, "superadmin": 100,
+}
+
+
+def _patch_role_levels(monkeypatch):
+    """Business-tool RBAC (Stage E) resolves required role levels via
+    modules.rbac.get_role_level, which needs a live DB. Unit tests here
+    exercise ReadonlyBusinessAdapter in isolation, so stub the resolver
+    with the same real-world hierarchy and reset the adapter's process-wide
+    cache so no other test's values leak in."""
+    from modules.ai_console import live_adapters
+
+    async def fake_get_role_level(name):
+        return _FAKE_ROLE_LEVELS.get(name, 999)
+
+    monkeypatch.setattr(live_adapters.rbac, "get_role_level", fake_get_role_level)
+    monkeypatch.setattr(live_adapters, "_role_level_cache", {})
+
 
 async def test_runtime_adapter_parses_systemd_output(monkeypatch):
     from modules.ai_console.live_adapters import ReadonlyRuntimeAdapter
@@ -56,6 +76,8 @@ async def test_runtime_adapter_uses_runtime_truth_helpers(monkeypatch):
 async def test_business_employee_search_returns_suggestions(monkeypatch):
     from modules.ai_console.live_adapters import ReadonlyBusinessAdapter
 
+    _patch_role_levels(monkeypatch)
+
     async def fake_employee_list(status="active"):
         return [
             {"employee_name": "Manik", "employee_mobile": "01711111111"},
@@ -72,6 +94,8 @@ async def test_business_employee_search_returns_suggestions(monkeypatch):
 
 async def test_business_employee_summary_aggregates_readonly_sources(monkeypatch):
     from modules.ai_console.live_adapters import ReadonlyBusinessAdapter
+
+    _patch_role_levels(monkeypatch)
 
     async def fake_employee_list(status="active"):
         return [{"employee_name": "Manik", "employee_mobile": "01711111111", "designation": "Guard"}]
@@ -100,6 +124,8 @@ async def test_business_employee_summary_aggregates_readonly_sources(monkeypatch
 
 async def test_business_cash_ledger_summary_uses_daily_payments(monkeypatch):
     from modules.ai_console.live_adapters import ReadonlyBusinessAdapter
+
+    _patch_role_levels(monkeypatch)
 
     async def fake_daily(question):
         return {"transaction_count": 2, "total_amount": 1000, "answer": "ok"}

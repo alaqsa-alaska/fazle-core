@@ -176,9 +176,11 @@ class TestVoiceUI:
         expect(btn).to_be_visible()
         assert btn.get_attribute("aria-label")
 
-    def test_plus_attachment_buttons_are_disabled(self, chat_page: Page):
-        expect(chat_page.locator("#attach-file-btn")).to_be_disabled()
-        expect(chat_page.locator("#attach-image-btn")).to_be_disabled()
+    def test_attach_file_button_coexists_with_voice(self, chat_page: Page):
+        # Stage D enables real file upload alongside voice — see
+        # tests/e2e/test_open_chat_attachments.py for full upload coverage.
+        expect(chat_page.locator("#attach-file-btn")).to_be_visible()
+        expect(chat_page.locator("#attach-file-btn")).to_be_enabled()
 
     def test_permission_denied_shows_clear_message(self, denied_mic_chat_page: Page):
         denied_mic_chat_page.click("#voice-btn")

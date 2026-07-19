@@ -73,6 +73,7 @@ async def test_chat_message_feature_flag_on_uses_ai_console_path(monkeypatch):
         web_context=True,
         include_provider_response=False,
         registry=None,
+        actor_role_level=100,
     ):
         class _Resp:
             request_id = "live-123"
@@ -180,6 +181,7 @@ async def test_ai_console_route_preserves_context_flags(monkeypatch):
         web_context=True,
         include_provider_response=False,
         registry=None,
+        actor_role_level=100,
     ):
         observed.update(
             {
