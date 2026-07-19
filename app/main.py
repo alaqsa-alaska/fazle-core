@@ -1720,6 +1720,7 @@ async def _handle_bridge_event(payload: dict, source: str):
         await process_bridge_inbound(
             source, sender_clean, text,
             id_role=_id_role, id_conf=_id_conf, id_name=_id_name,
+            message_id=msg_id,
         )
 
         # Background: extract structured facts from inbound message

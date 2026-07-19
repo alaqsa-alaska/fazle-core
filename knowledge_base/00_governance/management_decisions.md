@@ -4125,4 +4125,154 @@ via `scripts/restart_gate.sh --restart` to actually put the new read-only
 routes live, then begin Stage 2 design (message-id threading + the
 no-match branch change) as its own reviewed step.
 
+## Draft-Confirmation Invariant, Workstream 2 Stage 2 (2026-07-19)
+
+**Status: code complete and unit-tested, NOT YET committed/pushed/deployed
+— held for the same commit+push+restart checkpoint as Stage 1, batched
+together.** This is the actual behavior change: `handle_admin_escort_
+completion()`'s no-match path no longer auto-creates a second confirmed
+program row.
+
+### message_id threading (additive, zero behavior change on its own)
+
+Traced every path that can reach `handle_admin_escort_completion()` and
+threaded an optional `message_id` through all of them, needed for the
+review queue's dedup identity (migration 052):
+
+- `modules/bridge_poller/__init__.py::process_bridge_inbound()` — new
+  `message_id: str = ""` kwarg (this is the *single* unified entry point
+  both `_poll_bridge()`'s regular inbound scan and `app/main.py`'s webhook
+  handler call, per the function's own docstring — the highest-blast-
+  radius touch point in this whole workstream, since every message type
+  flows through it, not just escort confirmations). Passed through to its
+  own `process_message(phone, text, bridge_name, message_id=message_id or
+  None)` call.
+- `modules/bridge_poller/__init__.py`'s `_poll_bridge()` call site — now
+  passes `message_id=str(msg.get("id") or msg.get("message_id") or "")`.
+- `app/main.py`'s webhook handler call site — now passes `message_id=
+  msg_id` (the same `msg_id` P15-03's dedup guard already computes a few
+  lines earlier in the same function).
+- `modules/message_router/__init__.py::process_message()` — new keyword-
+  only `message_id: Optional[str] = None` param, threaded into its
+  `handle_admin_escort_completion(..., message_id=message_id)` call.
+- `modules/bridge_poller/__init__.py`'s *separate* outgoing-scan call site
+  (reads admin's own sent messages directly from bridge SQLite, does not
+  go through `process_message()` at all) — passes its own `omsg_id`
+  directly as `message_id=omsg_id`.
+- `modules/escort/__init__.py::handle_admin_escort_completion()` — new
+  `message_id: Optional[str] = None` param, used only by the no-match
+  branch below; the matched-draft path is unaffected (already idempotent
+  by `program_id`).
+
+All additive, keyword-only, defaulting to `None`/`""` — every existing
+caller (including every test) continues to work unchanged. Verified:
+`tests/unit/test_message_router_identity_seed.py` and `tests/unit/
+test_bridge_poller_legacy_gate.py` (10 tests, both files touched by this
+change) pass clean with no modifications needed.
+
+### The no-match branch itself
+
+`modules/escort/__init__.py::handle_admin_escort_completion()`'s no-match
+branch no longer calls `_create_confirmed_from_admin()` or the post-hoc
+`reconcile_drafts_for_confirmation()` cleanup. Instead:
+
+1. `_score_pending_program_candidates()` (new) — `_find_pending_program()`'s
+   original scoring loop extracted into a shared helper that returns
+   *every* candidate (not just the winner), each with `program_id`,
+   `score`, `matched_fields` (which of `master_mobile`/`program_date`/
+   `mother_vessel`/`lighter_vessel` actually contributed), and `warnings`
+   (e.g. `candidate_program_date_missing`, `confirmation_start_date_missing`).
+   `_find_pending_program()` itself becomes a thin wrapper — same query,
+   same `_PENDING_PROGRAM_MATCH_THRESHOLD = 5.5` cutoff, same return
+   contract, verified behaviorally unchanged (see Verification below).
+2. `_enqueue_unmatched_confirmation()` (new) — idempotent insert into
+   `wbom_unmatched_confirmations`: pre-checks `(source_bridge,
+   source_message_id)` when a `message_id` exists and returns the
+   existing row's id if already queued (closing the same cross-path
+   double-delivery gap the migration's own partial unique index exists
+   for); on `ON CONFLICT DO NOTHING` racing a concurrent insert of the
+   identical message, re-selects rather than silently dropping the
+   confirmation. `admin_phone` stored is the caller's own already-
+   authenticated routing identity (only reachable after
+   `_is_authoritative_bridge_confirmation()` has already passed) — never
+   parsed from message content.
+3. Reply to the admin: `"Queued for review (#{id})..."` — no client-
+   facing delivery (`None` as the second return value), matching the
+   spec's explicit "no confirmed program created, no client reply"
+   requirement.
+
+### Investigation finding, out of scope, not fixed
+
+While writing the new no-match test, found that
+`test_draft_updated_by_bridge_confirmation` (pre-existing, previously
+attributed to "isolation") actually fails for a real, reproducible reason
+unrelated to this workstream: `_is_authoritative_bridge_confirmation()`
+compares a phone-normalized `recipient_phone` against
+`_escort_client_phone_list()`, which returns **unnormalized** numbers —
+`"8801670535255"` vs. `_normalize_mobile()`'s `"01670535255"` — so that
+branch can never match, and any confirmation carrying `recipient_phone=
+"..."` is silently rejected regardless of correctness. Not touched here —
+out of scope for the draft-confirmation invariant, and the real-world
+`message_router.py` admin-confirmation call site already passes
+`recipient_phone=None` (the other, unaffected branch), so this bug isn't
+actually live-blocking today. New tests below deliberately use
+`recipient_phone=None` to match that real call shape rather than
+routing through the known-broken branch. Flagged here so it isn't
+mistaken for something this change caused, and so it's on record for
+whoever picks it up next.
+
+### Tests added
+
+`tests/unit/test_escort_source_of_truth_refactor.py`, new
+`TestUnmatchedConfirmationQueue` class (4 tests, all passing):
+`test_no_match_queues_instead_of_creating_program` (proves
+`_create_confirmed_from_admin` and the old reconcile call are never
+reached, no client delivery, reply references the queue id, candidate
+evidence and `message_id`/`admin_phone`/`client_phone` all threaded
+through correctly), `test_enqueue_is_idempotent_on_existing_message_id`,
+`test_enqueue_inserts_when_message_id_not_seen_before`,
+`test_enqueue_without_message_id_skips_precheck` (the webhook-path-
+without-a-reliable-id case).
+
+### Verification performed
+
+- The exact `INSERT ... ON CONFLICT (source_bridge, source_message_id)
+  WHERE source_message_id IS NOT NULL AND source_message_id <> '' DO
+  NOTHING RETURNING id` query — the highest-risk piece of new SQL in this
+  workstream — validated against a second genuinely disposable
+  `postgres:17-alpine` container (fresh, torn down after) with the real
+  `asyncpg` driver and the real migration 052 schema applied first: new
+  message_id inserts succeed, true duplicates correctly return no id and
+  the pre-check/re-select correctly recovers the existing row's id,
+  multiple `NULL`-message-id rows (the webhook-without-reliable-id case)
+  are correctly allowed as distinct rows.
+- `python -m pytest tests/unit/test_escort_source_of_truth_refactor.py`:
+  25 tests, 24 passed, 1 failed (the pre-existing, unrelated,
+  root-caused-above failure — confirmed present before this change too).
+- `tests/unit/test_escort_module.py`, `test_message_router_identity_seed.py`,
+  `test_bridge_poller_legacy_gate.py`: all non-DB-gated tests pass; the
+  DB-gated ones error on missing `TEST_DB_PASSWORD` (this session's
+  standing constraint, not a regression — same as noted on the
+  `contact_roles` fix earlier this session).
+- AST-parse clean on all 5 changed files.
+
+### Not done this pass (Stage 3+)
+
+Link-existing/confirm-new/reject/defer review-action endpoints (Stage 3/4
+— `_create_confirmed_from_admin()` stays defined, genuinely unused in any
+live call path until Stage 4's confirm-new endpoint calls it under an
+explicit admin action); employee resolution reuse for the link-existing
+flow; concurrency/locking (advisory locks, row locks — no reviewer UI
+exists yet to race against); frontend UI; `source_chat_jid` left `NULL`
+always (not threaded through — genuinely optional evidence, not needed
+for the dedup mechanism or the core review workflow, simplification noted
+here rather than silently done).
+
+### Next step
+
+Same as Stage 1: commit, push, and (Owner's explicit go-ahead) restart via
+`scripts/restart_gate.sh --restart`. Both stages will deploy together in
+one restart. After that, Stage 3 (link-existing/confirm-new review
+endpoints) is its own reviewed step.
+
 

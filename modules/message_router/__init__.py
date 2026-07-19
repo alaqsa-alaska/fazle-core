@@ -306,11 +306,16 @@ def _is_safe_autosend_intent(intent: str, role: str) -> bool:  # noqa: ARG001
 
 
 async def process_message(
-    sender: str, text: str, source: str
+    sender: str, text: str, source: str, *, message_id: Optional[str] = None
 ) -> tuple[str, Optional[dict]]:
     """
     Route one inbound message and return (reply_text, admin_notification | None).
     Does NOT send anything — callers handle delivery.
+
+    message_id: the bridge's own id for this message, when the caller has one
+    (see modules.bridge_poller.process_bridge_inbound). Threaded through to
+    handle_admin_escort_completion() for the draft-confirmation review queue's
+    dedup identity (migration 052) — optional, only that one path uses it.
     """
     settings = get_settings()
     sender = normalize_phone(sender) or sender.strip()
@@ -428,6 +433,7 @@ async def process_message(
                 sender,
                 source,
                 recipient_phone=None,
+                message_id=message_id,
             )
             return (confirm_text or "Escort confirmation processed."), client_delivery
 

@@ -82,6 +82,29 @@ After confirmation:
 - Program status is final
 - Roster status is synced to the confirmed-equivalent visible state
 
+## No-Match Behavior (updated 2026-07-19 — Workstream 2 Stage 2)
+
+The above "no duplicate row is created" / "duplicate prevention works"
+verification (2026-06-27) covered the *matched*-draft path only. Until
+2026-07-19, a confirmation that failed to match any draft with high
+enough confidence (`_find_pending_program()`'s scoring, threshold 5.5 —
+see Matching Logic above) fell through to `_create_confirmed_from_admin()`,
+creating a **second, unlinked confirmed program row** ("admin reply is
+the source of truth"), followed by a best-effort post-hoc cleanup pass
+(`reconcile_drafts_for_confirmation()`) — mitigation, not prevention.
+
+**Changed 2026-07-19 (Owner decision):** no-match no longer auto-creates.
+It now queues the confirmation in `wbom_unmatched_confirmations`
+(migration 052) for admin review instead — no program row is created, no
+draft rows are touched/reconciled, no client-facing reply is sent. An
+admin must explicitly either link the confirmation to an existing draft
+or confirm it really is a separate duty segment before any program row is
+written. See `modules/escort/__init__.py::_enqueue_unmatched_confirmation()`
+and `management_decisions.md` → "Draft-Confirmation Invariant, Workstream
+2 Stage 2" for full detail. The review-action endpoints themselves
+(link-existing / confirm-new / reject / defer) are a later stage of the
+same workstream, not yet built as of this note.
+
 ## Production Verification
 
 Live non-destructive verification completed on 2026-06-27 confirmed:
@@ -89,7 +112,8 @@ Live non-destructive verification completed on 2026-06-27 confirmed:
 - invalid client intake is ignored
 - bridge confirmation overwrites corrupted draft values
 - destination normalization works
-- duplicate prevention works
+- duplicate prevention works (matched-draft path only — see "No-Match
+  Behavior" above for the no-match path's separate, later fix)
 - roster list and export search both work
 - browser search, view, edit, recalculate, config, escort-client management, and export all work
 

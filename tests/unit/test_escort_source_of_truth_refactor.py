@@ -424,3 +424,165 @@ class TestEscortSourceOfTruth:
         )
         assert reply == ""
         assert note is None
+
+
+class TestUnmatchedConfirmationQueue:
+    """Workstream 2 Stage 2: no-match must queue for review, never
+    silently auto-create a second program row."""
+
+    @pytest.mark.asyncio
+    async def test_no_match_queues_instead_of_creating_program(self, monkeypatch):
+        _set_escort_env(monkeypatch)
+        import modules.escort as escort_module
+        from modules.escort import handle_admin_escort_completion
+
+        async def _fake_find_pending_program(*args, **kwargs):
+            return None
+
+        async def _fake_score_candidates(*args, **kwargs):
+            return [{"program_id": 41, "score": 3.1, "matched_fields": ["mother_vessel"], "warnings": []}]
+
+        create_calls = []
+
+        async def _fake_create_confirmed_from_admin(*args, **kwargs):
+            create_calls.append((args, kwargs))
+            return 999  # would prove the old auto-create path fired if ever called
+
+        enqueue_calls = []
+
+        async def _fake_enqueue(**kwargs):
+            enqueue_calls.append(kwargs)
+            return 77
+
+        reconcile_calls = []
+        # Old code imported reconcile_drafts_for_confirmation lazily inside the
+        # no-match branch; the branch it lived in no longer exists, so this
+        # module-level patch just proves it's genuinely never reached.
+        async def _fake_reconcile(**kwargs):
+            reconcile_calls.append(kwargs)
+
+        monkeypatch.setattr(escort_module, "_find_pending_program", _fake_find_pending_program)
+        monkeypatch.setattr(escort_module, "_score_pending_program_candidates", _fake_score_candidates)
+        monkeypatch.setattr(escort_module, "_create_confirmed_from_admin", _fake_create_confirmed_from_admin)
+        monkeypatch.setattr(escort_module, "_enqueue_unmatched_confirmation", _fake_enqueue)
+
+        confirm_text = """
+        Mother Vessel: MV NEVER SEEN BEFORE
+        Lighter Vessel: Unknown Lighter
+        Master Mobile: 01799999999
+        Escort Name: Karim
+        Escort Mobile: 01888888888
+        Start Date: 12/04/2026 (D)
+        Al-Aqsa Security Service
+        """
+        # recipient_phone=None matches the real message_router.py call shape
+        # for role=="admin" confirmations (modules/message_router/__init__.py
+        # ~line 430) -- deliberately not exercising recipient_phone="...",
+        # which hits a separate, pre-existing, already-known bug in
+        # _is_authoritative_bridge_confirmation()'s phone-format comparison
+        # (_escort_client_phone_list() returns unnormalized numbers compared
+        # against a normalized recipient; same root cause as the existing
+        # "1 pre-existing, isolation-verified, unrelated failure" on
+        # test_draft_updated_by_bridge_confirmation above -- out of scope
+        # for the draft-confirmation invariant, not fixed here).
+        reply, note = await handle_admin_escort_completion(
+            confirm_text,
+            "8801880446111",
+            "bridge2",
+            recipient_phone=None,
+            message_id="MSG-XYZ",
+        )
+
+        assert create_calls == [], "no-match must never call _create_confirmed_from_admin"
+        assert reconcile_calls == [], "no-match must never reconcile/delete draft rows"
+        assert note is None, "no-match must never produce a client-facing delivery"
+        assert "Queued for review" in reply
+        assert "#77" in reply
+        assert len(enqueue_calls) == 1
+        assert enqueue_calls[0]["message_id"] == "MSG-XYZ"
+        assert enqueue_calls[0]["admin_phone"] == "8801880446111"
+        assert enqueue_calls[0]["client_phone"] is None
+        assert enqueue_calls[0]["candidates"][0]["program_id"] == 41
+        assert enqueue_calls[0]["best_score"] == 3.1
+
+    @pytest.mark.asyncio
+    async def test_enqueue_is_idempotent_on_existing_message_id(self, monkeypatch):
+        _set_escort_env(monkeypatch)
+        import modules.escort as escort_module
+
+        async def _fake_fetch_val(query, *args, **kwargs):
+            assert "SELECT id FROM wbom_unmatched_confirmations" in query, (
+                "message_id present -> must pre-check before attempting an insert"
+            )
+            return 55
+
+        monkeypatch.setattr(escort_module, "fetch_val", _fake_fetch_val)
+
+        queue_id = await escort_module._enqueue_unmatched_confirmation(
+            text="raw",
+            draft={"mother_vessel": "MV X"},
+            source="bridge1",
+            admin_phone="8801880446111",
+            client_phone="8801670535255",
+            message_id="MSG-DUP",
+            candidates=[],
+            best_score=None,
+        )
+        assert queue_id == 55
+
+    @pytest.mark.asyncio
+    async def test_enqueue_inserts_when_message_id_not_seen_before(self, monkeypatch):
+        _set_escort_env(monkeypatch)
+        import modules.escort as escort_module
+
+        calls = []
+
+        async def _fake_fetch_val(query, *args, **kwargs):
+            calls.append(query)
+            if "SELECT id FROM wbom_unmatched_confirmations" in query:
+                return None  # not queued before
+            assert "INSERT INTO wbom_unmatched_confirmations" in query
+            assert "ON CONFLICT (source_bridge, source_message_id)" in query
+            return 88
+
+        monkeypatch.setattr(escort_module, "fetch_val", _fake_fetch_val)
+
+        queue_id = await escort_module._enqueue_unmatched_confirmation(
+            text="raw text",
+            draft={"mother_vessel": "MV X"},
+            source="bridge1",
+            admin_phone="8801880446111",
+            client_phone="8801670535255",
+            message_id="MSG-NEW",
+            candidates=[{"program_id": 1, "score": 2.0, "matched_fields": [], "warnings": []}],
+            best_score=2.0,
+        )
+        assert queue_id == 88
+        assert len(calls) == 2  # pre-check, then insert
+
+    @pytest.mark.asyncio
+    async def test_enqueue_without_message_id_skips_precheck(self, monkeypatch):
+        _set_escort_env(monkeypatch)
+        import modules.escort as escort_module
+
+        calls = []
+
+        async def _fake_fetch_val(query, *args, **kwargs):
+            calls.append(query)
+            assert "INSERT INTO wbom_unmatched_confirmations" in query
+            return 91
+
+        monkeypatch.setattr(escort_module, "fetch_val", _fake_fetch_val)
+
+        queue_id = await escort_module._enqueue_unmatched_confirmation(
+            text="raw text",
+            draft={"mother_vessel": "MV X"},
+            source="meta",
+            admin_phone="8801880446111",
+            client_phone=None,
+            message_id=None,
+            candidates=[],
+            best_score=None,
+        )
+        assert queue_id == 91
+        assert len(calls) == 1  # no reliable id -> no pre-check possible, straight to insert

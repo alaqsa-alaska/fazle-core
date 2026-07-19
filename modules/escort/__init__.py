@@ -1158,15 +1158,31 @@ async def save_escort_programs(
     return program_ids
 
 
-async def _find_pending_program(
+_PENDING_PROGRAM_MATCH_THRESHOLD = 5.5
+
+
+async def _score_pending_program_candidates(
     mv: Optional[str],
     lv: Optional[str],
     *,
     master_mobile: Optional[str] = None,
     program_date=None,
     client_phone: Optional[str] = None,
-) -> Optional[dict]:
-    """Find most recent draft with master mobile as primary match signal."""
+) -> list[dict]:
+    """Score every draft candidate against a confirmation's parsed fields.
+
+    Returns every candidate (not just the winner), sorted by score
+    descending, each as {"program_id", "score", "matched_fields",
+    "warnings"}. Shared by _find_pending_program() (takes the top one if
+    it clears _PENDING_PROGRAM_MATCH_THRESHOLD) and the no-match review-
+    queue path in handle_admin_escort_completion(), which needs the full
+    ranked list as admin-reviewable evidence, not just a single winner.
+
+    Scoring formula unchanged from the pre-refactor single-winner version
+    (master_mobile exact +5, program_date exact +3, mother_vessel
+    similarity ratio *3, lighter_vessel similarity ratio *1) -- this
+    function only adds visibility into the score, it does not change it.
+    """
     mv_clean = (mv or "").upper().replace("MV.", "").replace("MV ", "").strip()
     lv_clean = (lv or "").strip()
     master_norm = _normalize_mobile(master_mobile or "") if master_mobile else None
@@ -1198,33 +1214,81 @@ async def _find_pending_program(
                 program_date,
             )
         if not candidates:
-            return None
+            return []
 
-        best = None
-        best_score = -1.0
+        scored: list[dict] = []
         for row in candidates:
             if client_phone and not _remarks_client_matches(row["remarks"], client_phone):
                 continue
             score = 0.0
+            matched_fields: list[str] = []
+            warnings: list[str] = []
             if master_norm and (row["master_mobile"] or "") == master_norm:
                 score += 5.0
+                matched_fields.append("master_mobile")
             if program_date and row["program_date"] == program_date:
                 score += 3.0
+                matched_fields.append("program_date")
+            elif program_date and not row["program_date"]:
+                warnings.append("candidate_program_date_missing")
             row_mv = (row["mother_vessel"] or "").upper().replace("MV.", "").replace("MV ", "").strip()
             if mv_clean:
                 mv_ratio = SequenceMatcher(None, mv_clean, row_mv).ratio()
                 score += mv_ratio * 3.0
+                if mv_ratio >= 0.8:
+                    matched_fields.append("mother_vessel")
             if lv_clean and row.get("lighter_vessel"):
                 lv_ratio = SequenceMatcher(None, lv_clean.lower(), (row["lighter_vessel"] or "").lower()).ratio()
                 score += lv_ratio
-            if score > best_score:
-                best_score = score
-                best = row
-        if best and best_score >= 5.5:
-            return dict(best)
+                if lv_ratio >= 0.8:
+                    matched_fields.append("lighter_vessel")
+            elif lv_clean and not row.get("lighter_vessel"):
+                warnings.append("candidate_lighter_vessel_missing")
+            if not program_date:
+                warnings.append("confirmation_start_date_missing")
+            scored.append({
+                "program_id": row["program_id"],
+                "score": round(score, 2),
+                "matched_fields": matched_fields,
+                "warnings": warnings,
+            })
+        scored.sort(key=lambda c: c["score"], reverse=True)
+        return scored
+    except Exception as e:
+        log.error(f"[escort] score candidates error: {e}")
+        return []
+
+
+async def _find_pending_program(
+    mv: Optional[str],
+    lv: Optional[str],
+    *,
+    master_mobile: Optional[str] = None,
+    program_date=None,
+    client_phone: Optional[str] = None,
+) -> Optional[dict]:
+    """Find most recent draft with master mobile as primary match signal.
+
+    Thin wrapper over _score_pending_program_candidates(): same threshold,
+    same winner-selection behavior as before this function was split --
+    only the scoring internals moved, not the matching semantics.
+    """
+    scored = await _score_pending_program_candidates(
+        mv, lv, master_mobile=master_mobile, program_date=program_date, client_phone=client_phone,
+    )
+    if not scored or scored[0]["score"] < _PENDING_PROGRAM_MATCH_THRESHOLD:
+        return None
+    try:
+        row = await fetch_one(
+            """SELECT program_id, remarks, mother_vessel, lighter_vessel,
+                      destination, master_mobile, program_date
+               FROM wbom_escort_programs WHERE program_id = $1""",
+            scored[0]["program_id"],
+        )
+        return dict(row) if row else None
     except Exception as e:
         log.error(f"[escort] find program error: {e}")
-    return None
+        return None
 
 
 def _remarks_client_matches(remarks_text: Optional[str], client_phone: Optional[str]) -> bool:
@@ -2008,15 +2072,93 @@ def _is_authoritative_bridge_confirmation(ctx: ConfirmationContext) -> bool:
     return bool((mapped and bridge_number == mapped) or (bridge_number in admin_numbers))
 
 
+async def _enqueue_unmatched_confirmation(
+    *,
+    text: str,
+    draft: dict,
+    source: str,
+    admin_phone: str,
+    client_phone: Optional[str],
+    message_id: Optional[str],
+    candidates: list[dict],
+    best_score: Optional[float],
+) -> int:
+    """Insert a no-confident-match admin confirmation into the review queue
+    (migration 052, wbom_unmatched_confirmations), idempotently.
+
+    admin_phone here is the caller's already-authenticated bridge/webhook
+    routing identity (handle_admin_escort_completion() only reaches this
+    point after _is_authoritative_bridge_confirmation() has already passed)
+    -- never a value parsed from message content, per the no-match queue's
+    own trust requirement.
+
+    Idempotent on (source, message_id): if this exact message was already
+    queued -- a rare cross-path double-delivery neither
+    processed_bridge_messages nor processed_outgoing_escort_messages catches
+    on its own, see migration 052's header comment -- returns the existing
+    row's id instead of inserting a second one. Relies on the same partial
+    unique index the migration validated (ON CONFLICT targets it by
+    repeating its exact predicate, required by Postgres for partial
+    indexes).
+    """
+    if message_id:
+        existing_id = await fetch_val(
+            """SELECT id FROM wbom_unmatched_confirmations
+               WHERE source_bridge = $1 AND source_message_id = $2""",
+            source, message_id,
+        )
+        if existing_id:
+            return existing_id
+
+    queue_id = await fetch_val(
+        """INSERT INTO wbom_unmatched_confirmations
+               (source_bridge, source_message_id, source,
+                admin_phone, client_phone,
+                raw_confirmation_text, parsed_confirmation,
+                candidate_matches, best_candidate_score)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (source_bridge, source_message_id)
+               WHERE source_message_id IS NOT NULL AND source_message_id <> ''
+               DO NOTHING
+           RETURNING id""",
+        source, message_id or None, source,
+        admin_phone, client_phone,
+        text, json.dumps(draft, default=str),
+        json.dumps(candidates), best_score,
+    )
+    if queue_id is not None:
+        return queue_id
+
+    # ON CONFLICT DO NOTHING means a concurrent insert of the identical
+    # message won the race between our own pre-check and this INSERT --
+    # re-select rather than silently dropping the confirmation.
+    existing_id = await fetch_val(
+        """SELECT id FROM wbom_unmatched_confirmations
+           WHERE source_bridge = $1 AND source_message_id = $2""",
+        source, message_id,
+    )
+    if existing_id:
+        return existing_id
+    raise RuntimeError(f"unmatched-confirmation insert returned no id and no existing row found (source={source}, message_id={message_id})")
+
+
 async def handle_admin_escort_completion(
     text: str,
     admin_phone: str,
     source: str,
     recipient_phone: Optional[str] = None,
+    message_id: Optional[str] = None,
 ) -> tuple[str, Optional[dict]]:
     """
     Entry point for admin's completed escort draft.
     Finds original client, sends final slip to them, confirms to admin.
+
+    message_id: the bridge's own id for this specific confirmation message,
+    when the caller has one (bridge_poller's outgoing-scan omsg_id, or the
+    webhook path's event id threaded through process_bridge_inbound() ->
+    process_message()). Used only for wbom_unmatched_confirmations' dedup
+    identity (migration 052) on the no-match path -- not used on the
+    matched-draft path, which already updates idempotently by program_id.
     """
     draft = parse_completed_draft(text)
     ctx: ConfirmationContext = {
@@ -2046,28 +2188,54 @@ async def handle_admin_escort_completion(
     )
 
     if not program:
-        log.warning(
-            f"[escort] no matching draft: mv={draft['mother_vessel']} "
-            f"lv={draft['lighter_vessel']} escort={draft['escort_name']} "
-            f"→ creating confirmed record from admin message"
+        # Draft-Confirmation Invariant (Workstream 2 Stage 2, 2026-07-19):
+        # this used to call _create_confirmed_from_admin() directly here
+        # ("admin reply is the source of truth"), silently creating a
+        # second, unlinked confirmed program row on every fuzzy-match miss.
+        # Owner decision: no-match must never auto-create — it now queues
+        # for admin review instead (migration 052,
+        # wbom_unmatched_confirmations). No draft rows are touched or
+        # reconciled here anymore either, since no target draft has been
+        # confidently identified — the old post-hoc same-lighter-vessel
+        # cleanup pass only make sense once a human has actually linked
+        # this confirmation to something.
+        candidates = await _score_pending_program_candidates(
+            draft["mother_vessel"],
+            draft["lighter_vessel"],
+            master_mobile=draft.get("master_mobile"),
+            program_date=program_date,
+            client_phone=recipient_phone,
         )
-        # Admin reply is the source of truth — create a confirmed record
-        # even when no draft exists (inbound parse may have failed).
-        pid = await _create_confirmed_from_admin(draft, source, client_phone=recipient_phone)
-        if pid:
-            # Reconcile: delete any other draft rows for the same lighter vessel
-            if draft.get("lighter_vessel"):
-                try:
-                    from modules.escort_roster.db import reconcile_drafts_for_confirmation
-                    await reconcile_drafts_for_confirmation(
-                        lighter_vessel=draft["lighter_vessel"],
-                        mother_vessel=draft.get("mother_vessel"),
-                        actor="auto_reconcile",
-                    )
-                except Exception as _rec_err:
-                    log.warning(f"[escort] reconcile after create failed: {_rec_err}")
-            return (f"Saved (new record #{pid}). No draft found — created directly.", None)
-        return ("Save failed. Check logs.", None)
+        top_candidates = candidates[:5]
+        best_score = top_candidates[0]["score"] if top_candidates else None
+
+        log.warning(
+            f"[escort] no confident matching draft: mv={draft['mother_vessel']} "
+            f"lv={draft['lighter_vessel']} escort={draft['escort_name']} "
+            f"best_score={best_score} → routing to unmatched-confirmation review queue"
+        )
+
+        try:
+            queue_id = await _enqueue_unmatched_confirmation(
+                text=text,
+                draft=draft,
+                source=source,
+                admin_phone=admin_phone,
+                client_phone=recipient_phone,
+                message_id=message_id,
+                candidates=top_candidates,
+                best_score=best_score,
+            )
+        except Exception as _queue_err:
+            log.error(f"[escort] unmatched-confirmation queue insert failed: {_queue_err}")
+            return ("Save failed (review queue error). Check logs.", None)
+
+        return (
+            f"Queued for review (#{queue_id}). No confident matching draft found — "
+            f"an admin must link this to an existing draft or confirm it is a new duty "
+            f"before a program is created.",
+            None,
+        )
 
     log.info(
         f"[escort] matched program_id={program['program_id']} "

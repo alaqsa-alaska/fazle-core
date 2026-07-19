@@ -1135,6 +1135,7 @@ async def _poll_bridge(config: dict):
                     await process_bridge_inbound(
                         bridge_name, phone, text,
                         id_role=id_role, id_conf=id_conf, id_name=id_name,
+                        message_id=str(msg.get("id") or msg.get("message_id") or ""),
                     )
                     await _mark_core_queue_status(bridge_name, msg, "done")
                 except Exception as route_err:
@@ -1213,6 +1214,7 @@ async def _poll_bridge(config: dict):
                             admin_number,
                             bridge_name,
                             recipient_phone=recipient_phone,
+                            message_id=omsg_id,
                         )
                     except Exception as _ec_err:
                         log.error(f"[{bridge_name}] escort completion error for msg {omsg_id}: {_ec_err}")
@@ -1633,6 +1635,7 @@ async def process_bridge_inbound(
     id_role: str = "unknown",
     id_conf: int = 0,
     id_name: str = "",
+    message_id: str = "",
 ) -> None:
     """Unified bridge inbound processing pipeline.
 
@@ -1675,7 +1678,7 @@ async def process_bridge_inbound(
         return
 
     # 5. Full routing
-    reply, admin_note = await process_message(phone, text, bridge_name)
+    reply, admin_note = await process_message(phone, text, bridge_name, message_id=message_id or None)
 
     # Write intent back to the most recent inbound row for this sender+source
     if msg_intent:
