@@ -750,6 +750,48 @@ Future:      pick one casing convention (this document recommends lowercase, mat
 
 **Naming collision warning:** A completely unrelated function in `modules/fazle_payroll_engine/routes.py` also builds a dict literally named `status_map`, for a different domain entirely (escort-roster-**change-request** statuses: `pending/promoted/dismissed/duplicate → pending/approved/rejected/rejected`). Same variable name, two unrelated vocabularies — the same pattern already flagged for `review_status` in the Cash Transaction section. **Rule: `status_map` is a generic variable name reused across this codebase for unrelated lookups — always check which function/module you're in before trusting what a `status_map` maps.**
 
+### Dispatch write layer and `escort_changed` status (Phase 2A.2/2A.3, added 2026-07-19)
+
+`modules/dispatch` is the canonical write-orchestration layer for every
+controlled Dispatch mutation against `wbom_escort_programs`
+(assignment/reassignment, escort-replacement segments, safe unassignment,
+manual completion, release-slip approval, controlled override) — it never
+duplicates roster-sync or audit SQL, always calling
+`modules.escort_roster.db.sync_program_to_roster()`/`log_audit()` inside
+the same transaction. All Dispatch writes are manual/human-triggered; no
+auto-assignment, LLM ranking, or automatic real-overlap resolution exists
+anywhere in this layer.
+
+`escort_changed` (migration 049) is a new, additive status value alongside
+the existing vocabulary above: the earlier segment of a vessel operation
+that was replaced by a later escort before reaching normal completion.
+Historical and non-blocking for bookability/attendance/release-target
+purposes, exactly like `completed`/`cancelled` — but semantically distinct
+(a real duty segment that happened, not a cancellation). Set only by
+`modules.dispatch.create_replacement_segment()`, never by any WhatsApp
+message-driven path directly.
+
+`wbom_escort_programs.replaces_program_id` (migration 050, nullable
+self-FK) links a replacement segment back to the program it replaced. A
+partial unique index allows at most one **non-terminal** replacement per
+predecessor while permitting multiple historical/terminal replacements to
+coexist (Owner Decision 2, 2026-07-19).
+
+**Seven-day boundary rule (Owner Decision 6, 2026-07-19):** when an earlier
+same-vessel program is replaced by a different escort, `date_delta < 7
+days → escort_changed`; `date_delta >= 7 days → completed`; exactly seven
+days is `completed`. Explicit release/completion evidence always overrides
+this duration inference. Same-vessel matching itself requires both
+`mother_vessel` and `lighter_vessel` non-empty and matching on both sides
+(Owner Decision 3) — an empty `lighter_vessel` on either side routes to
+manual review instead of an automatic match, a rule specifically added
+after real bulk-import artifacts were found producing false matches
+without it.
+
+Full detail, all seven Owner Decisions, and the stage-by-stage
+implementation record: `knowledge_base/00_governance/management_decisions.md`,
+"Dispatch Phase 2A.3" section.
+
 ### Naming Rule — vessel identity
 
 ```

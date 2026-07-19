@@ -3373,3 +3373,196 @@ workflow given the confirmed attendance/release-attribution risk),
 unassignment, attendance integration, or generalized all-employee
 scheduling. None started, none designed, none part of this phase.
 
+---
+
+## Dispatch Phase 2A.3 — Escort Change, Lifecycle Corrections, Draft Expiry,
+Completion, and Controlled Resolution (2026-07-19)
+
+**Status: COMPLETE (Stages 1-6) — same-vessel escort-change handling,
+lifecycle corrections, tightened draft expiry, safe unassignment, manual
+completion, release-slip review, controlled override, and conflict-pair
+review.** This does NOT mark "Dispatch" as a whole complete. Auto-resolution
+of any real overlap, LLM-based classification, all-employee scheduling, and
+a "cancel invalid duplicate" workflow remain explicitly **out of scope** and
+deferred. The 48-pair different-vessel overlap backlog and the 18-item
+same-vessel review queue are surfaced for manual review only — see the
+separate Historical Overlap Recommendation Report (delivered to the Owner
+2026-07-19, not stored in this KB) for the specific proposed resolutions,
+none of which have been applied.
+
+### The seven Owner Decisions (binding, ratified 2026-07-19)
+
+1. New status `escort_changed` (Bangla: এস্কর্ট চেঞ্জ) — a lifecycle status
+   (the earlier segment of a vessel operation, replaced by a later escort
+   before normal completion), never a correction marker. Historical/
+   non-blocking exactly like `completed`/`cancelled` for bookability/
+   attendance/release-target purposes.
+2. `wbom_escort_programs.replaces_program_id` (nullable self-FK) + a
+   partial unique index (`idx_wbom_escort_programs_replaces_active_unique`)
+   preventing more than one **non-terminal** replacement per predecessor,
+   while allowing multiple historical/terminal replacements to coexist.
+3. Automatic same-vessel classification requires BOTH normalized
+   `mother_vessel` and `lighter_vessel` non-empty AND matching on both
+   sides; either side's `lighter_vessel` empty → `insufficient_data`,
+   manual review required, never auto-merged/replaced/completed/
+   escort_changed. Found to matter specifically for bulk-import artifacts
+   (confirmed via 8 real production examples, see the Recommendation
+   Report).
+4. `_update_program_confirmed()`'s overwrite gap fixed: when an existing
+   same-date, vessel-matched program has `status IN ('running',
+   'completed')` (accepted attendance/release evidence), a later different
+   escort message no longer silently overwrites it in place — routed to
+   manual review (`escort_roster_change_requests`,
+   `action='manual_review_same_date_escort_change'`) instead. When no
+   duty evidence exists, still treated as a correction and updated in
+   place (unchanged behavior), with the correction itself now audited.
+5. The existing 48-pair/24-employee different-vessel overlap backlog is
+   manual-review-only, never auto-resolved. Reviewed outcomes:
+   "correct one" (`/assign`, `/assign-override`) and "unassign one safe
+   draft/confirmed assignment" (`/unassign`) reuse existing guarded
+   workflows; "keep both as authorized overlap" and "defer for
+   investigation" use the new `/overlaps/review` endpoint (audit-only, no
+   mutation); "cancel invalid duplicate" is explicitly **not implemented**
+   — no separately-supported cancel workflow exists.
+6. Seven-day boundary: `date_delta < 7 days → escort_changed`;
+   `date_delta >= 7 days → completed`; exactly seven days is `completed`.
+   Explicit release/completion evidence always overrides duration
+   inference.
+7. Staged deployment — six independently deployed and certified stages,
+   never one uncontrolved release.
+
+### Schema (Stage 1 — migrations 049, 050, 051)
+
+- `049`: widened `wbom_escort_programs_status_check` to add
+  `'escort_changed'`.
+- `050`: added `replaces_program_id INTEGER REFERENCES wbom_escort_programs
+  (program_id)`, a no-self-reference CHECK, a plain index, and the Decision-2
+  partial unique index.
+- `051`: widened `escort_roster_change_requests_action_check` (a
+  **separate, DB-level** constraint from the Python-level whitelist in
+  `create_roster_change_request()` — both had to be widened; found only
+  via direct empirical testing, not anticipated in the pre-implementation
+  Decision Report) to add `'manual_review_same_date_escort_change'`.
+
+All three applied directly to production (bypassing `db/migrate.py`'s
+bookkeeping, consistent with the pre-existing gap covering migrations
+029-048) and manually recorded in `schema_migrations`.
+
+### Lifecycle and locking model (Stages 1-6, `modules/dispatch/__init__.py`)
+
+Canonical statuses: `draft → confirmed → running → completed`, plus
+`cancelled`/`expired` (legacy) and `escort_changed` (new). `confirmed →
+running` remains solely triggered by `mark_program_running_on_attendance()`
+(Owner-ratified 2026-07-10) — `status IN ('running', 'completed')` is
+itself sufficient proof of accepted attendance evidence, used repeatedly as
+a guard (Stage 2, Stage 3). Every write function
+(`create_replacement_segment`, `unassign_program`,
+`manually_complete_program`, `assign_program` override path,
+`record_conflict_pair_review`) follows the same pattern established in
+2A.2: `pg_advisory_xact_lock` in a fixed global order, a fresh re-read
+inside the transaction, `DispatchAssignmentError` for every rejection,
+`sync_program_to_roster(conn=)` for roster sync (never reproduced roster
+SQL), `log_audit()` for every mutation.
+
+### Stage-by-stage summary
+
+- **Stage 1** — schema + status vocabulary extended everywhere
+  `escort_changed` needed to be excluded from "active/blocking" logic
+  (`modules/escort_lifecycle`, `modules/escort_roster/extractor.py`,
+  `modules/payroll_logic`, `modules/dispatch`, `escort-roster.html`).
+- **Stage 2** — same-date correction guard (Decision 4) in
+  `modules.escort._create_confirmed_from_admin()` /
+  `_update_program_confirmed()`.
+- **Stage 3** — `create_replacement_segment()` (Decision 2/3/6): validates
+  vessel match, different escort, later start boundary, computes the
+  seven-day classification, links via `replaces_program_id`. Triggered
+  both by a new manual endpoint (`POST /programs/{id}/replace-escort`) and
+  automatically from the admin-message pipeline's plain-insert fallback
+  (the one code path structurally unreachable by Stage 2's same-date
+  guard, confirmed by inspection — no overlap between the two triggers).
+- **Stage 4** — draft-expiry TTL tightened to exclude drafts that already
+  have usable escort identity (name or mobile), even past 24h; new
+  `unassign_program()` (draft/confirmed only, blocked by attendance or an
+  existing payment draft, never a hard delete).
+- **Stage 5** — `manually_complete_program()` (admin/superadmin only,
+  reuses `modules.escort_lifecycle.close_program()` directly — never a
+  second completion implementation) and release-slip review
+  (`list_pending_release_slips`, `get_release_slip_candidates` reusing
+  `modules.escort_roster.extractor.find_slip_matches()` verbatim,
+  `approve_release_slip` giving `escort_release_matches` its first real
+  write, reusing its pre-existing `'keep'/'reject'` vocabulary so the
+  dormant `get_slip_queue()`/dashboard consumers stay consistent).
+- **Stage 6** — controlled override (`assign_program(override=True)`,
+  mandatory reason + fresh conflict re-acknowledgment under lock, audited
+  with an `authorized_override` marker that stays visible in
+  `GET /api/dispatch/overlaps`, never hidden); `record_conflict_pair_review()`
+  (Decision 5's two audit-only outcomes); `find_same_vessel_review_candidates()`
+  (read-only, reuses the Decision Report's own historical-audit grouping
+  method: normalized `(mother_vessel, lighter_vessel)` pair, not
+  per-employee, since one side of a same-vessel change often has
+  `escort_employee_id IS NULL`).
+
+### RBAC
+
+New `_require_admin_or_above` dependency
+(`modules/dispatch/routes.py`), mirroring
+`modules.escort_roster.routes._resolve_actor`'s `can_admin_direct`
+role-set-intersection pattern (`{"admin","superadmin","owner"}` ⊆ live
+`fazle_roles`), not the `COMMAND_ROLE` string-command mapping
+`_require_operator_or_above` reuses — no existing command maps to this
+tier. Gates: manual completion, release-slip approval, controlled
+override, conflict-pair review. All other Stage 1-6 reads remain
+`viewer`-or-above; writes with an existing guarded workflow remain
+`operator`-or-above.
+
+### A real production bug found and fixed post-deploy (Stage 6)
+
+`find_same_vessel_review_candidates()`'s bulk-import-artifact detection
+initially used `wbom_escort_programs.created_at`. The full test suite
+passed because `tests/conftest.py`'s schema stub has that column — but the
+real production table does **not** (confirmed via
+`information_schema.columns`), the opposite-direction drift from the
+`escort_shift_logs`/`escort_release_matches` gaps found earlier in this
+same engagement. Found via production smoke-testing (500 error),
+root-caused, fixed to use `assignment_time` (present and fully populated
+in both environments), redeployed, and reverified against live data.
+
+### UI
+
+First Dispatch UI coverage for any of Phase 2A.3 (Stages 1-5 were
+backend-only). `app/static/dispatch.html` gained: an admin-gated override
+checkbox integrated into the existing assign-confirm flow; Keep-Both/Defer
+buttons per overlap pair; and new cards for the same-vessel review queue,
+manual replace-escort, safe unassignment, incomplete drafts, release-slip
+review, and manual completion.
+
+### Tests
+
+66 new unit tests across four files (`test_dispatch_2a3_schema.py` ×8,
+`test_dispatch_2a3_stage2_correction_guard.py` ×9,
+`test_dispatch_2a3_stage3_replacement.py` ×17,
+`test_dispatch_2a3_stage4_expiry_unassign.py` ×17,
+`test_dispatch_2a3_stage5_completion_release.py` ×20,
+`test_dispatch_2a3_stage6_override_review.py` ×17 — 88 total across all
+six stages). Full regression re-run after every stage: consistently 1
+pre-existing, isolation-verified, unrelated failure
+(`test_draft_updated_by_bridge_confirmation`) and zero new failures, ending
+at 1063 passed / 1 skipped / 14 xfailed / 4 xpassed.
+
+### Deployment
+
+Six independent deploys, one per stage, each via
+`scripts/restart_gate.sh --restart` (all 9 checks passed each time), plus
+one same-day hotfix deploy for the Stage 6 `created_at` bug above. Every
+stage smoke-tested directly against the live production API before being
+called complete.
+
+### Next Owner decision required before any further Dispatch work
+
+Whether to accept any part of the Historical Overlap Recommendation Report
+(18 same-vessel candidates, 48 different-vessel overlap pairs) — nothing in
+that report has been applied. A "cancel invalid duplicate" workflow for
+Decision 5's fifth reviewed action remains undesigned. Full multi-section
+Dispatch UI polish beyond Stage 6's first-pass cards remains a follow-up
+item, not blocking.
+

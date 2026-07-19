@@ -671,11 +671,12 @@ AI console unification (see roadmap doc referenced in this repo's governance mem
 
 - [ ] Dispatch/scheduling engine (availability calendar, conflict/double-booking
   detection, ranked-assignment suggestions) — chosen by Owner to go first, before
-  accounting. **Partially started — manual controlled assignment only, see below.**
-  A reservation/soft-hold model, controlled conflict override, running-program
-  replacement, unassignment, attendance integration, and generalized all-employee
-  scheduling are all still not started and need their own Owner scope conversation
-  before any code.
+  accounting. **Substantially built through Phase 2A.3 (see below).** A "cancel
+  invalid duplicate" workflow, and generalized all-employee (non-escort) scheduling
+  remain not started and need their own Owner scope conversation before any code.
+  The Historical Overlap Recommendation Report (delivered 2026-07-19, not stored in
+  this KB) proposes resolutions for the 18-item same-vessel queue and the 48-pair
+  different-vessel backlog — nothing in it has been applied pending Owner review.
   - [x] **Dispatch Phase 2A.1 — read-only availability/conflict preview** shipped and
     production-verified 2026-07-18: `GET /api/dispatch/availability`,
     `POST /api/dispatch/check-conflict`, `GET /api/dispatch/suggestions`
@@ -694,6 +695,19 @@ AI console unification (see roadmap doc referenced in this repo's governance mem
     reassignment. No auto-assignment, no conflict override, no reservation, no
     schema change. Full detail:
     `knowledge_base/00_governance/management_decisions.md` → "Dispatch Phase 2A.2".
+  - [x] **Dispatch Phase 2A.3 (Stages 1-6) — escort change, lifecycle corrections,
+    draft expiry, completion, and controlled resolution** shipped and
+    production-verified 2026-07-19: new `escort_changed` status +
+    `replaces_program_id` linkage (migrations 049-051); same-date correction guard;
+    `create_replacement_segment()` (seven-day boundary rule); tightened draft-expiry
+    TTL; safe unassignment; manual completion (reuses `close_program()` directly);
+    release-slip review (`escort_release_matches`'s first real write); controlled
+    conflict override (`assign_program(override=True)`, admin-only, audited,
+    never hidden from `/overlaps`); conflict-pair review (Decision 5's two
+    audit-only outcomes); read-only same-vessel review queue. First Dispatch UI
+    coverage beyond 2A.1/2A.2 (`dispatch.html`). 88 new unit tests across 6 stage
+    files. Full detail, all seven Owner Decisions, stage-by-stage record:
+    `knowledge_base/00_governance/management_decisions.md` → "Dispatch Phase 2A.3".
 - [x] Client Billing / invoicing / accounts receivable (billing-only slice) — Commit D
   (payment recording, outstanding-balance view, mark-paid, audit log, AI read-only tool,
   dashboard summary) shipped and verified live 2026-07-13.
