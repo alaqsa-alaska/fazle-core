@@ -377,6 +377,41 @@ Focused verification evidence:
 - RBAC's plain "valid key or not" check (`_require_api_key`) — previously
   copy-pasted across 5 route files — now lives in one place, `shared/auth_deps.py`.
 
+## AI Operating Console V1 — Stages A-C (2026-07-19)
+
+Owner-authorized voice/mobile stabilization of `open-chat.html`, run in parallel with
+(not blocked on) the Phase 1/2/3 roadmap in `docs/NEXT_IMPLEMENTATION_QUEUE.md`.
+
+- **`POST /chat/voice`** (new) — multipart voice upload → transcription. Auth-gated the
+  same way as `/chat/message` (`require_api_key`). Accepts `audio` (webm/ogg/oga/wav/
+  m4a/mp3, 15MB max, ~2 min max), `language` (`auto`/`bn`/`en`, UI hint only — the
+  underlying transcribe call does not take a language parameter, so this does not steer
+  recognition), `duration_ms` (client-measured, informational). Response:
+  `{transcript, language, confidence, confident, duration_ms, editable, warning}`.
+  Reuses `modules.voice_processor.process_voice()` — the same engine WhatsApp voice
+  notes use — with an additive `skip_intent=True` flag so this route never invokes the
+  intent-classification LLM call itself (default `skip_intent=False` preserves existing
+  WhatsApp behavior exactly). Audio is written to `resources/uploads/voice/` for the
+  duration of transcription only and always deleted in a `finally` block.
+- **The transcript is never auto-sent.** It fills an editable review box in the
+  composer; the user must explicitly click "Use Transcript" then "Send" — this goes
+  through the normal, unmodified `/chat/message` path.
+- `/chat/message`'s old `[voice: ...]` placeholder-rejection branch is removed (it had
+  a latent `NameError` bug and is obsolete now that voice produces real transcripts).
+  `/chat/message`'s contract, auth, model selection, and provider routing are otherwise
+  unchanged.
+- Frontend (`app/static/open-chat.html`): explicit voice state machine (idle →
+  recording → uploading_audio → transcribing → transcript_ready → error) guards
+  against concurrent recordings, duplicate sends, and a stale transcript from a
+  superseded recording. "Attach File"/"Attach Image" are disabled with a "coming in a
+  later stage" label rather than offering non-functional local-only preview. Mobile:
+  `100dvh` viewport (keyboard-safe), 44px minimum touch targets under 980px width.
+- **Not done this pass** (deferred, matches the Owner's Stage A-C-only scope): file/
+  image upload and OCR into chat, business read-only tool registry expansion, response
+  streaming, any new conversation-persistence schema, General Ledger tools, any AI
+  write capability. See `docs/NEXT_IMPLEMENTATION_QUEUE.md` → "AI Operating Console V1"
+  for the full stage-by-stage record and test inventory.
+
 ## Running Locally Or On The VPS
 
 Production is managed by systemd:
@@ -460,6 +495,62 @@ Use targeted tests for risky changes:
 7. Update this README after major changes to provider order, safe-mode behavior,
    canonical write paths, or production topology.
 
+## Troubleshooting Employee Edit HTTP 500
+
+Employee edit is a production-critical write path (`wbom_employees`, bridged to
+`fpe_employees`) — follow this process rather than guessing at a fix. Do not
+change any employee-edit code until step 7 has produced a real traceback.
+
+1. **Record the employee ID** (`wbom_employees.employee_id`, and `fpe_employees.id`
+   if known) from the failing request.
+2. **Preserve the submitted frontend payload** — copy the exact JSON body from
+   DevTools/Network before retrying anything; a retry can mask what caused the
+   original failure.
+3. **Record timestamp (UTC) and the acting admin user** (from the RBAC session /
+   API key used) so the server-side trace can be located precisely.
+4. **Inspect the browser Network tab response** — capture the raw HTTP 500 body;
+   FastAPI error responses often include enough detail to skip several steps
+   below.
+5. **Inspect `fazle-core.service` logs around the timestamp**:
+   ```
+   sudo journalctl -u fazle-core.service --since "<ts-5min>" --until "<ts+2min>"
+   tail -n 200 logs/fazle-core-error.log
+   ```
+6. **Capture the full Python traceback** — do not summarize it; paste it
+   verbatim into the incident/session note.
+7. **Identify the SQL/constraint error**, if any — look for `asyncpg` exception
+   text (`UniqueViolationError`, `ForeignKeyViolationError`,
+   `CheckViolationError`, etc.) inside the traceback.
+8. **Compare the request schema with the live table** — `wbom_employees` and
+   `fpe_employees` are two separate, bridged identity systems (see
+   `.claude/CLAUDE.md`); check both, and check
+   `knowledge_base/06_developer_system/database_rules.md` Domain 2 (EMPLOYEE)
+   for the current canonical columns rather than assuming the schema matches
+   an older doc or `tests/conftest.py`'s stub — that stub has drifted from
+   production before.
+9. **Reproduce using a safe test employee** — never reproduce against a real
+   employee record; create a disposable test row (or use an existing
+   designated test employee if one exists) and repeat the exact payload from
+   step 2.
+10. **Classify the failure**: frontend (bad payload shape), validation
+    (rejected before DB), DB (constraint/schema mismatch), authentication/RBAC
+    (role below required threshold — see `fazle_roles` hierarchy), or
+    transient (DB connection/pool exhaustion, timeout).
+11. **Add a regression test before fixing** — a failing test that reproduces
+    the traceback, under the appropriate suite in `tests/` (see `Makefile`
+    targets for `test-unit` / `test-integration`).
+12. **Verify the fix through both the API and the browser** — a passing test
+    is necessary but not sufficient; confirm the actual edit form saves
+    correctly end-to-end.
+13. **Document the rollback** — note the commit hash, and confirm
+    `scripts/restart_gate.sh --check-only` passes before any restart; use
+    `scripts/restart_gate.sh --restart` (never a bare `systemctl restart`) if
+    a restart is required to pick up the fix.
+
+**Do not invent a fix without a reproduced traceback.** If steps 1-9 don't
+produce one (e.g. the failure is intermittent), document what was observed
+and escalate rather than guessing at a change to a production-critical path.
+
 ## Related Docs
 
 | Doc | Purpose |
@@ -470,6 +561,7 @@ Use targeted tests for risky changes:
 | `docs/PRODUCTION_CERTIFICATION_v1.0.md` | Phase 1.5 evidence-based production certification (2026-07-09) — is this actually ready for Phase 2? |
 | `docs/PHASE2_ENTRY_GATE.md` | The GO/NO-GO checklist for Phase 2a (dispatch) and Phase 2b (billing/GL) |
 | `knowledge_base/00_governance/CANONICAL_BUSINESS_RULES.md` | Second-highest-priority doc after the Constitution — the single source of truth for business rules, canonical naming (e.g. which of 7 phone-column names means what), and known formula/status conflicts |
+| `knowledge_base/06_developer_system/writer_authority.md` | All payroll/roster/payment writer functions — destination table, trigger, transaction/locking, financial authority, audit, idempotency (2026-07-19) |
 | `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` | Full 10-report architecture/risk/gap audit and consolidation roadmap |
 | `docs/ARCHITECTURE.md` | Deeper system and data-flow notes |
 | `docs/API.md` | HTTP endpoint reference |

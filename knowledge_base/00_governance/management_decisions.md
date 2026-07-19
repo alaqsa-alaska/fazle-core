@@ -3638,3 +3638,157 @@ functions (`create_escort_payment_draft()`, `create_advance_request_draft()`,
 `69897d7` (2026-07-18), the doc just hadn't been updated for it; (2) this
 `upsert_contact_role()` entry to be updated to reference this record.
 
+## AI Operating Console V1 — Stages A-C: text stabilization, mobile UI, voice transcription (2026-07-19)
+
+**Status: implemented, unit + integration + Playwright e2e tests passing
+against the live dev service. Not yet deployed** (working tree only —
+service not restarted, nothing pushed; see "Owner decision still required"
+below).
+
+### Origin
+
+Owner authorized only Stages A-C of the previously-scoped "Local AI
+Operating Console V1" plan (the fuller plan — voice, file upload, business
+tool registry, evidence cards — was proposed first; Owner narrowed the
+authorized scope to text stabilization + mobile UI + voice transcription
+only, explicitly excluding file upload, OCR, tool-registry expansion,
+streaming, and any new schema). Audited baseline (confirmed by direct code
+read, not assumed): `open-chat.html` text chat worked; voice/attachment
+controls were UI-only placeholders — the composer literally said
+"Attachments and voice are previewed locally until Phase 8 upload contracts
+are added," and `/chat/message` explicitly rejected `[voice: ...]`
+placeholder strings with a canned Bangla reply. That rejection branch had a
+latent bug: it referenced `requested_model` before the line that assigned
+it, which would have raised `UnboundLocalError` had a real placeholder ever
+reached it in production — moot now since the branch is removed.
+
+### Baseline revalidation (before editing)
+
+`git status`/`git log` showed local `main` 4 commits ahead of `origin/main`
+but confirmed fast-forward-safe (`git merge-base --is-ancestor origin/main
+HEAD` — no true divergence). Working tree was **not** clean: pre-existing
+uncommitted changes in this file, `docs/NEXT_IMPLEMENTATION_QUEUE.md`, and
+`modules/contact_roles/routes.py` (the `upsert_contact_role()` fix
+documented in the entry directly above this one) were already present from
+an earlier session, unrelated to this work — left untouched rather than
+reverted or force-included, per the safety rule against discarding
+uncommitted work. `fazle-core.service` was healthy (`/health` = ok) at the
+start of this work.
+
+### What changed
+
+- **`modules/voice_processor/__init__.py`** — `process_voice()` gained an
+  additive `skip_intent: bool = False` parameter. Default behavior (used by
+  WhatsApp) is byte-for-byte unchanged; `skip_intent=True` returns
+  immediately after transcription/confidence/language-detect, skipping the
+  `modules.intent.classify()` / `ai.classify_intent_llm()` step entirely —
+  so the new web route never triggers an LLM call itself, regardless of
+  what `process_voice()` is reused for.
+- **`app/main.py`** — removed the `[voice: ...]` placeholder-rejection
+  branch from `POST /chat/message` (dead code once the frontend no longer
+  sends placeholders). Added `POST /chat/voice`: multipart upload (`audio`
+  + `language` + `duration_ms`), auth via the same `require_api_key` used by
+  `/chat/message`, extension + content-type + size + duration validation,
+  temp file under `resources/uploads/voice/` always removed in a `finally`
+  block (success, transcription failure, or timeout), calls
+  `voice_processor.process_voice(path, skip_intent=True)` under a 110s
+  `asyncio.wait_for` (matches `process_voice`'s own internal ~105s worst-case
+  retry budget), maps `asyncio.TimeoutError` → 504 and other exceptions →
+  502. Response never includes a fabricated transcript — low-confidence/
+  empty results return `confident: false` plus the existing Bangla
+  low-confidence message as `warning`, per the "do not fabricate" spec.
+- **`app/static/open-chat.html`** — new voice panel + explicit state
+  machine (`idle → recording → uploading_audio → transcribing →
+  transcript_ready → error`), guarding against concurrent recordings,
+  duplicate uploads/sends, sending while a transcript is still processing,
+  and a stale transcript from a superseded recording (`voiceRequestId`
+  guard incremented per recording, response applied only if still current).
+  Auto-stop at 120s. Cancel discards without uploading. Editable transcript
+  box with "Use Transcript" / "Record Again" / "Clear" controls — transcript
+  is never auto-sent; the existing `/chat/message` path is used unmodified
+  once the user presses Send. "Attach File"/"Attach Image" disabled with a
+  "coming in a later stage" tooltip (previously offered a non-functional
+  local-preview-only experience, which the Owner's spec explicitly said not
+  to keep). Mobile: `100dvh` (keyboard-safe height), 44px minimum touch
+  targets under 980px, `aria-label`s added to icon/ambiguous controls.
+  **Real bug found and fixed during testing** (not just a test artifact):
+  `.voice-panel{display:grid}` and `.voice-actions{display:flex}` had equal
+  CSS specificity to the browser's native `[hidden]{display:none}` rule and
+  won by source order, so the `hidden` attribute silently failed to hide
+  either element — added explicit `.voice-panel[hidden]{display:none}` /
+  `.voice-actions[hidden]{display:none}` overrides.
+
+### Verification performed
+
+- `python3 -m py_compile` on all changed/new `.py` files — clean.
+- Full relevant non-DB unit suite (42 tests: `test_chat_voice_endpoint.py`
+  [new, 11 cases], `test_voice_processor_skip_intent.py` [new, regression
+  guard for WhatsApp path], `test_chat_message_smoke.py` [existing +
+  1 new placeholder-removal regression test], `test_chat_exact_db_tools.py`,
+  `test_phase3_to_7_ai_console.py`, `test_phase8a_chat_integration.py`,
+  `test_phase8b_open_chat_ui.py`, `test_llm_provider_order.py`) — all pass.
+  `test_invoice_numbering.py` and `test_shared_auth_deps.py` errored on
+  `TEST_DB_PASSWORD` not being set in this session (pre-existing environment
+  gap per `README.md`'s Tests section, unrelated to this change — neither
+  file touches chat/voice code).
+- 17 new Playwright e2e tests (`tests/e2e/test_open_chat_voice.py`) run
+  **against the live dev service** (`fazle-core.service`, already running,
+  health-checked before and unaffected — no restart performed, changes were
+  only picked up because Playwright hits the static HTML file and the
+  already-mocked `/chat/voice`/`/chat/message` routes for most assertions;
+  the handful of real backend calls exercised were pre-existing read-only
+  GETs like `/chat/models`). Chromium's built-in
+  `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` flags
+  were used for a real (silent, synthetic) audio device — a hand-rolled JS
+  override of `navigator.mediaDevices.getUserMedia` was tried first and
+  found unreliable (assignment did not consistently shadow the native
+  implementation in headless Chromium), so the test file uses the native
+  flags instead. All 17 pass: mobile layout (390px, no horizontal overflow,
+  44px touch targets, Bangla wrapping), mic button + permission-denied
+  state, recording indicator + cancel discarding without upload, transcript
+  editability + no-autosend, manual Send reaching `/chat/message`,
+  Record Again replacing a stale transcript, low-confidence warning (not
+  fabricated text), no new console errors introduced by the voice flow
+  (baselined against pre-existing page-load noise — see below), and HTML
+  escaping of a transcript containing a `<script>` payload.
+- **Known environment quirk, not a code regression**: the API key read
+  directly from `.env`'s `INTERNAL_API_KEY` did not authenticate against
+  `/chat/models`/`/chat/memory/*` on the live service (403 `Unauthorized`)
+  during e2e runs, while the in-process FastAPI test client (using
+  `get_settings().internal_api_key` directly) authenticated fine for the
+  unit/integration suite. Likely `generate_runtime_services_env.sh`
+  (the service's `ExecStartPre`) sources the running key from somewhere
+  other than a literal `.env` read at the time these tests ran. Not
+  investigated further — out of scope for this change, and every e2e
+  assertion that mattered for Stages A-C either didn't need real backend
+  auth (routes were mocked) or used `expect()`/explicit waits robust to it.
+  Flagged here so it isn't mistaken for a new auth bug introduced by this
+  work.
+
+### Not done this pass (deferred, matches authorized scope)
+
+File/image upload and OCR extraction into chat, business read-only tool
+registry expansion, response streaming, AI writes, General Ledger tools,
+any new conversation-persistence schema (confirmed not needed for Stages
+A-C — file handling reuses the existing temp-file-then-delete pattern,
+conversation persistence continues to rely on the existing generic
+`llm_conversation_log` table, no migration).
+
+### Docs updated in the same change
+
+`README.md` (new "AI Operating Console V1 — Stages A-C" section),
+`docs/NEXT_IMPLEMENTATION_QUEUE.md` (new "AI Operating Console V1" section
+under Phase 3, explicitly marked as not blocked on Phase 2 landing).
+
+### Owner decision still required
+
+This has **not been pushed or deployed** — working-tree changes only,
+verified via the live dev service's already-running instance (no restart
+needed for the tests above since Playwright drives the browser against
+static/mocked surfaces). Before `git push` + `scripts/restart_gate.sh
+--restart`: (1) confirm whether to commit `docs/NEXT_IMPLEMENTATION_QUEUE.md`
+and this file together with their pre-existing unrelated uncommitted
+content from the `upsert_contact_role()` session, or ask for those to be
+committed separately first; (2) confirm go-ahead to push and restart
+production for this change specifically.
+

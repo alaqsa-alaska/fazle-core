@@ -738,6 +738,51 @@ AI console unification (see roadmap doc referenced in this repo's governance mem
   `open-chat.html` across payroll, escort, accounting, and dispatch, with citations.
   **Blocked on Phase 2 landing.**
 
+## AI Operating Console V1 (separate track, not blocked on Phase 2/3)
+
+Owner-authorized directly, in parallel with the Phase 1/2/3 roadmap above — this is UI/UX
+stabilization of the existing `open-chat.html` console, not new business-tool surface
+area, so it does not wait on Phase 2 landing the way the two Phase 3 items above do.
+
+- [x] **Stage A — text chat stabilization** (2026-07-19): removed the `[voice: ...]`
+  placeholder rejection branch in `POST /chat/message` (`app/main.py`) — it had a latent
+  `NameError` bug (`requested_model` referenced before assignment) and is now moot since
+  voice input goes through real transcription. `/chat/message` request/response contract,
+  auth, model selection, and provider routing are unchanged.
+- [x] **Stage B — mobile-responsive UI + explicit state machine** (2026-07-19):
+  `app/static/open-chat.html` — `100dvh` viewport fix (keyboard-safe on mobile), 44px
+  minimum touch targets under 980px, `aria-label`s on icon/ambiguous controls, explicit
+  voice state machine (`idle → recording → uploading_audio → transcribing →
+  transcript_ready → error`) guarding against concurrent recordings, duplicate
+  uploads/sends, and stale transcripts from a superseded recording (`voiceRequestId`
+  guard). "Attach File"/"Attach Image" are now disabled with a "coming in a later
+  stage" tooltip rather than offering a non-functional local-preview experience.
+- [x] **Stage C — voice upload → transcription** (2026-07-19): new
+  `POST /chat/voice` (`app/main.py`), multipart upload (`audio` file + `language` hint
+  + client-measured `duration_ms`), auth-gated identically to `/chat/message`
+  (`require_api_key`). Reuses `modules.voice_processor.process_voice()` unchanged for
+  WhatsApp; added an additive `skip_intent: bool = False` parameter (default preserves
+  existing WhatsApp behavior exactly) so the web route can transcribe without ever
+  invoking the intent-classification LLM call. Audio formats: webm/ogg/oga/wav/m4a/mp3,
+  15MB max, ~2 minute max duration (matches frontend auto-stop). Temp file written to
+  `resources/uploads/voice/`, always deleted in a `finally` block regardless of success/
+  failure/timeout. Transcript is returned for manual review/edit — the endpoint never
+  calls an LLM or `/chat/message` itself; the user must press Send. Language hint is
+  UI-only today (the underlying transcribe call takes no language parameter), documented
+  as such rather than overclaiming steering accuracy.
+- Explicitly **not done this pass** (deferred, matches Owner's Stage A-C-only scope):
+  file/image upload and OCR extraction into chat, business read-only tool registry
+  expansion, response streaming, any new conversation-persistence schema, General
+  Ledger tools, any AI write capability.
+- Tests: `tests/unit/test_chat_voice_endpoint.py` (11 cases — auth, validation,
+  success, low-confidence, processor exception/timeout, temp-file cleanup, no-LLM-call
+  guard), `tests/unit/test_voice_processor_skip_intent.py` (regression guard for the
+  WhatsApp path), `tests/unit/test_chat_message_smoke.py` (placeholder-removal
+  regression), `tests/e2e/test_open_chat_voice.py` (17 Playwright cases — mobile
+  layout, permission-denied, recording/cancel, transcript editability, no-autosend,
+  manual send, record-again replacing stale transcript, XSS escaping, no new console
+  errors). All passing as of 2026-07-19 against the live dev service.
+
 ---
 
 ## Full history (Sessions 1-13, Tier 0/1, and detailed "Done" log)
