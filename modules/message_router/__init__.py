@@ -409,6 +409,19 @@ async def process_message(
 
     # ── 2. ESCORT CLIENT roles — strict order gate + admin draft only ─────────
     if role_str in _ESCORT_ROLES:
+        # Phase B Stage 1 (2026-07-19): shadow-mode conversation-memory
+        # observation only -- feature-flagged off by default
+        # (conversation_memory_enabled / whatsapp_thread_reconstruction_
+        # enabled), fully exception-safe, never changes the return value
+        # below. Deliberately placed before the existing routing decision
+        # so it observes every authorized escort-client message, whether
+        # or not this single message alone completes an order.
+        from modules.conversation_memory.thread_reconstruction import shadow_observe_escort_client_message
+        await shadow_observe_escort_client_message(
+            text=text, sender_phone=sender, source=source,
+            message_id=message_id, sender_role=role_str,
+        )
+
         is_verified_escort = _is_verified_escort_identity(identity, role_str)
         intent_check = classify(text)
         strict_order = _looks_like_escort_order(text)

@@ -4784,4 +4784,131 @@ Multi-message conversation aggregation, Bangla parsing, parser redesign,
 payroll/billing/GL work. Program `#954` was read-only-verified, never
 modified.
 
+## Phase B, Conversation Memory Engine, Stage 1 (2026-07-19)
+
+**Status: code complete, tested, deployed in shadow mode (feature flags
+default OFF).** Foundation for turning message-by-message escort parsing
+into conversation-aware understanding, without weakening any existing
+authorization/confirmation control — none of those gates were touched.
+
+### Part 1 audit findings (governance, before any code)
+
+- `BUSINESS-CONSTITUTION.md` Article VII ("no new business features until
+  System Consolidation Sprint complete") and `final_management_directive.md`'s
+  blanket production freeze are **superseded, not violated** —
+  `master_execution_plan_v2.md` (status: "KB v2 CERTIFIED — Phase 6
+  Conditional Refactoring is the active phase") documents the Owner-approved
+  conditional-refactoring phase this and every other feature shipped this
+  session falls under, each with explicit per-feature authorization.
+- **Two existing, partially-overlapping systems found and reconciled, not
+  duplicated:** `modules/conversation_layer` (Session 9, "Full Activation")
+  is an LLM+KB+RAG recruitment *reply* generator using `get_recent_history()`
+  (last 5 raw message bodies, `wbom_whatsapp_messages`) as ambient context —
+  architecturally unrelated to structured field extraction. `fazle_recruitment_sessions`
+  + `modules.recruitment_flow.intake_message()` is a real, working,
+  fixed-column, step-by-step multi-message collector for recruitment
+  (`name→age→area→job_preference→experience→phone_confirm`) — built but not
+  wired into the live router (the live path uses `conversation_layer`
+  instead). **Owner decision: coexist, not consolidate** — escort gets the
+  new generic engine; recruitment keeps its own existing mechanism
+  unchanged.
+- `wbom_whatsapp_messages` reused as the raw message-event source (Part
+  5.1) — no new message-event table.
+
+### Schema (migration 053)
+
+One new table, not five (the spec's own suggested list): `fazle_conversation_threads`
+— generic conversation identity (`platform`+`bridge_id`+`counterparty_phone`+
+`business_domain`, deliberately not phone alone, so escort/recruitment/bridge1/bridge2
+threads never collide), JSONB `fields` with per-field
+`value`/`source_message_id`/`confidence`/`extraction_method` (Part 4.6's exact
+shape, not a merged text blob), `state` machine matching the spec's 9 states
+exactly (CHECK-enforced), `expires_at`, `conflict_flags`, `related_object_type`/`related_object_id`.
+Plus `processed_conversation_messages`, the identical `(message_id, bridge)`
+dedup shape already used twice in `modules/bridge_poller`. `system_generated`
+is deliberately NOT a stored column — computed on read via the already-deployed
+`_is_system_generated_notification()` (Root Cause 7), avoiding a second,
+driftable source of truth. Validated on 3 separate disposable `postgres:17-alpine`
+containers across schema/constraint/idempotency/JSONB-shape checks before
+production application.
+
+### Code
+
+- `app/config.py`: 4 feature flags (`conversation_memory_enabled`,
+  `whatsapp_thread_reconstruction_enabled`, `multi_message_escort_parser_enabled`,
+  `bangla_semantic_parser_enabled`), all default `False` — Part 13's
+  shadow-mode-first requirement. Domain TTLs (escort 30min, recruitment 24h,
+  general 2h), configurable, never hardcoded in parser functions.
+- `modules/conversation_memory/__init__.py` (new): thread identity
+  (`get_open_thread`/`create_thread`), `merge_field()` (pure function
+  implementing Part 6.2's full merge policy — system-generated always
+  rejected, explicit label overrides inferred, higher-confidence correction
+  overrides, conflicting high-confidence values flagged not silently
+  overwritten), `update_thread()`, `expire_stale_threads()` (flips to
+  `expired`, never hard-deletes — different retention requirement than the
+  unrelated escort-draft TTL sweep, which does delete), idempotency via
+  `is_message_processed()`/`mark_message_processed()`.
+- `modules/conversation_memory/thread_reconstruction.py` (new):
+  `shadow_observe_escort_client_message()` — Stage 1's actual message_router
+  hook. Feeds the **existing, unmodified** `modules.escort.parse_escort_message()`
+  output into the memory engine; does not yet include Bangla extraction
+  (Stage 3) or genuine multi-message-driven actions (Stage 2). Fully
+  exception-safe — any internal failure is caught and logged, never
+  propagates to the caller.
+- `modules/message_router/__init__.py`: one hook call, inside the existing
+  `if role_str in _ESCORT_ROLES:` branch, before the existing routing
+  decision — never changes the return value. Zero behavior change when
+  flags are off (the production default).
+
+### Honest scope — what Stage 1 does NOT achieve
+
+**The real two-message Bangla/English example from the spec does not yet
+produce a correct value end-to-end.** Verified directly:
+`parse_escort_message("ভেসেল নেম Horda")` returns `mother_vessel: "MV ভেসেল
+নেম HORDA"` — the Bangla label leaks into the value instead of being
+stripped to `"MV HORDA"`, because Bangla semantic extraction is Stage 3,
+not built yet. A pure-English two-message equivalent (`"Mother Vessel: MV
+Horda"` as message 2) **does** correctly accumulate into one complete
+thread with all three required fields. This distinction is deliberately
+tested and documented rather than glossed over, per the task's own explicit
+instruction not to claim the Bangla example succeeds until it genuinely
+does.
+
+**No draft or program is created in Stage 1, even from a complete
+thread** — shadow mode only, verified by test (`wbom_escort_programs` row
+count unchanged before/after a complete accumulation).
+
+### Tests
+
+`tests/unit/test_conversation_memory.py` (14 tests, pure-function merge
+policy + TTL config + feature-flag defaults, no DB needed) and
+`tests/unit/test_conversation_memory_shadow_hook.py` (2 flag-safety tests
+run via pytest directly; 4 DB-backed integration tests — real accumulation,
+the honest Bangla gap, no-program-created, duplicate-message-id — written
+as proper `test_db_pool`-gated tests for whenever `TEST_DB_PASSWORD` is
+available, and additionally verified by hand against a disposable database
+this session since that variable is still unavailable). All pass. Full
+regression (`test_escort_source_of_truth_refactor.py` +
+`test_message_router_identity_seed.py` + `test_bridge_poller_legacy_gate.py` +
+`test_bridge_poller_system_notification_guard.py`): same standing baseline
+(1 pre-existing unrelated failure), zero new regressions.
+
+### Deployment
+
+Migration `053_conversation_memory_engine.sql` applied to production
+(schema-only, zero data rows written by the migration itself). Code
+committed, pushed, deployed via `scripts/restart_gate.sh --restart`. Both
+feature flags remain `False` in production — the new code paths exist and
+are proven correct, but do not run on real traffic yet. Enabling them (even
+in shadow mode, on real messages) is a separate, explicit decision — not
+assumed by this deployment.
+
+### Not done this pass (Stages 2-4, per the agreed staged plan)
+
+Multi-message escort completeness driving real draft creation (Stage 2),
+Bangla semantic parser (Stage 3), enabling the feature flags / admin
+inspection UI / Part 11-13's remaining deployment gates (Stage 4). Phase C
+(applicant/client/employee memory, cross-conversation reasoning, personality
+layer) — planning document not yet started.
+
 

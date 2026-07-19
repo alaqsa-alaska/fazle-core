@@ -206,6 +206,18 @@ class Settings(BaseSettings):
     # Hours after which a pending payment draft is auto-expired by the scheduler.
     draft_ttl_hours: int = 24
 
+    # Phase B — Conversation Memory Engine (2026-07-19). All default OFF/
+    # shadow -- Part 13's explicit "shadow mode first, no autonomous
+    # confirmation" requirement. TTL configurable by domain per Part 4.5;
+    # never hardcode a business TTL inside parser functions.
+    conversation_memory_enabled: bool = False
+    whatsapp_thread_reconstruction_enabled: bool = False
+    multi_message_escort_parser_enabled: bool = False
+    bangla_semantic_parser_enabled: bool = False
+    conversation_ttl_escort_minutes: int = 30
+    conversation_ttl_recruitment_hours: int = 24
+    conversation_ttl_general_hours: int = 2
+
     # Fazle Payroll Engine (FPE)
     fpe_sync_chat_jids: str = ""   # comma-separated target JIDs for historical sync
     # Phones authorized to send "Cash <phone> <name> <amount>" commands
