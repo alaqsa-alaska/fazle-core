@@ -4505,4 +4505,114 @@ wording ("may have no access or read-only access") and not built,
 since the backend itself doesn't offer a read-only tier for this
 resource today).
 
+## Escort-Pipeline Audit, Root Cause 7 Fix (2026-07-19)
+
+**Status: code complete and unit-tested, NOT YET committed/pushed/deployed.**
+Fixes the confirmed root cause of the MV Horda incident (Stage 5 decision
+package): `modules/bridge_poller/__init__.py`'s outgoing-message scan
+could misread the system's own auto-generated admin review notifications
+as authoritative admin confirmations, because it only checked whether the
+outgoing text *looked like* a completed draft, never who or what actually
+produced it.
+
+### The fix has two layers, per Owner instruction
+
+**Primary — a real origin marker, not a text-shape guess.** Discovered
+during investigation (not previously known to be usable for this): TASK 5
+already appends `app.bridge._AUTOMATED_SUFFIX_ANCHOR` ("🤖 Automated Reply
+System") to every message sent through `BridgeClient.send()`/
+`send_strict()` — confirmed to be the *only* path both `modules.outbound.
+_send_with_channel()` (the queue) and `app.main._notify_admin()`'s
+direct-fallback branch use to actually put text on the wire. A human
+admin typing directly into their own WhatsApp client never produces this
+marker — it's written by our own Python code at send time. This required
+no new schema, no new tracking table, and no message-ID correlation
+infrastructure (which was the original, harder design considered and
+ruled out — see below) — just checking a marker that was already there.
+
+**Secondary, defense-in-depth per explicit instruction — known
+system-notification title prefixes**, in case a future notification path
+is ever added that bypasses `BridgeClient.send()`/`send_strict()` (and so
+wouldn't carry the marker). `SYSTEM_NOTIFICATION_TITLE_PREFIXES`
+(`modules/message_router/__init__.py`, new) is the single source of truth
+for every title string `_admin_review_note()` and the two hardcoded
+notification dicts use — explicitly commented that it must be kept in
+sync with those literals, since (unlike the marker) it's a text check
+that can silently drift.
+
+### Design path not taken, and why
+
+Considered a message-ID-based correlation table (app records the real
+WhatsApp message ID returned by the bridge's send API when it sends a
+system notification, outgoing-scan checks the read-back `omsg_id` against
+that table). Investigated `modules/outbound/__init__.py::
+_send_with_channel()` and found `_send_with_channel()`'s "external_id" for
+bridge1/bridge2 sends is a synthetic `f"{bridge}:{recipient}"` string, not
+a real WhatsApp message ID — `BridgeClient.send_strict()`'s actual HTTP
+response is discarded entirely. Building this properly would mean
+extending the bridge's send API response handling to capture and thread
+through a real message ID, a materially larger change. Not pursued once
+the existing marker was found to already solve the problem without it.
+
+### What changed
+
+- `modules/message_router/__init__.py`: new `SYSTEM_NOTIFICATION_TITLE_PREFIXES`
+  constant (6 known titles), documented as the single source of truth.
+- `modules/bridge_poller/__init__.py`: new `_is_system_generated_notification()`
+  (marker check first, prefix-denylist fallback second); guard applied at
+  the escort-completion branch of the outgoing scan, before
+  `handle_admin_escort_completion()` is ever called — scoped to exactly
+  what was asked (the escort-confirmation scanner).
+
+### Flagged, not fixed — same vulnerability class, different branch, awaiting a decision
+
+The outgoing scan's **release-confirmation** branch (`is_release_confirmation()`
+→ `handle_admin_release_confirmation()`, same loop, ~L1221-1227) has the
+identical exposure: the "⚠️ RELEASE REVIEW REQUIRED" notification
+(`message_router/__init__.py`, release-intent branch) literally contains
+the substring `[RELEASE CONFIRMED]` as instructional text ("...send an
+exact [RELEASE CONFIRMED] message..."), which is exactly what
+`modules.escort_lifecycle.is_release_confirmation()`'s `_RC_ANCHOR` regex
+matches on. The same `_is_system_generated_notification()` helper would
+guard this branch too, at the cost of two lines — not applied, since the
+Owner's instruction was scoped to the escort-confirmation scanner
+specifically. Flagged for a quick decision on whether to extend it.
+
+### Tests
+
+`tests/unit/test_bridge_poller_system_notification_guard.py` (new, 14
+tests): the exact real production incident text (queue item `#1`'s raw
+text) is correctly recognized and is confirmed to independently pass
+`is_completed_escort_draft()` (proving the guard is load-bearing, not
+redundant); a genuine admin confirmation is correctly *not* flagged;
+every one of the 6 known title prefixes individually; leading-whitespace
+and empty-text edge cases; the marker signal proven independent of the
+prefix list (a brand-new notification wording with none of the known
+prefixes, only the marker, is still caught); `BridgeClient.send_strict()`
+itself proven to actually append the marker (not just asserted from the
+constant in isolation); a source-inspection test proving the guard call
+precedes the `handle_admin_escort_completion()` call in the real scan
+loop.
+
+### Verification performed
+
+`pytest tests/unit/test_bridge_poller_system_notification_guard.py
+tests/unit/test_bridge_poller_legacy_gate.py
+tests/unit/test_message_router_identity_seed.py
+tests/unit/test_escort_source_of_truth_refactor.py
+tests/unit/test_escort_module.py
+tests/unit/test_unmatched_confirmations_rbac.py`: same baseline as every
+other fix this session (1 pre-existing unrelated failure, 3 DB-gated
+errors from missing `TEST_DB_PASSWORD`), zero new regressions. No
+circular-import issue from `bridge_poller` importing `app.bridge`
+(confirmed via a real import, not just a syntax check).
+
+### Not done this pass
+
+Release-confirmation branch guard (flagged above, awaiting a decision).
+`app/main.py::_notify_admin()`'s `meta` branch (`_send_meta`) not audited
+for the same exposure — out of scope (escort/bridge1/bridge2 only, per
+the incident). Historical queue items `#1`/`#2` (MV Horda) still
+untouched, still `Owner decision = PENDING` per the Stage 5 package.
+
 

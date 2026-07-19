@@ -37,7 +37,13 @@ from app.config import get_settings
 from app.database import execute, fetch_one, fetch_all, fetch_val
 from shared.draft_reply import create_draft_reply
 from app.bridge import get_bridge1, get_bridge2
-from modules.message_router import process_message, get_primary_admin, _is_safe_autosend_intent
+from modules.message_router import (
+    process_message,
+    get_primary_admin,
+    _is_safe_autosend_intent,
+    SYSTEM_NOTIFICATION_TITLE_PREFIXES,
+)
+from app.bridge import _AUTOMATED_SUFFIX_ANCHOR
 from modules.intent import classify as classify_intent
 from modules.recruitment_flow import recruitment_eligibility
 
@@ -175,6 +181,35 @@ async def _set_outgoing_cursor(bridge: str, ts: datetime):
         """,
         f"{bridge}:outgoing", ts,
     )
+
+
+def _is_system_generated_notification(text: str) -> bool:
+    """Escort-pipeline audit, Root Cause 7 (2026-07-19): reject any
+    outgoing message this app generated itself before treating it as a
+    candidate admin confirmation.
+
+    Primary signal: app.bridge._AUTOMATED_SUFFIX_ANCHOR ("🤖 Automated
+    Reply System"). TASK 5 already appends this to every message sent
+    through BridgeClient.send()/send_strict() -- the one and only path
+    both the outbound queue (modules.outbound._send_with_channel) and
+    app.main._notify_admin()'s direct-fallback path use to actually put
+    text on the wire. A human admin typing directly into their own
+    WhatsApp client never produces this marker; it is written by our own
+    Python code at send time, not something a human types. This is a
+    real origin marker, not a text-shape guess -- it doesn't care what
+    the notification says, only whether *we* sent it.
+
+    Secondary signal (defense-in-depth): known system-notification title
+    prefixes (SYSTEM_NOTIFICATION_TITLE_PREFIXES) -- kept as a second
+    layer in case some future notification path is ever added that
+    doesn't route through BridgeClient.send()/send_strict() and so
+    wouldn't carry the marker."""
+    if not text:
+        return False
+    if _AUTOMATED_SUFFIX_ANCHOR in text:
+        return True
+    stripped = text.lstrip()
+    return any(stripped.startswith(prefix) for prefix in SYSTEM_NOTIFICATION_TITLE_PREFIXES)
 
 
 async def _is_outgoing_processed(msg_id: str, bridge: str) -> bool:
@@ -1204,6 +1239,14 @@ async def _poll_bridge(config: dict):
                         continue
 
                     if not is_completed_escort_draft(otext):
+                        continue
+
+                    if _is_system_generated_notification(otext):
+                        log.warning(
+                            f"[{bridge_name}] outgoing text matches is_completed_escort_draft() but "
+                            f"starts with a known system-notification prefix -- rejecting as a false-"
+                            f"positive confirmation candidate, msg={omsg_id}"
+                        )
                         continue
 
                     log.info(f"[{bridge_name}] outgoing escort completion detected → jid={chat_jid}")

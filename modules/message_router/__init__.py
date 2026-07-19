@@ -226,6 +226,32 @@ def _looks_like_escort_buying_intent(text: str) -> bool:
     return keyword_hits >= 2 and has_mobile
 
 
+# Root-cause fix (2026-07-19, escort-pipeline audit): every title string a
+# system-generated admin notification can start with. These messages are
+# sent to the admin over the same WhatsApp bridge account that
+# bridge_poller's outgoing-message scan later reads back looking for real
+# admin-typed confirmations (modules/bridge_poller/__init__.py) -- a
+# notification that happens to quote/instruct escort- or release-shaped
+# text (e.g. "send an exact [RELEASE CONFIRMED] message...") can
+# false-positive match is_completed_escort_draft()/is_release_confirmation()
+# and be misread as the admin's own authoritative reply. This list is the
+# immediate defense-in-depth guard for that scan (see
+# _is_system_generated_notification() there) -- it is NOT a substitute for
+# a real origin marker (see the same audit's Root Cause 7 finding), just a
+# fast, cheap first layer. MUST be kept in sync with every title string
+# used below and in the two hardcoded notification dicts elsewhere in this
+# file (the release-review-required note in the release-intent branch, and
+# app/main.py's send_to_admin path shares this same exposure).
+SYSTEM_NOTIFICATION_TITLE_PREFIXES: tuple[str, ...] = (
+    "⚠️ ESCORT REVIEW DRAFT",
+    "⚠️ ESCORT COMPLAINT/ASSIGNMENT-LIKE MESSAGE",
+    "⚠️ ESCORT CLIENT MESSAGE",
+    "⚠️ COMPLETED ESCORT SLIP RECEIVED FROM NON-ADMIN",
+    "⚠️ RELEASE REVIEW REQUIRED",
+    "📩 DRAFT-ONLY CONTACT MESSAGE",
+)
+
+
 def _admin_review_note(
     *,
     sender: str,
