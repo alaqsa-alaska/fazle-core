@@ -770,10 +770,6 @@ area, so it does not wait on Phase 2 landing the way the two Phase 3 items above
   calls an LLM or `/chat/message` itself; the user must press Send. Language hint is
   UI-only today (the underlying transcribe call takes no language parameter), documented
   as such rather than overclaiming steering accuracy.
-- Explicitly **not done this pass** (deferred, matches Owner's Stage A-C-only scope):
-  file/image upload and OCR extraction into chat, business read-only tool registry
-  expansion, response streaming, any new conversation-persistence schema, General
-  Ledger tools, any AI write capability.
 - Tests: `tests/unit/test_chat_voice_endpoint.py` (11 cases — auth, validation,
   success, low-confidence, processor exception/timeout, temp-file cleanup, no-LLM-call
   guard), `tests/unit/test_voice_processor_skip_intent.py` (regression guard for the
@@ -782,6 +778,57 @@ area, so it does not wait on Phase 2 landing the way the two Phase 3 items above
   layout, permission-denied, recording/cancel, transcript editability, no-autosend,
   manual send, record-again replacing stale transcript, XSS escaping, no new console
   errors). All passing as of 2026-07-19 against the live dev service.
+- [x] **Stage D — secure file upload and extraction** (2026-07-19): new
+  `POST /chat/upload` (`app/main.py`), same auth as `/chat/message`/`/chat/voice`.
+  Allowed: txt/md/csv/pdf/png/jpg/jpeg/webp, 12MB max. Reuses
+  `modules.kb_upload.parser.extract_text()` (PyMuPDF) for txt/md/pdf, a new bounded
+  CSV summarizer (headers + capped rows), and `modules.ocr_processor._call_ocr()` (the
+  private raw-OCR call, not the public `process_image()` — that function also does
+  WhatsApp duplicate-hash registration as a side effect that must not fire here) for
+  images. Temp file always deleted in a `finally` block; no server path ever returned.
+  `/chat/message` extended additively with `attachments[]`, wrapped in
+  `[ATTACHMENT]`/`[END ATTACHMENT]` delimiters plus an explicit
+  not-a-system-instruction warning (prompt-injection defense). Capped at 3 attachments
+  / 16000 combined characters, truncating with a reported warning rather than silently
+  dropping content.
+- [x] **Stage E — read-only business tool integration** (2026-07-19): audited first —
+  the AI Console's tool-orchestration pipeline (`modules/ai_console/`, BUS-001..009,
+  `UnifiedEvidenceBuilder`) was already live in production (confirmed
+  `ai_console_enabled=True`), just missing Dispatch tools and any per-tool RBAC at all
+  (confirmed zero references anywhere via grep). Added BUS-010..014: dispatch
+  availability/conflict-check/suggestions (wrapping the already-existing
+  `modules.dispatch.list_escort_workers()`/`check_conflict()`/`get_suggestions()`),
+  `missing_end_date_programs` (new `modules.dispatch.get_missing_end_date_programs()`
+  — a review/data-quality signal, explicitly never phrased as a confirmed conflict, per
+  the corrected Dispatch rules), and `employee_advances` (new
+  `modules.ai_readonly_tools.get_employee_advances()`, reusing the existing
+  `ai_read_payroll_runs` view — no schema change). Per-tool RBAC: role levels resolved
+  live from `fazle_roles` via `modules.rbac.get_role_level()`, fail-closed on lookup
+  failure, `viewer`/`office_assistant`/`accountant` tiers matching the Owner's
+  recommended examples. Business-mode tool selection narrowed from "always run every
+  tool" to question-aware keyword routing.
+- [x] **Stage F — evidence and source cards** (2026-07-19): responses now include
+  `answer_status` ("General AI answer" / "Verified business answer" / "Partially
+  verified answer" / "Unable to verify") and `business_verified`, computed from
+  existing confidence/business_used fields — never labels a general answer as
+  business-verified. Reuses the existing evidence envelope/card rendering rather than
+  inventing a new format; added filesystem-path masking to the existing evidence
+  sanitizer (business data itself, e.g. contact mobiles, intentionally left alone —
+  masking scope limited to what was actually asked, not a broader change to
+  already-shipped evidence behavior).
+- Explicitly **not done this pass** (deferred, matches Owner's Stage D-F-only scope):
+  response streaming, AI write capability, General Ledger tools, any new
+  conversation-persistence schema, OCR-on-scanned-PDF (reports an honest warning
+  instead), external OCR/STT providers.
+- Tests: `tests/unit/test_ai_console_business_tools_stage_e.py` (16 cases — RBAC
+  allow/deny, fail-closed, new-tool happy paths, tool-selection routing, structural
+  SELECT-only proof), `tests/unit/test_chat_upload_endpoint.py` (17 cases),
+  `tests/unit/test_chat_message_attachments.py` (7 cases — including prompt-injection
+  content passed through as explicitly-labeled data, never followed as an
+  instruction), `tests/e2e/test_open_chat_attachments.py` (15 Playwright cases). All
+  passing (82 backend unit tests total across the AI Console test files; both e2e
+  suites 100% individually — running them together in one invocation hits
+  browser/mic resource contention, not a code defect).
 
 ---
 

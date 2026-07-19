@@ -377,7 +377,7 @@ Focused verification evidence:
 - RBAC's plain "valid key or not" check (`_require_api_key`) — previously
   copy-pasted across 5 route files — now lives in one place, `shared/auth_deps.py`.
 
-## AI Operating Console V1 — Stages A-C (2026-07-19)
+## AI Operating Console V1 — Stages A-F (2026-07-19)
 
 Owner-authorized voice/mobile stabilization of `open-chat.html`, run in parallel with
 (not blocked on) the Phase 1/2/3 roadmap in `docs/NEXT_IMPLEMENTATION_QUEUE.md`.
@@ -406,11 +406,35 @@ Owner-authorized voice/mobile stabilization of `open-chat.html`, run in parallel
   superseded recording. "Attach File"/"Attach Image" are disabled with a "coming in a
   later stage" label rather than offering non-functional local-only preview. Mobile:
   `100dvh` viewport (keyboard-safe), 44px minimum touch targets under 980px width.
-- **Not done this pass** (deferred, matches the Owner's Stage A-C-only scope): file/
-  image upload and OCR into chat, business read-only tool registry expansion, response
+- **`POST /chat/upload`** (Stage D, new) — multipart file upload → text extraction.
+  Same auth as `/chat/message`/`/chat/voice`. Allowed: txt/md/csv/pdf/png/jpg/jpeg/webp,
+  12MB max. Reuses `modules.kb_upload.parser.extract_text()` (PyMuPDF) for txt/md/pdf, a
+  new bounded CSV summarizer, and `modules.ocr_processor._call_ocr()` (raw OCR only —
+  not the public `process_image()`, which also registers a WhatsApp duplicate-hash as a
+  side effect that must not fire for chat uploads) for images. Temp file always deleted
+  in a `finally` block; never returns a server filesystem path. Scanned/image-only PDFs
+  report an honest "no extractable text" warning rather than claiming success.
+- **`/chat/message` attachments** (Stage D) — extended additively with `attachments[]`
+  (old text-only clients unaffected). Content is wrapped in `[ATTACHMENT]`/
+  `[END ATTACHMENT]` delimiters plus an explicit instruction that it is untrusted
+  document data, not a system instruction (prompt-injection defense). Capped at 3
+  attachments / 16000 combined characters per message, truncating — never silently
+  dropping — with `attachments_truncated` reported back.
+- **Business tools + RBAC** (Stage E) — the AI Console's tool-orchestration pipeline
+  (`modules/ai_console/`, previously BUS-001..009) was already live in production; added
+  BUS-010..014 (Dispatch availability/conflict-check/suggestions, missing-end-date
+  programs, employee advances), all wrapping existing service functions with no schema
+  change. Added the first per-tool RBAC in this path (previously none existed anywhere
+  in it): role levels resolved live from `fazle_roles`, fail-closed on lookup failure.
+- **Answer-status labels + evidence cards** (Stage F) — responses now include
+  `answer_status` ("General AI answer" / "Verified business answer" / "Partially
+  verified answer" / "Unable to verify") and `business_verified`, rendered as a badge on
+  every bot message and a response-panel row. Never labels a general answer as
+  business-verified.
+- **Not done this pass** (deferred, matches the Owner's Stage D-F scope): response
   streaming, any new conversation-persistence schema, General Ledger tools, any AI
-  write capability. See `docs/NEXT_IMPLEMENTATION_QUEUE.md` → "AI Operating Console V1"
-  for the full stage-by-stage record and test inventory.
+  write capability, external OCR/STT providers. See `docs/NEXT_IMPLEMENTATION_QUEUE.md`
+  → "AI Operating Console V1" for the full stage-by-stage record and test inventory.
 
 ## Running Locally Or On The VPS
 
