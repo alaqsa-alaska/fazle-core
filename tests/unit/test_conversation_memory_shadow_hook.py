@@ -73,6 +73,74 @@ async def test_exception_inside_observation_never_propagates(monkeypatch):
         get_settings.cache_clear()
 
 
+@pytest.mark.asyncio
+async def test_unauthorized_sender_never_reaches_thread_creation(monkeypatch):
+    """Pre-flag-enable check #3: unauthorized senders cannot form an
+    escort-order candidate even in shadow mode -- explicit defense-in-
+    depth check inside _observe() itself, not just relying on the
+    message_router call site being correct."""
+    from app.config import get_settings
+    import modules.conversation_memory as cm
+    from modules.conversation_memory import thread_reconstruction as tr
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+    monkeypatch.setenv("ESCORT_CLIENT_PHONES", "8801670535255")
+    get_settings.cache_clear()
+
+    async def _boom(*a, **kw):
+        raise AssertionError("must never be reached for an unauthorized sender")
+
+    monkeypatch.setattr(cm, "get_open_thread", _boom)
+    monkeypatch.setattr(cm, "create_thread", _boom)
+
+    try:
+        await tr.shadow_observe_escort_client_message(
+            text=REAL_MSG_1, sender_phone="8801999999999",  # NOT in ESCORT_CLIENT_PHONES
+            source="bridge2", message_id="MSG-UNAUTH", sender_role="employee",
+        )
+    finally:
+        monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
+        monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+        monkeypatch.delenv("ESCORT_CLIENT_PHONES", raising=False)
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_system_generated_marker_on_inbound_text_is_refused(monkeypatch):
+    """Pre-flag-enable check #2: even though a genuine human would never
+    type the _AUTOMATED_SUFFIX_ANCHOR marker, this is checked explicitly
+    on the inbound path too, not just assumed impossible."""
+    from app.config import get_settings
+    import modules.conversation_memory as cm
+    from modules.conversation_memory import thread_reconstruction as tr
+    from app.bridge import _AUTOMATED_SUFFIX
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+    monkeypatch.setenv("ESCORT_CLIENT_PHONES", "01670535255")
+    get_settings.cache_clear()
+
+    async def _boom(*a, **kw):
+        raise AssertionError("must never be reached when the text carries the automated marker")
+
+    monkeypatch.setattr(cm, "get_open_thread", _boom)
+    monkeypatch.setattr(cm, "create_thread", _boom)
+
+    try:
+        await tr.shadow_observe_escort_client_message(
+            text=REAL_MSG_1 + _AUTOMATED_SUFFIX, sender_phone="01670535255",
+            source="bridge2", message_id="MSG-SYSGEN", sender_role="client_escort_buyer",
+        )
+    finally:
+        monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
+        monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+        monkeypatch.delenv("ESCORT_CLIENT_PHONES", raising=False)
+        get_settings.cache_clear()
+
+
 class TestShadowObservationAgainstRealDB:
     """Requires a live Postgres connection (test_db_pool) -- skipped
     automatically in this session (TEST_DB_PASSWORD unavailable), runs
@@ -93,9 +161,10 @@ class TestShadowObservationAgainstRealDB:
         get_settings.cache_clear()
         monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
         monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+        monkeypatch.setenv("ESCORT_CLIENT_PHONES", "")
         get_settings.cache_clear()
 
-        phone = "01670535255_shadow_test_1"
+        phone = "01900000011"
         try:
             await shadow_observe_escort_client_message(
                 text=REAL_MSG_1, sender_phone=phone, source="bridge2",
@@ -122,6 +191,7 @@ class TestShadowObservationAgainstRealDB:
         finally:
             monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
             monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+            monkeypatch.delenv("ESCORT_CLIENT_PHONES", raising=False)
             get_settings.cache_clear()
 
     @pytest.mark.asyncio
@@ -139,9 +209,10 @@ class TestShadowObservationAgainstRealDB:
         get_settings.cache_clear()
         monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
         monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+        monkeypatch.setenv("ESCORT_CLIENT_PHONES", "")
         get_settings.cache_clear()
 
-        phone = "01670535255_shadow_test_bangla"
+        phone = "01900000012"
         try:
             await shadow_observe_escort_client_message(
                 text=REAL_MSG_1, sender_phone=phone, source="bridge2",
@@ -161,6 +232,7 @@ class TestShadowObservationAgainstRealDB:
         finally:
             monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
             monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+            monkeypatch.delenv("ESCORT_CLIENT_PHONES", raising=False)
             get_settings.cache_clear()
 
     @pytest.mark.asyncio
@@ -175,9 +247,10 @@ class TestShadowObservationAgainstRealDB:
         get_settings.cache_clear()
         monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
         monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+        monkeypatch.setenv("ESCORT_CLIENT_PHONES", "")
         get_settings.cache_clear()
 
-        phone = "01670535255_shadow_test_no_draft"
+        phone = "01900000013"
         try:
             count_before = await fetch_val("SELECT count(*) FROM wbom_escort_programs")
             await shadow_observe_escort_client_message(
@@ -193,6 +266,7 @@ class TestShadowObservationAgainstRealDB:
         finally:
             monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
             monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+            monkeypatch.delenv("ESCORT_CLIENT_PHONES", raising=False)
             get_settings.cache_clear()
 
     @pytest.mark.asyncio
@@ -204,9 +278,10 @@ class TestShadowObservationAgainstRealDB:
         get_settings.cache_clear()
         monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
         monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+        monkeypatch.setenv("ESCORT_CLIENT_PHONES", "")
         get_settings.cache_clear()
 
-        phone = "01670535255_shadow_test_dup"
+        phone = "01900000014"
         try:
             await shadow_observe_escort_client_message(
                 text=REAL_MSG_1, sender_phone=phone, source="bridge2",
@@ -223,4 +298,5 @@ class TestShadowObservationAgainstRealDB:
         finally:
             monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
             monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+            monkeypatch.delenv("ESCORT_CLIENT_PHONES", raising=False)
             get_settings.cache_clear()

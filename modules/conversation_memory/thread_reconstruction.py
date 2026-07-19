@@ -54,7 +54,28 @@ async def shadow_observe_escort_client_message(
 
 async def _observe(*, text: str, sender_phone: str, source: str, message_id: Optional[str], sender_role: str) -> None:
     import modules.conversation_memory as cm
-    from modules.escort import parse_escort_message
+    from modules.escort import parse_escort_message, _is_allowed_escort_client
+    from modules.bridge_poller import _is_system_generated_notification
+
+    # Explicit, defense-in-depth authorization gate (Stage 2 §3) -- the
+    # caller (message_router's `if role_str in _ESCORT_ROLES:` branch)
+    # already enforces this, but this module must never assume it was
+    # called correctly. Belt-and-braces: re-check here too, so a future
+    # caller wiring this hook into a different branch can't silently
+    # grant order-creation-candidate status to an unauthorized sender.
+    if not _is_allowed_escort_client(sender_phone):
+        log.debug("[shadow] sender not in ESCORT_CLIENT_PHONES, refusing to observe: %s", sender_phone)
+        return
+
+    # Inbound client messages should never carry the outbound-only
+    # _AUTOMATED_SUFFIX_ANCHOR marker (a human never types it, and this
+    # is the inbound path -- bridge_poller's own guard is for the
+    # OUTGOING scan). Checked anyway, explicitly, rather than assumed --
+    # if it ever fires, treat the message as untrustworthy input, not a
+    # contributor to conversation state.
+    if _is_system_generated_notification(text):
+        log.warning("[shadow] inbound text unexpectedly carries a system-generated marker, refusing to observe: sender=%s", sender_phone)
+        return
 
     if message_id and await cm.is_message_processed(message_id, source):
         log.debug("[shadow] message already processed, skipping: %s", message_id)
