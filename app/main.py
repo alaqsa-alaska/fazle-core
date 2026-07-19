@@ -15,14 +15,16 @@ import hmac
 import json
 import logging
 import os
+import pathlib
 import re
 import shutil
 import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, Depends, File, Form, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -3428,32 +3430,6 @@ async def chat_message(request: Request):
     if not q:
         raise HTTPException(status_code=400, detail="q required")
 
-    # Reject raw voice placeholders; they must be transcribed before reaching the AI.
-    if q.startswith("[voice:") and q.endswith("]"):
-        settings_for_voice = get_settings()
-        return {
-            "answer": "ভয়েস বার্তা পাওয়া গেছে, কিন্তু এটি এখনো টেক্সটে রূপান্তরিত হয়নি। অনুগ্রহ করে লিখে পাঠান অথবা STT সক্ষম করুন।",
-            "model": requested_model or settings_for_voice.ollama_model,
-            "provider": None,
-            "rag_used": False,
-            "db_tools_used": [],
-            "web_fetched": False,
-            "citations": [],
-            "top_score": None,
-            "memory_context_used": False,
-            "confidence": "Unknown",
-            "traceability": ["ORCH-001"],
-            "evidence_summary": _summarize_chat_evidence(_empty_chat_evidence()),
-            "evidence": _empty_chat_evidence(),
-            "runtime_used": [],
-            "business_used": [],
-            "memory_used": [],
-            "knowledge_used": [],
-            "feature_path": "ai_console",
-            "ai_console_enabled": await _is_ai_console_chat_enabled(),
-            "trace": {"mode": "general", "request_id": "voice-placeholder", "selected_tools": []},
-        }
-
     requested_model = (body.get("model") or "").strip() or None
 
     history = body.get("history") or []
@@ -3556,6 +3532,100 @@ async def chat_message(request: Request):
         feature_path="admin_chat_lab",
         feature_flag_enabled=ai_console_enabled,
     )
+
+
+_VOICE_UPLOAD_DIR = "/home/azim/core/resources/uploads/voice"
+_VOICE_ALLOWED_EXTENSIONS = {".webm", ".ogg", ".oga", ".wav", ".m4a", ".mp3"}
+_VOICE_MAX_SIZE = 15 * 1024 * 1024  # 15 MB — generous for a few minutes of webm/opus
+_VOICE_MAX_DURATION_MS = 120_000  # 2 minutes — matches the frontend auto-stop
+
+
+@app.post("/chat/voice", dependencies=[Depends(require_api_key)])
+async def chat_voice(
+    audio: UploadFile = File(...),
+    language: str = Form("auto"),
+    duration_ms: int = Form(0),
+):
+    """
+    AI Console Stage C — voice upload → transcription (editable transcript only).
+
+    Reuses modules.voice_processor (the same engine WhatsApp voice notes use)
+    with skip_intent=True so this route never invokes an LLM itself; the
+    transcript is returned for the user to review/edit and submit manually
+    through /chat/message. Audio is written to a temp file for the duration
+    of transcription only and always deleted afterward.
+
+    `language` is a UI hint (Auto/bn/en) only — the underlying transcribe
+    call takes no language parameter today, so it does not steer
+    recognition. The `language` field in the response reflects post-hoc
+    heuristic detection (Bengali-character ratio), not the requested hint.
+    """
+    if not audio.filename:
+        raise HTTPException(status_code=400, detail="No filename")
+
+    safe_name = pathlib.Path(audio.filename).name
+    ext = os.path.splitext(safe_name)[1].lower()
+    if ext not in _VOICE_ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported audio type: {ext}. Allowed: {', '.join(sorted(_VOICE_ALLOWED_EXTENSIONS))}",
+        )
+
+    base_content_type = (audio.content_type or "").split(";")[0].strip().lower()
+    if base_content_type and not (
+        base_content_type.startswith("audio/") or base_content_type == "video/webm"
+    ):
+        raise HTTPException(status_code=400, detail=f"Unsupported content type: {base_content_type}")
+
+    if duration_ms and duration_ms > int(_VOICE_MAX_DURATION_MS * 1.1):
+        raise HTTPException(status_code=400, detail="Recording exceeds maximum duration")
+
+    content_bytes = await audio.read()
+    if len(content_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+    if len(content_bytes) > _VOICE_MAX_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Audio too large: {len(content_bytes)//1024}KB. Max: {_VOICE_MAX_SIZE//1024}KB",
+        )
+
+    os.makedirs(_VOICE_UPLOAD_DIR, exist_ok=True)
+    temp_name = f"chatvoice_{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
+    temp_path = os.path.join(_VOICE_UPLOAD_DIR, temp_name)
+
+    with open(temp_path, "wb") as fh:
+        fh.write(content_bytes)
+
+    try:
+        from modules.voice_processor import process_voice
+        try:
+            result = await asyncio.wait_for(process_voice(temp_path, skip_intent=True), timeout=110.0)
+        except asyncio.TimeoutError:
+            log.warning("[chat/voice] transcription timed out file=%s", temp_name)
+            raise HTTPException(
+                status_code=504,
+                detail="Voice transcription timed out; please try a shorter recording",
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error("[chat/voice] transcription failed file=%s error=%s", temp_name, e)
+            raise HTTPException(status_code=502, detail="Voice transcription failed")
+    finally:
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+    return {
+        "transcript": result["transcript"],
+        "language": result["language_hint"],
+        "confidence": None,
+        "confident": result["confident"],
+        "duration_ms": duration_ms or None,
+        "editable": True,
+        "warning": None if result["confident"] else result["reply"],
+    }
 
 
 # ── User Management APIs ──────────────────────────────────────────────────────

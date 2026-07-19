@@ -31,10 +31,16 @@ class VoiceResult(TypedDict):
     reply: str
 
 
-async def process_voice(file_path: str) -> VoiceResult:
+async def process_voice(file_path: str, skip_intent: bool = False) -> VoiceResult:
     """
     Full pipeline: transcribe → language detect → intent → reply.
     On timeout: retries once before raising.
+
+    skip_intent=True stops after transcription/confidence/language-detect and
+    never calls the intent classifier (which can invoke an LLM) — used by
+    callers (e.g. the web chat voice endpoint) that must not send the
+    transcript to any LLM themselves; the caller is fully responsible for
+    what happens to the transcript.
     """
     settings = get_settings()
 
@@ -59,6 +65,16 @@ async def process_voice(file_path: str) -> VoiceResult:
             language_hint=lang,
             intent="unknown",
             reply="ভয়েস বার্তাটি ভালোভাবে বোঝা যায়নি। অনুগ্রহ করে টেক্সট আকারে পাঠান।",
+        )
+
+    if skip_intent:
+        return VoiceResult(
+            transcript=transcript,
+            word_count=word_count,
+            confident=True,
+            language_hint=lang,
+            intent="not_classified",
+            reply="",
         )
 
     # Lazy import to avoid circular
