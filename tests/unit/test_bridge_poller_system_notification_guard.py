@@ -158,3 +158,109 @@ def test_guard_call_precedes_handle_admin_escort_completion_in_source():
         "the system-notification guard must be checked before "
         "handle_admin_escort_completion() is ever called in the outgoing scan"
     )
+
+
+# ===========================================================================
+# Release-confirmation branch (same guard, same function, applied to the
+# sibling scan branch per Owner-approved scope completion, 2026-07-19)
+# ===========================================================================
+
+# Verbatim text the release-intent branch generates
+# (modules/message_router/__init__.py, is_release_intent() branch) --
+# note it genuinely contains "[RELEASE CONFIRMED]" as instructional text,
+# which is exactly what is_release_confirmation()'s _RC_ANCHOR matches on.
+RELEASE_REVIEW_REQUIRED_TEXT = (
+    "⚠️ RELEASE REVIEW REQUIRED\n"
+    "Employee ID: 754\nPhone: 8801818388630\n"
+    "Message: I am done, please release me\n\n"
+    "Review the active program and send an exact "
+    "[RELEASE CONFIRMED] message with End Date, Shift, Days, "
+    "Food, Conveyance, Escort and Lighter."
+)
+
+# A hypothetical *different* automated notification that was never given
+# one of the known SYSTEM_NOTIFICATION_TITLE_PREFIXES titles -- proves the
+# marker (not the prefix denylist) is what catches this one, independent
+# of test_automated_suffix_anchor_is_the_primary_signal above.
+OTHER_AUTOMATED_MESSAGE_WITH_RELEASE_SHAPED_TEXT = (
+    "🔔 Heads up — a program may be ready for release.\n"
+    "Consider sending [RELEASE CONFIRMED] with the usual fields once verified."
+)
+
+GENUINE_RELEASE_CONFIRMATION = (
+    "[RELEASE CONFIRMED]\n"
+    "End Date: 19.07.2026\n"
+    "Shift: D\n"
+    "Days: 1\n"
+    "Food: 150\n"
+    "Conveyance: 100\n"
+    "Escort: Karim\n"
+    "Lighter: Bushra Biva 01"
+)
+
+
+def test_release_review_required_text_also_passes_is_release_confirmation():
+    """Confirms the premise: the system's own review-request notification
+    genuinely matches the release-confirmation pattern-matcher (it
+    contains the literal "[RELEASE CONFIRMED]" anchor as instructional
+    text) -- without the guard, nothing else in the scan stops it."""
+    from modules.escort_lifecycle import is_release_confirmation
+    assert is_release_confirmation(RELEASE_REVIEW_REQUIRED_TEXT) is True
+
+
+def test_release_review_required_notification_is_recognized_as_system_generated():
+    from modules.bridge_poller import _is_system_generated_notification
+    assert _is_system_generated_notification(RELEASE_REVIEW_REQUIRED_TEXT) is True
+
+
+def test_other_automated_message_with_release_shaped_text_is_ignored():
+    """A DIFFERENT automated notification, not one of the known titles --
+    only carries the _AUTOMATED_SUFFIX_ANCHOR marker, no known prefix.
+    Proves the primary marker signal (not the secondary prefix denylist)
+    is what catches this one."""
+    from modules.bridge_poller import _is_system_generated_notification
+    from modules.message_router import SYSTEM_NOTIFICATION_TITLE_PREFIXES
+    from app.bridge import _AUTOMATED_SUFFIX
+
+    text = OTHER_AUTOMATED_MESSAGE_WITH_RELEASE_SHAPED_TEXT + _AUTOMATED_SUFFIX
+    assert not any(text.lstrip().startswith(p) for p in SYSTEM_NOTIFICATION_TITLE_PREFIXES), (
+        "test premise: this title must NOT be in the known prefix list"
+    )
+    assert _is_system_generated_notification(text) is True
+
+
+def test_genuine_release_confirmation_is_not_flagged():
+    """A real human admin's release confirmation must still be recognized
+    as release-confirmation-shaped and NOT rejected by the guard."""
+    from modules.escort_lifecycle import is_release_confirmation
+    from modules.bridge_poller import _is_system_generated_notification
+
+    assert is_release_confirmation(GENUINE_RELEASE_CONFIRMATION) is True
+    assert _is_system_generated_notification(GENUINE_RELEASE_CONFIRMATION) is False
+
+
+def test_guard_call_precedes_handle_admin_release_confirmation_in_source():
+    """Structural proof the guard is wired into the release branch too,
+    strictly before the handler call -- same pattern as the escort-
+    completion branch's equivalent test above."""
+    import inspect
+    import modules.bridge_poller as bp
+
+    source = inspect.getsource(bp)
+    # Find the release branch specifically (the module also contains the
+    # escort-completion guard call, which must not be confused with this one).
+    release_branch_start = source.index("if is_release_confirmation(otext):")
+    release_branch_end = source.index("await handle_admin_release_confirmation(")
+    guard_call = source.index("_is_system_generated_notification(otext)", release_branch_start)
+    assert release_branch_start < guard_call < release_branch_end, (
+        "the system-notification guard must be checked inside the release "
+        "branch, before handle_admin_release_confirmation() is ever called"
+    )
+
+
+def test_existing_escort_confirmation_protection_still_passes():
+    """Regression guard: the release-branch addition must not have
+    disturbed the escort-completion branch's own guard."""
+    from modules.bridge_poller import _is_system_generated_notification
+    assert _is_system_generated_notification(REAL_INCIDENT_TEXT) is True
+    assert _is_system_generated_notification(GENUINE_ADMIN_CONFIRMATION) is False

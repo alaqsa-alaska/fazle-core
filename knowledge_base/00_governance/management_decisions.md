@@ -4615,4 +4615,71 @@ for the same exposure — out of scope (escort/bridge1/bridge2 only, per
 the incident). Historical queue items `#1`/`#2` (MV Horda) still
 untouched, still `Owner decision = PENDING` per the Stage 5 package.
 
+## Escort-Pipeline Audit, Root Cause 7 — Release-Branch Completion (2026-07-19)
+
+**Status: code complete, tested, deployed same day as the escort-branch
+fix.** Owner-approved completion of the same root-cause class in the
+sibling scan branch, explicitly scoped: reuse the existing guard verbatim,
+no duplication, no changes to release business rules/parsing/payment/
+roster.
+
+### What changed
+
+`modules/bridge_poller/__init__.py`, `+9` lines, one call site: inside
+the `if is_release_confirmation(otext):` branch (`_poll_bridge()`, the
+outgoing scan), a call to the same `_is_system_generated_notification()`
+used for the escort-completion branch, immediately before
+`handle_admin_release_confirmation()` is called. No new function, no
+new constant, no changes to `modules/escort_lifecycle/__init__.py` or
+any release/payment/roster code.
+
+### Tests added
+
+`tests/unit/test_bridge_poller_system_notification_guard.py`, +6 tests
+(20 total in the file, up from 14):
+`test_release_review_required_text_also_passes_is_release_confirmation`
+(confirms the premise — the system's own notification genuinely matches
+`is_release_confirmation()`'s `_RC_ANCHOR`, so the guard is load-bearing,
+not redundant), `test_release_review_required_notification_is_recognized_as_system_generated`,
+`test_other_automated_message_with_release_shaped_text_is_ignored` (a
+*different* automated message, not one of the known titles — proves the
+marker signal alone, independent of the prefix denylist, catches it),
+`test_genuine_release_confirmation_is_not_flagged` (a real
+`[RELEASE CONFIRMED]`-shaped human message is correctly left
+unflagged), `test_guard_call_precedes_handle_admin_release_confirmation_in_source`
+(structural proof, same source-inspection pattern as the escort-branch
+equivalent, scoped to the release branch specifically so it can't be
+satisfied by the escort branch's own guard call), and
+`test_existing_escort_confirmation_protection_still_passes` (regression
+guard on the escort-branch fix itself).
+
+### Verification performed
+
+`pytest tests/unit/test_bridge_poller_system_notification_guard.py`:
+20/20 passed. Combined with
+`test_bridge_poller_legacy_gate.py`/`test_escort_lifecycle.py`/
+`test_escort_source_of_truth_refactor.py`/`test_message_router_identity_seed.py`:
+FAILED/ERROR list is exactly the same 14 items already accounted for
+this session (1 pre-existing unrelated failure,
+13 DB-gated errors in `test_escort_lifecycle.py` — that file's fixtures
+require `test_db_pool`, unrelated to this change, same standing
+`TEST_DB_PASSWORD` constraint) — zero new regressions.
+
+### Deployment
+
+Commit, push, `scripts/restart_gate.sh --restart` (same controlled
+process as the escort-branch fix) — see commit log for hash and restart
+timing. Post-restart: health `ok`, logs inspected for unexpected
+`[RELEASE CONFIRMED]`/release-processing activity, none found. No data
+rows modified — this is a code-only change; the real
+`wbom_unmatched_confirmations` queue (2 pending MV Horda items) and
+`wbom_escort_programs` were not touched, confirmed by re-querying both
+before and after the restart.
+
+### Not done this pass (per explicit instruction)
+
+Multi-message conversation aggregation, Bangla parsing, Program `#945`
+incident data changes (cancel + recreate) — all still pending a separate
+authorization.
+
 

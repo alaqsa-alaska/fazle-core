@@ -1231,6 +1231,15 @@ async def _poll_bridge(config: dict):
 
                     # Phase 22: release confirmation takes priority
                     if is_release_confirmation(otext):
+                        if _is_system_generated_notification(otext):
+                            log.warning(
+                                f"[{bridge_name}] outgoing text matches is_release_confirmation() but "
+                                f"is a system-generated notification (e.g. RELEASE REVIEW REQUIRED, "
+                                f"which itself contains the [RELEASE CONFIRMED] anchor as instructional "
+                                f"text) -- rejecting as a false-positive confirmation candidate, "
+                                f"msg={omsg_id}"
+                            )
+                            continue
                         log.info(f"[{bridge_name}] outgoing RELEASE confirmation → jid={chat_jid}")
                         try:
                             await handle_admin_release_confirmation(otext, chat_jid, source=bridge_name)
