@@ -35,6 +35,7 @@
   }
   .shell{
     height:100vh;
+    height:100dvh;
     display:grid;
     grid-template-columns:260px minmax(0,1fr) 340px;
     gap:0;
@@ -451,6 +452,51 @@
     cursor:pointer;
     font-size:12px;
   }
+  .tool-btn:disabled{
+    opacity:.4;
+    cursor:not-allowed;
+  }
+  .tool-btn:disabled:hover{color:var(--muted);border-color:var(--line)}
+  .voice-panel{
+    display:grid;
+    gap:8px;
+    padding:10px 12px;
+    border:1px solid var(--line);
+    border-radius:14px;
+    background:rgba(92,178,255,.05);
+  }
+  .voice-panel[hidden]{display:none}
+  .voice-status-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    font-size:12px;
+    color:var(--text);
+  }
+  .voice-indicator{
+    width:10px;
+    height:10px;
+    border-radius:50%;
+    background:var(--muted);
+    flex-shrink:0;
+  }
+  .voice-indicator.active{
+    background:var(--bad);
+    animation:voice-pulse 1s infinite;
+  }
+  @keyframes voice-pulse{
+    0%,100%{opacity:1}
+    50%{opacity:.35}
+  }
+  #voice-timer{color:var(--muted);font-variant-numeric:tabular-nums}
+  .voice-transcript-box{min-height:64px}
+  .voice-actions{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .voice-actions[hidden]{display:none}
+  .voice-actions .tiny-btn{width:auto;padding:8px 12px}
   .composer-main{
     display:flex;
     gap:10px;
@@ -629,6 +675,9 @@
     .left.open,.right.open{transform:translateX(0)}
     .left{left:0}
     .mobile-only{display:inline-flex!important}
+    .tool-btn,.send-btn,#voice-cancel-btn,.voice-actions .tiny-btn{min-height:44px}
+    .tool-btn{padding:10px 12px;font-size:13px}
+    .composer{padding-bottom:max(16px, env(safe-area-inset-bottom))}
   }
   .mobile-only{display:none}
   ::-webkit-scrollbar{width:6px;height:6px}
@@ -714,7 +763,7 @@
       <div class="runtime-banner">
         <span class="pill info" id="provider-pill">Provider: -</span>
         <span class="pill" id="default-model-pill">Default Model: -</span>
-        <span class="pill warn" id="composer-status-pill">Attachments: local preview only</span>
+        <span class="pill warn" id="composer-status-pill">Voice: live transcription · Files: coming soon</span>
       </div>
     </header>
 
@@ -739,21 +788,38 @@
 
     <section class="composer">
       <div class="attachment-row">
-        <button class="tool-btn" onclick="document.getElementById('file-input').click()">Attach File</button>
-        <button class="tool-btn" onclick="document.getElementById('image-input').click()">Attach Image</button>
-        <button class="tool-btn" id="voice-btn" onclick="toggleVoiceRecording()">Voice Note</button>
+        <button class="tool-btn" id="attach-file-btn" disabled aria-disabled="true" title="File upload arrives in a later stage">📎 Attach File (soon)</button>
+        <button class="tool-btn" id="attach-image-btn" disabled aria-disabled="true" title="File upload arrives in a later stage">🖼 Attach Image (soon)</button>
+        <button class="tool-btn" id="voice-btn" onclick="toggleVoiceRecording()" aria-label="Record voice note">🎤 Record Voice</button>
+        <select class="tool-btn" id="voice-lang-select" aria-label="Voice language hint" title="Voice language hint (auto-detect happens after transcription either way)">
+          <option value="auto">Auto</option>
+          <option value="bn">বাংলা</option>
+          <option value="en">English</option>
+        </select>
         <button class="tool-btn" onclick="clearConversation()">Clear Chat</button>
-        <input class="hidden-input" id="file-input" type="file" onchange="handleFileInput(event)">
-        <input class="hidden-input" id="image-input" type="file" accept="image/*" onchange="handleImageInput(event)">
+      </div>
+      <div class="voice-panel" id="voice-panel" hidden>
+        <div class="voice-status-row">
+          <span class="voice-indicator" id="voice-indicator" aria-hidden="true"></span>
+          <span id="voice-status-text" aria-live="polite">Idle</span>
+          <span id="voice-timer"></span>
+          <button class="tiny-btn" id="voice-cancel-btn" style="width:auto;padding:6px 10px" onclick="cancelVoiceRecording()" hidden>Cancel</button>
+        </div>
+        <textarea class="input-box voice-transcript-box" id="voice-transcript-box" rows="2" placeholder="Transcript will appear here for review..." hidden aria-label="Voice transcript (editable)"></textarea>
+        <div class="voice-actions" id="voice-actions" hidden>
+          <button class="tiny-btn" onclick="useVoiceTranscript()">Use Transcript</button>
+          <button class="tiny-btn" onclick="recordAgain()">Record Again</button>
+          <button class="tiny-btn" onclick="clearVoiceTranscript()">Clear</button>
+        </div>
       </div>
       <div class="chip-row" id="attachment-chips"></div>
       <div class="composer-main">
-        <textarea class="input-box" id="q-input" rows="1" placeholder="Bangla-তে জিজ্ঞেস করুন: employee, payroll, runtime, memory, bridge, Qdrant, Ollama, logs, health..."></textarea>
-        <button class="send-btn" id="send-btn" onclick="sendMessage()">➜</button>
+        <textarea class="input-box" id="q-input" rows="1" placeholder="Bangla-তে জিজ্ঞেস করুন: employee, payroll, runtime, memory, bridge, Qdrant, Ollama, logs, health..." aria-label="Message"></textarea>
+        <button class="send-btn" id="send-btn" onclick="sendMessage()" aria-label="Send message">➜</button>
       </div>
       <div class="composer-foot">
-        <div id="composer-hint">READ ONLY mode active. Attachments and voice are previewed locally until Phase 8 upload contracts are added.</div>
-        <div id="chat-status"></div>
+        <div id="composer-hint">Voice notes are transcribed for review before sending — nothing is sent automatically. File/image upload arrives in a later stage.</div>
+        <div id="chat-status" aria-live="polite"></div>
       </div>
     </section>
   </main>
@@ -791,7 +857,7 @@
 <script>
 const API_KEY = localStorage.getItem("fazle_api_key") || "";
 const MAX_HISTORY_TURNS = 10;
-const MAX_ATTACHMENT_SIZE = 8 * 1024 * 1024;
+const MAX_RECORDING_MS = 120000;
 
 let conversationHistory = [];
 let isLoading = false;
@@ -800,13 +866,18 @@ let currentModels = [];
 let currentProviders = {};
 let selectedProvider = "all";
 let currentResponseMeta = null;
-let attachedFile = null;
-let attachedImage = null;
-let recordedVoice = null;
-let mediaRecorder = null;
-let audioChunks = [];
 let evidenceDockOpen = true;
 let typingCounter = 0;
+
+// Voice state machine: idle | recording | uploading_audio | transcribing | transcript_ready | error
+let voiceState = "idle";
+let mediaRecorder = null;
+let audioChunks = [];
+let voiceStream = null;
+let voiceRequestId = 0;
+let voiceRecordingStartTs = null;
+let voiceTimerInterval = null;
+let voiceCancelled = false;
 
 window.addEventListener("DOMContentLoaded", () => {
   if (!API_KEY) {
@@ -823,6 +894,19 @@ window.addEventListener("DOMContentLoaded", () => {
   loadHistory();
   renderRightPanels(null);
 });
+
+function stopAllVoiceTracks() {
+  if (voiceStream) {
+    voiceStream.getTracks().forEach(track => track.stop());
+    voiceStream = null;
+  }
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    try { mediaRecorder.stop(); } catch (_error) {}
+  }
+  stopVoiceTimer();
+}
+window.addEventListener("pagehide", stopAllVoiceTracks);
+window.addEventListener("beforeunload", stopAllVoiceTracks);
 
 function bindComposer() {
   const ta = document.getElementById("q-input");
@@ -1046,8 +1130,8 @@ function renderRightPanels(res) {
       <div class="meta-value">${(response.memory_used || []).join(", ") || "No memory sources used yet."}</div>
     </div>
     <div class="meta-card">
-      <div class="meta-label">Conversation Attachments</div>
-      <div class="meta-value">${attachedFile || attachedImage || recordedVoice ? "Locally prepared but not sent to backend yet." : "None"}</div>
+      <div class="meta-label">Attachments</div>
+      <div class="meta-value">Voice notes are transcribed and sent as normal text after review. File/image upload is not available yet.</div>
     </div>
     ${buildSourceCards("Memory Evidence", evidence.memory)}
   `;
@@ -1186,9 +1270,8 @@ function removeTyping(id) {
 
 function setLoading(value) {
   isLoading = value;
-  document.getElementById("send-btn").disabled = value;
-  document.getElementById("q-input").disabled = value;
   document.getElementById("chat-status").textContent = value ? "Fazle is assembling evidence..." : "";
+  refreshComposerAvailability();
 }
 
 function toggleCtx(key) {
@@ -1215,77 +1298,206 @@ function clearConversation() {
   updateFlagUI(Boolean(document.getElementById("flag-pill").textContent.includes("ON")), "pending");
 }
 
-function handleFileInput(event) {
-  const file = event.target.files && event.target.files[0];
-  if (!file) return;
-  if (file.size > MAX_ATTACHMENT_SIZE) {
-    showToast("File is too large for Phase 8B local preview.");
-    return;
-  }
-  attachedFile = file;
-  renderAttachmentChips();
+function refreshComposerAvailability() {
+  const voiceBusy = voiceState === "recording" || voiceState === "uploading_audio" || voiceState === "transcribing";
+  const busy = isLoading || voiceBusy;
+  document.getElementById("send-btn").disabled = busy;
+  document.getElementById("q-input").disabled = busy;
 }
 
-function handleImageInput(event) {
-  const file = event.target.files && event.target.files[0];
-  if (!file) return;
-  if (file.size > MAX_ATTACHMENT_SIZE) {
-    showToast("Image is too large for Phase 8B local preview.");
-    return;
+function setVoiceState(state, statusText) {
+  voiceState = state;
+  document.getElementById("voice-panel").hidden = state === "idle";
+  document.getElementById("voice-indicator").className = "voice-indicator" + (state === "recording" ? " active" : "");
+  document.getElementById("voice-status-text").textContent = statusText;
+  document.getElementById("voice-cancel-btn").hidden = state !== "recording";
+  document.getElementById("voice-transcript-box").hidden = state !== "transcript_ready";
+  document.getElementById("voice-actions").hidden = state !== "transcript_ready";
+  if (state !== "recording") document.getElementById("voice-timer").textContent = "";
+
+  const voiceBtn = document.getElementById("voice-btn");
+  voiceBtn.disabled = state === "uploading_audio" || state === "transcribing";
+  voiceBtn.textContent = state === "recording" ? "⏹ Stop & Transcribe" : "🎤 Record Voice";
+
+  refreshComposerAvailability();
+}
+
+function startVoiceTimer() {
+  stopVoiceTimer();
+  voiceTimerInterval = setInterval(() => {
+    const elapsedMs = Date.now() - voiceRecordingStartTs;
+    const seconds = Math.floor(elapsedMs / 1000);
+    document.getElementById("voice-timer").textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+    if (elapsedMs >= MAX_RECORDING_MS) stopVoiceRecording();
+  }, 250);
+}
+
+function stopVoiceTimer() {
+  if (voiceTimerInterval) {
+    clearInterval(voiceTimerInterval);
+    voiceTimerInterval = null;
   }
-  attachedImage = file;
-  renderAttachmentChips();
 }
 
 async function toggleVoiceRecording() {
-  if (mediaRecorder && mediaRecorder.state === "recording") {
-    mediaRecorder.stop();
+  if (voiceState === "recording") {
+    stopVoiceRecording();
     return;
   }
+  if (voiceState !== "idle" && voiceState !== "transcript_ready") return; // busy uploading/transcribing
+
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showToast("Voice recording is not supported in this browser.");
+    setVoiceState("error", "Voice recording is not supported in this browser.");
+    setTimeout(() => setVoiceState("idle", "Idle"), 2500);
     return;
   }
+  if (typeof MediaRecorder === "undefined") {
+    showToast("MediaRecorder is not supported in this browser.");
+    setVoiceState("error", "MediaRecorder is not supported in this browser.");
+    setTimeout(() => setVoiceState("idle", "Idle"), 2500);
+    return;
+  }
+
+  clearVoiceTranscript();
+  voiceCancelled = false;
+
+  let stream;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioChunks = [];
-    mediaRecorder = new MediaRecorder(stream);
-    mediaRecorder.ondataavailable = event => {
-      if (event.data && event.data.size > 0) audioChunks.push(event.data);
-    };
-    mediaRecorder.onstop = () => {
-      stream.getTracks().forEach(track => track.stop());
-      const blob = new Blob(audioChunks, { type: "audio/webm" });
-      recordedVoice = { blob, name: `voice-${Date.now()}.webm`, size: blob.size };
-      renderAttachmentChips();
-      document.getElementById("voice-btn").textContent = "Voice Note";
-    };
-    mediaRecorder.start();
-    document.getElementById("voice-btn").textContent = "Stop Recording";
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (error) {
-    showToast(error.message || "Microphone access failed");
+    showToast(error.message || "Microphone permission denied");
+    setVoiceState("error", "Microphone permission denied.");
+    setTimeout(() => setVoiceState("idle", "Idle"), 2500);
+    return;
+  }
+
+  voiceStream = stream;
+  audioChunks = [];
+  const thisRequestId = ++voiceRequestId;
+
+  try {
+    mediaRecorder = new MediaRecorder(stream);
+  } catch (_error) {
+    stream.getTracks().forEach(track => track.stop());
+    voiceStream = null;
+    setVoiceState("error", "Recording could not start on this device.");
+    setTimeout(() => setVoiceState("idle", "Idle"), 2500);
+    return;
+  }
+
+  mediaRecorder.ondataavailable = event => {
+    if (event.data && event.data.size > 0) audioChunks.push(event.data);
+  };
+  mediaRecorder.onstop = () => {
+    stopVoiceTimer();
+    if (voiceStream) {
+      voiceStream.getTracks().forEach(track => track.stop());
+      voiceStream = null;
+    }
+    if (voiceCancelled) {
+      setVoiceState("idle", "Idle");
+      return;
+    }
+    if (thisRequestId !== voiceRequestId) return; // superseded by a newer recording
+    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    if (!blob.size) {
+      setVoiceState("error", "Empty recording — please try again.");
+      setTimeout(() => setVoiceState("idle", "Idle"), 2000);
+      return;
+    }
+    uploadVoiceForTranscription(blob, thisRequestId);
+  };
+
+  mediaRecorder.start();
+  voiceRecordingStartTs = Date.now();
+  setVoiceState("recording", "● Recording...");
+  startVoiceTimer();
+}
+
+function stopVoiceRecording() {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    setVoiceState("uploading_audio", "Recording stopped — preparing upload...");
+    mediaRecorder.stop();
   }
 }
 
-function renderAttachmentChips() {
-  const chips = [];
-  if (attachedFile) chips.push({ key: "file", label: `File: ${attachedFile.name}` });
-  if (attachedImage) chips.push({ key: "image", label: `Image: ${attachedImage.name}` });
-  if (recordedVoice) chips.push({ key: "voice", label: `Voice: ${recordedVoice.name}` });
-  const host = document.getElementById("attachment-chips");
-  host.innerHTML = chips.map(item => `
-    <div class="attach-chip">
-      <span>${escapeHtml(item.label)}</span>
-      <button onclick="clearAttachment('${escapeHtml(item.key)}')">x</button>
-    </div>
-  `).join("");
+function cancelVoiceRecording() {
+  voiceCancelled = true;
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+  } else if (voiceStream) {
+    voiceStream.getTracks().forEach(track => track.stop());
+    voiceStream = null;
+    setVoiceState("idle", "Idle");
+  }
 }
 
-function clearAttachment(kind) {
-  if (kind === "file") attachedFile = null;
-  if (kind === "image") attachedImage = null;
-  if (kind === "voice") recordedVoice = null;
-  renderAttachmentChips();
+async function uploadVoiceForTranscription(blob, requestId) {
+  const durationMs = voiceRecordingStartTs ? (Date.now() - voiceRecordingStartTs) : 0;
+  const form = new FormData();
+  form.append("audio", blob, `voice-${Date.now()}.webm`);
+  form.append("language", document.getElementById("voice-lang-select").value || "auto");
+  form.append("duration_ms", String(durationMs));
+
+  try {
+    setVoiceState("uploading_audio", "Uploading recording...");
+    setVoiceState("transcribing", "Transcribing...");
+    const res = await fetch("/chat/voice", {
+      method: "POST",
+      headers: { "X-Internal-Key": localStorage.getItem("fazle_api_key") || API_KEY },
+      body: form
+    });
+    if (requestId !== voiceRequestId) return;
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (requestId !== voiceRequestId) return;
+
+    const box = document.getElementById("voice-transcript-box");
+    box.value = data.transcript || "";
+
+    if (!data.transcript) {
+      setVoiceState("transcript_ready", data.warning || "কোনো টেক্সট শনাক্ত হয়নি। অনুগ্রহ করে আবার চেষ্টা করুন।");
+    } else if (data.warning) {
+      setVoiceState("transcript_ready", `⚠ ${data.warning}`);
+    } else {
+      setVoiceState("transcript_ready", `Transcript ready (${data.language || "auto"}) — review, then Use Transcript`);
+    }
+  } catch (error) {
+    if (requestId !== voiceRequestId) return;
+    setVoiceState("error", error.message || "Voice transcription failed");
+    showToast(error.message || "Voice transcription failed");
+    setTimeout(() => { if (voiceState === "error") setVoiceState("idle", "Idle"); }, 3000);
+  }
+}
+
+function useVoiceTranscript() {
+  const box = document.getElementById("voice-transcript-box");
+  const edited = box.value.trim();
+  if (!edited) {
+    showToast("Transcript is empty");
+    return;
+  }
+  const input = document.getElementById("q-input");
+  input.value = input.value ? `${input.value}\n${edited}` : edited;
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  clearVoiceTranscript();
+  input.focus();
+}
+
+function recordAgain() {
+  toggleVoiceRecording();
+}
+
+function clearVoiceTranscript() {
+  const box = document.getElementById("voice-transcript-box");
+  if (box) box.value = "";
+  voiceRequestId++; // invalidate any in-flight transcription response
+  setVoiceState("idle", "Idle");
 }
 
 function toggleEvidenceDock() {
@@ -1305,6 +1517,7 @@ function setRightTab(tab) {
 
 async function sendMessage() {
   if (isLoading) return;
+  if (voiceState === "recording" || voiceState === "uploading_audio" || voiceState === "transcribing") return;
   const input = document.getElementById("q-input");
   const q = input.value.trim();
   if (!q) return;
@@ -1314,7 +1527,7 @@ async function sendMessage() {
   input.value = "";
   input.style.height = "auto";
   setLoading(true);
-  appendMessage("user", buildUserPromptSummary(prompt));
+  appendMessage("user", prompt);
   conversationHistory.push({ role: "user", content: prompt });
   const typingId = showTyping();
 
@@ -1357,14 +1570,6 @@ async function sendMessage() {
   } finally {
     setLoading(false);
   }
-}
-
-function buildUserPromptSummary(text) {
-  const extra = [];
-  if (attachedFile) extra.push(`[file: ${attachedFile.name}]`);
-  if (attachedImage) extra.push(`[image: ${attachedImage.name}]`);
-  if (recordedVoice) extra.push(`[voice: ${recordedVoice.name}]`);
-  return extra.length ? `${text}\n\n${extra.join(" ")}` : text;
 }
 
 function showToast(message) {
