@@ -155,3 +155,61 @@ never retroactively swept — cleaned up one-time, see
 defensive second sweep for any future financially-inert legacy `status='expired'` row
 was added to `expire_stale_drafts()` so this specific failure mode can't recur even in
 an edge case.
+
+## Phase B — Conversation Memory Engine (Stages 1-3, Shadow Mode) — 2026-07-19
+
+Everything above this section is unchanged and still describes the
+*only* path that writes `wbom_escort_programs`. Phase B adds a parallel,
+strictly observational layer (`modules/conversation_memory`) upstream of
+that path, with its own non-authoritative notion of "source of truth"
+that must not be confused with this document's:
+
+- **Conversation memory does not grant authority.** A message being
+  authorized (`ESCORT_CLIENT_PHONES`, correct bridge direction) lets it
+  *contribute fields to a shadow candidate*; it never makes that
+  candidate a draft, and never bypasses the Direction Gate / Matching
+  Logic / Enforcement rules above. The real source of truth remains
+  exactly what this document already says: the bridge -> escort client
+  confirmation message.
+- **System-generated exclusion.** Re-checked independently inside
+  `modules.conversation_memory.thread_reconstruction._observe()` via
+  `modules.bridge_poller._is_system_generated_notification()` — the same
+  detection this document's "Enforcement" section relies on elsewhere —
+  rather than assuming the caller already filtered it out.
+- **Existing-draft awareness is read-only.** When a shadow thread
+  accumulates enough fields to look like a candidate, it checks (SELECT
+  only) whether an existing `wbom_escort_programs` draft/confirmed/
+  running row already matches — classified as `no_candidate`,
+  `one_likely`, `several_ambiguous`, `likely_duplicate`, or
+  `likely_correction` — and records that classification. It never
+  modifies a draft and never reuses `_create_confirmed_from_admin()`'s
+  dedup/replacement logic (that logic governs admin confirmation intake,
+  a different decision with different consequences than client order
+  intake).
+- **Interleaving / grouping.** `modules/conversation_memory/grouping.py`
+  decides which open thread (if any) a new message belongs to, using
+  lighter_vessel and master_mobile as the hard identity anchors (Section
+  5's Case B: different anchors from the same phone -> separate threads,
+  never merged). Mother-vessel disagreement alone does not fork a new
+  thread — it is flagged as an ordinary field-level conflict on the
+  already-matched thread instead, since a real order's mother vessel is
+  routinely supplied in a separate message from its lighter/mobile
+  (Case A).
+- **TTL / expiry.** Domain-configurable
+  (`CONVERSATION_TTL_ESCORT_MINUTES`, default 30). A thread past its TTL
+  is marked `expired` (never hard-deleted) and is never silently reopened
+  by a later message — `get_open_thread(s)` filters `expires_at > NOW()`
+  on every read, not just at sweep time.
+- **Shadow comparison records.** Every observed message writes one row to
+  `fazle_conversation_shadow_comparisons` (migration 054): the existing
+  single-message parser's result side by side with this engine's
+  conversation-aware result, field provenance, completion state,
+  grouping decision, conflicts, and `would_create_draft` — structured
+  data only, queryable for the aggregate metrics Owner review needs
+  before any draft-activation decision.
+- **Rollout state:** `CONVERSATION_MEMORY_ENABLED` /
+  `WHATSAPP_THREAD_RECONSTRUCTION_ENABLED` on in production;
+  `MULTI_MESSAGE_ESCORT_PARSER_ENABLED` / `BANGLA_SEMANTIC_PARSER_ENABLED`
+  off pending a separate Owner-approved checkpoint. See
+  `management_decisions.md` → "Phase B" entries and
+  `modules/conversation_memory/` for full implementation detail.

@@ -66,6 +66,13 @@ Rejected cases:
 - Missing master mobile
 - Wrong message direction
 
+> As of 2026-07-19: this still fully describes the production
+> single-message draft flow above. A message rejected here for a missing
+> field may separately be held (not discarded) by the Phase B
+> Conversation Memory Engine in shadow mode, in case a follow-up message
+> completes the same order — see "Multi-Message Draft Candidates" below.
+> That engine cannot itself create a draft; only the flow above can.
+
 ## Bridge -> Client Confirmation Flow
 
 Required direction:
@@ -160,6 +167,31 @@ Verified on 2026-06-27:
 - Browser search render
 - View/edit/recalculate/export actions
 - Config tab and Escort Client Management render
+
+## Multi-Message Draft Candidates (Phase B, Shadow Mode) — added 2026-07-19
+
+`modules/conversation_memory` runs upstream of the flow above, on every
+authorized escort-client message, gated behind its own feature flags.
+Full rule set: `../04_business_rules/escort_business_rules.md` →
+"Multi-Message Intake (Phase B, Shadow Mode)". Summary for this
+document's purposes:
+
+- It reconstructs a per-client "conversation thread" spanning several
+  messages within a TTL window, so an order split across messages (e.g.
+  lighter+mobile in one message, mother vessel in a follow-up) isn't
+  silently lost the way isolated single-message rejection would lose it.
+- Two different orders from the same client sent close together (e.g.
+  different master mobiles) are kept as two separate threads, never
+  merged into one.
+- It never creates a draft, never touches `wbom_escort_programs`, never
+  sends a reply, and never modifies an existing draft — even when a
+  thread becomes field-complete. It is purely observational, recorded
+  for later analysis via `fazle_conversation_shadow_comparisons`.
+- Currently deployed with `CONVERSATION_MEMORY_ENABLED` /
+  `WHATSAPP_THREAD_RECONSTRUCTION_ENABLED` on and
+  `MULTI_MESSAGE_ESCORT_PARSER_ENABLED` / `BANGLA_SEMANTIC_PARSER_ENABLED`
+  off. Enabling real multi-message draft creation from this engine is a
+  distinct, separate Owner decision, not implied by any of the above.
 
 ## Cross References
 

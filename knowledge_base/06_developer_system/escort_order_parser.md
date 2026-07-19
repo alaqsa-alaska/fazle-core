@@ -238,6 +238,89 @@ Rules:
   caused valid orders to be silently dropped into the social pipeline before
   ever reaching this module (incident 2026-07-13/14, fixed 2026-07-15).
 
+## Multi-Message + Bangla Extraction (Phase B, Shadow Mode) — 2026-07-19
+
+This section documents `modules/conversation_memory`, a separate module
+from `modules/escort` above. `parse_escort_message()` itself is
+unmodified by any of this — verified by a dedicated regression test
+(`test_existing_production_parser_unchanged`) that asserts its output is
+byte-for-byte the same with or without the new module present.
+
+**Why it exists:** `parse_escort_message()` is a pure single-message
+parser with no Bangla label awareness. A real, verified gap: the message
+`"ভেসেল নেম Horda"` was read as `"MV ভেসেল নেম HORDA"` (the Bangla label
+itself leaking into the vessel name) instead of `"MV HORDA"`. Fixing this
+inside `parse_escort_message()` would only fix that one string; Phase B
+instead adds a reusable label-aware extraction layer
+(`modules/conversation_memory/bangla_extraction.py`) plus multi-message
+accumulation (`modules/conversation_memory/`), gated behind their own
+feature flags and never touching this module's parsing logic.
+
+**Bangla label list** (`bangla_extraction.py`), matched longest-label-first
+so a specific label is never shadowed by a shorter one that's a substring
+of it:
+
+| Field | Labels |
+|---|---|
+| Mother vessel (specific, always high-confidence) | মাদার ভেসেলের নাম, মাদার ভেসেল, মাদার শিপ |
+| Mother vessel (generic, context-sensitive — see below) | ভেসেল নেম, ভেসেলের নাম |
+| Lighter vessel | লাইটার ভেসেল, লাইটার নাম, লাইটার |
+| Master mobile | মাস্টার মোবাইল, মোবাইল নম্বর, মাস্টার |
+| Destination | গন্তব্য, ডেস্টিনেশন |
+| Trip | দ্বিতীয় ট্রিপ, ২য় ট্রিপ, ট্রিপ |
+| Capacity | ক্যাপাসিটি, plus unit words টন / এমটি |
+
+**Normalization applied:**
+- Bangla digits (০-৯) -> ASCII digits, before any numeric extraction
+  (mobile, capacity, trip number).
+- WhatsApp markup characters (`*_~\``) stripped before value extraction.
+- An existing `MV` / `M.V.` / `এমভি` prefix inside a captured value is
+  stripped before re-applying the canonical `"MV " + UPPERCASE` form —
+  the same canonical shape `parse_escort_message()` already produces for
+  English input, so downstream code never has to special-case which
+  parser a value came from.
+- Capacity unit words (`টন`, `এমটি`, `mt`) all normalize to the existing
+  `<N> MT` form.
+- Trip suffix splitting is language-independent: `"Bushra Biva-1(2nd
+  Trip)"` -> `lighter_vessel="Bushra Biva-1"` + a separate `trip="2nd
+  Trip"` field, applied to whichever parser produced the lighter_vessel
+  value.
+
+**Context-sensitive generic label:** the generic `ভেসেল নেম` /
+`ভেসেলের নাম` label doesn't say *which* vessel — Bangla client messages
+use it for whichever vessel is being clarified at that point in the
+conversation. It is extracted as a **low-confidence, non-explicit**
+mother-vessel candidate by default. It is only promoted to a
+high-confidence explicit label once the target conversation thread
+already has both `lighter_vessel` and `master_mobile` set (i.e. the
+mother vessel is the only thing left missing) — re-derived using the
+actual thread's prior state, never guessed up front from the message
+alone.
+
+**Verified real example** (the mandatory Phase B test case,
+`test_stage3_mandatory_example.py`):
+
+```text
+Message 1: "Bushra Biva-1(2nd Trip)\n1250MT\n01821375926\nOuter To Local\nAC:SST/NMT"
+Message 2: "ভেসেল নেম Horda"
+
+Result (shadow candidate, no production draft):
+  Mother Vessel: MV HORDA
+  Lighter Vessel: Bushra Biva-1
+  Trip: 2nd Trip
+  Capacity: 1250 MT
+  Master Mobile: 01821375926
+  Destination: Chattogram
+  Complete: true, would_create_draft: true
+  Actual wbom_escort_programs row created: false
+```
+
+**Rollout:** gated behind `BANGLA_SEMANTIC_PARSER_ENABLED` (off in
+production), independent of `MULTI_MESSAGE_ESCORT_PARSER_ENABLED` (also
+off) — verified by hand that with the multi-message flag on but this
+flag off, the old buggy Bangla behavior still reproduces exactly, so the
+fix cannot activate as an unintended side effect of the other flag.
+
 ## Verified Examples
 
 Production tests cover:

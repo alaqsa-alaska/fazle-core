@@ -49,6 +49,11 @@ Not source of truth:
 - client message draft
 - parser guess alone
 - stale roster row
+- (added 2026-07-19) any `modules/conversation_memory` shadow candidate
+  or shadow comparison record — that layer is strictly observational and
+  never writes to `wbom_escort_programs` or `escort_roster_entries`; see
+  `../04_business_rules/escort_business_rules.md` → "Multi-Message
+  Intake (Phase B, Shadow Mode)"
 
 Projection rule:
 - roster rows must mirror the final source program state

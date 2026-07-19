@@ -4912,3 +4912,199 @@ inspection UI / Part 11-13's remaining deployment gates (Stage 4). Phase C
 layer) — planning document not yet started.
 
 
+
+## Phase B, Conversation Memory Engine, Stages 2-3 (2026-07-19)
+
+Continuation of "Phase B, Conversation Memory Engine, Stage 1" above.
+Owner instruction: proceed to Stage 2 (multi-message escort parser in
+shadow mode) then Stage 3 (Bangla semantic extraction), explicitly no
+production draft creation, stop after a checkpoint report.
+
+### Section 1 — pre-flag-enable checks and production flag flip
+
+All 4 required checks passed before touching production `.env`:
+
+1. **Fail-open** — covered by Stage 1's existing exception-safety tests
+   (`test_flags_off_by_default_is_a_complete_noop`,
+   `test_exception_inside_observation_never_propagates`).
+2. **System-generated exclusion** — added an explicit, defense-in-depth
+   check inside `_observe()` itself
+   (`modules.bridge_poller._is_system_generated_notification()`), not
+   just relying on the message_router call site. New test:
+   `test_system_generated_marker_on_inbound_text_is_refused`.
+3. **Unauthorized-sender exclusion** — same pattern, added
+   `_is_allowed_escort_client()` re-check inside `_observe()`. New test:
+   `test_unauthorized_sender_never_reaches_thread_creation`.
+4. **Sensitive raw-message retention** — confirmed by inspecting the
+   schema: `fazle_conversation_threads.fields` stores only short
+   extracted business values (vessel name, mobile, destination) plus a
+   `source_message_id` pointer, never raw message bodies. Raw text stays
+   only in `wbom_whatsapp_messages`, under whatever retention already
+   governs that table. Threads never hard-delete — they transition to
+   `expired`/`abandoned`, matching this repo's existing non-destructive
+   pattern (escort program status transitions).
+
+Adding the new checks broke 4 pre-existing Stage 1 DB-backed tests
+(their synthetic phone values like `"01670535255_shadow_test_1"` failed
+the new `_is_allowed_escort_client()` normalization) — fixed by
+renumbering to realistic 11-digit test phones and setting
+`ESCORT_CLIENT_PHONES=""` (permissive/open mode) for those tests. All 4
+re-verified against a fresh disposable Postgres container.
+
+**Production flags flipped:** `CONVERSATION_MEMORY_ENABLED=true` and
+`WHATSAPP_THREAD_RECONSTRUCTION_ENABLED=true` added to `.env`.
+`MULTI_MESSAGE_ESCORT_PARSER_ENABLED=false` and
+`BANGLA_SEMANTIC_PARSER_ENABLED=false` also added explicitly (still off,
+per instruction). Deployed via `scripts/restart_gate.sh --restart`,
+service healthy post-restart, flags confirmed live via the running
+process's environment.
+
+### Section 2-9 — Stage 2 implementation
+
+New migration `054_conversation_memory_shadow_comparisons.sql`: one
+table, `fazle_conversation_shadow_comparisons`, recording the existing
+single-message-parser result side by side with the new conversation-aware
+result for every observed message, plus provenance/completion/conflict/
+grouping metadata and a nullable `thread_id` FK (a `needs_review`
+observation may not resolve to one thread). Aggregate metrics (Section
+9's required counts) computed on demand via `GROUP BY`, not a separate
+running-counters table — `modules.conversation_memory.
+shadow_comparison_metrics()`. Verified idempotent + FK-constrained on a
+disposable container before production application.
+
+**`modules/conversation_memory/grouping.py`** (new): the Part 5
+interleaving-protection heuristic. Uses `lighter_vessel` +
+`master_mobile` as the hard grouping anchors (deliberately narrower than
+the 3-field completeness set) — Case A's own example is a mother-vessel
+value arriving in a *separate* message from the lighter/mobile message,
+so mother-vessel disagreement alone must not fork a new thread; it's
+caught as an ordinary field-level conflict on the already-matched thread
+instead. Case B (different lighter/mobile from the same phone) forks a
+new candidate or flags `needs_review` when genuinely ambiguous, never
+guesses. Also holds `check_existing_draft_relation()` (Part 7,
+read-only, classifies `no_candidate` / `one_likely` / `several_ambiguous`
+/ `likely_duplicate` / `likely_correction` against `wbom_escort_programs`
+— deliberately does not reuse `_create_confirmed_from_admin()`'s dedup
+logic, a different decision for a different caller).
+
+**Two real gaps found and fixed in `merge_field()`** (Part 4's 9 merge
+rules) while building against the mandatory test scenarios:
+- Equal-confidence-but-different-value was silently overwriting instead
+  of conflicting — the exact case Part 4's "a later message must not
+  silently overwrite a different high-confidence explicit value"
+  describes. Changed the correction branch from `confidence >=
+  existing_confidence` to strictly `>`, verified against all existing
+  pure-function tests (none relied on the equal-confidence case
+  overwriting).
+- The "unchanged value" check used raw string equality, missing Part 4's
+  "normalized-equivalent values are not conflicts" rule for fields the
+  upstream parser doesn't already normalize (e.g. vessel-name
+  whitespace/case). Added a normalized-comparison fallback reusing
+  `grouping.normalize_for_comparison()`.
+
+`modules/conversation_memory/__init__.py` also gained `get_open_threads()`
+(plural, all live non-expired threads for an identity — Stage 1's
+`get_open_thread()` singular is unchanged, still used by the Stage 1
+path) and a TTL correctness fix: both now filter `expires_at > NOW()` on
+every read, not just at sweep time (Part 8: a message arriving in the gap
+between expiry and the next scheduler tick must not merge into an
+already-logically-expired thread).
+
+`thread_reconstruction.py` split into `_observe_stage1()` (byte-identical
+to the already-deployed Stage 1 behavior) and `_observe_stage2()`
+(grouping-aware, existing-draft-aware, records a shadow comparison row),
+dispatched on `multi_message_escort_parser_enabled`.
+
+### Section 10 — 15 required Stage 2 tests
+
+All 15 written (`tests/unit/test_conversation_memory_stage2.py`): 4 run
+for real via pytest (no DB needed — parser-unchanged, hook-failure-
+doesn't-block-routing, unauthorized/system-generated exclusion under
+Stage 2). The 11 DB-backed ones are written as proper `test_db_pool`
+tests (skipped locally, `TEST_DB_PASSWORD` still unavailable this
+session) and hand-verified against a disposable `postgres:17-alpine`
+container: two-English-messages-merge, reversed-order, duplicate-replay-
+idempotent, restart-persistence, expired-no-merge, two-clients-different-
+bridges-isolated, two-master-mobiles-not-guessed (Case B), conflicting-
+mother-vessels-flagged-not-overwritten, normalized-equivalent-mobiles-
+not-conflict, no-business-table-write, flags-off-old-behavior. All
+passed, including a full re-run after each of the two `merge_field()`
+fixes above to confirm no regression.
+
+### Sections 11-13 — Stage 3 Bangla extraction
+
+New `modules/conversation_memory/bangla_extraction.py`: reusable
+label-aware extractor (not a one-off patch), covering the full required
+label list (mother vessel specific + generic, lighter, master mobile,
+destination, trip, capacity), Bangla-digit normalization, WhatsApp
+markup stripping, MV/M.V./এমভি prefix collapsing (never doubled), capacity
+unit-word mapping, and language-independent trip-suffix splitting
+(`"Bushra Biva-1(2nd Trip)"` -> `lighter_vessel="Bushra Biva-1"` +
+`trip="2nd Trip"`).
+
+Context-sensitivity (Part 12): the generic `ভেসেল নেম`/`ভেসেলের নাম`
+label is extracted as low-confidence/non-explicit by default; promoted to
+high-confidence explicit only once the target thread's *prior* state
+(before this message) already has both `lighter_vessel` and
+`master_mobile` — re-derived using the actual resolved thread, not
+guessed from the message alone before grouping runs.
+
+Gated on its own `BANGLA_SEMANTIC_PARSER_ENABLED` flag, independent of
+`MULTI_MESSAGE_ESCORT_PARSER_ENABLED` — verified by hand that with Stage
+2 on but Stage 3 off, the old buggy Bangla behavior (`"MV ভেসেল নেম
+HORDA"`) still reproduces exactly.
+
+**Mandatory real example — passes end-to-end** (both flags on, disposable
+container, and via `tests/unit/test_stage3_mandatory_example.py`):
+
+```
+Message 1: "Bushra Biva-1(2nd Trip)\n1250MT\n01821375926\nOuter To Local\nAC:SST/NMT"
+Message 2: "ভেসেল নেম Horda"
+
+Mother Vessel: MV HORDA | Lighter Vessel: Bushra Biva-1 | Trip: 2nd Trip
+Capacity: 1250 MT | Master Mobile: 01821375926 | Destination: Chattogram
+is_complete: true | would_create_draft: true
+Actual wbom_escort_programs rows created: 0 (before == after)
+```
+
+16 additional pure-function unit tests
+(`tests/unit/test_bangla_extraction.py`) cover the normalization
+primitives and label-matching precedence (specific labels never shadowed
+by generic substrings) independently of the DB-backed scenario.
+
+### Deployment
+
+Both stages committed and deployed separately via
+`scripts/restart_gate.sh --restart` (migration 054 applied to production
+first, schema-only). Service healthy after each restart, zero errors in
+`logs/fazle-core-error.log`. Flags confirmed live via the running
+process's environment after each restart:
+`CONVERSATION_MEMORY_ENABLED=true`,
+`WHATSAPP_THREAD_RECONSTRUCTION_ENABLED=true`,
+`MULTI_MESSAGE_ESCORT_PARSER_ENABLED=false`,
+`BANGLA_SEMANTIC_PARSER_ENABLED=false` — Stage 2/3 code exists in
+production but is dormant, per Section 1's explicit instruction. No
+`wbom_escort_programs` row created by either stage in any tested flag
+combination.
+
+### KB updates
+
+`escort_business_rules.md`, `escort_workflow.md`,
+`escort_source_of_truth_workflow.md`, `escort_order_parser.md` all
+updated with a dated Phase B section plus inline notes patching the old
+single-message-discard language so it no longer conflicts (the old rule
+is still accurate for the production single-message parser; it just no
+longer implies a rejected message leaves zero trace anywhere).
+`escort_roster_system.md` got a short cross-reference note (Phase B
+never touches roster projection).
+
+### Not done this pass
+
+Real multi-message draft creation, admin inspection UI for shadow
+candidates, Phase C (Applicant/Client/Employee Memory, cross-conversation
+reasoning) implementation — planning document only, see
+`phase_c_memory_architecture_plan.md`. Enabling
+`MULTI_MESSAGE_ESCORT_PARSER_ENABLED` / `BANGLA_SEMANTIC_PARSER_ENABLED`
+for actual shadow-mode data collection on live traffic is left as an
+explicit Owner decision, not made in this pass — see the final checkpoint
+report.

@@ -36,6 +36,15 @@ If any minimum field cannot be identified with reasonable confidence:
 - Create no draft
 - Create no roster side effect
 
+> **Still accurate for the production single-message parser** (this rule
+> governs real draft creation and is unchanged). As of 2026-07-19, an
+> authorized-but-incomplete message is *additionally* held in the Phase B
+> Conversation Memory Engine (shadow mode, non-authoritative) instead of
+> being discarded with no trace — see "Multi-Message Intake (Phase B,
+> Shadow Mode)" below. It still creates no draft and no roster side
+> effect; only the deterministic single-message parser above may do that,
+> and only while its own gate is satisfied by one message.
+
 If the minimum fields are present:
 - Parse with best effort
 - Create one draft order only
@@ -149,6 +158,11 @@ If any of the three are missing:
 - Discard the message
 - Do not save draft data
 
+> As of 2026-07-19: "discard" means the deterministic single-message
+> parser takes no action on that one message, as always. It does not mean
+> the message leaves no trace anywhere in the system — see "Multi-Message
+> Intake (Phase B, Shadow Mode)" below for what else may observe it.
+
 Duplicate-prevention match priority:
 1. Master Mobile
 2. Mother Vessel
@@ -213,6 +227,74 @@ net_payable = max(gross_amount − food_bill − conveyance − advances, 0)
 - যাতায়াত কর্তন (`conveyance`): প্রোগ্রাম টেবিল থেকে, ডিফল্ট ০
 - অ্যাডভান্স কর্তন: ওই এসকর্ট প্রোগ্রাম ও চলতি মাসের `final` স্ট্যাটাস অ্যাডভান্স মাত্র
 - ডিউটি দিন: রোস্টারে দিন গণনা; না থাকলে প্রোগ্রামের তারিখের পার্থক্য + 1
+
+## Multi-Message Intake (Phase B, Shadow Mode) — added 2026-07-19
+
+A second, entirely separate layer sits alongside the deterministic
+single-message parser above: `modules/conversation_memory` (Phase B,
+Stages 1-3). It does not replace or relax any rule above — every rule in
+this document still governs the *only* code path that may create a real
+`wbom_escort_programs` row. This layer exists to stop losing information
+when a genuine order legitimately spans more than one WhatsApp message
+(e.g. lighter/mobile in one message, mother vessel named in a
+follow-up), which the single-message parser above has no way to see.
+
+**Core rules:**
+
+- **Multi-message spanning.** An authorized client's messages within a
+  TTL window (`CONVERSATION_TTL_ESCORT_MINUTES`, default 30) may be
+  accumulated into one "conversation thread," field by field, instead of
+  each message being judged in isolation.
+- **Authorized-incomplete is held, not discarded.** A message from an
+  authorized escort client (`ESCORT_CLIENT_PHONES`, correct bridge
+  direction) that is individually incomplete is retained in the thread
+  (as a *shadow candidate*) rather than vanishing with no trace, once
+  Stage 2 (`MULTI_MESSAGE_ESCORT_PARSER_ENABLED`) is on.
+- **Only a combined-complete thread ever qualifies as a candidate.**
+  Completeness is still exactly Mother Vessel + Lighter Vessel + Master
+  Mobile (Part 6.4) — spanning messages changes *where* those three
+  values may come from, never *what* is required.
+- **Conversation memory grants no authority.** Accumulating messages into
+  a thread never creates a draft, program, roster entry, or client/admin
+  reply by itself — see "Shadow-Mode Rollout" below. The authorization
+  gates above (`ESCORT_CLIENT_PHONES`, bridge direction) are re-checked
+  independently inside this layer too, not assumed from the caller.
+- **System-generated messages never contribute.** Any inbound text
+  carrying the `_AUTOMATED_SUFFIX_ANCHOR` marker (`app/bridge.py`) or
+  matching `SYSTEM_NOTIFICATION_TITLE_PREFIXES` is refused before it can
+  affect a thread — the same class of incident this fixed for the
+  outgoing scan (`escort_source_of_truth_workflow.md`, Root Cause 7).
+- **Interleaving protection.** The same client phone can have more than
+  one order in flight. Two messages with *different* lighter vessels or
+  master mobiles are treated as two separate candidate threads, never
+  silently merged into one order. A message that can't be confidently
+  attributed to any open thread is held as `needs_review`, never guessed.
+- **Conflicts are flagged, not silently overwritten.** A later message
+  giving a different high-confidence value for a field already set stays
+  a recorded conflict on the thread; the original value is preserved.
+  Values that are the same after normalization (digit forms, phone
+  formats, whitespace/case) are never treated as conflicts.
+- **TTL / expiry.** A thread past its TTL is marked `expired`, not
+  deleted, and a later related message opens a fresh thread rather than
+  silently reopening the old one.
+- **Bangla / mixed-language labels.** Stage 3
+  (`BANGLA_SEMANTIC_PARSER_ENABLED`) adds label-aware extraction for
+  Bangla vessel/lighter/mobile/destination/trip/capacity labels (see
+  `escort_order_parser.md` for the full label list and normalization
+  rules) — fixing a real gap where the old single-message parser read a
+  Bangla label as literal vessel-name text.
+- **Provenance and idempotency.** Every accumulated field records which
+  message set it, at what confidence, and by what extraction method.
+  Replaying the same `message_id` is a guaranteed no-op.
+
+**Shadow-mode rollout:** `CONVERSATION_MEMORY_ENABLED` and
+`WHATSAPP_THREAD_RECONSTRUCTION_ENABLED` are on in production
+(2026-07-19 checkpoint). `MULTI_MESSAGE_ESCORT_PARSER_ENABLED` and
+`BANGLA_SEMANTIC_PARSER_ENABLED` remain off pending a separate
+Owner-approved checkpoint. In every combination of these flags, this
+layer never writes to `wbom_escort_programs` or any other business
+table — see `modules/conversation_memory/thread_reconstruction.py` and
+`management_decisions.md` → "Phase B" entries for full detail.
 
 ## Cross References
 
