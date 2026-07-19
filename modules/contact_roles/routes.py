@@ -97,15 +97,15 @@ async def upsert_contact_role(body: ContactRoleBody):
         INSERT INTO fazle_contact_roles
           (phone, platform, name, role, sub_role,
            priority, source, is_active, confidence, notes)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9)
+        VALUES ($1, $2, COALESCE($3, ''), $4, COALESCE($5, ''), $6, $7, true, $8, COALESCE($9, ''))
         ON CONFLICT (phone, platform) DO UPDATE SET
           role       = EXCLUDED.role,
-          sub_role   = EXCLUDED.sub_role,
-          name       = COALESCE(EXCLUDED.name, fazle_contact_roles.name),
+          sub_role   = COALESCE($5, fazle_contact_roles.sub_role),
+          name       = COALESCE($3, fazle_contact_roles.name),
           priority   = EXCLUDED.priority,
           source     = EXCLUDED.source,
           confidence = EXCLUDED.confidence,
-          notes      = COALESCE(EXCLUDED.notes, fazle_contact_roles.notes),
+          notes      = COALESCE($9, fazle_contact_roles.notes),
           is_active  = true,
           updated_at = NOW()
         """,

@@ -512,16 +512,21 @@ session: 153 affected rows corrected in one audited transaction (rollback artifa
 `no_wbom_match`/`wbom_match_unlinked` unchanged. Full record:
 `management_decisions.md` Session 23 Stage 1. Commits `55a2d79`, `c2671fb`, `20c3778`.
 
-**`modules/contact_roles/routes.py::upsert_contact_role()` raises a raw 500 (
-`NotNullViolationError`) if `name`/`sub_role`/`notes` are omitted from the POST body
-— found 2026-07-17 during Phase 1B test verification.** All three are
-`Optional[str] = None` on `ContactRoleBody`, but the live schema has them `NOT NULL
-DEFAULT ''` and the `INSERT` passes the Python `None` straight through instead of
-falling back to `''`. Never hit in practice if every real caller already supplies
-these fields; surfaced only because the new test suite (`tests/unit/test_contact_roles.py`)
-correctly omitted optional fields per the API's own stated contract. Cheap fix
-(`COALESCE($n, '')` in the `INSERT`, or `Field(default="")` instead of `None` on the
-three models), not bundled into Phase 1B since it's unrelated to the role-whitelist scope.
+**🟡 FIXED 2026-07-19, code-review-verified only — live test run still needed
+— `modules/contact_roles/routes.py::upsert_contact_role()` raw 500
+(`NotNullViolationError`) if `name`/`sub_role`/`notes` omitted from the POST
+body.** Found 2026-07-17 during Phase 1B test verification. Fixed via
+parameter-level `COALESCE` in both the `INSERT VALUES` list (satisfies `NOT
+NULL DEFAULT ''` on a fresh row) and the `ON CONFLICT DO UPDATE SET` clause
+(preserves existing value when a field is omitted on update — the reason
+the simpler `Field(default="")` approach was rejected mid-implementation,
+see full record). Also closed the same latent bug in `sub_role`'s `UPDATE
+SET`, which previously had no `COALESCE` at all. **Run
+`tests/unit/test_contact_roles.py` and update this entry to fully
+RESOLVED once confirmed** — blocked at implementation time on
+`TEST_DB_PASSWORD` not being available in that session. Full record:
+`management_decisions.md` → "`upsert_contact_role()` raw-500 fix
+(2026-07-19)".
 
 **🟢 RESOLVED 2026-07-18 (Phase 1D) — `fazle_contact_roles` test-schema drift.** Was:
 migration 029's own `CREATE TABLE IF NOT EXISTS` for this table was already 100%
@@ -584,25 +589,28 @@ returned `total_advances: 3500.0` matching two real transactions (would have
 been `0.0` before the fix). Full record: `management_decisions.md`
 "Payroll Advance Deduction Employee-ID Resolution Fix". Commit `c2c4256`.
 
-**🔴 NOT RESOLVED — same bug class found in 4 sibling functions, none fixed
-(explicitly out of the above fix's narrow scope; do not assume this whole
-class of ID-resolution issue is closed):**
+**🟢 RESOLVED 2026-07-18 — same bug class found in 4 sibling functions, all
+fixed together (this entry previously read "NOT RESOLVED"; that was stale —
+verified against current code 2026-07-19 and corrected).** Commit
+`69897d7` ("fix(money): resolve remaining employee-ID-space bugs found
+across the payroll/payment surface") fixed all four the same day as the
+`compute_run()` fix above:
 - `modules/payment_workflow/__init__.py::create_escort_payment_draft()` —
-  **highest priority of these.** This is the function that computes every
-  real escort payment draft's `net_payable` on release (confirmed live path,
-  `CANONICAL_BUSINESS_RULES.md`) — unlike `compute_run()`'s dormant pipeline,
-  this is real money moving today with the same wrong-ID-space advance
-  subtraction.
+  was the highest-priority one of these (computes every real escort payment
+  draft's `net_payable` on release, real money moving today). Now resolves
+  the linked, active `fpe_employees` row via `wbom_employee_id` before
+  querying `fpe_cash_transactions`, matching `compute_run()`'s pattern; no
+  link → 0 advances (data-completeness fact, not an error).
 - `modules/payment_workflow/__init__.py::create_advance_request_draft()` —
-  same bug in a display-only "paid this month" figure shown to the admin
-  approving a new advance — misleading but not money-miscalculating.
-- `modules/payroll_logic/__init__.py::get_payroll_summary()` — same bug
-  across 3 queries feeding customer-facing WhatsApp payment-history replies.
-- `modules/admin_employees/__init__.py::get_employee()` — same bug in a
-  cosmetic admin-panel transaction count.
+  same fix applied to the display-only "paid this month" figure.
+- `modules/payroll_logic/__init__.py::get_payroll_summary()` — same fix
+  applied across the 3 queries feeding customer-facing WhatsApp
+  payment-history replies.
+- `modules/admin_employees/__init__.py::get_employee()` — same fix applied
+  to the admin-panel transaction count.
 - (`modules/social_auto_reply/employee_lookup.py`'s two similarly-shaped
-  functions have the same bug but are dead code, zero callers — no live
-  impact, not prioritized.)
+  functions still have the same bug but are dead code, zero callers — no
+  live impact, not prioritized, not part of this fix.)
 
 **`escort_roster_audit_logs` relation missing from the test schema — found
 2026-07-17 during Phase 1B.2 Stage A live-verification testing.** Caught and logged

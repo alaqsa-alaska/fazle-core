@@ -3566,3 +3566,75 @@ Decision 5's fifth reviewed action remains undesigned. Full multi-section
 Dispatch UI polish beyond Stage 6's first-pass cards remains a follow-up
 item, not blocking.
 
+## `upsert_contact_role()` raw-500 fix (2026-07-19)
+
+**Status: FIXED, code-review-verified only — live test run not yet
+confirmed** (`tests/unit/test_contact_roles.py` requires `TEST_DB_PASSWORD`,
+unavailable in the session that made this change; Owner accepted
+code-review-level verification and deferred the live run). **Do not treat
+this as fully closed until someone runs the suite and updates this entry.**
+
+### Origin
+
+Flagged 2026-07-17 during Phase 1B test verification (see the
+"Technical Debt" entry this supersedes) as a cheap, out-of-scope-for-Phase-1B
+fix: `POST /api/contact-roles` (`modules/contact_roles/routes.py::
+upsert_contact_role()`) raised a raw 500 (`NotNullViolationError`) whenever
+`name`/`sub_role`/`notes` were omitted from the body. `ContactRoleBody` types
+all three `Optional[str] = None`; the live `fazle_contact_roles` schema has
+them `NOT NULL DEFAULT ''` (confirmed against `db/migrations/
+004_identity_brain.sql:10-14` and `029_bootstrap_core_tables_schema_record.sql:431-447`).
+Passing `None` explicitly into an `INSERT` bypasses the column default
+entirely — Postgres only applies `DEFAULT ''` when a column is *omitted*
+from the statement, not when it's given `NULL`.
+
+### Why the first proposed approach was rejected mid-implementation
+
+The original proposal favored changing the three Pydantic fields to
+`Field(default="")`. Implementing it surfaced a real regression: the
+existing `ON CONFLICT (phone, platform) DO UPDATE SET name = COALESCE(
+EXCLUDED.name, fazle_contact_roles.name)` pattern depends on `None` meaning
+"field omitted on this update, keep the existing value." Defaulting to
+`""` in Pydantic would make every update that omits `name`/`notes` silently
+overwrite them with an empty string instead of preserving them —
+data loss on a previously-safe caller pattern.
+
+### Fix applied
+
+Kept `ContactRoleBody`'s fields as `Optional[str] = None` (preserving
+update-omission semantics) and moved the fix into the SQL itself
+(`modules/contact_roles/routes.py::upsert_contact_role()`, ~line 95-111):
+the same bound parameter is referenced twice with different treatment —
+`COALESCE($3, '')` etc. in the `INSERT ... VALUES` list (satisfies `NOT
+NULL` on a genuinely new row) and `COALESCE($3, fazle_contact_roles.name)`
+etc. in the `ON CONFLICT DO UPDATE SET` clause (preserves the existing
+value on update-with-omission, referencing the raw parameter directly
+rather than `EXCLUDED.name`, since `EXCLUDED.name` would no longer be
+`NULL` once the `VALUES` list applies its own `COALESCE`). Also extended
+the same `COALESCE` protection to `sub_role`'s `UPDATE SET` clause, which
+previously had none at all (`sub_role = EXCLUDED.sub_role`, unprotected) —
+the same bug class, latent on update as well as insert, closed in the same
+change rather than left half-fixed.
+
+### Verification performed
+
+Python syntax check, module import check (confirms route wiring and
+Pydantic model still resolve cleanly), and a manual trace of both the
+fresh-`INSERT` and `ON CONFLICT`-`UPDATE` branches against the `NOT NULL
+DEFAULT ''` schema. **Not yet verified**: a live run of
+`tests/unit/test_contact_roles.py` — blocked on `TEST_DB_PASSWORD` not
+being available in the implementing session. `PUT /{phone}` (
+`update_contact_role()`) was checked and confirmed already safe (a plain
+`UPDATE ... SET x = COALESCE($n, x)` has no equivalent `NOT NULL`-on-insert
+failure mode) — not touched.
+
+### Docs updated in the same change
+
+`docs/NEXT_IMPLEMENTATION_QUEUE.md`: (1) corrected the stale 🔴 "NOT
+RESOLVED" advance-deduction employee-ID-space bug entry under "Technical
+Debt" — verified against current code that all 4 real-impact sibling
+functions (`create_escort_payment_draft()`, `create_advance_request_draft()`,
+`get_payroll_summary()`, `get_employee()`) were already fixed by commit
+`69897d7` (2026-07-18), the doc just hadn't been updated for it; (2) this
+`upsert_contact_role()` entry to be updated to reference this record.
+
