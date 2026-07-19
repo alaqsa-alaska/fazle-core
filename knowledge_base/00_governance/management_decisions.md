@@ -4682,4 +4682,106 @@ Multi-message conversation aggregation, Bangla parsing, Program `#945`
 incident data changes (cancel + recreate) — all still pending a separate
 authorization.
 
+## MV Horda Incident Data Resolution (2026-07-19)
+
+**Status: executed, Owner-directed, verified.** Resolves the two real
+`wbom_unmatched_confirmations` rows referenced throughout Root Cause 7's
+investigation (Stage 5 decision package `HORD-001`/`HORD-002`) and the
+incorrect Program `#945` they exposed.
+
+### Owner decisions executed
+
+1. **Queue item `#1`** (the system-generated review-wrapper false
+   confirmation, predates guard fix `0dc2e78`) → `rejected`, exact Owner
+   reason recorded, `reviewed_by='owner_decision_2026-07-19'`. No program
+   created or touched by this step.
+2. **Program `#945`** (incorrect auto-created assignment, lighter `MV
+   Asik Mannan -1`, master `01828750249`) → `cancelled`. No hard delete,
+   vessel/master/escort data left byte-for-byte unchanged. Audited
+   (`cancelled_by_owner_decision`, exact Owner reason). Roster projection
+   (`escort_roster_entries` id `2296`) re-synced to `roster_status=
+   cancelled` in place — not explicitly requested but necessary to avoid
+   a stale `confirmed` roster row sitting under a cancelled program.
+3. **Queue item `#2`** (the genuine authoritative confirmation) →
+   `confirmed_new`, created exactly one new program, **`#1009`**
+   (`mother_vessel=MV HORDA`, `lighter_vessel=Bushra Biva 01`,
+   `master_mobile=01821375926`, `escort_mobile=01818388630`, employee
+   `754` — same person as `#945`, resolved not recreated, `program_date=
+   2026-07-19`, `status=confirmed`). Roster synced (new
+   `escort_roster_entries` row, `roster_status=confirmed`).
+4. **`#1009.replaces_program_id = 945`** — set via a direct, audited
+   `UPDATE` (`link_unmatched_confirmation_to_existing_draft()`/
+   `confirm_unmatched_confirmation_as_new()` don't expose this field;
+   migration 050's existing self-referential FK is exactly the intended
+   relation, confirmed before use, not invented).
+
+### Why program `#945` could not be confused with the new confirmation, verified before executing
+
+`classify_vessel_match("MV Horda", "Bushra Biva 01", "MV HORDA", "MV Asik
+Mannan -1")` (`modules.dispatch`) returns `no_match` — tested directly,
+not assumed — so `_create_confirmed_from_admin()`'s internal dedup and
+auto-replacement-segment logic (`find_replacement_predecessor()`) could
+not have matched, deduped against, or silently converted `#945` into a
+replacement predecessor regardless of execution order. Cancelling `#945`
+before Step C was an additional defense-in-depth measure (it also
+excludes `#945` from `find_replacement_predecessor()`'s candidate query
+by status), not a load-bearing safety mechanism on its own.
+
+### No governed "cancel program" function exists
+
+Searched `modules/dispatch`, `modules/escort_roster`, `modules/escort_lifecycle`,
+`modules/escort` — `'cancelled'` appears everywhere as a pre-existing
+terminal state checked *for*, never as a value any function actively
+*writes* as an admin action. Used a direct, audited `UPDATE` (same
+`log_audit()` mechanism every governed function in this codebase already
+uses) rather than inventing a new function for a single, Owner-directed,
+one-time incident resolution.
+
+### Execution model
+
+Four sequential steps (cancel `#945` → reject queue `#1` → confirm queue
+`#2` as new → link `replaces_program_id`), each individually atomic and
+row-count-verified before the next began — not one wrapping transaction
+across all four. Steps B/C use this session's own Stage 3 governed
+functions, which deliberately manage their own advisory-lock-scoped
+connection to avoid the nested-connection deadlock class this repo hit
+once already (Phase 1I) — composing them into a shared outer transaction
+would have meant bypassing that safety design. Full per-step rollback
+plan was written before execution (see the pre-execution report in this
+conversation); not needed — all four steps succeeded on the first
+attempt with exact expected row counts.
+
+### Verification performed
+
+Read-only re-query of every touched/adjacent row after execution: queue
+items `#1`/`#2` correct final state; `#945` `cancelled`, data unchanged,
+roster `cancelled`; `#1009` matches the Owner-confirmed fields exactly,
+`replaces_program_id=945`, roster `confirmed`; exactly one program row
+matches `(MV HORDA, Bushra Biva 01, 2026-07-19)` — `#1009` itself, no
+duplicate; `#954` completely unchanged (different escort, different
+date, not referenced anywhere in this action); zero payment drafts,
+zero attendance rows for either program; complete audit trail (4 new
+`escort_roster_audit_logs` rows, correct actor/action/timestamp on
+each). Service health `ok` post-action.
+`tests/unit/test_escort_source_of_truth_refactor.py`,
+`test_bridge_poller_system_notification_guard.py`,
+`test_unmatched_confirmations_rbac.py`: same standing baseline (1
+pre-existing unrelated failure), zero new regressions — expected, since
+this action touched only production data, no code.
+
+### Observation, not fixed (pre-existing, unrelated to this incident)
+
+`#1009.start_date` is `NULL` — `_create_confirmed_from_admin()`'s
+plain-insert path (the same governed function every "auto_created" row
+in this table goes through, including `#945`/`#954` themselves) only
+populates `program_date`, never the separate `start_date` column, on
+this path. Pre-existing behavior of the governed function, not
+introduced by this action, not in scope to fix here.
+
+### Not done (per explicit instruction)
+
+Multi-message conversation aggregation, Bangla parsing, parser redesign,
+payroll/billing/GL work. Program `#954` was read-only-verified, never
+modified.
+
 
