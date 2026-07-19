@@ -3984,3 +3984,145 @@ push/restart outcome, live authentication re-verification, and real
 those steps run, deliberately, so the governance record doesn't
 overclaim a deployment that hasn't happened yet at commit time).
 
+## Draft-Confirmation Invariant, Workstream 2 Stage 1 (2026-07-19)
+
+**Status: Stage 1 only (migration + read-only queue visibility) — code not
+yet deployed to the running service. Stage 2 (the actual no-match behavior
+change) deliberately not started**, per Owner's own staged-deployment
+instruction: don't enable the new no-match branch before the queue table
+and review visibility are verified.
+
+### Origin and the design question resolved before any code
+
+`knowledge_base/05_workflows/escort_source_of_truth_workflow.md` documents
+draft-to-confirmation matching (client phone → master mobile → mother
+vessel → start date) and states duplicate prevention was live-verified
+2026-06-27 — but that verification covered the *matched*-draft path only.
+Re-reading `modules/escort/__init__.py::handle_admin_escort_completion()`
+confirmed a deliberate, commented design choice on the *no-match* path:
+`_create_confirmed_from_admin()` is called immediately ("Admin reply is the
+source of truth — create a confirmed record even when no draft exists"),
+followed by a post-hoc `reconcile_drafts_for_confirmation()` cleanup pass —
+mitigation, not prevention. Owner explicitly confirmed (asked directly,
+not inferred from the workstream spec) that this should change: no-match
+should block auto-creation and route to human review instead.
+
+### Investigation before writing any code
+
+- **Linkage columns**: `wbom_escort_programs.whatsapp_message_id`/
+  `reply_message_id` already exist in schema (migration 029) but are never
+  written by the confirmation flow — only read for display in
+  `modules/escort_roster/db.py`. No migration needed for this part.
+- **Reply/thread linkage** (the spec's Priority 2 preference): not
+  technically available — no quoted/reply-to message metadata is captured
+  anywhere in `modules/bridge_poller`'s ingestion pipeline. Admin
+  confirmations are freshly-typed messages, not protocol-level replies to
+  the client's original order, so content-based matching is closer to the
+  only mechanism that actually exists here, not a corner someone cut.
+- **Dedup identity audit**: found two independent, pre-existing dedup
+  tables — `processed_bridge_messages` (inbound webhook/poller race guard)
+  and `processed_outgoing_escort_messages` (the bridge-poller's own
+  outgoing-scan guard), both `modules/bridge_poller/__init__.py`, both
+  `PRIMARY KEY (message_id, bridge)`. They guard two *different* ingestion
+  paths independently — the same physical admin confirmation could reach
+  `handle_admin_escort_completion()` twice across paths (webhook route vs.
+  SQLite outgoing scan) without either table catching it. This is a real
+  gap the new table's own dedup index closes, not redundant safety.
+- **Message-id availability at call sites**: `modules/bridge_poller/
+  __init__.py`'s outgoing-scan path has `omsg_id` available (currently
+  unused past its own `_mark_outgoing_processed` call). `app/main.py`'s
+  webhook handler has `msg_id = event.get("id") or event.get("message_id")`
+  available before calling `process_message()`. `modules/message_router
+  ::process_message()` itself has no message-id parameter today — would
+  need one threaded through for Stage 2 to populate `source_message_id`
+  from the webhook path. Not done in Stage 1; noted for Stage 2.
+- **Review-queue precedent**: no existing table was safe to repurpose;
+  `fpe_employee_edit_requests` (migration 046) was the closest real
+  precedent (`pending/approved/rejected`-shaped review queue) and its
+  general shape was followed for the new table.
+
+### Migration 052
+
+New table `wbom_unmatched_confirmations` (see file for full column list
+and rationale comments) — purely additive, no existing table touched.
+Partial unique index on `(source_bridge, source_message_id)` mirrors the
+existing pattern already used for `wbom_cash_transactions`'s own
+WhatsApp-message dedup index (`idx_wbom_transactions_wa_msg_dedup`,
+migration 029) — not a new pattern introduced.
+
+**Validated on a genuinely disposable, throwaway `postgres:17-alpine`
+Docker container** (spun up fresh, torn down immediately after — not the
+shared test DB, which was unavailable this session, `TEST_DB_PASSWORD`
+not set): idempotent re-run (`CREATE ... IF NOT EXISTS` throughout,
+confirmed via a second apply producing only `NOTICE ... skipping`), true
+duplicate `(source_bridge, source_message_id)` correctly rejected with a
+unique-violation, multiple `NULL` `source_message_id` rows correctly
+permitted (needed for the webhook path, which lacks a reliable id today),
+`status` `CHECK` constraint enforced, FK to `wbom_escort_programs`
+enforced.
+
+**Applied to production 2026-07-19.** Hit the known, already-documented
+`db/migrate.py` bookkeeping gap (`schema_migrations` not updated past
+`028`, `MIGRATION_INVENTORY.md`'s own note on migrations `044`-`051`) —
+confirmed via `--dry-run` showing `029`-`045` as spuriously "pending"
+before touching anything. Followed the same already-ratified pattern used
+for those: applied `052`'s SQL directly (via a one-off `asyncpg` script
+executing the file's exact contents in a transaction, not `db/migrate.py`
+itself, which would have replayed the entire stale `029`-`045` backlog),
+then manually recorded only `052_unmatched_escort_confirmations.sql` in
+`schema_migrations`. Post-apply, read-only-verified against production:
+19 columns, 4 indexes, 0 rows (correct — Stage 2 doesn't write here yet).
+
+### Stage 1 code
+
+`modules/escort/routes.py` (new file): `GET /api/escort/unmatched-
+confirmations` (paginated, filterable by `status`) and `GET .../{id}`
+(detail — for each stored candidate, also resolves and attaches its
+*current live* `wbom_escort_programs` state, not just the queue-time
+snapshot, matching the spec's "current live candidate status" UI
+requirement ahead of the UI actually existing). RBAC: admin/superadmin
+only on every route, including the list — same sensitivity tier as
+Dispatch Stage 5/6, whose `_require_admin_or_above` this file copies
+verbatim (local copy, same cross-module-import-cycle justification as
+that module's own copy). Registered in `app/main.py` mirroring the exact
+`dispatch_router` pattern. Phone numbers masked in every response
+(`_mask_phone()`, last-4-digits-visible).
+
+**Not done in Stage 1, deliberately**: no change to
+`handle_admin_escort_completion()`'s no-match behavior — it still calls
+`_create_confirmed_from_admin()` exactly as before. The table stays empty
+until Stage 2. No action endpoints (`link-existing`/`confirm-new`/
+`reject`/`defer`) — those are Stage 3/4 and depend on Stage 2 existing
+first. No frontend UI.
+
+### Verification performed
+
+Migration: see above (disposable-DB + production read-only checks).
+Code: `python3 -m py_compile`-equivalent AST parse clean on both changed
+files; `modules.escort.routes` imports standalone cleanly and registers
+its 2 routes; full `app.main` import attempted but blocked on this
+session's shell not replicating `pydantic-settings`' own `.env` loading
+(a pre-existing environment characteristic unrelated to this change — the
+failure occurs inside `modules/escort_roster/routes.py`, a file this
+change never touched, at the same `get_settings()` call every other
+router-module already makes at import time). **Not yet verified**: a live
+HTTP call to either new endpoint (service hasn't been restarted with this
+code yet), and no `TEST_DB_PASSWORD`-gated test suite run this session
+(same constraint noted in the earlier `contact_roles` fix this session).
+
+### Not done this pass (deferred to Stage 2+, matches authorized scope)
+
+Threading `message_id` through `message_router.process_message()` and
+`bridge_poller`'s outgoing-scan call site; the actual no-match queue-
+admission branch; employee resolution reuse; link-existing/confirm-new/
+reject/defer endpoints; concurrency/locking; audit logging; frontend UI;
+the broader test suite the full workstream spec asks for.
+
+### Next step
+
+Commit, push, and (with Owner's explicit go-ahead, not assumed) restart
+via `scripts/restart_gate.sh --restart` to actually put the new read-only
+routes live, then begin Stage 2 design (message-id threading + the
+no-match branch change) as its own reviewed step.
+
+
