@@ -84,19 +84,45 @@ async def mark_message_processed(message_id: str, bridge: str, thread_id: Option
 async def get_open_thread(
     *, bridge_id: str, counterparty_phone: str, business_domain: str,
 ) -> Optional[dict]:
-    """Most recent open/partial/conflicted thread for this identity, if
-    any. Conversation identity is platform+bridge+counterparty+domain
-    (Part 4.2) -- deliberately NOT phone alone, so an escort-domain
-    thread and a recruitment-domain thread for the same phone never
-    collide, and a thread on bridge1 never merges with one on bridge2."""
+    """Most recent open/partial/conflicted, NON-EXPIRED thread for this
+    identity, if any. Conversation identity is platform+bridge+
+    counterparty+domain (Part 4.2) -- deliberately NOT phone alone, so an
+    escort-domain thread and a recruitment-domain thread for the same
+    phone never collide, and a thread on bridge1 never merges with one on
+    bridge2.
+
+    Filters expires_at > NOW() explicitly rather than relying solely on
+    expire_stale_threads() having already run -- Part 8's "after TTL
+    expiry, must not silently reopen/merge" is a per-read guarantee, not
+    just a post-sweep one; a message arriving in the gap between expiry
+    and the next scheduler tick must not merge into a thread that is
+    already, logically, expired."""
     row = await fetch_one(
         """SELECT * FROM fazle_conversation_threads
            WHERE bridge_id = $1 AND counterparty_phone = $2 AND business_domain = $3
-             AND state = ANY($4)
+             AND state = ANY($4) AND expires_at > NOW()
            ORDER BY last_message_at DESC LIMIT 1""",
         bridge_id, counterparty_phone, business_domain, list(OPEN_STATES),
     )
     return _deserialize(row) if row else None
+
+
+async def get_open_threads(
+    *, bridge_id: str, counterparty_phone: str, business_domain: str,
+) -> list[dict]:
+    """All open/partial/conflicted, non-expired threads for this identity,
+    most recently active first -- Stage 2's grouping/interleaving
+    protection (Part 5) needs to see every live candidate thread, not just
+    the most recent one, to decide whether an incoming message continues
+    an existing thread, starts a new one, or is ambiguous between several."""
+    rows = await fetch_all(
+        """SELECT * FROM fazle_conversation_threads
+           WHERE bridge_id = $1 AND counterparty_phone = $2 AND business_domain = $3
+             AND state = ANY($4) AND expires_at > NOW()
+           ORDER BY last_message_at DESC""",
+        bridge_id, counterparty_phone, business_domain, list(OPEN_STATES),
+    )
+    return [_deserialize(r) for r in rows]
 
 
 async def create_thread(
@@ -216,15 +242,31 @@ def merge_field(
     if existing.get("value") == value:
         return fields, FieldMergeResult(False, False, "unchanged_value")
 
+    # Part 4's "normalized-equivalent values are not conflicts" -- e.g.
+    # the same vessel name with different whitespace/case, or the same
+    # phone number in a different textual form that the upstream parser
+    # didn't already normalize away. Treated identically to a raw match:
+    # a no-op, not a correction and not a conflict.
+    from modules.conversation_memory.grouping import normalize_for_comparison
+    if normalize_for_comparison(field_name, existing.get("value")) == normalize_for_comparison(field_name, value):
+        return fields, FieldMergeResult(False, False, "normalized_equivalent_value")
+
     if is_explicit_label and not existing.get("is_explicit_label"):
         new_entry["is_explicit_label"] = True
         updated = {**fields, field_name: new_entry}
         return updated, FieldMergeResult(True, False, "explicit_label_overrides_inferred")
 
     existing_confidence = float(existing.get("confidence") or 0.0)
-    if confidence >= existing_confidence and confidence >= _CONFLICT_CONFIDENCE_THRESHOLD:
+    # Strictly greater, not >=: two equally-confident but DIFFERENT values
+    # (e.g. two explicit "Mother Vessel: X" labels naming different ships)
+    # must not silently overwrite one another -- Part 4's "a later message
+    # must not silently overwrite a different high-confidence explicit
+    # value" is exactly the equal-confidence case, so it has to fall
+    # through to the conflict check below rather than being treated as a
+    # strictly-better correction.
+    if confidence > existing_confidence and confidence >= _CONFLICT_CONFIDENCE_THRESHOLD:
         updated = {**fields, field_name: new_entry}
-        return updated, FieldMergeResult(True, False, "higher_or_equal_confidence_correction")
+        return updated, FieldMergeResult(True, False, "higher_confidence_correction")
 
     if confidence >= _CONFLICT_CONFIDENCE_THRESHOLD and existing_confidence >= _CONFLICT_CONFIDENCE_THRESHOLD:
         return fields, FieldMergeResult(False, True, "conflicting_high_confidence_values")
@@ -280,6 +322,76 @@ async def update_thread(
         *args,
     )
     return _deserialize(row) if row else None
+
+
+async def record_shadow_comparison(
+    *,
+    thread_id: Optional[int],
+    bridge_id: str,
+    counterparty_phone: str,
+    business_domain: str,
+    message_id: Optional[str],
+    current_parser_result: dict,
+    conversation_aware_result: dict,
+    field_provenance: dict,
+    completion_state: str,
+    grouping_action: str,
+    grouping_reason: str,
+    conflicts: list,
+    would_create_draft: bool,
+    reason: str,
+    existing_draft_relation: Optional[str] = None,
+    existing_draft_relation_detail: Optional[dict] = None,
+    parser_missed_candidate: bool = False,
+    parser_would_have_merged_incorrectly: bool = False,
+) -> None:
+    """Stage 2 Part 9 -- one structured row per observed message while
+    multi_message_escort_parser_enabled is on. Never read by anything that
+    creates a business row; exists purely for the required aggregate
+    metrics (conversations observed, partial threads, completed
+    candidates, conflicts, duplicates, unauthorized-excluded,
+    parser-missed-candidate, parser-would-have-merged-incorrectly), all
+    computed on demand via GROUP BY over this table."""
+    await execute(
+        """INSERT INTO fazle_conversation_shadow_comparisons
+               (thread_id, bridge_id, counterparty_phone, business_domain, message_id,
+                current_parser_result, conversation_aware_result, field_provenance,
+                completion_state, grouping_action, grouping_reason, conflicts,
+                would_create_draft, reason, existing_draft_relation,
+                existing_draft_relation_detail, parser_missed_candidate,
+                parser_would_have_merged_incorrectly)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)""",
+        thread_id, bridge_id, counterparty_phone, business_domain, message_id,
+        json.dumps(current_parser_result, default=str),
+        json.dumps(conversation_aware_result, default=str),
+        json.dumps(field_provenance, default=str),
+        completion_state, grouping_action, grouping_reason,
+        json.dumps(conflicts, default=str),
+        would_create_draft, reason, existing_draft_relation,
+        json.dumps(existing_draft_relation_detail, default=str) if existing_draft_relation_detail is not None else None,
+        parser_missed_candidate, parser_would_have_merged_incorrectly,
+    )
+
+
+async def shadow_comparison_metrics(business_domain: str = "escort") -> dict:
+    """Section 9's required aggregate counts, computed on demand from
+    fazle_conversation_shadow_comparisons -- never a running counter that
+    could drift from the underlying rows."""
+    row = await fetch_one(
+        """SELECT
+               count(*) AS conversations_observed,
+               count(*) FILTER (WHERE completion_state = 'partial') AS partial_threads,
+               count(*) FILTER (WHERE would_create_draft) AS completed_candidates,
+               count(*) FILTER (WHERE jsonb_array_length(conflicts) > 0) AS conflicts,
+               count(*) FILTER (WHERE grouping_reason = 'duplicate_message_replay') AS duplicates,
+               count(*) FILTER (WHERE grouping_action = 'needs_review') AS unauthorized_or_ambiguous_excluded,
+               count(*) FILTER (WHERE parser_missed_candidate) AS parser_missed_candidate_cases,
+               count(*) FILTER (WHERE parser_would_have_merged_incorrectly) AS parser_would_have_merged_incorrectly_cases
+           FROM fazle_conversation_shadow_comparisons
+           WHERE business_domain = $1""",
+        business_domain,
+    )
+    return dict(row) if row else {}
 
 
 async def expire_stale_threads(actor: str = "scheduler") -> dict:
