@@ -27,12 +27,13 @@ DB usage (no schema change):
 import json
 import logging
 import re
+from contextlib import asynccontextmanager
 from datetime import date
 from difflib import SequenceMatcher
 from typing import Optional, TypedDict
 
 from app.config import get_settings
-from app.database import execute, fetch_one, fetch_val, fetch_all
+from app.database import execute, fetch_one, fetch_val, fetch_all, db_conn
 from modules.fazle_payroll_engine.normalizer import normalize_bd_phone, to_880
 from modules.identity_brain import _phone_variants
 
@@ -2140,6 +2141,324 @@ async def _enqueue_unmatched_confirmation(
     if existing_id:
         return existing_id
     raise RuntimeError(f"unmatched-confirmation insert returned no id and no existing row found (source={source}, message_id={message_id})")
+
+
+# ── Unmatched-confirmation review actions (Workstream 2 Stage 3) ───────────────
+#
+# Concurrency model: a non-blocking session-level advisory lock
+# (pg_try_advisory_lock) per queue item, and a second one per target
+# program_id when a target is involved -- NOT a row-level `SELECT ... FOR
+# UPDATE`. A real row lock only holds for the life of an open transaction;
+# _update_program_confirmed()/_resolve_escort_employee_id() each acquire
+# their own separate pool connection (they don't accept a `conn` param),
+# so holding a row lock on one connection while awaiting a write through a
+# different connection is exactly the nested-connection-while-locked
+# deadlock class Phase 1I found and fixed in sync_program_to_roster() (see
+# escort_dualwrite_concurrency_debug_2026-07-17.md) -- not repeating it
+# here. Advisory locks don't have that failure mode: they block other
+# *lock acquirers*, not other writers, so the nested pool acquisitions
+# inside _update_program_confirmed() etc. are unaffected. A concurrent
+# reviewer action on the same queue item or target program fails fast
+# with a clear conflict (mapped to HTTP 409 in routes.py) instead of
+# blocking or silently racing.
+
+
+class UnmatchedConfirmationConflict(Exception):
+    """Raised on any state that means the requested action can no longer
+    safely proceed -- lock contention, stale expected-status, already
+    resolved, invalid target. routes.py maps this to HTTP 409."""
+
+
+class UnmatchedConfirmationNotFound(Exception):
+    """routes.py maps this to HTTP 404."""
+
+
+def _advisory_lock_key(*parts: object) -> str:
+    return "unmatched_confirmation:" + ":".join(str(p) for p in parts)
+
+
+@asynccontextmanager
+async def _try_locked(conn, *key_parts: object):
+    """Non-blocking advisory lock scoped to `conn`. Yields once acquired;
+    raises UnmatchedConfirmationConflict immediately if already held by
+    another session. Always releases in `finally`, even on error."""
+    key = _advisory_lock_key(*key_parts)
+    got = await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key)
+    if not got:
+        raise UnmatchedConfirmationConflict(f"another review action is already in progress ({key})")
+    try:
+        yield
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", key)
+
+
+def _parsed_confirmation_dict(queue_row: dict) -> dict:
+    parsed = queue_row.get("parsed_confirmation")
+    if isinstance(parsed, str):
+        try:
+            return json.loads(parsed)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return parsed or {}
+
+
+async def link_unmatched_confirmation_to_existing_draft(
+    item_id: int,
+    target_program_id: int,
+    *,
+    performed_by: str,
+    reason: str,
+    expected_queue_status: Optional[str] = None,
+    expected_target_status: Optional[str] = None,
+) -> dict:
+    """Resolve a queued no-match confirmation by linking it to an existing
+    draft/program -- Stage 3 §8. Reuses _update_program_confirmed() and
+    _resolve_escort_employee_id() verbatim (never a second implementation
+    of either). Never creates a second program."""
+    async with db_conn() as conn:
+        async with _try_locked(conn, "queue", item_id):
+            queue_row = await conn.fetchrow(
+                "SELECT * FROM wbom_unmatched_confirmations WHERE id = $1", item_id
+            )
+            if not queue_row:
+                raise UnmatchedConfirmationNotFound(f"unmatched confirmation {item_id} not found")
+            queue_row = dict(queue_row)
+
+            if queue_row["status"] not in ("pending", "deferred"):
+                raise UnmatchedConfirmationConflict(
+                    f"queue item {item_id} is already {queue_row['status']!r}, not pending/deferred"
+                )
+            if expected_queue_status and queue_row["status"] != expected_queue_status:
+                raise UnmatchedConfirmationConflict(
+                    f"expected queue status {expected_queue_status!r}, found {queue_row['status']!r}"
+                )
+            if queue_row["resolved_program_id"] is not None:
+                raise UnmatchedConfirmationConflict(
+                    f"queue item {item_id} already resolved to program {queue_row['resolved_program_id']}"
+                )
+
+            async with _try_locked(conn, "program", target_program_id):
+                target = await conn.fetchrow(
+                    "SELECT * FROM wbom_escort_programs WHERE program_id = $1", target_program_id
+                )
+                if not target:
+                    raise UnmatchedConfirmationNotFound(f"target program {target_program_id} not found")
+                target = dict(target)
+                if target["status"] not in ("draft", "confirmed"):
+                    raise UnmatchedConfirmationConflict(
+                        f"target program {target_program_id} is {target['status']!r}, "
+                        f"no longer a valid link target"
+                    )
+                if expected_target_status and target["status"] != expected_target_status:
+                    raise UnmatchedConfirmationConflict(
+                        f"expected target status {expected_target_status!r}, found {target['status']!r}"
+                    )
+
+                old_target_snapshot = dict(target)
+                parsed = _parsed_confirmation_dict(queue_row)
+                escort_mobile = parsed.get("escort_mobile") or ""
+                escort_name = parsed.get("escort_name")
+
+                # Certified employee lookup/create service, reused verbatim --
+                # same function the matched-confirmation path already uses.
+                emp_id = await _resolve_escort_employee_id(escort_mobile, escort_name, auto_create=True)
+
+                program_date = _parse_program_date(parsed.get("date_str"))
+                confirmation_destination = (
+                    _normalize_destination(parsed.get("destination") or "") or parsed.get("destination")
+                )
+
+                ok = await _update_program_confirmed(
+                    target_program_id,
+                    escort_name or "",
+                    escort_mobile,
+                    lighter_vessel=parsed.get("lighter_vessel"),
+                    shift=parsed.get("shift"),
+                    program_date=program_date,
+                    escort_employee_id=emp_id,
+                    mother_vessel=parsed.get("mother_vessel"),
+                    destination=confirmation_destination,
+                    master_mobile=parsed.get("master_mobile"),
+                    cargo_type=parsed.get("cargo_type"),
+                    importer=parsed.get("importer"),
+                    capacity=parsed.get("capacity"),
+                )
+                if not ok:
+                    raise RuntimeError(f"_update_program_confirmed failed for program {target_program_id}")
+
+                await _sync_roster_after_confirm(target_program_id)
+
+                new_target = await fetch_one(
+                    "SELECT * FROM wbom_escort_programs WHERE program_id = $1", target_program_id
+                )
+
+                await conn.execute(
+                    """UPDATE wbom_unmatched_confirmations
+                       SET status = 'linked_existing', resolved_program_id = $2,
+                           reviewed_by = $3, reviewed_at = NOW(), review_reason = $4,
+                           updated_at = NOW()
+                       WHERE id = $1""",
+                    item_id, target_program_id, performed_by, reason,
+                )
+
+                from modules.escort_roster.db import log_audit
+                await log_audit(
+                    target_program_id,
+                    "unmatched_confirmation_linked",
+                    old_data=old_target_snapshot,
+                    new_data=dict(new_target) if new_target else None,
+                    performed_by=performed_by,
+                    source="admin_review",
+                )
+
+                return {
+                    "queue_id": item_id,
+                    "resolved_program_id": target_program_id,
+                    "employee_id": emp_id,
+                    "status": "linked_existing",
+                }
+
+
+async def confirm_unmatched_confirmation_as_new(
+    item_id: int,
+    *,
+    performed_by: str,
+    reason: str,
+    expected_queue_status: Optional[str] = None,
+) -> dict:
+    """Resolve a queued no-match confirmation by explicitly confirming it
+    is a genuinely separate duty segment -- Stage 3 §9. This is the ONLY
+    remaining call path to _create_confirmed_from_admin(); it is never
+    reached automatically, only via this explicit, reasoned admin action.
+    """
+    if not reason or not reason.strip():
+        raise ValueError("a mandatory reason is required to confirm a new program")
+
+    async with db_conn() as conn:
+        async with _try_locked(conn, "queue", item_id):
+            queue_row = await conn.fetchrow(
+                "SELECT * FROM wbom_unmatched_confirmations WHERE id = $1", item_id
+            )
+            if not queue_row:
+                raise UnmatchedConfirmationNotFound(f"unmatched confirmation {item_id} not found")
+            queue_row = dict(queue_row)
+
+            if queue_row["status"] not in ("pending", "deferred"):
+                raise UnmatchedConfirmationConflict(
+                    f"queue item {item_id} is already {queue_row['status']!r}, not pending/deferred"
+                )
+            if expected_queue_status and queue_row["status"] != expected_queue_status:
+                raise UnmatchedConfirmationConflict(
+                    f"expected queue status {expected_queue_status!r}, found {queue_row['status']!r}"
+                )
+            if queue_row["resolved_program_id"] is not None:
+                raise UnmatchedConfirmationConflict(
+                    f"queue item {item_id} already resolved to program {queue_row['resolved_program_id']}"
+                )
+
+            # Revalidate a confident match hasn't since appeared (e.g. the
+            # real draft arrived/was parsed correctly after this was
+            # queued) -- confirm-new must never be used merely because the
+            # fuzzy score was low at admission time.
+            parsed = _parsed_confirmation_dict(queue_row)
+            program_date = _parse_program_date(parsed.get("date_str"))
+            now_matching = await _find_pending_program(
+                parsed.get("mother_vessel"),
+                parsed.get("lighter_vessel"),
+                master_mobile=parsed.get("master_mobile"),
+                program_date=program_date,
+                client_phone=queue_row.get("client_phone"),
+            )
+            if now_matching:
+                raise UnmatchedConfirmationConflict(
+                    f"a confident matching draft now exists (program_id="
+                    f"{now_matching['program_id']}) -- use link-existing instead"
+                )
+
+            draft = parsed
+            pid = await _create_confirmed_from_admin(
+                draft, queue_row["source"], client_phone=queue_row.get("client_phone")
+            )
+            if not pid:
+                raise RuntimeError(f"_create_confirmed_from_admin failed for queue item {item_id}")
+
+            new_program = await fetch_one(
+                "SELECT * FROM wbom_escort_programs WHERE program_id = $1", pid
+            )
+
+            await conn.execute(
+                """UPDATE wbom_unmatched_confirmations
+                   SET status = 'confirmed_new', resolved_program_id = $2,
+                       reviewed_by = $3, reviewed_at = NOW(), review_reason = $4,
+                       updated_at = NOW()
+                   WHERE id = $1""",
+                item_id, pid, performed_by, reason,
+            )
+
+            from modules.escort_roster.db import log_audit
+            await log_audit(
+                pid,
+                "unmatched_confirmation_confirmed_new",
+                old_data=None,
+                new_data=dict(new_program) if new_program else None,
+                performed_by=performed_by,
+                source="admin_review",
+            )
+
+            return {"queue_id": item_id, "resolved_program_id": pid, "status": "confirmed_new"}
+
+
+async def _set_unmatched_confirmation_terminal_status(
+    item_id: int,
+    *,
+    new_status: str,
+    performed_by: str,
+    reason: Optional[str],
+    require_reason: bool,
+) -> dict:
+    """Shared body for reject/defer -- neither touches wbom_escort_programs,
+    so no target-program lock is needed, only the per-queue-item one. The
+    queue row's own status/reviewed_by/reviewed_at/review_reason columns
+    ARE the audit trail for these two actions (see Stage 3 governance
+    note: escort_roster_audit_logs.program_id is NOT NULL, so it cannot
+    represent an action with no associated program)."""
+    if require_reason and (not reason or not reason.strip()):
+        raise ValueError(f"a reason is required to set status={new_status!r}")
+
+    async with db_conn() as conn:
+        async with _try_locked(conn, "queue", item_id):
+            queue_row = await conn.fetchrow(
+                "SELECT * FROM wbom_unmatched_confirmations WHERE id = $1", item_id
+            )
+            if not queue_row:
+                raise UnmatchedConfirmationNotFound(f"unmatched confirmation {item_id} not found")
+            queue_row = dict(queue_row)
+
+            if queue_row["status"] not in ("pending", "deferred"):
+                raise UnmatchedConfirmationConflict(
+                    f"queue item {item_id} is already {queue_row['status']!r}, not pending/deferred"
+                )
+
+            await conn.execute(
+                """UPDATE wbom_unmatched_confirmations
+                   SET status = $2, reviewed_by = $3, reviewed_at = NOW(),
+                       review_reason = $4, updated_at = NOW()
+                   WHERE id = $1""",
+                item_id, new_status, performed_by, reason,
+            )
+            return {"queue_id": item_id, "status": new_status}
+
+
+async def reject_unmatched_confirmation(item_id: int, *, performed_by: str, reason: str) -> dict:
+    return await _set_unmatched_confirmation_terminal_status(
+        item_id, new_status="rejected", performed_by=performed_by, reason=reason, require_reason=True,
+    )
+
+
+async def defer_unmatched_confirmation(item_id: int, *, performed_by: str, reason: Optional[str] = None) -> dict:
+    return await _set_unmatched_confirmation_terminal_status(
+        item_id, new_status="deferred", performed_by=performed_by, reason=reason, require_reason=False,
+    )
 
 
 async def handle_admin_escort_completion(

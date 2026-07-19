@@ -101,9 +101,20 @@ admin must explicitly either link the confirmation to an existing draft
 or confirm it really is a separate duty segment before any program row is
 written. See `modules/escort/__init__.py::_enqueue_unmatched_confirmation()`
 and `management_decisions.md` → "Draft-Confirmation Invariant, Workstream
-2 Stage 2" for full detail. The review-action endpoints themselves
-(link-existing / confirm-new / reject / defer) are a later stage of the
-same workstream, not yet built as of this note.
+2 Stage 2" for full detail.
+
+**Stage 3 (2026-07-19):** the review actions themselves —
+`POST /api/escort/unmatched-confirmations/{id}/link-existing`,
+`.../confirm-new`, `.../reject`, `.../defer` (`modules/escort/routes.py`,
+admin/superadmin only). `link-existing` updates the same target program
+row via the same `_update_program_confirmed()` the matched-draft path
+uses. `confirm-new` re-validates no confident match has appeared since
+the item was queued before it will create a program — it is the only
+remaining call path to `_create_confirmed_from_admin()`, never reached
+automatically. No frontend UI yet — reachable only via direct API call as
+of this note. See `management_decisions.md` → "... Stage 3" for the
+concurrency design (non-blocking advisory locks, not row locks —
+deliberately avoids the nested-connection deadlock class Phase 1I found).
 
 ## Production Verification
 

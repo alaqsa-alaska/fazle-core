@@ -4284,4 +4284,132 @@ Same as Stage 1: commit, push, and (Owner's explicit go-ahead) restart via
 one restart. After that, Stage 3 (link-existing/confirm-new review
 endpoints) is its own reviewed step.
 
+## Draft-Confirmation Invariant, Workstream 2 Stage 3 (2026-07-19)
+
+**Status: code complete and unit-tested, NOT YET committed/pushed/deployed
+— held for Owner checkpoint before deploy, same as prior stages.** Adds
+the actual review actions: link-existing, confirm-new, reject, defer. A
+queued item couldn't previously be resolved at all past Stage 1's
+read-only visibility — this is what makes the queue actionable.
+
+### Audit-table reuse decision (investigated before writing any code)
+
+Per the spec's own instruction ("reuse existing audit structures... stop
+and propose if another schema object is needed"): audited
+`escort_roster_audit_logs` (`modules/escort_roster/db.py::log_audit()`,
+9,970 real rows in production, confirmed live) as the obvious reuse
+candidate. Its `program_id` column is `NOT NULL` — it can represent
+link-existing and confirm-new (both produce a real program), but
+structurally cannot represent reject/defer (no program exists). Decision:
+reuse `log_audit()` for the two program-producing actions; for
+reject/defer, `wbom_unmatched_confirmations`' own `status`/`reviewed_by`/
+`reviewed_at`/`review_reason` columns (already in migration 052) **are**
+the audit trail — no new table needed for those two, satisfying the
+"don't add another audit table" instruction by not needing one at all.
+
+### Concurrency design (the reason this took the most care)
+
+`_update_program_confirmed()` and `_resolve_escort_employee_id()` don't
+accept a `conn` parameter — each acquires its own separate pool
+connection. Holding a real `SELECT ... FOR UPDATE` row lock on one
+connection while awaiting a write through a different, nested connection
+is exactly the deadlock class Phase 1I found and fixed in
+`sync_program_to_roster()` (see `escort_dualwrite_concurrency_debug_
+2026-07-17.md`) — not repeating it here, deliberately.
+
+**Decision: non-blocking session-level advisory locks
+(`pg_try_advisory_lock`/`pg_advisory_unlock`), not row locks.** Two lock
+keys per action — `unmatched_confirmation:queue:{id}` and (for
+link-existing) `unmatched_confirmation:program:{target_id}` — held on one
+dedicated connection (`app.database.db_conn()`) for the life of the
+resolution, released in `finally` regardless of outcome. Advisory locks
+block other *lock acquirers*, not other writers, so the nested pool
+acquisitions inside `_update_program_confirmed()` etc. are structurally
+unaffected — no deadlock is possible by construction, not just by
+testing luck. A concurrent reviewer action on the same queue item or
+target program fails immediately (`UnmatchedConfirmationConflict` → HTTP
+409 in `routes.py`) rather than blocking or silently racing.
+Fresh-read-then-act (no cached state) plus optional `expected_queue_
+status`/`expected_target_status` params give the caller genuine
+optimistic-concurrency detection on top of the lock (a reviewer whose
+browser tab is stale gets a clear conflict, not a silent overwrite).
+
+**Verified**: two concurrent sessions racing `pg_try_advisory_lock` on
+the identical key — second session's `SELECT` correctly returns `false`
+immediately (no hang), and correctly succeeds once the first session
+releases — tested against a genuinely disposable `postgres:17-alpine`
+container with the real driver, not simulated.
+
+### What changed
+
+`modules/escort/__init__.py`: `UnmatchedConfirmationConflict`/
+`UnmatchedConfirmationNotFound` exceptions, `_try_locked()` (the advisory-
+lock context manager above), and the four action functions —
+`link_unmatched_confirmation_to_existing_draft()` (reuses `_update_
+program_confirmed()`/`_resolve_escort_employee_id()`/`_sync_roster_after_
+confirm()` verbatim, never a second implementation of any of them; never
+creates a program), `confirm_unmatched_confirmation_as_new()` (mandatory
+reason; **re-validates no confident match has since appeared** via a
+fresh `_find_pending_program()` call before proceeding — confirm-new must
+never fire merely because the fuzzy score was low at admission time; this
+is the *only* remaining call path to `_create_confirmed_from_admin()`,
+never reached automatically since Stage 2), `reject_unmatched_
+confirmation()` (mandatory reason), `defer_unmatched_confirmation()`
+(reason optional, item stays reviewable).
+
+`modules/escort/routes.py`: four `POST` endpoints (`link-existing`,
+`confirm-new`, `reject`, `defer`), admin/superadmin-gated, `performed_by`
+resolved from the authenticated caller (`_resolve_performed_by()`,
+verbatim copy of `modules.dispatch.routes`'s own already-certified
+helper) — never trusted from the request body. Exceptions mapped to
+404/409/400/500.
+
+### Tests
+
+`tests/unit/test_escort_source_of_truth_refactor.py`, new
+`TestUnmatchedConfirmationReviewActions` class (11 tests, all passing):
+link-existing happy path (verifies the employee-resolution call, the
+`_update_program_confirmed()` call, roster sync, audit call, and the
+queue-row UPDATE all fire with correct arguments), blocked when already
+resolved, blocked by lock contention, blocked on an invalid target
+status; confirm-new happy path, requires a reason, **blocked when a
+confident match now exists** (proves the revalidation guard actually
+prevents program creation, not just that it's present in the code);
+reject requires a reason + happy path; defer optional-reason + happy path
++ blocked on an already-terminal item.
+
+### Verification performed
+
+- The exact queue-row `UPDATE` shapes (reject and link-existing) and the
+  advisory-lock contention behavior validated against a third disposable
+  `postgres:17-alpine` container (fresh, torn down after) with the real
+  migration 052 schema and a stub `wbom_escort_programs` applied first.
+- `pytest tests/unit/test_escort_source_of_truth_refactor.py`: 33 tests,
+  32 passed, 1 failed (the same pre-existing, unrelated, already
+  root-caused failure from Stage 2's record above).
+- `test_escort_module.py`, `test_message_router_identity_seed.py`,
+  `test_bridge_poller_legacy_gate.py`: all non-DB-gated tests pass; the
+  3 DB-gated ones in `test_escort_module.py` error on missing
+  `TEST_DB_PASSWORD` (standing session constraint, not a regression).
+- `modules.escort.routes` imports cleanly standalone, all 6 routes
+  (2 from Stage 1, 4 new) register with no circular-import issue despite
+  `routes.py` importing its own parent package (`modules.escort`) — safe
+  because `modules/escort/__init__.py` never imports `routes.py` itself.
+
+### Not done this pass (Stage 3 remainder / Stage 5)
+
+Frontend review UI (compare-drafts-side-by-side, the two required
+warning/confirmation copy blocks for confirm-new) — none of the four
+endpoints have any UI surface yet, they're only reachable via direct API
+calls. Browser/Playwright tests. The full workflow/integration regression
+suites the original spec asks for (blocked on `TEST_DB_PASSWORD`, same as
+every DB-gated suite this session).
+
+### Next step
+
+Same checkpoint as Stages 1-2: commit, push, restart (Owner's explicit
+go-ahead each time, not assumed). After that, the only work remaining in
+this workstream is the frontend review UI and Workstream 5's historical
+reclassification — both separate, later checkpoints.
+
 

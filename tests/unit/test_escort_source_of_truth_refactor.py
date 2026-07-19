@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import date
 
 import pytest
@@ -586,3 +587,276 @@ class TestUnmatchedConfirmationQueue:
         )
         assert queue_id == 91
         assert len(calls) == 1  # no reliable id -> no pre-check possible, straight to insert
+
+
+class _FakeConn:
+    """Minimal asyncpg.Connection stand-in for the Stage 3 review-action
+    tests. queue_row/target_row are plain dicts (dict(record) on a dict
+    just copies it, matching real asyncpg.Record behavior closely enough
+    for these tests). advisory_lock_ok controls every pg_try_advisory_lock
+    call uniformly -- good enough since these tests only ever hold one
+    lock contention scenario at a time."""
+
+    def __init__(self, *, advisory_lock_ok=True, queue_row=None, target_row=None):
+        self.advisory_lock_ok = advisory_lock_ok
+        self.queue_row = dict(queue_row) if queue_row else None
+        self.target_row = dict(target_row) if target_row else None
+        self.executed: list[tuple] = []
+
+    async def fetchval(self, query, *args):
+        if "pg_try_advisory_lock" in query:
+            return self.advisory_lock_ok
+        raise AssertionError(f"unexpected fetchval query: {query}")
+
+    async def fetchrow(self, query, *args):
+        if "wbom_unmatched_confirmations" in query:
+            return dict(self.queue_row) if self.queue_row else None
+        if "wbom_escort_programs" in query:
+            return dict(self.target_row) if self.target_row else None
+        raise AssertionError(f"unexpected fetchrow query: {query}")
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+        return "OK"
+
+
+def _fake_db_conn_factory(conn):
+    @asynccontextmanager
+    async def _fake_db_conn():
+        yield conn
+    return _fake_db_conn
+
+
+class TestUnmatchedConfirmationReviewActions:
+    """Workstream 2 Stage 3: link-existing / confirm-new / reject / defer."""
+
+    @pytest.mark.asyncio
+    async def test_link_existing_happy_path(self, monkeypatch):
+        import modules.escort as escort_module
+
+        queue_row = {
+            "id": 5, "status": "pending", "resolved_program_id": None,
+            "source": "bridge1", "client_phone": None,
+            "parsed_confirmation": json.dumps({
+                "mother_vessel": "MV TEST", "escort_name": "Karim",
+                "escort_mobile": "01888888888",
+            }),
+        }
+        target_row = {"program_id": 41, "status": "draft", "mother_vessel": "MV TEST"}
+        conn = _FakeConn(queue_row=queue_row, target_row=target_row)
+
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        emp_calls = []
+        async def _fake_resolve(mobile, name=None, *, auto_create=False):
+            emp_calls.append((mobile, name, auto_create))
+            return 77
+
+        update_calls = []
+        async def _fake_update(*args, **kwargs):
+            update_calls.append((args, kwargs))
+            return True
+
+        sync_calls = []
+        async def _fake_sync(program_id):
+            sync_calls.append(program_id)
+
+        async def _fake_fetch_one(query, *args, **kwargs):
+            return {"program_id": 41, "status": "confirmed"}
+
+        audit_calls = []
+        async def _fake_log_audit(*args, **kwargs):
+            audit_calls.append((args, kwargs))
+
+        monkeypatch.setattr(escort_module, "_resolve_escort_employee_id", _fake_resolve)
+        monkeypatch.setattr(escort_module, "_update_program_confirmed", _fake_update)
+        monkeypatch.setattr(escort_module, "_sync_roster_after_confirm", _fake_sync)
+        monkeypatch.setattr(escort_module, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr("modules.escort_roster.db.log_audit", _fake_log_audit)
+
+        result = await escort_module.link_unmatched_confirmation_to_existing_draft(
+            5, 41, performed_by="admin_test", reason="matches after manual review",
+        )
+
+        assert result == {
+            "queue_id": 5, "resolved_program_id": 41, "employee_id": 77, "status": "linked_existing",
+        }
+        assert emp_calls == [("01888888888", "Karim", True)]
+        assert sync_calls == [41]
+        assert len(audit_calls) == 1
+        assert audit_calls[0][0][0] == 41  # program_id positional arg to log_audit
+        assert audit_calls[0][0][1] == "unmatched_confirmation_linked"
+        # queue row UPDATE actually executed on the locked connection
+        # (executed also contains the advisory-unlock calls, in order,
+        # so search rather than assume position)
+        assert any("SET status = 'linked_existing'" in q for q, _ in conn.executed)
+
+    @pytest.mark.asyncio
+    async def test_link_existing_blocked_when_already_resolved(self, monkeypatch):
+        import modules.escort as escort_module
+
+        queue_row = {
+            "id": 6, "status": "linked_existing", "resolved_program_id": 41,
+            "source": "bridge1", "client_phone": None, "parsed_confirmation": "{}",
+        }
+        conn = _FakeConn(queue_row=queue_row)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        with pytest.raises(escort_module.UnmatchedConfirmationConflict):
+            await escort_module.link_unmatched_confirmation_to_existing_draft(
+                6, 41, performed_by="admin_test", reason="x",
+            )
+
+    @pytest.mark.asyncio
+    async def test_link_existing_blocked_by_lock_contention(self, monkeypatch):
+        import modules.escort as escort_module
+
+        conn = _FakeConn(advisory_lock_ok=False)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        with pytest.raises(escort_module.UnmatchedConfirmationConflict):
+            await escort_module.link_unmatched_confirmation_to_existing_draft(
+                7, 41, performed_by="admin_test", reason="x",
+            )
+
+    @pytest.mark.asyncio
+    async def test_link_existing_rejects_invalid_target_status(self, monkeypatch):
+        import modules.escort as escort_module
+
+        queue_row = {
+            "id": 8, "status": "pending", "resolved_program_id": None,
+            "source": "bridge1", "client_phone": None, "parsed_confirmation": "{}",
+        }
+        target_row = {"program_id": 41, "status": "completed", "mother_vessel": "MV TEST"}
+        conn = _FakeConn(queue_row=queue_row, target_row=target_row)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        with pytest.raises(escort_module.UnmatchedConfirmationConflict):
+            await escort_module.link_unmatched_confirmation_to_existing_draft(
+                8, 41, performed_by="admin_test", reason="x",
+            )
+
+    @pytest.mark.asyncio
+    async def test_confirm_new_happy_path(self, monkeypatch):
+        import modules.escort as escort_module
+
+        queue_row = {
+            "id": 9, "status": "pending", "resolved_program_id": None,
+            "source": "bridge1", "client_phone": None,
+            "parsed_confirmation": json.dumps({
+                "mother_vessel": "MV NEW", "lighter_vessel": "New Lighter",
+                "escort_name": "Rahim",
+            }),
+        }
+        conn = _FakeConn(queue_row=queue_row)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        async def _fake_find_pending_program(*a, **kw):
+            return None  # no confident match now -- confirm-new legitimately allowed
+
+        create_calls = []
+        async def _fake_create(draft, source, client_phone=None):
+            create_calls.append((draft, source, client_phone))
+            return 55
+
+        async def _fake_fetch_one(query, *args, **kwargs):
+            return {"program_id": 55, "status": "confirmed"}
+
+        audit_calls = []
+        async def _fake_log_audit(*args, **kwargs):
+            audit_calls.append((args, kwargs))
+
+        monkeypatch.setattr(escort_module, "_find_pending_program", _fake_find_pending_program)
+        monkeypatch.setattr(escort_module, "_create_confirmed_from_admin", _fake_create)
+        monkeypatch.setattr(escort_module, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr("modules.escort_roster.db.log_audit", _fake_log_audit)
+
+        result = await escort_module.confirm_unmatched_confirmation_as_new(
+            9, performed_by="admin_test", reason="genuinely a second duty segment",
+        )
+
+        assert result == {"queue_id": 9, "resolved_program_id": 55, "status": "confirmed_new"}
+        assert len(create_calls) == 1
+        assert len(audit_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_confirm_new_requires_reason(self, monkeypatch):
+        import modules.escort as escort_module
+        with pytest.raises(ValueError):
+            await escort_module.confirm_unmatched_confirmation_as_new(
+                9, performed_by="admin_test", reason="   ",
+            )
+
+    @pytest.mark.asyncio
+    async def test_confirm_new_blocked_when_confident_match_now_exists(self, monkeypatch):
+        """The revalidation requirement: confirm-new must never be used
+        merely because the fuzzy score was low at admission time -- if a
+        real match has since appeared, link-existing is the correct action."""
+        import modules.escort as escort_module
+
+        queue_row = {
+            "id": 10, "status": "pending", "resolved_program_id": None,
+            "source": "bridge1", "client_phone": None,
+            "parsed_confirmation": json.dumps({"mother_vessel": "MV NEW"}),
+        }
+        conn = _FakeConn(queue_row=queue_row)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        async def _fake_find_pending_program(*a, **kw):
+            return {"program_id": 99}  # a confident match now exists
+
+        create_calls = []
+        async def _fake_create(*a, **kw):
+            create_calls.append((a, kw))
+            return 55
+
+        monkeypatch.setattr(escort_module, "_find_pending_program", _fake_find_pending_program)
+        monkeypatch.setattr(escort_module, "_create_confirmed_from_admin", _fake_create)
+
+        with pytest.raises(escort_module.UnmatchedConfirmationConflict):
+            await escort_module.confirm_unmatched_confirmation_as_new(
+                10, performed_by="admin_test", reason="a reason",
+            )
+        assert create_calls == [], "must never create a program when a confident match now exists"
+
+    @pytest.mark.asyncio
+    async def test_reject_requires_reason(self, monkeypatch):
+        import modules.escort as escort_module
+        with pytest.raises(ValueError):
+            await escort_module.reject_unmatched_confirmation(1, performed_by="admin_test", reason="")
+
+    @pytest.mark.asyncio
+    async def test_reject_happy_path(self, monkeypatch):
+        import modules.escort as escort_module
+
+        queue_row = {"id": 11, "status": "pending"}
+        conn = _FakeConn(queue_row=queue_row)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        result = await escort_module.reject_unmatched_confirmation(
+            11, performed_by="admin_test", reason="spam / not a real order",
+        )
+        assert result == {"queue_id": 11, "status": "rejected"}
+        assert any("SET status = " in q for q, _ in conn.executed)
+
+    @pytest.mark.asyncio
+    async def test_defer_does_not_require_reason(self, monkeypatch):
+        import modules.escort as escort_module
+
+        queue_row = {"id": 12, "status": "pending"}
+        conn = _FakeConn(queue_row=queue_row)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        result = await escort_module.defer_unmatched_confirmation(12, performed_by="admin_test")
+        assert result == {"queue_id": 12, "status": "deferred"}
+
+    @pytest.mark.asyncio
+    async def test_defer_blocked_on_already_terminal_item(self, monkeypatch):
+        import modules.escort as escort_module
+
+        queue_row = {"id": 13, "status": "rejected"}
+        conn = _FakeConn(queue_row=queue_row)
+        monkeypatch.setattr(escort_module, "db_conn", _fake_db_conn_factory(conn))
+
+        with pytest.raises(escort_module.UnmatchedConfirmationConflict):
+            await escort_module.defer_unmatched_confirmation(13, performed_by="admin_test")

@@ -1,18 +1,19 @@
 """
 Fazle Core — Draft-Confirmation Invariant (Workstream 2) review-queue routes.
 
-Stage 1 only: read-only visibility into wbom_unmatched_confirmations
-(migration 052). The no-match admission behavior change in
-handle_admin_escort_completion() (modules/escort/__init__.py) is Stage 2,
-deliberately not wired yet -- this router exists first so the queue is
-visible and verifiable before anything starts writing to it.
+Stage 1: read-only visibility into wbom_unmatched_confirmations
+(migration 052). Stage 2 wired the no-match admission behavior change in
+handle_admin_escort_completion() (modules/escort/__init__.py). Stage 3
+(this addition) adds the actual review actions -- link-existing,
+confirm-new, reject, defer -- so a queued item can finally be resolved,
+not just viewed.
 
 RBAC: admin/superadmin only for every route here, including the list --
 this queue holds raw confirmation text and phone numbers, the same
 sensitivity tier as modules.dispatch.routes's Stage 5/6 admin-only actions,
-whose _require_admin_or_above this file copies verbatim (local copy to
-avoid a cross-module import cycle, same justification as that module's own
-copy).
+whose _require_admin_or_above and _resolve_performed_by this file copies
+verbatim (local copy to avoid a cross-module import cycle, same
+justification as that module's own copy).
 """
 from __future__ import annotations
 
@@ -21,9 +22,11 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import APIKeyHeader
+from pydantic import BaseModel
 
 from app.config import get_settings
 from app.database import fetch_all, fetch_one
+from modules import escort as escort_svc
 
 router = APIRouter(prefix="/api/escort", tags=["escort-unmatched-confirmations"])
 
@@ -45,6 +48,21 @@ async def _require_admin_or_above(key: str = Depends(_API_KEY_HEADER)) -> str:
     if normalized_roles.intersection({"admin", "superadmin", "owner"}):
         return key
     raise HTTPException(status_code=403, detail="admin role or above required")
+
+
+async def _resolve_performed_by(key: str) -> str:
+    """Human-readable actor label for the audit trail -- prefers the admin's
+    username/name, falls back to phone, falls back to a generic label for
+    the internal API key. Verbatim copy of modules.dispatch.routes's own
+    helper (same cross-module-import-cycle justification)."""
+    settings = get_settings()
+    if key and key == settings.internal_api_key:
+        return "internal_api_key"
+    from modules import rbac
+    admin = await rbac.get_admin_by_api_key(key or "")
+    if not admin:
+        return "unknown"
+    return admin.get("username") or admin.get("name") or admin.get("phone") or f"admin#{admin.get('id')}"
 
 
 def _mask_phone(phone: Optional[str]) -> Optional[str]:
@@ -145,3 +163,107 @@ async def get_unmatched_confirmation(item_id: int):
                 c["current_live_state"] = None  # candidate program no longer exists
 
     return result
+
+
+def _map_review_error(e: Exception) -> HTTPException:
+    if isinstance(e, escort_svc.UnmatchedConfirmationNotFound):
+        return HTTPException(status_code=404, detail=str(e))
+    if isinstance(e, escort_svc.UnmatchedConfirmationConflict):
+        return HTTPException(status_code=409, detail=str(e))
+    if isinstance(e, ValueError):
+        return HTTPException(status_code=400, detail=str(e))
+    return HTTPException(status_code=500, detail="review action failed, check logs")
+
+
+class LinkExistingRequest(BaseModel):
+    target_program_id: int
+    reason: str
+    expected_queue_status: Optional[str] = None
+    expected_target_status: Optional[str] = None
+
+
+class ConfirmNewRequest(BaseModel):
+    reason: str
+    expected_queue_status: Optional[str] = None
+
+
+class RejectRequest(BaseModel):
+    reason: str
+
+
+class DeferRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post(
+    "/unmatched-confirmations/{item_id}/link-existing",
+    dependencies=[Depends(_require_admin_or_above)],
+)
+async def link_existing(item_id: int, body: LinkExistingRequest, key: str = Depends(_API_KEY_HEADER)):
+    """Resolve a queued confirmation by linking it to an existing draft.
+    Updates the SAME program row (never a second one) via the certified
+    _update_program_confirmed()/_resolve_escort_employee_id() functions."""
+    performed_by = await _resolve_performed_by(key)
+    try:
+        return await escort_svc.link_unmatched_confirmation_to_existing_draft(
+            item_id,
+            body.target_program_id,
+            performed_by=performed_by,
+            reason=body.reason,
+            expected_queue_status=body.expected_queue_status,
+            expected_target_status=body.expected_target_status,
+        )
+    except Exception as e:
+        raise _map_review_error(e) from None
+
+
+@router.post(
+    "/unmatched-confirmations/{item_id}/confirm-new",
+    dependencies=[Depends(_require_admin_or_above)],
+)
+async def confirm_new(item_id: int, body: ConfirmNewRequest, key: str = Depends(_API_KEY_HEADER)):
+    """Explicit admin confirmation that a queued item is genuinely a
+    separate duty segment. Re-validates no confident match has since
+    appeared before creating exactly one new program."""
+    performed_by = await _resolve_performed_by(key)
+    try:
+        return await escort_svc.confirm_unmatched_confirmation_as_new(
+            item_id,
+            performed_by=performed_by,
+            reason=body.reason,
+            expected_queue_status=body.expected_queue_status,
+        )
+    except Exception as e:
+        raise _map_review_error(e) from None
+
+
+@router.post(
+    "/unmatched-confirmations/{item_id}/reject",
+    dependencies=[Depends(_require_admin_or_above)],
+)
+async def reject(item_id: int, body: RejectRequest, key: str = Depends(_API_KEY_HEADER)):
+    """Reject a queued confirmation. Never creates or updates a program."""
+    performed_by = await _resolve_performed_by(key)
+    try:
+        return await escort_svc.reject_unmatched_confirmation(
+            item_id, performed_by=performed_by, reason=body.reason,
+        )
+    except Exception as e:
+        raise _map_review_error(e) from None
+
+
+@router.post(
+    "/unmatched-confirmations/{item_id}/defer",
+    dependencies=[Depends(_require_admin_or_above)],
+)
+async def defer(item_id: int, body: DeferRequest, key: str = Depends(_API_KEY_HEADER)):
+    """Defer a queued confirmation for later review. Item stays reviewable
+    (status='deferred' is treated identically to 'pending' by every other
+    action's status check)."""
+    performed_by = await _resolve_performed_by(key)
+    try:
+        return await escort_svc.defer_unmatched_confirmation(
+            item_id, performed_by=performed_by, reason=body.reason,
+        )
+    except Exception as e:
+        raise _map_review_error(e) from None
