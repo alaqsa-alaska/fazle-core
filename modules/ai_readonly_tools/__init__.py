@@ -22,6 +22,7 @@ Public API (all async):
     get_escort_program_status(vessel=None, date_str=None) -> list[dict]
     get_attendance_summary(employee_name=None, month=None) -> list[dict]
     get_payroll_run_status(month=None, year=None) -> list[dict]
+    get_employee_advances(employee_name=None, limit=20) -> list[dict]
     get_daily_payments(question) -> dict
     get_employee_month_payments(question) -> dict
     get_lighter_assignment(question) -> dict
@@ -258,6 +259,30 @@ async def get_payroll_run_status(
 ) -> list[dict]:
     """Return payroll run status for a period."""
     return await get_payment_summary(month=month, year=year)
+
+
+async def get_employee_advances(employee_name: Optional[str] = None, limit: int = 20) -> list[dict]:
+    """Return recent payroll-run advance figures, optionally filtered by
+    employee name. Uses the existing ai_read_payroll_runs view (no schema
+    change) — total_advances is per-run, not a running balance, so this
+    reports "advances recorded per recent run," not a single outstanding
+    total."""
+    limit = max(1, min(limit, 50))
+    conditions = ["total_advances > 0"]
+    params: list[Any] = []
+    idx = 1
+    if employee_name:
+        conditions.append(f"LOWER(employee_name) LIKE ${idx}")
+        params.append(f"%{employee_name.lower()}%")
+        idx += 1
+    where = "WHERE " + " AND ".join(conditions)
+    params.append(limit)
+    sql = f"""
+        SELECT employee_name, designation, period_year, period_month, status, total_advances
+        FROM ai_read_payroll_runs {where}
+        ORDER BY period_year DESC, period_month DESC LIMIT ${idx}
+    """
+    return await _fetch(sql, *params)
 
 
 def _fmt_bdt(amount: float) -> str:

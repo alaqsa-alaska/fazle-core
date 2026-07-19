@@ -331,6 +331,48 @@ def _build_worker_entry(employee: dict, blocking_programs: list[dict],
     }
 
 
+async def get_missing_end_date_programs(limit: int = 50) -> dict:
+    """Read-only report: programs with a recorded start_date but no
+    end_date, excluding terminal statuses (completed/cancelled/
+    escort_changed) where an open end is normal/expected. This is a
+    review/data-quality signal ("missing_completion_data"), not a
+    lifecycle status change and not itself a conflict -- callers (including
+    the AI console) must not auto-close, auto-cancel, or treat this as a
+    confirmed double-booking. Matches the corrected business rule that an
+    earlier program with no end_date may simply be missing completion
+    data, not proof of overlap (see CANONICAL_BUSINESS_RULES.md, Dispatch
+    section)."""
+    limit = max(1, min(limit, 100))
+    rows = await fetch_all(
+        f"""SELECT {_PROGRAM_FIELDS}
+            FROM wbom_escort_programs
+            WHERE end_date IS NULL
+              AND start_date IS NOT NULL
+              AND status NOT IN ('completed', 'cancelled', 'escort_changed')
+            ORDER BY start_date ASC
+            LIMIT $1""",
+        limit,
+    )
+    items = []
+    for r in rows:
+        row = dict(r)
+        items.append({
+            "program_id": row.get("program_id"),
+            "mother_vessel": row.get("mother_vessel"),
+            "lighter_vessel": row.get("lighter_vessel"),
+            "escort_employee_id": row.get("escort_employee_id"),
+            "start_date": str(row["start_date"]) if row.get("start_date") else None,
+            "shift": row.get("shift"),
+            "status": row.get("status"),
+            "destination": row.get("destination"),
+        })
+    return {
+        "items": items,
+        "count": len(items),
+        "note": "missing_completion_data — review/data-quality signal, not a confirmed conflict",
+    }
+
+
 async def check_conflict(
     escort_employee_id: int,
     start_date: date,

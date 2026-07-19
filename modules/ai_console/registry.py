@@ -63,6 +63,27 @@ def _runtime_entries() -> list[RegistryEntry]:
     return entries
 
 
+_BUS_MIN_ROLE: dict[str, str] = {
+    # viewer: basic employee/program search, Dispatch availability/conflict
+    "BUS-001": "viewer",
+    "BUS-005": "viewer",
+    "BUS-008": "viewer",
+    "BUS-010": "viewer",
+    "BUS-011": "viewer",
+    # office_assistant: operational attendance/program/dispatch detail
+    "BUS-002": "office_assistant",
+    "BUS-004": "office_assistant",
+    "BUS-007": "office_assistant",
+    "BUS-009": "office_assistant",
+    "BUS-012": "office_assistant",
+    "BUS-013": "office_assistant",
+    # accountant: payroll/salary/advance/cash summaries
+    "BUS-003": "accountant",
+    "BUS-006": "accountant",
+    "BUS-014": "accountant",
+}
+
+
 def _business_entries() -> list[RegistryEntry]:
     rows = [
         ("BUS-001", "employee_search", "Search employees by name or mobile", "postgres_readonly_view", "business", "Verified", ["ORCH-002", "BUS-001"]),
@@ -74,6 +95,11 @@ def _business_entries() -> list[RegistryEntry]:
         ("BUS-007", "recruitment_summary", "Summarize recruitment facts", "postgres_readonly_view", "business", "Verified", ["ORCH-002", "BUS-007"]),
         ("BUS-008", "knowledge_search", "Search knowledge base content", "knowledge_base", "knowledge", "Partially Verified", ["ORCH-032", "BUS-008"]),
         ("BUS-009", "conversation_history", "Summarize conversation history", "conversation_context", "conversation", "Partially Verified", ["ORCH-035", "BUS-009"]),
+        ("BUS-010", "dispatch_availability", "List escort worker availability", "dispatch_readonly_service", "business", "Verified", ["ORCH-002", "BUS-010"]),
+        ("BUS-011", "dispatch_conflict_check", "Check one escort's proposed window for conflicts", "dispatch_readonly_service", "business", "Verified", ["ORCH-002", "BUS-011"]),
+        ("BUS-012", "dispatch_suggestions", "Rank available escorts for a proposed window", "dispatch_readonly_service", "business", "Verified", ["ORCH-002", "BUS-012"]),
+        ("BUS-013", "missing_end_date_programs", "List escort programs missing an end date (review signal, not a conflict)", "dispatch_readonly_service", "business", "Partially Verified", ["ORCH-002", "BUS-013"]),
+        ("BUS-014", "employee_advances", "Summarize recorded payroll-run advances", "postgres_readonly_view", "business", "Verified", ["ORCH-002", "BUS-014"]),
     ]
     entries: list[RegistryEntry] = []
     for rid, name, purpose, authority, mode, confidence, refs in rows:
@@ -93,6 +119,7 @@ def _business_entries() -> list[RegistryEntry]:
                     "secret_exposure",
                 ],
                 traceability_refs=refs + ["STD-008", "EVID-011"],
+                metadata={"min_role": _BUS_MIN_ROLE.get(rid, "admin")},
             )
         )
     return entries

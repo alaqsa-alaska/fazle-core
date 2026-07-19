@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-ALLOWED_STATUSES = {"ok", "partial", "failed", "unavailable", "not_implemented"}
+ALLOWED_STATUSES = {"ok", "partial", "failed", "unavailable", "not_implemented", "permission_denied"}
 ALLOWED_CONFIDENCE = {"Verified", "Partially Verified", "Inference", "Unknown"}
 
 

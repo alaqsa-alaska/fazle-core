@@ -159,20 +159,61 @@ def select_live_tools(mode: str) -> list[str]:
         ]
     if mode == "business":
         return [
-            "BUS-001",
-            "BUS-002",
-            "BUS-003",
-            "BUS-004",
-            "BUS-005",
-            "BUS-006",
-            "BUS-007",
-            "BUS-008",
-            "BUS-009",
+            "BUS-001", "BUS-002", "BUS-003", "BUS-004", "BUS-005", "BUS-006",
+            "BUS-007", "BUS-008", "BUS-009", "BUS-010", "BUS-011", "BUS-012",
+            "BUS-013", "BUS-014",
         ]
     if mode == "memory":
         return ["MEM-001", "MEM-004", "MEM-005", "MEM-007"]
     # general / unclassified: run a broad baseline covering key areas
     return ["BUS-001", "BUS-003", "BUS-004", "MEM-001", "RT-001"]
+
+
+# Keyword groups for narrowing "business" mode to a relevant subset of tools
+# instead of always running all 14 -- keeps per-question latency/DB load
+# bounded while still satisfying "choose one or more approved tools."
+_BUS_TOOL_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("BUS-013", ("missing end date", "no end date", "without end date", "open ended", "end date not recorded")),
+    ("BUS-014", ("advance", "advances", "অগ্রিম")),
+    ("BUS-010", ("available", "availability", "free tomorrow", "who is free")),
+    ("BUS-011", ("conflict", "double book", "double-book", "clash")),
+    ("BUS-012", ("suggest", "suggestion", "recommend", "who should", "rank")),
+    ("BUS-003", ("payroll", "salary", "বেতন")),
+    ("BUS-004", ("attendance", "হাজিরা", "অ্যাটেন্ডেন্স")),
+    ("BUS-005", ("escort", "vessel", "program", "এসকর্ট")),
+    ("BUS-006", ("cash", "ledger", "transaction", "ক্যাশ", "লেজার")),
+    ("BUS-007", ("recruitment", "candidate", "নিয়োগ")),
+    ("BUS-008", ("knowledge", "policy", "how to", "how do i", "rule")),
+    ("BUS-009", ("conversation history", "message history", "past messages")),
+]
+
+
+def select_business_tools_for_message(message: str) -> list[str]:
+    """Narrow business-mode tool selection to what the question actually
+    signals, falling back to a small general-purpose set (not all 14) when
+    nothing specific matches. BUS-001/BUS-002 (employee search/summary) are
+    always included when any employee-ish signal (name/mobile) is present,
+    matching the existing BUS-001 phone-forcing behavior below."""
+    q = (message or "").lower()
+    selected: list[str] = []
+    for tool_id, keywords in _BUS_TOOL_KEYWORDS:
+        if any(kw in q for kw in keywords):
+            selected.append(tool_id)
+    has_employee_signal = bool(_extract_phone_hint(q)) or any(
+        kw in q for kw in ("employee", "mobile", "phone", "name", "কর্মচারী", "মোবাইল")
+    )
+    if has_employee_signal and "BUS-001" not in selected:
+        selected.append("BUS-001")
+    if not selected:
+        # No specific signal — safe, bounded general business default.
+        selected = ["BUS-001", "BUS-003", "BUS-004", "BUS-005"]
+    return selected
+
+
+def _extract_phone_hint(text: str) -> str | None:
+    import re
+    digits = re.sub(r"\D+", "", text or "")
+    return digits if len(digits) >= 8 else None
 
 
 async def orchestrate_console_request(
@@ -185,10 +226,13 @@ async def orchestrate_console_request(
     web_context: bool = True,
     include_provider_response: bool = False,
     registry: RegistryLoader | None = None,
+    actor_role_level: int = 100,
 ) -> ConsoleOrchestrationResponse:
     loader = registry or build_registry_loader()
     mode = classify_message(message)
-    selected_tools = select_live_tools(mode)
+    selected_tools = (
+        select_business_tools_for_message(message) if mode == "business" else select_live_tools(mode)
+    )
 
     runtime_adapter = ReadonlyRuntimeAdapter(loader)
     business_adapter = ReadonlyBusinessAdapter(loader)
@@ -225,7 +269,9 @@ async def orchestrate_console_request(
         if tool_id.startswith("RT-"):
             runtime_results.append(await runtime_adapter.fetch(tool_id, payload))
         elif tool_id.startswith("BUS-") and db_context:
-            business_results.append(await business_adapter.fetch(tool_id, payload))
+            business_results.append(
+                await business_adapter.fetch(tool_id, payload, actor_role_level=actor_role_level)
+            )
         elif tool_id.startswith("MEM-") and app_context:
             memory_results.append(await memory_adapter.fetch(tool_id, payload))
     log.info(

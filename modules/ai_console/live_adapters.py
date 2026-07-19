@@ -20,12 +20,49 @@ log = logging.getLogger("fazle.ai_console.live_adapters")
 from app import llm as ai
 from app.config import get_settings
 from app.database import get_pool
-from modules import ai_readonly_tools, ollama_memory, rag
+from modules import ai_readonly_tools, dispatch, ollama_memory, rag, rbac
 from modules.ai_console.adapters import BusinessAdapter, EvidenceAdapter, MemoryAdapter, RuntimeAdapter
 from modules.ai_console.envelopes import EvidenceEnvelope, ToolResultEnvelope, utc_now_iso
 from modules.ai_console.registry import RegistryLoader, build_registry_loader
 from shared.bridge_orchestrator import get_bridge_diagnostics
 from shared.runtime_gateway import get_current_runtime_nodes
+
+
+# RBAC for business tools (Stage E). Role levels come from the live
+# fazle_roles table (never hardcoded), cached per-process since the
+# hierarchy itself changes rarely -- a stale cache only ever fails toward
+# requiring MORE access, never less, because an unmapped/unresolvable role
+# name falls back to "admin" at the registry level (registry.py's
+# _BUS_MIN_ROLE.get(rid, "admin")).
+_role_level_cache: dict[str, int] = {}
+
+
+async def _resolve_min_role_level(role_name: str) -> int:
+    if role_name not in _role_level_cache:
+        try:
+            _role_level_cache[role_name] = await rbac.get_role_level(role_name)
+        except Exception:
+            # Fail closed: an unresolvable role name requires the highest
+            # level rather than granting access.
+            return 10_000
+    return _role_level_cache[role_name]
+
+
+_ISO_DATE_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})")
+
+
+def _extract_date(text: str) -> str | None:
+    match = _ISO_DATE_RE.search(text or "")
+    return match.group(1) if match else None
+
+
+def _extract_shift_hint(text: str) -> str | None:
+    q = (text or "").lower()
+    if "night" in q or "রাত" in (text or ""):
+        return "N"
+    if "day" in q or "দিন" in (text or ""):
+        return "D"
+    return None
 
 
 CANONICAL_RUNTIME_INVENTORY_PATH = "/api/runtime/nodes/current"
@@ -663,8 +700,25 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
     def __init__(self, registry: RegistryLoader | None = None) -> None:
         self.registry = registry or build_registry_loader()
 
-    async def fetch(self, tool_id: str, payload: dict[str, Any]) -> ToolResultEnvelope:
+    async def fetch(
+        self, tool_id: str, payload: dict[str, Any], *, actor_role_level: int = 100,
+    ) -> ToolResultEnvelope:
         entry = self.registry.get(tool_id)
+        min_role = str(entry.metadata.get("min_role") or "admin")
+        required_level = await _resolve_min_role_level(min_role)
+        if actor_role_level < required_level:
+            log.info(
+                "[ai_console.business.rbac] denied tool=%s min_role=%s required_level=%d actor_level=%d",
+                tool_id, min_role, required_level, actor_role_level,
+            )
+            return _envelope(
+                entry=entry,
+                status="permission_denied",
+                data={"message": f"requires {min_role} role or above", "min_role": min_role},
+                source="ai_console.business",
+                warnings=[f"Tool {tool_id} requires {min_role} role or above."],
+                confidence="Unknown",
+            )
         handlers: dict[str, Callable[[Any, dict[str, Any]], Any]] = {
             "BUS-001": self._employee_search,
             "BUS-002": self._employee_summary,
@@ -675,6 +729,11 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
             "BUS-007": self._recruitment_summary,
             "BUS-008": self._knowledge_search,
             "BUS-009": self._conversation_history,
+            "BUS-010": self._dispatch_availability,
+            "BUS-011": self._dispatch_conflict_check,
+            "BUS-012": self._dispatch_suggestions,
+            "BUS-013": self._missing_end_date_programs,
+            "BUS-014": self._employee_advances,
         }
         handler = handlers.get(tool_id)
         if handler is None:
@@ -871,6 +930,120 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
         return _envelope(
             entry=entry,
             status=status,
+            data={"rows": rows, "count": len(rows)},
+            source="modules.ai_readonly_tools",
+            confidence=confidence,
+        )
+
+    async def _dispatch_availability(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        employee_id = payload.get("employee_id")
+        try:
+            employee_id = int(employee_id) if employee_id is not None else None
+        except (TypeError, ValueError):
+            employee_id = None
+        result = await dispatch.list_escort_workers(
+            active_only=True, employee_id=employee_id, page=1,
+            page_size=min(int(payload.get("limit") or 20), 50),
+        )
+        return _envelope(
+            entry=entry,
+            status="ok",
+            data=result,
+            source="modules.dispatch",
+        )
+
+    async def _dispatch_conflict_check(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        question = _normalize_question(payload)
+        employee_id = payload.get("employee_id")
+        start_date_s = payload.get("start_date") or _extract_date(question)
+        end_date_s = payload.get("end_date") or start_date_s
+        start_shift = payload.get("start_shift") or _extract_shift_hint(question) or "D"
+        end_shift = payload.get("end_shift") or start_shift
+        if not employee_id or not start_date_s:
+            return _envelope(
+                entry=entry,
+                status="partial",
+                data={"message": "insufficient parameters — need employee_id and a date (YYYY-MM-DD)"},
+                source="modules.dispatch",
+                warnings=["Could not determine employee_id/date from the question; ask with an explicit date and employee."],
+                confidence="Unknown",
+            )
+        from datetime import date as _date
+        try:
+            result = await dispatch.check_conflict(
+                escort_employee_id=int(employee_id),
+                start_date=_date.fromisoformat(start_date_s),
+                start_shift=start_shift,
+                end_date=_date.fromisoformat(end_date_s),
+                end_shift=end_shift,
+            )
+        except ValueError as exc:
+            return _envelope(
+                entry=entry,
+                status="partial",
+                data={"message": "invalid date/employee_id"},
+                source="modules.dispatch",
+                warnings=[_safe_error(exc)],
+                confidence="Unknown",
+            )
+        return _envelope(entry=entry, status="ok", data=result, source="modules.dispatch")
+
+    async def _dispatch_suggestions(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        question = _normalize_question(payload)
+        start_date_s = payload.get("start_date") or _extract_date(question)
+        end_date_s = payload.get("end_date") or start_date_s
+        start_shift = payload.get("start_shift") or _extract_shift_hint(question) or "D"
+        end_shift = payload.get("end_shift") or start_shift
+        if not start_date_s:
+            return _envelope(
+                entry=entry,
+                status="partial",
+                data={"message": "insufficient parameters — need a date (YYYY-MM-DD)"},
+                source="modules.dispatch",
+                warnings=["Could not determine a date from the question; ask with an explicit date."],
+                confidence="Unknown",
+            )
+        from datetime import date as _date
+        try:
+            result = await dispatch.get_suggestions(
+                start_date=_date.fromisoformat(start_date_s),
+                start_shift=start_shift,
+                end_date=_date.fromisoformat(end_date_s),
+                end_shift=end_shift,
+                destination=payload.get("destination"),
+                limit=min(int(payload.get("limit") or 10), 20),
+            )
+        except ValueError as exc:
+            return _envelope(
+                entry=entry,
+                status="partial",
+                data={"message": "invalid date"},
+                source="modules.dispatch",
+                warnings=[_safe_error(exc)],
+                confidence="Unknown",
+            )
+        return _envelope(entry=entry, status="ok", data=result, source="modules.dispatch")
+
+    async def _missing_end_date_programs(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        result = await dispatch.get_missing_end_date_programs(limit=min(int(payload.get("limit") or 50), 100))
+        return _envelope(
+            entry=entry,
+            status="ok" if result["items"] else "partial",
+            data=result,
+            source="modules.dispatch",
+            confidence="Partially Verified",
+        )
+
+    async def _employee_advances(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        question = _normalize_question(payload)
+        rows = await ai_readonly_tools.get_employee_advances(
+            employee_name=payload.get("employee_name") or _extract_name_hint(question),
+            limit=min(int(payload.get("limit") or 20), 50),
+        )
+        confidence = "Verified" if rows else "Partially Verified"
+        return _envelope(
+            entry=entry,
+            status="ok" if rows else "partial",
             data={"rows": rows, "count": len(rows)},
             source="modules.ai_readonly_tools",
             confidence=confidence,
