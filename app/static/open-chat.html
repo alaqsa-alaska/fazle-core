@@ -381,6 +381,10 @@
   .badge-confidence-Verified{border-color:rgba(31,157,98,.35);color:#89e0b2;background:rgba(31,157,98,.12)}
   .badge-confidence-Partially\ Verified{border-color:rgba(217,144,26,.35);color:#f5c66e;background:rgba(217,144,26,.12)}
   .badge-confidence-Unknown,.badge-confidence-Inference{border-color:rgba(204,79,79,.35);color:#ffb0b0;background:rgba(204,79,79,.1)}
+  .badge-status-verified{border-color:rgba(31,157,98,.45);color:#89e0b2;background:rgba(31,157,98,.14);font-weight:600}
+  .badge-status-partial{border-color:rgba(217,144,26,.45);color:#f5c66e;background:rgba(217,144,26,.14);font-weight:600}
+  .badge-status-unable{border-color:rgba(204,79,79,.45);color:#ffb0b0;background:rgba(204,79,79,.14);font-weight:600}
+  .badge-status-general{border-color:rgba(92,178,255,.35);color:#9fd4ff;background:rgba(92,178,255,.1);font-weight:600}
   .msg-time{
     margin-top:6px;
     color:var(--muted);
@@ -497,6 +501,65 @@
   }
   .voice-actions[hidden]{display:none}
   .voice-actions .tiny-btn{width:auto;padding:8px 12px}
+  .attachment-card{
+    border:1px solid var(--line);
+    border-radius:14px;
+    background:rgba(255,255,255,.03);
+    padding:10px 12px;
+    display:grid;
+    gap:6px;
+  }
+  .attachment-card-head{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size:12px;
+  }
+  .attachment-card-name{
+    font-weight:600;
+    color:var(--text);
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    flex:1;
+    min-width:0;
+  }
+  .attachment-card-meta{color:var(--muted);font-size:11px}
+  .attachment-card-remove{
+    border:none;
+    background:none;
+    color:#ffb0b0;
+    cursor:pointer;
+    font-size:14px;
+    padding:2px 6px;
+    flex-shrink:0;
+  }
+  .attachment-card-status{font-size:11px}
+  .attachment-card-status.ok{color:#89e0b2}
+  .attachment-card-status.warn{color:#f5c66e}
+  .attachment-card-status.busy{color:var(--muted)}
+  .attachment-card-preview{
+    font-size:11px;
+    color:var(--muted);
+    background:#0c1526;
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:8px 10px;
+    max-height:120px;
+    overflow:auto;
+    white-space:pre-wrap;
+    word-break:break-word;
+  }
+  .attachment-card-toggle{
+    background:none;
+    border:none;
+    color:var(--accent);
+    cursor:pointer;
+    font-size:11px;
+    padding:0;
+    text-align:left;
+    width:fit-content;
+  }
   .composer-main{
     display:flex;
     gap:10px;
@@ -788,8 +851,8 @@
 
     <section class="composer">
       <div class="attachment-row">
-        <button class="tool-btn" id="attach-file-btn" disabled aria-disabled="true" title="File upload arrives in a later stage">📎 Attach File (soon)</button>
-        <button class="tool-btn" id="attach-image-btn" disabled aria-disabled="true" title="File upload arrives in a later stage">🖼 Attach Image (soon)</button>
+        <button class="tool-btn" id="attach-file-btn" onclick="document.getElementById('file-input').click()" aria-label="Attach a file">📎 Attach File</button>
+        <input class="hidden-input" id="file-input" type="file" accept=".txt,.md,.csv,.pdf,.png,.jpg,.jpeg,.webp" onchange="handleFileInput(event)">
         <button class="tool-btn" id="voice-btn" onclick="toggleVoiceRecording()" aria-label="Record voice note">🎤 Record Voice</button>
         <select class="tool-btn" id="voice-lang-select" aria-label="Voice language hint" title="Voice language hint (auto-detect happens after transcription either way)">
           <option value="auto">Auto</option>
@@ -818,7 +881,7 @@
         <button class="send-btn" id="send-btn" onclick="sendMessage()" aria-label="Send message">➜</button>
       </div>
       <div class="composer-foot">
-        <div id="composer-hint">Voice notes are transcribed for review before sending — nothing is sent automatically. File/image upload arrives in a later stage.</div>
+        <div id="composer-hint">Voice notes and file attachments are reviewed before sending — nothing is sent automatically.</div>
         <div id="chat-status" aria-live="polite"></div>
       </div>
     </section>
@@ -868,6 +931,10 @@ let selectedProvider = "all";
 let currentResponseMeta = null;
 let evidenceDockOpen = true;
 let typingCounter = 0;
+
+const MAX_ATTACHMENTS = 3;
+const MAX_UPLOAD_SIZE = 12 * 1024 * 1024;
+let attachedFiles = []; // [{attachment_id, filename, type, size_bytes, extracted_text, text_length, truncated, warning, previewOpen}]
 
 // Voice state machine: idle | recording | uploading_audio | transcribing | transcript_ready | error
 let voiceState = "idle";
@@ -1013,8 +1080,16 @@ function getEvidencePayload(res) {
   };
 }
 
+function answerStatusBadgeType(status) {
+  if (status === "Verified business answer") return "status-verified";
+  if (status === "Partially verified answer") return "status-partial";
+  if (status === "Unable to verify") return "status-unable";
+  return "status-general";
+}
+
 function buildBadges(res) {
   const badges = [];
+  if (res.answer_status) badges.push(renderBadge(res.answer_status, answerStatusBadgeType(res.answer_status)));
   if (res.feature_path) badges.push(renderBadge(`Path: ${res.feature_path}`));
   if (getProviderLabel(res.provider)) badges.push(renderBadge(`Provider: ${getProviderLabel(res.provider)}`));
   if (res.model) badges.push(renderBadge(res.model));
@@ -1039,6 +1114,7 @@ function updateFlagUI(enabled, featurePath) {
 
 function renderResponseMeta(res) {
   const rows = [
+    ["Answer Status", res.answer_status || "-"],
     ["Feature Path", res.feature_path || "-"],
     ["Provider", getProviderLabel(res.provider) || "-"],
     ["Model", res.model || "-"],
@@ -1047,7 +1123,8 @@ function renderResponseMeta(res) {
     ["Runtime Sources", (res.runtime_used || []).join(", ") || "-"],
     ["Business Sources", (res.business_used || []).join(", ") || "-"],
     ["Memory Sources", (res.memory_used || []).join(", ") || "-"],
-    ["Knowledge Sources", (res.knowledge_used || []).join(", ") || "-"]
+    ["Knowledge Sources", (res.knowledge_used || []).join(", ") || "-"],
+    ["Attachments Used", (res.attachments_used || []).join(", ") || "-"]
   ];
   document.getElementById("response-meta").innerHTML = rows.map(([label, value]) => `
     <div class="meta-card">
@@ -1131,7 +1208,7 @@ function renderRightPanels(res) {
     </div>
     <div class="meta-card">
       <div class="meta-label">Attachments</div>
-      <div class="meta-value">Voice notes are transcribed and sent as normal text after review. File/image upload is not available yet.</div>
+      <div class="meta-value">Voice notes are transcribed after review. Files (txt/md/csv/pdf/images) are extracted and attached to your next message after review.</div>
     </div>
     ${buildSourceCards("Memory Evidence", evidence.memory)}
   `;
@@ -1225,16 +1302,20 @@ async function loadHistory() {
   } catch (_error) {}
 }
 
-function appendMessage(role, text, responseMeta = null) {
+function appendMessage(role, text, responseMeta = null, attachments = []) {
   const messages = document.getElementById("messages");
   document.getElementById("welcome-screen").style.display = "none";
   const wrapper = document.createElement("div");
   wrapper.className = `msg ${role}`;
   const badges = responseMeta ? buildBadges(responseMeta) : "";
+  const attachmentBadges = (attachments || [])
+    .map(att => renderBadge(`📎 ${att.filename}`))
+    .join("");
   wrapper.innerHTML = `
     <div class="msg-avatar">${role === "user" ? "YOU" : "AI"}</div>
     <div class="msg-body">
       <div class="msg-bubble md-content">${markdownToHtml(text)}</div>
+      ${attachmentBadges ? `<div class="msg-meta">${attachmentBadges}</div>` : ""}
       ${badges ? `<div class="msg-meta">${badges}</div>` : ""}
       <div class="msg-time">${formatTime()}</div>
     </div>
@@ -1296,6 +1377,125 @@ function clearConversation() {
   `;
   renderRightPanels(null);
   updateFlagUI(Boolean(document.getElementById("flag-pill").textContent.includes("ON")), "pending");
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderAttachmentCards() {
+  const host = document.getElementById("attachment-chips");
+  host.innerHTML = attachedFiles.map((att, index) => {
+    if (att.status === "uploading") {
+      return `
+        <div class="attachment-card">
+          <div class="attachment-card-head">
+            <span class="attachment-card-name">${escapeHtml(att.filename)}</span>
+            <button class="attachment-card-remove" onclick="removeAttachment(${index})" aria-label="Remove attachment">✕</button>
+          </div>
+          <div class="attachment-card-status busy">Uploading &amp; extracting...</div>
+        </div>`;
+    }
+    if (att.status === "error") {
+      return `
+        <div class="attachment-card">
+          <div class="attachment-card-head">
+            <span class="attachment-card-name">${escapeHtml(att.filename)}</span>
+            <button class="attachment-card-remove" onclick="removeAttachment(${index})" aria-label="Remove attachment">✕</button>
+          </div>
+          <div class="attachment-card-status warn">${escapeHtml(att.error || "Upload failed")}</div>
+        </div>`;
+    }
+    const preview = att.previewOpen
+      ? `<div class="attachment-card-preview">${escapeHtml(att.extracted_text || "(no text extracted)")}</div>
+         <button class="attachment-card-toggle" onclick="toggleAttachmentPreview(${index})">Hide preview</button>`
+      : `<button class="attachment-card-toggle" onclick="toggleAttachmentPreview(${index})">${att.text_length ? "View extracted text" : "No text extracted"}</button>`;
+    return `
+      <div class="attachment-card">
+        <div class="attachment-card-head">
+          <span class="attachment-card-name">${escapeHtml(att.filename)}</span>
+          <span class="attachment-card-meta">${escapeHtml(att.type || "")} · ${formatFileSize(att.size_bytes || 0)}</span>
+          <button class="attachment-card-remove" onclick="removeAttachment(${index})" aria-label="Remove attachment">✕</button>
+        </div>
+        <div class="attachment-card-status ${att.warning ? "warn" : "ok"}">
+          ${att.warning ? escapeHtml(att.warning) : `Extracted ${att.text_length} characters`}
+        </div>
+        ${att.text_length ? preview : ""}
+      </div>`;
+  }).join("");
+  document.getElementById("attach-file-btn").disabled = attachedFiles.length >= MAX_ATTACHMENTS;
+}
+
+function toggleAttachmentPreview(index) {
+  if (!attachedFiles[index]) return;
+  attachedFiles[index].previewOpen = !attachedFiles[index].previewOpen;
+  renderAttachmentCards();
+}
+
+function removeAttachment(index) {
+  attachedFiles.splice(index, 1);
+  renderAttachmentCards();
+}
+
+async function handleFileInput(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = ""; // allow re-selecting the same file later
+  if (!file) return;
+
+  if (attachedFiles.length >= MAX_ATTACHMENTS) {
+    showToast(`You can attach up to ${MAX_ATTACHMENTS} files per message.`);
+    return;
+  }
+  if (file.size > MAX_UPLOAD_SIZE) {
+    showToast(`File is too large (max ${formatFileSize(MAX_UPLOAD_SIZE)}).`);
+    return;
+  }
+
+  const placeholder = { filename: file.name, status: "uploading" };
+  attachedFiles.push(placeholder);
+  renderAttachmentCards();
+
+  const form = new FormData();
+  form.append("file", file, file.name);
+
+  try {
+    const res = await fetch("/chat/upload", {
+      method: "POST",
+      headers: { "X-Internal-Key": localStorage.getItem("fazle_api_key") || API_KEY },
+      body: form
+    });
+    const idx = attachedFiles.indexOf(placeholder);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      if (idx !== -1) attachedFiles[idx] = { filename: file.name, status: "error", error: err.detail || `HTTP ${res.status}` };
+      renderAttachmentCards();
+      showToast(err.detail || "File upload failed");
+      return;
+    }
+    const data = await res.json();
+    if (idx !== -1) {
+      attachedFiles[idx] = {
+        attachment_id: data.attachment_id,
+        filename: data.filename,
+        type: data.type,
+        size_bytes: data.size_bytes,
+        extracted_text: data.extracted_text || "",
+        text_length: data.text_length || 0,
+        truncated: Boolean(data.truncated),
+        warning: data.warning || null,
+        status: "ready",
+        previewOpen: false
+      };
+    }
+    renderAttachmentCards();
+  } catch (error) {
+    const idx = attachedFiles.indexOf(placeholder);
+    if (idx !== -1) attachedFiles[idx] = { filename: file.name, status: "error", error: error.message || "Upload failed" };
+    renderAttachmentCards();
+    showToast(error.message || "File upload failed");
+  }
 }
 
 function refreshComposerAvailability() {
@@ -1518,16 +1718,21 @@ function setRightTab(tab) {
 async function sendMessage() {
   if (isLoading) return;
   if (voiceState === "recording" || voiceState === "uploading_audio" || voiceState === "transcribing") return;
+  if (attachedFiles.some(att => att.status === "uploading")) {
+    showToast("Please wait for attachments to finish uploading.");
+    return;
+  }
   const input = document.getElementById("q-input");
   const q = input.value.trim();
   if (!q) return;
 
+  const readyAttachments = attachedFiles.filter(att => att.status === "ready");
   const selectedModel = document.getElementById("model-select").value || undefined;
   const prompt = q;
   input.value = "";
   input.style.height = "auto";
   setLoading(true);
-  appendMessage("user", prompt);
+  appendMessage("user", prompt, null, readyAttachments);
   conversationHistory.push({ role: "user", content: prompt });
   const typingId = showTyping();
 
@@ -1538,8 +1743,13 @@ async function sendMessage() {
       history: conversationHistory.slice(-MAX_HISTORY_TURNS * 2),
       app_context: ctx.kb,
       db_context: ctx.db,
-      web_context: ctx.web
+      web_context: ctx.web,
+      attachments: readyAttachments.map(att => ({
+        filename: att.filename, type: att.type, extracted_text: att.extracted_text
+      }))
     });
+    attachedFiles = [];
+    renderAttachmentCards();
     removeTyping(typingId);
     conversationHistory.push({ role: "assistant", content: res.answer || "" });
     const evidence = getEvidencePayload(res);
