@@ -5251,3 +5251,38 @@ there is nothing to "keep enabled." Resuming Stage 4 (flipping these two
 flags for real shadow-mode data collection under the corrected
 authorization gate) is the next step, pending confirmation this report is
 accepted.
+
+## Phase B Stage 4 — Real-Traffic Shadow Observation Resumed (2026-07-20)
+
+Following the ESCORT_CLIENT_PHONES fix and observation-baseline reset
+above, Owner confirmed and authorized flipping the remaining two flags.
+Production `.env` and running process both confirmed:
+
+```
+CONVERSATION_MEMORY_ENABLED=true
+WHATSAPP_THREAD_RECONSTRUCTION_ENABLED=true
+MULTI_MESSAGE_ESCORT_PARSER_ENABLED=true
+BANGLA_SEMANTIC_PARSER_ENABLED=true
+```
+
+Deployed via `scripts/restart_gate.sh --restart` (all 9 checks passed),
+service healthy, zero new errors post-restart.
+
+**Safety invariants still enforced in this mode** (unchanged by this
+flag flip, all previously verified): `shadow_mode_scope()`'s hard runtime
+write-guard assertion still blocks any write to a table outside
+`fazle_conversation_threads` / `processed_conversation_messages` /
+`fazle_conversation_shadow_comparisons`; the 5-second observation timeout
+still bounds the inline-awaited shadow call; no code path in
+`modules/conversation_memory` writes to `wbom_escort_programs` or any
+other business table in any flag combination. Real multi-message draft
+creation remains **not** enabled — this flip only turns on grouping/
+Bangla-extraction *observation and comparison-record generation* for
+real traffic, per the Stage 4 authorization's explicit "observational
+only" scope.
+
+Real-traffic shadow collection begins from this point
+(2026-07-20T05:09:18Z restart timestamp). Per Stage 4 Section 5, will run
+until 14 calendar days or 30 authorized escort-client conversation
+threads, whichever comes first, before compiling the Owner Decision
+Package.
