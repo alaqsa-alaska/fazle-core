@@ -183,6 +183,16 @@ _CATEGORY_ROLE_MAP: dict[str, frozenset[str]] = {
     "financial":   frozenset({"accountant", "admin", "developer"}),
     "fpe":         frozenset({"admin", "developer"}),
     "internal":    frozenset({"admin", "developer"}),
+    # 2026-07-22: category used by _load_kb_rows() for the "kb:knowledge_base/*.md"
+    # DB-mirror rows (whole knowledge_base/ documents re-ingested into
+    # fazle_knowledge_base for RAG). Without this entry, it fell through to
+    # _DEFAULT_ALLOWED (every role, including candidate/employee) — the raw-file
+    # loader for this same tree (_load_knowledge_base_files()) is explicitly
+    # admin/developer-only by design; the DB-mirror path had silently diverged
+    # from that, letting archived/historical docs (still carrying pre-rebrand
+    # company name and superseded fee policy) leak into candidate-facing RAG
+    # answers. This closes that gap without touching the archived docs' content.
+    "knowledge_base": frozenset({"admin", "developer"}),
 }
 # Default: allow all tiers (preserves current behaviour for unclassified content).
 _DEFAULT_ALLOWED: frozenset[str] = frozenset({
