@@ -6,9 +6,10 @@ observe and treat this file as stale — then update it.
 
 ## What this is
 
-FastAPI + asyncpg WhatsApp-first operations backend for Al-Aqsa Security &
-Logistics Services Ltd (attendance, escort duty, payroll, cash payments,
-billing, recruitment, AI console). No ORM. No build step — runs directly off
+FastAPI + asyncpg WhatsApp-first operations backend for Al-Manaratayn Skill
+Solutions (rebranded 2026-07-21; formerly Al-Aqsa Security & Logistics Services
+Ltd) — attendance, escort duty, payroll, cash payments, billing, recruitment,
+AI console. No ORM. No build step — runs directly off
 this git working tree via `run.py`. Root: `/home/azim/core` (not `/root/...`
 — verify any path a human gives you against the live filesystem before
 trusting it).

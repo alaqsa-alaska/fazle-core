@@ -82,7 +82,11 @@ _DEST_RE = re.compile(r"(?i)(?:destination|dest)\s*[:=]\s*(.+)")
 
 NOISE_LINES = {"al aqsa surveillance force", "al-aqsa security service",
                "al aqsa", "al-aqsa", "al aqsa security", "al-aqsa surveillance",
-               "al aqsa security service"}
+               "al aqsa security service",
+               # 2026-07-21: new brand — old lines stay listed above since
+               # historical/already-scanned documents still carry the old name.
+               "al-manaratayn skill solutions", "al manaratayn skill solutions",
+               "al-manaratayn", "al manaratayn"}
 
 # Destination keywords — use canonical DEST_ALIASES from modules.escort (Task 9)
 DESTINATIONS = {v.lower(): v for _, v in DEST_ALIASES}

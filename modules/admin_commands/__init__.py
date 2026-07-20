@@ -911,7 +911,7 @@ async def _cmd_escort_confirm(
             f"Escort Name: {escort_name}\n"
             f"Escort Mobile: {escort_mobile}\n"
             f"{date_str} ({shift})\n"
-            f"Al-Aqsa Security Service"
+            f"Al-Manaratayn Skill Solutions"
         )
 
         # Get buyer phone from remarks JSON

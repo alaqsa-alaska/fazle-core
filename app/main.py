@@ -1346,22 +1346,9 @@ async def _handle_meta_message(msg: dict, value: dict):
     except Exception as hb_err:
         log.debug(f"[META] bridge_heartbeats write failed: {hb_err}")
 
-    if _social_auto_reply_single_engine():
-        try:
-            await ingest_social_event(
-                platform="meta_whatsapp",
-                event_type="message",
-                sender_id=sender,
-                text=text,
-                message_id=msg.get("id"),
-                media_flag=msg_type in ("image", "audio", "document", "video"),
-                raw_payload=msg,
-            )
-        except Exception as e:
-            log.warning(f"[social] meta ingest failed for {sender}: {e}")
-        log.debug(f"[META] social daemon is single reply engine, legacy reply path skipped for {sender}")
-        return
-
+    # 2026-07-21: identity-first routing — social_auto_reply retired for
+    # WhatsApp DM traffic (bridge1/bridge2/meta share one routing path now;
+    # see modules.bridge_poller.process_bridge_inbound / modules.route_b).
     # Sync-only: Meta is not in auto_reply_sources — save message, skip reply/draft.
     if "meta" not in settings.auto_reply_source_list:
         log.debug(f"[META] sync-only, skipping reply/draft for {sender}")
@@ -1683,32 +1670,12 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         _forward_to_agent_if_admin(sender_clean, text, source)
 
-        # Mirrors modules.bridge_poller._requires_legacy_workflow — keep in sync.
-        # Without this gate, an inbound escort/operational message on the webhook
-        # path (unlike the SQLite poller path, which already has this check) could
-        # be classified by the social auto-reply pipeline and never reach the real
-        # order/booking pipeline at all. See docs/AUDIT_REPORT_2026-07-17.md §1B-iv.
-        from modules.bridge_poller import _requires_legacy_workflow
-        if _social_auto_reply_single_engine() and not _requires_legacy_workflow(
-            text, {"media_type": media_type}
-        ):
-            try:
-                social_event_id = await ingest_social_event(
-                    platform=source,
-                    event_type="message",
-                    sender_id=sender_clean,
-                    text=text,
-                    message_id=msg_id or None,
-                    media_flag=bool(media_type),
-                    raw_payload=event,
-                )
-            except Exception as e:
-                log.warning(f"[social] bridge ingest failed source={source} sender={sender_clean}: {e}")
-                social_event_id = None
-            if social_event_id is not None:
-                log.debug(f"[{source.upper()}] social daemon is single reply engine, legacy reply path skipped for {sender_clean}")
-                continue
-            log.debug(f"[{source.upper()}] social ingest skipped; falling back to legacy reply path for {sender_clean}")
+        # 2026-07-21: identity-first routing — social_auto_reply's keyword
+        # gate is retired here too (mirrors the same change in
+        # modules.bridge_poller._poll_bridge). Every inbound mcp1/mcp2
+        # message now reaches process_bridge_inbound() unconditionally,
+        # which dispatches Route A vs Route B by sender identity via
+        # modules.message_router.process_message() instead of by content.
 
         # Sync-only sources: message is saved, no reply, no draft, no admin notify.
         if source not in settings.auto_reply_source_list:
@@ -2000,7 +1967,7 @@ h1{{color:#1a472a;font-size:24px}}
 </style>
 </head>
 <body>
-<h1>🌿 Fazle Core — Al-Aqsa Security</h1>
+<h1>🌿 Fazle Core — Al-Manaratayn Skill Solutions</h1>
 {safe_banner}
 <div class="grid">
   <div class="card"><div class="num">{emp_count['n']}</div><div class="label">Active Employees</div></div>

@@ -1138,34 +1138,17 @@ async def _poll_bridge(config: dict):
                     await _mark_core_queue_status(bridge_name, msg, "skipped", "unresolved_lid")
                     continue
 
-                if (
-                    os.getenv("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "true").lower() in ("1", "true", "yes")
-                    and not _requires_legacy_workflow(text, msg)
-                ):
-                    if await _check_social_daemon_health():
-                        try:
-                            from modules.social_auto_reply import ingest_social_event
-                            await ingest_social_event(
-                                platform=bridge_name,
-                                event_type="message",
-                                sender_id=phone,
-                                text=text,
-                                message_id=str(msg.get("id") or msg.get("message_id") or ""),
-                                media_flag=False,
-                                raw_payload=dict(msg),
-                            )
-                        except Exception as _social_err:
-                            log.warning(f"[social] poller ingest failed bridge={bridge_name} phone={phone}: {_social_err}")
-                        log.debug(f"[{bridge_name}] social daemon is single reply engine; poller legacy router/send skipped for {phone}")
-                        await _mark_core_queue_status(bridge_name, msg, "done")
-                        continue
-                    else:
-                        log.error(
-                            f"[social] daemon heartbeat stale >300s — bridge={bridge_name} phone={phone}; "
-                            "falling through to legacy router"
-                        )
-                        # fall through to legacy path below — no 'continue'
-
+                # 2026-07-21: identity-first routing — social_auto_reply's
+                # keyword-classifier/template engine is retired for WhatsApp
+                # DM traffic (bridge1/bridge2/meta). Every inbound message
+                # now goes through process_bridge_inbound() → process_message(),
+                # which itself dispatches Route A (KB/templates, existing
+                # roles) vs Route B (Ollama-only — escort/security_guard/
+                # candidate/unknown, see modules.route_b) by sender identity
+                # instead of by message content. social_auto_reply.
+                # ingest_social_event() is still used for Messenger DMs and
+                # Facebook Page comments (app/main.py _handle_messenger_message
+                # / _handle_fb_comment) — those are unaffected.
                 try:
                     await process_bridge_inbound(
                         bridge_name, phone, text,

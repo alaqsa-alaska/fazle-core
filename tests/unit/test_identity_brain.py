@@ -13,12 +13,12 @@ def _no_row():
     return None
 
 
-def _employee_row(phone: str = "8801811111111"):
+def _employee_row(phone: str = "8801811111111", designation: str = "Staff"):
     return {
         "employee_id": 1,
         "employee_mobile": phone,
-        "employee_name": "Test Guard",
-        "designation": "Security Guard",
+        "employee_name": "Test Employee",
+        "designation": designation,
         "status": "Active",
     }
 
@@ -102,7 +102,8 @@ class TestDetectIdentityFromEmployee:
 
         with patch("modules.identity_brain.fetch_one", new=AsyncMock(side_effect=[
             None,             # fazle_contact_roles miss
-            _employee_row(),  # wbom_employees hit
+            _employee_row(),  # wbom_employees hit (designation="Staff")
+            None,             # wbom_attendance recency check (lifecycle heuristic)
         ])):
             result = await detect_identity("8801811111111", "regular text")
 
@@ -117,12 +118,51 @@ class TestDetectIdentityFromEmployee:
         row = _employee_row("01811111111")
 
         with patch("modules.identity_brain.fetch_one", new=AsyncMock(side_effect=[
-            None, row,
+            None, row, None,
         ])):
             result = await detect_identity("8801811111111", "")
 
         actual_role = result.get("identity_role") or result.get("role")
         assert actual_role == "employee"
+
+    async def test_security_guard_designation_returns_security_guard_role(self):
+        """2026-07-21 routing work: designation drives the escort/guard split,
+        not a hardcoded 'employee' for every wbom_employees row."""
+        from modules.identity_brain import detect_identity
+
+        row = _employee_row(designation="Security Guard")
+        with patch("modules.identity_brain.fetch_one", new=AsyncMock(side_effect=[
+            None, row, None,
+        ])):
+            result = await detect_identity("8801811111111", "")
+
+        actual_role = result.get("identity_role") or result.get("role")
+        assert actual_role == "security_guard"
+
+    async def test_escort_designation_returns_escort_role(self):
+        from modules.identity_brain import detect_identity
+
+        row = _employee_row(designation="Escort")
+        with patch("modules.identity_brain.fetch_one", new=AsyncMock(side_effect=[
+            None, row, None,
+        ])):
+            result = await detect_identity("8801811111111", "")
+
+        actual_role = result.get("identity_role") or result.get("role")
+        assert actual_role == "escort"
+
+    async def test_inactive_employee_lifecycle_is_former_no_attendance_query(self):
+        """status != 'Active' short-circuits to 'former' without a 3rd DB call."""
+        from modules.identity_brain import detect_identity
+
+        row = _employee_row(designation="Staff")
+        row["status"] = "Inactive"
+        with patch("modules.identity_brain.fetch_one", new=AsyncMock(side_effect=[
+            None, row,
+        ])):
+            result = await detect_identity("8801811111111", "")
+
+        assert result.get("identity_lifecycle") == "former"
 
 
 class TestDetectIdentityFromTextHint:

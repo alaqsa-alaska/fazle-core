@@ -17,7 +17,7 @@ runtime_index: true
 ## Section 1 — Project Overview
 
 **Project Name:** Fazle AI Platform
-**Company:** Al-Aqsa Security & Logistics Services Ltd.
+**Company:** Al-Manaratayn Skill Solutions (formerly Al-Aqsa Security & Logistics Services Ltd.)
 **Location:** Bangladesh
 
 **Main Objective:** A bilingual (Bangla/English) WhatsApp-based AI automation platform that manages employee communications, recruitment, attendance, payroll, escort operations, and client interactions — all through WhatsApp messages, with AI-generated replies, human-supervised draft approvals, and a backend that integrates all business operations.

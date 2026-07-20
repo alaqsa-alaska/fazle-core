@@ -105,7 +105,7 @@ _TEMPLATE_SIGNALS = [
     "name of escort", "escort mobile", "master mobile", "master mob",
     "date & time start", "date & time completion", "completion time",
     "release place", "ghat supervisor", "lighter master", "company side",
-    "al-aqsa", "al aqsa", "security service", "bangladesh",
+    "al-aqsa", "al aqsa", "al-manaratayn", "al manaratayn", "skill solutions", "security service", "bangladesh",
 ]
 
 # Keywords common in supervisor handwritten notes

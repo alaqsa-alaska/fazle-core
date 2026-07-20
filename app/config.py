@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     fb_page_id: str = ""
 
     # Company
-    company_name: str = "Al-Aqsa Security Service"
+    company_name: str = "Al-Manaratayn Skill Solutions"
     accountant_phone: str = ""
     admin_numbers: str = ""
     admin_meta_number: str = ""
@@ -182,7 +182,7 @@ class Settings(BaseSettings):
     # Names: case-insensitive display name substrings
     # Default: if a saved contact name contains these tokens, never auto-send
     # (reply becomes a draft for admin review).
-    draft_always_names: str = "al-aqsa,escort,client,office,operation,tcis,gms,dalal"
+    draft_always_names: str = "al-aqsa,al-manaratayn,escort,client,office,operation,tcis,gms,dalal"
     # Prefixes: contact display_name starts with any of these words → always draft
     draft_name_prefixes: str = "client,escort,office,operation,tcis,gms,dalal"
 

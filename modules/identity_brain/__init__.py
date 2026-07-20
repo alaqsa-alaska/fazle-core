@@ -42,18 +42,44 @@ log = logging.getLogger("fazle.identity_brain")
 
 # ── Role priority table ────────────────────────────────────────────────────────
 _ROLE_PRIORITY: dict[str, int] = {
-    "admin":              200,
-    "family":             100,
-    "accountant":          95,
-    "vip_client":          92,
-    "client_escort_buyer": 90,
-    "repeat_client":       75,
-    "vendor":              70,
-    "employee":            88,
-    "supervisor":          80,
-    "candidate":           30,
-    "unknown":              0,
+    "admin":               200,
+    "family":              100,
+    "accountant":           95,
+    "internal_coordinator": 93,  # dispatch/payroll/paperwork coordinator — Route A, seed_rule sourced
+    "vip_client":           92,
+    "client_escort_buyer":  90,
+    "repeat_client":        75,
+    "vendor":               70,
+    "employee":             88,
+    "escort":               88,  # same tier as employee — a wbom_employees row with an escort designation
+    "security_guard":       88,  # same tier as employee — a wbom_employees row with a guard designation
+    "supervisor":           80,
+    "candidate":            30,
+    "unknown":               0,
 }
+
+# ── Route B roles (2026-07-21 identity-first routing) ──────────────────────────
+# Roles that message_router routes to the Ollama-only handler instead of the
+# KB/template/multi-provider machinery. Kept here (not re-derived per caller)
+# so bridge_poller's gate and message_router's branch can never drift apart.
+ROUTE_B_ROLES = frozenset({"escort", "security_guard", "candidate", "unknown"})
+
+# ── Designation → role mapping (escort/security_guard split) ──────────────────
+_ESCORT_DESIGNATION_RE = re.compile(r"escort", re.IGNORECASE)
+_GUARD_DESIGNATION_RE = re.compile(r"guard", re.IGNORECASE)
+
+
+def _designation_to_role(designation: Optional[str]) -> str:
+    """Map a wbom_employees.designation string to escort/security_guard/employee.
+    Read-only classification of an already-fetched row — no new query."""
+    d = (designation or "").strip()
+    if not d:
+        return "employee"
+    if _ESCORT_DESIGNATION_RE.search(d):
+        return "escort"
+    if _GUARD_DESIGNATION_RE.search(d):
+        return "security_guard"
+    return "employee"
 
 # ── Candidate keyword triggers ─────────────────────────────────────────────────
 _CANDIDATE_KEYWORDS = [
@@ -107,25 +133,17 @@ def _matches_env_escort_phone(norm_phone: str) -> bool:
 
 
 def _normalize_phone(phone: str) -> Optional[str]:
-    digits = re.sub(r"\D", "", phone or "")
-    if not digits:
-        return None
-    if digits.startswith("880") and len(digits) == 13:
-        canonical = digits
-    elif digits.startswith("0") and len(digits) == 11:
-        canonical = "880" + digits[1:]
-    elif digits.startswith("1") and len(digits) == 10:
-        canonical = "880" + digits
-    else:
-        return None
-    return canonical if canonical[3:5] in {"11", "12", "13", "14", "15", "16", "17", "18", "19"} else None
+    """Canonical 8801XXXXXXXXX form. Delegates to the documented single
+    source of truth (PHONE_NORMALIZER_CONVENTION.md) instead of
+    re-implementing digit-parsing/operator validation here."""
+    from modules.phone_normalizer import normalize_phone as _pn
+    return _pn(phone)
 
 
 def _phone_variants(phone: str) -> list[str]:
-    canonical = _normalize_phone(phone)
-    if not canonical:
-        return []
-    return ["0" + canonical[3:], canonical, "+" + canonical]
+    """[01XXXXXXXXX, 8801XXXXXXXXX, +8801XXXXXXXXX] for `= ANY($1)` lookups."""
+    from modules.number_identity import normalize_phone as _variants
+    return _variants(phone)
 
 
 async def detect_identity(phone: str, text: str = "") -> dict:
@@ -167,22 +185,28 @@ async def detect_identity(phone: str, text: str = "") -> dict:
         # ── Step 3: employee DB lookup ─────────────────────────────────────────
         emp = await _lookup_employee(norm)
         if emp:
-            log.info("[identity] %s → employee (db_employee)", norm)
-            return _build(_phone=norm, role="employee", confidence=88, source="db_employee",
-                          priority=_ROLE_PRIORITY["employee"], emp=emp)
+            role = _designation_to_role(emp.get("designation"))
+            lifecycle = await _lookup_lifecycle(norm, emp)
+            log.info("[identity] %s → %s (db_employee, lifecycle=%s)", norm, role, lifecycle)
+            return _build(_phone=norm, role=role, confidence=88, source="db_employee",
+                          priority=_ROLE_PRIORITY[role], emp=emp, lifecycle=lifecycle)
 
         # ── Step 3.5: operational evidence lookups ─────────────────────────────
         cash_emp = await _lookup_cash_identity(norm)
         if cash_emp:
-            log.info("[identity] %s → employee (cash_payment)", norm)
-            return _build(_phone=norm, role="employee", confidence=86, source="cash_payment",
-                          priority=_ROLE_PRIORITY["employee"], emp=cash_emp)
+            role = _designation_to_role(cash_emp.get("designation"))
+            lifecycle = await _lookup_lifecycle(norm, cash_emp)
+            log.info("[identity] %s → %s (cash_payment, lifecycle=%s)", norm, role, lifecycle)
+            return _build(_phone=norm, role=role, confidence=86, source="cash_payment",
+                          priority=_ROLE_PRIORITY[role], emp=cash_emp, lifecycle=lifecycle)
 
         attendance_emp = await _lookup_attendance_identity(norm)
         if attendance_emp:
-            log.info("[identity] %s → employee (attendance)", norm)
-            return _build(_phone=norm, role="employee", confidence=86, source="attendance",
-                          priority=_ROLE_PRIORITY["employee"], emp=attendance_emp)
+            role = _designation_to_role(attendance_emp.get("designation"))
+            lifecycle = await _lookup_lifecycle(norm, attendance_emp)
+            log.info("[identity] %s → %s (attendance, lifecycle=%s)", norm, role, lifecycle)
+            return _build(_phone=norm, role=role, confidence=86, source="attendance",
+                          priority=_ROLE_PRIORITY[role], emp=attendance_emp, lifecycle=lifecycle)
 
         escort_row = await _lookup_escort_roster(norm)
         if escort_row:
@@ -198,6 +222,7 @@ async def detect_identity(phone: str, text: str = "") -> dict:
                 _phone=norm, role=escort_role, confidence=85, source="escort_roster",
                 priority=_ROLE_PRIORITY.get(escort_role, _ROLE_PRIORITY["employee"]),
                 notes=f"escort_duty:{_esc_status}:{_esc_date}",
+                lifecycle="active",  # a live wbom_escort_programs row implies active duty
             )
 
         # ── Step 3.7: explicit ESCORT_CLIENT_PHONES match (Phase 1B.2, source A) ──
@@ -386,6 +411,37 @@ async def _lookup_attendance_identity(phone: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def _lookup_lifecycle(phone: str, emp: dict, *, on_leave_days: int = 14) -> str:
+    """Read-only former/on-leave/active heuristic (2026-07-21 routing work).
+
+    No new DB columns (Owner directive) — derived entirely from existing
+    wbom_employees.status plus wbom_attendance recency:
+      - status not 'Active' (e.g. 'Inactive')      → "former"
+      - status 'Active' but no attendance row in the
+        last `on_leave_days` days                  → "on_leave"
+      - status 'Active' with recent attendance      → "active"
+    Only meaningful for escort/security_guard/employee roles; callers for
+    other roles don't need this and can ignore the field.
+    """
+    status = (emp.get("status") or "").strip().lower()
+    if status and status != "active":
+        return "former"
+    employee_id = emp.get("employee_id")
+    if not employee_id:
+        return "active"
+    try:
+        recent = await fetch_one(
+            """SELECT 1 FROM wbom_attendance
+               WHERE employee_id = $1
+                 AND attendance_date >= (CURRENT_DATE - $2::int)
+               LIMIT 1""",
+            employee_id, on_leave_days,
+        )
+    except (AttributeError, LookupError, TypeError, ValueError):
+        return "active"  # fail open to "active" — this is context, not a gate
+    return "active" if recent else "on_leave"
+
+
 async def _lookup_escort_roster(phone: str) -> Optional[dict]:
     """Return any existing escort/ship identity before candidate classification."""
     variants = _phone_variants(phone)
@@ -395,7 +451,7 @@ async def _lookup_escort_roster(phone: str) -> Optional[dict]:
         """SELECT program_id, escort_name, escort_mobile, master_mobile,
                   status, program_date,
                   CASE WHEN escort_mobile = ANY($1)
-                       THEN 'employee' ELSE 'repeat_client' END AS identity_role
+                       THEN 'escort' ELSE 'repeat_client' END AS identity_role
            FROM wbom_escort_programs
            WHERE escort_mobile = ANY($1) OR master_mobile = ANY($1)
            ORDER BY program_date DESC NULLS LAST, program_id DESC
@@ -454,6 +510,7 @@ def _build(
     priority: int,
     emp: Optional[dict] = None,
     notes: str = "",
+    lifecycle: Optional[str] = None,
 ) -> dict:
     return {
         # Legacy UserRole fields (backward compatible)
@@ -474,6 +531,11 @@ def _build(
         "identity_source":     source,
         "identity_priority":   priority,
         "identity_notes":      notes,
+        # 2026-07-21 routing work: context only, not a routing input — Route
+        # B treats active/former/on_leave escort/guard identically per Owner
+        # spec. None for roles where lifecycle isn't meaningful (family,
+        # accountant, etc.).
+        "identity_lifecycle":  lifecycle,
     }
 
 
@@ -502,6 +564,7 @@ def _build_contact(
         "identity_source":     source,
         "identity_priority":   priority,
         "identity_notes":      "",
+        "identity_lifecycle":  None,
     }
 
 
@@ -523,6 +586,7 @@ def _unknown(_phone: str) -> dict:
         "identity_source":     "none",
         "identity_priority":   0,
         "identity_notes":      "",
+        "identity_lifecycle":  None,
     }
 
 

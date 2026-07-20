@@ -2,7 +2,8 @@
 
 > **New to this repo, or an AI agent picking up cold?** Read [`SYSTEM_ATLAS.md`](SYSTEM_ATLAS.md) first — it's the single canonical entry point and document map. This README covers the same ground in narrative form.
 
-Fazle Core is the production WhatsApp-first operations backend for Al-Aqsa
+Fazle Core is the production WhatsApp-first operations backend for Al-Manaratayn
+Skill Solutions (rebranded 2026-07-21; formerly Al-Aqsa
 Security and Logistics Services Ltd. It is a FastAPI service that ingests
 messages from WhatsApp bridge databases, bridge webhooks, Meta/Facebook
 webhooks, and admin UIs, then routes them into recruitment, payroll, escort,
@@ -15,7 +16,7 @@ domains are still transitional and must stay under human review.
 ## Product Overview
 
 **What it is:** a bilingual (Bangla/English) WhatsApp-first operations platform
-that runs Al-Aqsa Security & Logistics Services Ltd's day-to-day business —
+that runs Al-Manaratayn Skill Solutions's day-to-day business —
 recruitment, employee/guard payroll, escort (vessel security) service
 dispatch and duty tracking, client and employee communication, and a growing
 AI-driven console over that data. It is not a generic chatbot framework; every

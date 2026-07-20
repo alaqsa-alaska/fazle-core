@@ -10,7 +10,7 @@
 
 ## 1. What Fazle Core is (business context)
 
-Fazle Core is the production WhatsApp-first operations backend for **Al-Aqsa Security & Logistics Services Ltd**, a security-guard and vessel-escort company. It runs recruitment, employee/guard payroll, escort (vessel security) service intake and duty tracking, client and employee WhatsApp communication, and an AI console over that data — for one company, not a generic platform.
+Fazle Core is the production WhatsApp-first operations backend for **Al-Manaratayn Skill Solutions** (rebranded 2026-07-21; formerly Al-Aqsa Security & Logistics Services Ltd), a security-guard and vessel-escort company. It runs recruitment, employee/guard payroll, escort (vessel security) service intake and duty tracking, client and employee WhatsApp communication, and an AI console over that data — for one company, not a generic platform.
 
 **Who uses it:** the Owner/Admin (runs the business via WhatsApp commands + web dashboards), HR/office assistants (restricted payroll access), the accountant, employees/guards, recruitment candidates, and corporate escort/vessel clients.
 

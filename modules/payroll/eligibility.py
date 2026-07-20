@@ -24,7 +24,7 @@ from typing import Optional
 
 # Section 1.2 "Name keyword classification" — case-insensitive substring,
 # may appear anywhere in the name (first/middle/last/anywhere).
-OFFICE_NAME_KEYWORDS = ("al-aqsa", "office", "operation", "sv")
+OFFICE_NAME_KEYWORDS = ("al-aqsa", "al-manaratayn", "office", "operation", "sv")
 
 # Section 1.2 "Designation classification" — an approved non-Escort
 # designation is sufficient on its own, independent of the name check.

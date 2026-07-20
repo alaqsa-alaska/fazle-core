@@ -253,7 +253,7 @@ An employee is Office Staff (and therefore eligible for Formula 3, never Formula
 2. `designation` is not `'Escort'` (case-insensitive).
 3. Not an obvious bookkeeping/test/placeholder record (best-effort name-substring heuristic — disclosed as imperfect, not a guarantee).
 4. `basic_salary > 0`.
-5. Either the employee name contains (case-insensitive, anywhere) `Al-Aqsa`/`Office`/`Operation`/`SV`, OR `designation` is one of `Staff`/`Guard`/`Labor`/`Day Labour`/`Supervisor`/`Operation Officer`/`Office Assistant`/`Security Guard`.
+5. Either the employee name contains (case-insensitive, anywhere) `Al-Aqsa`/`Al-Manaratayn`/`Office`/`Operation`/`SV`, OR `designation` is one of `Staff`/`Guard`/`Labor`/`Day Labour`/`Supervisor`/`Operation Officer`/`Office Assistant`/`Security Guard`. (`Al-Manaratayn` added 2026-07-21 alongside the pre-rebrand `Al-Aqsa` keyword — existing employee-name records still carry the old name.)
 
 **Confirmed production result (2026-07-11): 0 of 188 employees are currently eligible** — 184 are Escort-designation (excluded by rule #2), and the remaining 4 non-Escort records each fail a different gate (one inactive, two with `basic_salary=0`, one flagged as a likely bookkeeping/test row). This is a **data-state condition, not an implementation failure** — the eligibility pipeline is built and verified correct against real production data; it is simply dormant until a real, active, positively-salaried office employee exists.
 

@@ -30,7 +30,7 @@ from app.database import fetch_one, fetch_all, fetch_val, execute
 from shared.draft_reply import create_draft_reply
 from modules.intent import classify
 from modules.phone_normalizer import normalize_phone
-from modules.identity_brain import detect_identity
+from modules.identity_brain import detect_identity, ROUTE_B_ROLES
 from modules.number_identity import normalize_phone as get_phone_variants
 from app import llm as ai
 from modules.payroll_logic import get_payroll_summary, format_payroll_context
@@ -742,6 +742,24 @@ async def process_message(
     if not existing_session and is_advance_request(text) and role_str != "admin":
         return await start_advance_verification(sender, source, identity.get("employee_id"))
 
+    # ── 11.5 ROUTE B (2026-07-21) — escort / security_guard / candidate / unknown ─
+    # Placed AFTER every mature, role-agnostic path above it (attendance,
+    # escort-order safety net, Sprint-3A advance/payment catchall, legacy
+    # advance verification) so none of that existing, tested behavior is
+    # ever preempted — escort/security_guard have real wbom_employees rows
+    # and must keep using the Sprint-3A conversation flow for genuine
+    # advance requests exactly like before the escort/guard role split.
+    # Route B only takes over what would otherwise fall through to the
+    # office_location fast path / KB / generic multi-provider AI fallback
+    # below — i.e. non-operational chat, office/deposit questions, and any
+    # money/advance phrasing Sprint-3A's own trigger groups didn't already
+    # catch. Ollama-only per Owner spec — see modules.route_b docstring.
+    if role_str in ROUTE_B_ROLES:
+        from modules.route_b import handle_route_b_message
+        reply, admin_note = await handle_route_b_message(sender, text, source, identity, intent)
+        if reply:
+            return reply, admin_note
+
     # ── 12. OFFICE LOCATION FAST PATH (KB-only, no AI, no reviewed memory) ──────
     # office_location intent skips reviewed-memory lookup and AI entirely.
     # The answer is always b11_office_address — deterministic and safe for all roles.
@@ -750,15 +768,14 @@ async def process_message(
         if office_reply:
             log.info("[OFFICE_FAST] %s → office_location → KB direct return", sender)
             return office_reply, None
-        # Hardcoded fallback if KB unavailable
-        return (
-            "আমাদের অফিস:\n"
-            "আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেড\n"
-            "আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, খোকনের বিল্ডিং (২য় তলা)\n"
-            "পাহাড়তলী, চট্টগ্রাম সিটি কর্পোরেশন\n\n"
-            "সকাল ৯টা – বিকাল ৫টা (শুক্রবার বন্ধ)\n"
-            "WhatsApp: 01958 122322"
-        ), None
+        # 2026-07-21: the separate hardcoded copy that used to live here was
+        # redundant with — and had drifted out of sync with —
+        # modules.knowledge_base.get_reply()'s own two-layer fallback (DB row
+        # b11_office_address, then its internal _FALLBACK constant). Removed
+        # per the KB-consolidation directive; kb_get_reply() above is now the
+        # single source of truth and should never actually reach this line.
+        log.error("[OFFICE_FAST] %s → office_location → KB unavailable (DB + fallback both empty)", sender)
+        return "", None
 
     # ── 13. KNOWLEDGE BASE (all roles, all other intents) ─────────────────────
     kb_reply = await kb_get_reply(text, intent)

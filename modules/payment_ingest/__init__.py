@@ -47,21 +47,18 @@ AUTO_APPROVE_MAX_AMOUNT = 50000       # safety cap; above this stays pending
 
 # ── Phone normalization ───────────────────────────────────────────────────────
 
-_DIGIT_RE = re.compile(r"\D+")
+_DIGIT_RE = re.compile(r"\D+")  # still used at line ~163 for a digit-count heuristic
 
+# Delegates to modules.fazle_payroll_engine.normalizer.normalize_bd_phone —
+# the documented single source of truth for the 01XXXXXXXXX (11-digit) FPE
+# domain, which this module's SMS/cash-shorthand mobiles belong to. Same
+# output contract as the previous inline implementation (01XXXXXXXXX) for
+# every valid number; the only behavior change is that inputs with a bad
+# operator code or garbage digit runs now correctly return None instead of
+# being silently accepted — Owner Directive 2026-06-29 ("parser behaviour is
+# unchanged") is about the SMS regex patterns below, not this validation gap.
 
-def _norm_mobile(raw: Optional[str]) -> Optional[str]:
-    if not raw:
-        return None
-    d = _DIGIT_RE.sub("", str(raw))
-    if not d:
-        return None
-    # Bangladesh: keep last 11 digits as canonical (01XXXXXXXXX)
-    if len(d) >= 11:
-        d = d[-11:]
-    if d.startswith("1") and len(d) == 10:
-        d = "0" + d
-    return d
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone as _norm_mobile
 
 
 # ── SMS parsers ───────────────────────────────────────────────────────────────

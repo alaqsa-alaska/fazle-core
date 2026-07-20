@@ -152,7 +152,7 @@ _CD_DEST_RE = re.compile(
     r"destination[ \t]*:[ \t]*(.+?)(?=[ \t]*\n|$)",
     re.IGNORECASE | re.MULTILINE,
 )
-_AL_AQSA_RE = re.compile(r"al.?aqsa|আল.?আকসা", re.IGNORECASE)
+_AL_AQSA_RE = re.compile(r"al.?aqsa|আল.?আকসা|al.?manaratayn|আল.?মানারাতাইন", re.IGNORECASE)
 _TRAILING_MV_PAREN_RE = re.compile(r"\(\s*(mv\.?\s+[A-Za-z0-9][A-Za-z0-9\s.\-]{1,60})\s*\)$", re.IGNORECASE)
 
 # O/a to <destination> pattern for inbound messages
@@ -869,7 +869,7 @@ def build_admin_draft(
         "Escort Mobile:",
         f"{d} ({shift_label})",
         "",
-        "Al-Aqsa Security & Logistics Services Ltd",
+        "Al-Manaratayn Skill Solutions",
     ]
     return "\n".join(lines)
 
@@ -1024,7 +1024,7 @@ def build_final_slip(draft: CompletedDraft, db_destination: Optional[str] = None
 
     Field labels and footer match the exact format used in the field:
       Mother Vessel / Lighter Vessel / Master Mobile / Destination /
-      Escort Name / Escort Mobile / Start Date (D/N) / Al-Aqsa Security Service
+      Escort Name / Escort Mobile / Start Date (D/N) / Al-Manaratayn Skill Solutions
     """
     shift_label = f" ({draft['shift']})" if draft.get("shift") else ""
     destination = draft.get("destination") or db_destination or ""
@@ -1036,7 +1036,7 @@ def build_final_slip(draft: CompletedDraft, db_destination: Optional[str] = None
         f"Escort Name: {draft['escort_name'] or '—'}",
         f"Escort Mobile: {draft['escort_mobile'] or '—'}",
         f"Start Date: {draft['date_str'] or _TODAY()}{shift_label}",
-        "Al-Aqsa Security Service",
+        "Al-Manaratayn Skill Solutions",
     ]
     return "\n".join(lines)
 
