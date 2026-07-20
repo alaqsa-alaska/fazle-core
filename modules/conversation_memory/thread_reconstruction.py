@@ -23,6 +23,7 @@ call site wraps this in a broad except and logs, never propagates.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -41,10 +42,12 @@ async def shadow_observe_escort_client_message(
     message_id: Optional[str],
     sender_role: str,
 ) -> None:
-    """Fire-and-forget shadow observation for an authorized escort-client
-    message. Called from modules.message_router, upstream of the
-    existing (unchanged) escort routing decision. Never raises to the
-    caller -- any failure here must never affect real message routing.
+    """Shadow observation for an authorized escort-client message,
+    awaited inline in the real message-routing path (modules.message_
+    router), upstream of the existing (unchanged) escort routing
+    decision. Never raises to the caller and never blocks past its own
+    timeout -- any failure or hang here must never affect real message
+    routing (Stage 4, Section 3's fail-safe requirements).
 
     Only runs when BOTH conversation_memory_enabled and
     whatsapp_thread_reconstruction_enabled are set (both default False) --
@@ -55,7 +58,21 @@ async def shadow_observe_escort_client_message(
         return
 
     try:
-        await _observe(text=text, sender_phone=sender_phone, source=source, message_id=message_id, sender_role=sender_role)
+        from app.database import shadow_mode_scope
+        async with shadow_mode_scope():
+            await asyncio.wait_for(
+                _observe(text=text, sender_phone=sender_phone, source=source, message_id=message_id, sender_role=sender_role),
+                timeout=settings.conversation_memory_shadow_timeout_seconds,
+            )
+    except asyncio.TimeoutError:
+        # Abandon the attempt outright -- no retry (a retry could race a
+        # second real message and duplicate processing, exactly what
+        # Section 3 prohibits). The next real message for this identity
+        # will simply re-observe from current DB state on its own turn.
+        log.error(
+            "[shadow] conversation memory observation timed out after %ss (non-fatal, no effect on routing)",
+            settings.conversation_memory_shadow_timeout_seconds,
+        )
     except Exception as exc:
         log.error("[shadow] conversation memory observation failed (non-fatal, no effect on routing): %s", exc)
 
@@ -65,6 +82,13 @@ async def _observe(*, text: str, sender_phone: str, source: str, message_id: Opt
     from modules.escort import _is_allowed_escort_client
     from modules.bridge_poller import _is_system_generated_notification
 
+    settings = get_settings()
+    # Section 6's exclusion/duplicate metrics only make sense in Stage
+    # 2/3's own scope (mirrors record_shadow_comparison()'s existing
+    # boundary: Stage 1 never writes to fazle_conversation_shadow_
+    # comparisons at all).
+    track_metrics = settings.multi_message_escort_parser_enabled
+
     # Explicit, defense-in-depth authorization gate (Stage 2 Part 3) -- the
     # caller (message_router's `if role_str in _ESCORT_ROLES:` branch)
     # already enforces this, but this module must never assume it was
@@ -73,6 +97,11 @@ async def _observe(*, text: str, sender_phone: str, source: str, message_id: Opt
     # grant order-creation-candidate status to an unauthorized sender.
     if not _is_allowed_escort_client(sender_phone):
         log.debug("[shadow] sender not in ESCORT_CLIENT_PHONES, refusing to observe: %s", sender_phone)
+        if track_metrics:
+            await cm.record_shadow_exclusion(
+                bridge_id=source, counterparty_phone=sender_phone, business_domain="escort",
+                message_id=message_id, exclusion_kind="unauthorized_excluded",
+            )
         return
 
     # Inbound client messages should never carry the outbound-only
@@ -83,13 +112,22 @@ async def _observe(*, text: str, sender_phone: str, source: str, message_id: Opt
     # contributor to conversation state.
     if _is_system_generated_notification(text):
         log.warning("[shadow] inbound text unexpectedly carries a system-generated marker, refusing to observe: sender=%s", sender_phone)
+        if track_metrics:
+            await cm.record_shadow_exclusion(
+                bridge_id=source, counterparty_phone=sender_phone, business_domain="escort",
+                message_id=message_id, exclusion_kind="system_generated_excluded",
+            )
         return
 
     if message_id and await cm.is_message_processed(message_id, source):
         log.debug("[shadow] message already processed, skipping: %s", message_id)
+        if track_metrics:
+            await cm.record_shadow_exclusion(
+                bridge_id=source, counterparty_phone=sender_phone, business_domain="escort",
+                message_id=message_id, exclusion_kind="duplicate_replay",
+            )
         return
 
-    settings = get_settings()
     if settings.multi_message_escort_parser_enabled:
         thread_id = await _observe_stage2(text=text, sender_phone=sender_phone, source=source, message_id=message_id, sender_role=sender_role)
     else:
@@ -201,10 +239,12 @@ _DEFAULT_FIELD_CONFIDENCE = {
 
 
 async def _observe_stage2(*, text: str, sender_phone: str, source: str, message_id: Optional[str], sender_role: str) -> Optional[int]:
+    import time
     import modules.conversation_memory as cm
     from modules.conversation_memory.grouping import classify_threads_for_message, check_existing_draft_relation
     from modules.escort import parse_escort_message
 
+    _started_at = time.monotonic()
     settings = get_settings()
     bangla_enabled = settings.bangla_semantic_parser_enabled
 
@@ -302,7 +342,7 @@ async def _observe_stage2(*, text: str, sender_phone: str, source: str, message_
                 confidence=meta["confidence"], extraction_method=meta["extraction_method"],
                 is_system_generated=False, is_explicit_label=meta.get("is_explicit_label", False),
             )
-            field_provenance[field_name] = result.reason
+            field_provenance[field_name] = {"reason": result.reason, "extraction_method": meta["extraction_method"]}
             if result.applied:
                 applied_any = True
             if result.conflict:
@@ -365,6 +405,7 @@ async def _observe_stage2(*, text: str, sender_phone: str, source: str, message_
         existing_draft_relation_detail=existing_draft_detail,
         parser_missed_candidate=parser_missed_candidate,
         parser_would_have_merged_incorrectly=parser_would_have_merged_incorrectly,
+        processing_latency_ms=int((time.monotonic() - _started_at) * 1000),
     )
 
     return thread["id"] if thread else None

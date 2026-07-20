@@ -217,6 +217,10 @@ class Settings(BaseSettings):
     conversation_ttl_escort_minutes: int = 30
     conversation_ttl_recruitment_hours: int = 24
     conversation_ttl_general_hours: int = 2
+    # Stage 4 fail-safe requirement: shadow observation is awaited inline
+    # in the real message-routing path, so it must be bounded -- a slow
+    # DB or slow extraction must never be able to hang real routing.
+    conversation_memory_shadow_timeout_seconds: float = 5.0
 
     # Fazle Payroll Engine (FPE)
     fpe_sync_chat_jids: str = ""   # comma-separated target JIDs for historical sync

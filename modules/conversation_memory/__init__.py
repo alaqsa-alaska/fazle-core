@@ -324,6 +324,9 @@ async def update_thread(
     return _deserialize(row) if row else None
 
 
+EXCLUSION_GROUPING_ACTIONS = ("unauthorized_excluded", "system_generated_excluded", "duplicate_replay")
+
+
 async def record_shadow_comparison(
     *,
     thread_id: Optional[int],
@@ -344,14 +347,12 @@ async def record_shadow_comparison(
     existing_draft_relation_detail: Optional[dict] = None,
     parser_missed_candidate: bool = False,
     parser_would_have_merged_incorrectly: bool = False,
+    processing_latency_ms: Optional[int] = None,
 ) -> None:
     """Stage 2 Part 9 -- one structured row per observed message while
     multi_message_escort_parser_enabled is on. Never read by anything that
     creates a business row; exists purely for the required aggregate
-    metrics (conversations observed, partial threads, completed
-    candidates, conflicts, duplicates, unauthorized-excluded,
-    parser-missed-candidate, parser-would-have-merged-incorrectly), all
-    computed on demand via GROUP BY over this table."""
+    metrics, all computed on demand via GROUP BY over this table."""
     await execute(
         """INSERT INTO fazle_conversation_shadow_comparisons
                (thread_id, bridge_id, counterparty_phone, business_domain, message_id,
@@ -359,8 +360,8 @@ async def record_shadow_comparison(
                 completion_state, grouping_action, grouping_reason, conflicts,
                 would_create_draft, reason, existing_draft_relation,
                 existing_draft_relation_detail, parser_missed_candidate,
-                parser_would_have_merged_incorrectly)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)""",
+                parser_would_have_merged_incorrectly, processing_latency_ms)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)""",
         thread_id, bridge_id, counterparty_phone, business_domain, message_id,
         json.dumps(current_parser_result, default=str),
         json.dumps(conversation_aware_result, default=str),
@@ -369,29 +370,115 @@ async def record_shadow_comparison(
         json.dumps(conflicts, default=str),
         would_create_draft, reason, existing_draft_relation,
         json.dumps(existing_draft_relation_detail, default=str) if existing_draft_relation_detail is not None else None,
-        parser_missed_candidate, parser_would_have_merged_incorrectly,
+        parser_missed_candidate, parser_would_have_merged_incorrectly, processing_latency_ms,
     )
 
 
+async def record_shadow_exclusion(
+    *, bridge_id: str, counterparty_phone: str, business_domain: str,
+    message_id: Optional[str], exclusion_kind: str,
+) -> None:
+    """Section 6's "system-generated messages excluded" / "unauthorized
+    senders excluded" / "duplicate message replays" counts need a row to
+    count -- these cases return early in _observe() before any candidate
+    logic runs, so without this they'd be invisible to
+    shadow_comparison_metrics(). exclusion_kind must be one of
+    EXCLUSION_GROUPING_ACTIONS. Only called while
+    multi_message_escort_parser_enabled is on, same scope boundary as
+    record_shadow_comparison()."""
+    if exclusion_kind not in EXCLUSION_GROUPING_ACTIONS:
+        raise ValueError(f"invalid exclusion_kind: {exclusion_kind!r}")
+    await execute(
+        """INSERT INTO fazle_conversation_shadow_comparisons
+               (thread_id, bridge_id, counterparty_phone, business_domain, message_id,
+                current_parser_result, conversation_aware_result, field_provenance,
+                completion_state, grouping_action, grouping_reason, conflicts,
+                would_create_draft, reason)
+           VALUES (NULL,$1,$2,$3,$4,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,
+                   'excluded',$5,$5,'[]'::jsonb,FALSE,$5)""",
+        bridge_id, counterparty_phone, business_domain, message_id, exclusion_kind,
+    )
+
+
+_REQUIRED_FIELDS_ARRAY = "array['mother_vessel','lighter_vessel','master_mobile']"
+
+
 async def shadow_comparison_metrics(business_domain: str = "escort") -> dict:
-    """Section 9's required aggregate counts, computed on demand from
-    fazle_conversation_shadow_comparisons -- never a running counter that
-    could drift from the underlying rows."""
+    """Stage 4 Section 6's full required metric set, computed on demand
+    from fazle_conversation_shadow_comparisons + fazle_conversation_threads
+    -- never a running counter that could drift from the underlying rows.
+    "Shadow exceptions" are intentionally not included here -- they're
+    logged (`log.error("[shadow] conversation memory observation
+    failed...")`) rather than persisted, since an exception can occur
+    before any row would exist to attach it to; read via
+    `grep -c '\\[shadow\\] conversation memory observation' logs/fazle-core.log`."""
     row = await fetch_one(
-        """SELECT
-               count(*) AS conversations_observed,
-               count(*) FILTER (WHERE completion_state = 'partial') AS partial_threads,
-               count(*) FILTER (WHERE would_create_draft) AS completed_candidates,
-               count(*) FILTER (WHERE jsonb_array_length(conflicts) > 0) AS conflicts,
-               count(*) FILTER (WHERE grouping_reason = 'duplicate_message_replay') AS duplicates,
-               count(*) FILTER (WHERE grouping_action = 'needs_review') AS unauthorized_or_ambiguous_excluded,
-               count(*) FILTER (WHERE parser_missed_candidate) AS parser_missed_candidate_cases,
-               count(*) FILTER (WHERE parser_would_have_merged_incorrectly) AS parser_would_have_merged_incorrectly_cases
+        f"""SELECT
+               count(*) FILTER (WHERE grouping_action NOT IN ('unauthorized_excluded','system_generated_excluded','duplicate_replay'))
+                   AS authorized_client_messages_observed,
+               count(DISTINCT thread_id) FILTER (WHERE thread_id IS NOT NULL)
+                   AS reconstructed_conversation_threads,
+               count(*) FILTER (WHERE would_create_draft AND NOT parser_missed_candidate)
+                   AS single_message_complete_orders,
+               count(*) FILTER (WHERE would_create_draft AND parser_missed_candidate)
+                   AS multi_message_complete_candidates,
+               count(*) FILTER (WHERE grouping_reason = 'conflicting_identity_fields_treated_as_new_order')
+                   AS possible_interleaved_orders,
+               count(*) FILTER (WHERE grouping_action = 'duplicate_replay')
+                   AS duplicate_message_replays,
+               count(*) FILTER (WHERE grouping_action = 'system_generated_excluded')
+                   AS system_generated_messages_excluded,
+               count(*) FILTER (WHERE grouping_action = 'unauthorized_excluded')
+                   AS unauthorized_senders_excluded,
+               count(*) FILTER (WHERE current_parser_result ?& {_REQUIRED_FIELDS_ARRAY})
+                   AS current_parser_drafts,
+               count(*) FILTER (WHERE would_create_draft)
+                   AS shadow_parser_would_create_draft_results,
+               count(*) FILTER (WHERE parser_missed_candidate)
+                   AS current_parser_misses_recovered_by_shadow_parsing,
+               count(*) FILTER (WHERE (current_parser_result ?& {_REQUIRED_FIELDS_ARRAY}) AND NOT would_create_draft)
+                   AS current_parser_successes_missed_by_shadow_parsing,
+               count(*) FILTER (WHERE jsonb_array_length(conflicts) > 0)
+                   AS field_level_disagreements,
+               count(*) FILTER (WHERE grouping_action = 'merge_existing' AND grouping_reason = 'single_open_thread_no_identity_conflict')
+                   AS possible_false_merges,
+               count(*) FILTER (WHERE grouping_action = 'needs_review')
+                   AS possible_missed_merges,
+               count(*) FILTER (WHERE field_provenance::text LIKE '%bangla_label%')
+                   AS bangla_labelled_fields_extracted,
+               count(*) FILTER (
+                   WHERE EXISTS (
+                       SELECT 1 FROM jsonb_each(conversation_aware_result) f(key, value)
+                       WHERE f.key IN ('mother_vessel','lighter_vessel','master_mobile')
+                         AND (f.value->>'confidence')::numeric < 0.6
+                   )
+               ) AS low_confidence_required_fields,
+               round(avg(processing_latency_ms) FILTER (WHERE processing_latency_ms IS NOT NULL))
+                   AS avg_processing_latency_ms,
+               max(processing_latency_ms) AS max_processing_latency_ms
            FROM fazle_conversation_shadow_comparisons
            WHERE business_domain = $1""",
         business_domain,
     )
-    return dict(row) if row else {}
+    metrics = dict(row) if row else {}
+
+    thread_row = await fetch_one(
+        """SELECT
+               count(*) FILTER (WHERE state IN ('open','partial')) AS incomplete_threads,
+               count(*) FILTER (WHERE state = 'conflicted') AS conflicted_threads,
+               count(*) FILTER (
+                   WHERE state = 'expired'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM fazle_conversation_shadow_comparisons c
+                         WHERE c.thread_id = fazle_conversation_threads.id AND c.would_create_draft
+                     )
+               ) AS expired_incomplete_threads
+           FROM fazle_conversation_threads
+           WHERE business_domain = $1""",
+        business_domain,
+    )
+    metrics.update(dict(thread_row) if thread_row else {})
+    return metrics
 
 
 async def expire_stale_threads(actor: str = "scheduler") -> dict:

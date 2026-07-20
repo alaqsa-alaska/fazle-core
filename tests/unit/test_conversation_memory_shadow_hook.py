@@ -141,6 +141,73 @@ async def test_system_generated_marker_on_inbound_text_is_refused(monkeypatch):
         get_settings.cache_clear()
 
 
+@pytest.mark.asyncio
+async def test_shadow_observation_times_out_without_blocking_caller(monkeypatch):
+    """Stage 4 Section 3 fail-safe requirement: a hung shadow observation
+    must be abandoned, not allowed to block the real message-routing path
+    it's awaited inline from."""
+    import asyncio
+    from app.config import get_settings
+    from modules.conversation_memory import thread_reconstruction as tr
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+    monkeypatch.setenv("CONVERSATION_MEMORY_SHADOW_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+
+    async def _hang(**kwargs):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(tr, "_observe", _hang)
+
+    try:
+        started = asyncio.get_event_loop().time()
+        # Must return well before the simulated 10s hang, and must not raise.
+        await tr.shadow_observe_escort_client_message(
+            text=REAL_MSG_1, sender_phone="01670535255", source="bridge2",
+            message_id="MSG-TIMEOUT", sender_role="client_escort_buyer",
+        )
+        elapsed = asyncio.get_event_loop().time() - started
+        assert elapsed < 2.0, "shadow observation must be abandoned at its own timeout, not left to hang"
+    finally:
+        monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
+        monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+        monkeypatch.delenv("CONVERSATION_MEMORY_SHADOW_TIMEOUT_SECONDS", raising=False)
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_shadow_db_unavailable_does_not_block_routing(monkeypatch):
+    """Stage 4 Section 3: if the shadow-mode database connection itself
+    is unavailable, real message routing must continue unaffected -- no
+    exception propagates, no HTTP 500 traceable to this module."""
+    from app.config import get_settings
+    from modules.conversation_memory import thread_reconstruction as tr
+    import modules.conversation_memory as cm
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", "true")
+    get_settings.cache_clear()
+
+    async def _connection_refused(*a, **kw):
+        raise ConnectionRefusedError("simulated DB connection failure")
+
+    monkeypatch.setattr(cm, "get_open_thread", _connection_refused)
+
+    try:
+        # Must not raise.
+        await tr.shadow_observe_escort_client_message(
+            text=REAL_MSG_1, sender_phone="01670535255", source="bridge2",
+            message_id="MSG-DBDOWN", sender_role="client_escort_buyer",
+        )
+    finally:
+        monkeypatch.delenv("CONVERSATION_MEMORY_ENABLED", raising=False)
+        monkeypatch.delenv("WHATSAPP_THREAD_RECONSTRUCTION_ENABLED", raising=False)
+        get_settings.cache_clear()
+
+
 class TestShadowObservationAgainstRealDB:
     """Requires a live Postgres connection (test_db_pool) -- skipped
     automatically in this session (TEST_DB_PASSWORD unavailable), runs

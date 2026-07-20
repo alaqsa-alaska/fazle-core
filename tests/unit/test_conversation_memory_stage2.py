@@ -89,14 +89,21 @@ async def test_unauthorized_employee_contributes_nothing_stage2(monkeypatch):
     async def _boom(*a, **kw):
         raise AssertionError("must never be reached for an unauthorized sender")
 
+    recorded = {}
+
+    async def _fake_record_exclusion(*, bridge_id, counterparty_phone, business_domain, message_id, exclusion_kind):
+        recorded["exclusion_kind"] = exclusion_kind
+
     monkeypatch.setattr(cm, "get_open_threads", _boom)
     monkeypatch.setattr(cm, "create_thread", _boom)
+    monkeypatch.setattr(cm, "record_shadow_exclusion", _fake_record_exclusion)
 
     try:
         await tr.shadow_observe_escort_client_message(
             text=MSG_LIGHTER_1, sender_phone="8801999999999",
             source="bridge2", message_id="STAGE2-UNAUTH-1", sender_role="employee",
         )
+        assert recorded["exclusion_kind"] == "unauthorized_excluded"
     finally:
         _disable_stage2(monkeypatch)
 
@@ -113,14 +120,21 @@ async def test_system_generated_wrapper_contributes_nothing_stage2(monkeypatch):
     async def _boom(*a, **kw):
         raise AssertionError("must never be reached when the text carries the automated marker")
 
+    recorded = {}
+
+    async def _fake_record_exclusion(*, bridge_id, counterparty_phone, business_domain, message_id, exclusion_kind):
+        recorded["exclusion_kind"] = exclusion_kind
+
     monkeypatch.setattr(cm, "get_open_threads", _boom)
     monkeypatch.setattr(cm, "create_thread", _boom)
+    monkeypatch.setattr(cm, "record_shadow_exclusion", _fake_record_exclusion)
 
     try:
         await tr.shadow_observe_escort_client_message(
             text=MSG_LIGHTER_1 + _AUTOMATED_SUFFIX, sender_phone="01670535255",
             source="bridge2", message_id="STAGE2-SYSGEN-1", sender_role="client_escort_buyer",
         )
+        assert recorded["exclusion_kind"] == "system_generated_excluded"
     finally:
         _disable_stage2(monkeypatch)
 
@@ -183,8 +197,11 @@ class TestShadowStage2AgainstRealDB:
     @pytest.mark.asyncio
     async def test_duplicate_replay_idempotent(self, test_db_pool, monkeypatch):
         """#3: replaying the exact same message_id must not create a
-        second thread, a second merge, or a second shadow comparison
-        row."""
+        second thread or a second merge. It DOES write one additional
+        'duplicate_replay' shadow-comparison row (Stage 4 Section 6
+        requires duplicate replays to be counted for metrics) -- but that
+        row is a bare exclusion marker (thread_id NULL, would_create_
+        draft False), never a second observation of the thread itself."""
         from modules.conversation_memory.thread_reconstruction import shadow_observe_escort_client_message
         import modules.conversation_memory as cm
         from app.database import fetch_val
@@ -199,10 +216,16 @@ class TestShadowStage2AgainstRealDB:
             await shadow_observe_escort_client_message(text=MSG_LIGHTER_1, sender_phone=phone, source="bridge2", message_id="ST2-3-DUP", sender_role="client_escort_buyer")
             t2 = await cm.get_open_threads(bridge_id="bridge2", counterparty_phone=phone, business_domain="escort")
             cmp2 = await fetch_val("SELECT count(*) FROM fazle_conversation_shadow_comparisons WHERE counterparty_phone=$1", phone)
+            replay_rows = await fetch_val(
+                "SELECT count(*) FROM fazle_conversation_shadow_comparisons WHERE counterparty_phone=$1 AND grouping_action='duplicate_replay'",
+                phone,
+            )
 
             assert len(t1) == len(t2) == 1
-            assert t1[0]["updated_at"] == t2[0]["updated_at"]
-            assert cmp1 == cmp2 == 1
+            assert t1[0]["updated_at"] == t2[0]["updated_at"], "the thread itself must not be touched by the replay"
+            assert cmp1 == 1
+            assert cmp2 == 2, "the replay adds exactly one exclusion-marker row, not a second real observation"
+            assert replay_rows == 1
         finally:
             _disable_stage2(monkeypatch)
 
