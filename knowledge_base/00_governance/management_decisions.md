@@ -5108,3 +5108,120 @@ reasoning) implementation — planning document only, see
 for actual shadow-mode data collection on live traffic is left as an
 explicit Owner decision, not made in this pass — see the final checkpoint
 report.
+
+## Pre-Existing Stash Entry — Recorded, Not Touched (2026-07-19)
+
+Per explicit Owner instruction (Phase B Stage 4 authorization, Section 1):
+this repo has a pre-existing, unrelated stash entry, discovered
+accidentally during Stage 2/3 work (see the checkpoint report note on
+the same date). **No action has been or will be taken on it** — not
+popped, applied, dropped, or modified — until a separate, explicit,
+read-only recovery/audit task using a temporary branch or isolated
+worktree is authorized.
+
+**Identifier:** `stash@{0}`
+**Label:** `WIP on develop: 455806c ops: 2026-05-06 backlog cleanup and docs update`
+**Base commit:** `455806c` ("ops: 2026-05-06 backlog cleanup and docs update")
+**Scope (from `git stash show --stat`, read-only inspection only):** ~30
+files touched, substantial diffs concentrated in `app/main.py` (+1096),
+`app/static/dashboard.html` (+2592), `README.md` (+887),
+`modules/message_router/__init__.py` (+355),
+`modules/bridge_poller/__init__.py` (+295),
+`modules/admin_commands/__init__.py` (+373), plus smaller changes across
+`app/config.py`, `app/ollama.py`, `modules/intent/__init__.py`,
+`modules/recruitment_flow/__init__.py`, `modules/scheduler/__init__.py`,
+`requirements.txt`, CI config, and docs. Given the base commit predates
+essentially all of this session's work by roughly six weeks of
+development, this is very likely stale/superseded WIP rather than
+something safe to reapply as-is — but that determination is explicitly
+out of scope for this task and left for a dedicated review.
+
+## ESCORT_CLIENT_PHONES Format-Mismatch Incident — Root-Caused and Fixed (2026-07-20)
+
+Discovered while building Phase B Stage 4's real-traffic write guard tests:
+`modules.escort._escort_client_phone_list()` normalized `ESCORT_CLIENT_PHONES`
+entries to `8801XXXXXXXXX` (via `to_880()`) while `_is_allowed_escort_client()`
+and `_is_authoritative_bridge_confirmation()` compared against
+`_normalize_mobile()`'s `01XXXXXXXXX` output — a mismatch that could never
+compare equal. Confirmed against the exact production value
+(`8801670535255,8801757622300,8801836743754`): every configured client
+failed, in every input format tested. Confirmed against live production
+data: `fazle_conversation_threads` had 0 rows despite Stage 1 having been
+enabled for several hours — Phase B's shadow observer had been silently
+rejecting every real message via this same broken function reused for its
+own defense-in-depth authorization re-check.
+
+**Second, higher-severity instance of the same bug class found during the
+audit:** `_is_authoritative_bridge_confirmation()` (line 2070) has the
+identical mismatch, gating the real bridge→client confirmation source-of-
+truth path whenever `recipient_phone` is present in the confirmation
+context. This explains a previously-unresolved standing test failure —
+`test_escort_source_of_truth_refactor.py::test_draft_updated_by_bridge_
+confirmation` — on record as "pre-existing, unrelated" since at least
+Session 21 (2026-07-17) and even earlier ("matches a failure already on
+record from a prior session's own git-stash-isolation check"). This
+session's fix resolves that standing failure as a direct consequence, not
+a coincidence.
+
+**Canonical format decision:** `01XXXXXXXXX`, per this repo's own existing
+Owner Directive (2026-07-01, `modules/fazle_payroll_engine/normalizer.py`):
+"Canonical storage format: 01XXXXXXXXX... WBOM/RBAC domain format:
+8801XXXXXXXXX, for wbom_*/user_profiles [only]." `ESCORT_CLIENT_PHONES` is
+not a wbom_*/user_profiles table, so the general canonical format applies
+— not the 880-form initially suggested when this incident was reported,
+which would have introduced a THIRD normalization convention rather than
+aligning with the repo's own declared single source of truth.
+
+**Fix (2 functions, `modules/escort/__init__.py`):**
+- `_normalize_mobile()` is now a thin wrapper around
+  `modules.fazle_payroll_engine.normalizer.normalize_bd_phone()` (the
+  repo's declared canonical normalizer) instead of a separate, weaker
+  reimplementation that didn't handle Bengali digits, "88"-without-"8"
+  country codes, or 10-digit inputs missing their leading zero. Strict
+  superset of previously-accepted input, identical output on the overlap
+  — not a behavior change for any currently-passing case.
+- `_escort_client_phone_list()` now normalizes to `01XXXXXXXXX` via
+  `normalize_bd_phone()` directly (dropped `to_880()`), matching
+  `_normalize_mobile()`'s format.
+
+**Full impact audit (11 call sites/functions checked, see conversation
+record for the complete matrix):** the bug is narrowly confined to these
+two functions' internal inconsistency with each other.
+`modules.escort_roster.routes._escort_client_phone_list()` (a separate
+function) and `modules.identity_brain._matches_env_escort_phone()` both
+independently use 880-format self-consistently against their own
+880-format normalizers — not affected, not touched.
+`modules.client_billing.profiles._validate_contact_mobile()` likewise
+self-consistent (880 vs 880) — not touched. `shared/env.py.is_escort_
+client()` is documented dead code (zero callers) using a third, more
+robust (suffix-comparison) pattern — not touched.
+
+**Identity-bypass audit (not a policy violation):** confirmed via
+`_is_verified_escort_identity()` that a sender verified through stored
+`fazle_contact_roles.role` or a contact-name "escort" marker deliberately
+bypasses `_is_allowed_escort_client()` entirely. This is Phase 1B.2
+(certified 2026-07-17, commits `7313613`/`45d23fa`/`24051fe`/`f8a1d75`) —
+verbatim from that session's own record: "verified senders no longer
+blocked by the phone-only allowlist gate (a real gap this fix closes)."
+`client_escort_buyer` has three intentionally independent, coequal
+verification sources (`.env` phone, stored role, contact-name marker) per
+the Owner's own ratified Phase 1B.2 decisions — not a whitelist bypass to
+close, a working-as-designed exemption. Left unchanged.
+
+**Tests:** 17 new (`tests/unit/test_escort_client_phone_normalization_fix.py`)
+covering every required production number in every input form (local,
+880, +880, spaced, Bengali digits), unconfigured-number rejection,
+unverified-sender rejection, the verified-identity exemption (both a
+behavioral test and a direct spy proving `_is_allowed_escort_client()` is
+never called on that path), the legacy draft path, Phase B observer
+acceptance/exclusion, whitelist cache invalidation, whitelist
+deduplication, invalid-number handling, and confirmation-direction-rule
+integrity. Full regression sweep (escort, bridge_poller, conversation_
+memory, Bangla extraction, database write-guard, Stage 3 mandatory
+example): 0 failures, 21 pre-existing DB-unavailability errors (standing
+`TEST_DB_PASSWORD` constraint, unrelated). Re-verified against a disposable
+Postgres container: the full Phase B Stage 1/2/3 scenario suite and the
+mandatory real two-message example all still pass unchanged.
+
+**Deployment:** code-only change, no schema/data migration. Deployed via
+`scripts/restart_gate.sh --restart`.

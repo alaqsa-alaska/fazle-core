@@ -34,7 +34,7 @@ from typing import Optional, TypedDict
 
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_val, fetch_all, db_conn
-from modules.fazle_payroll_engine.normalizer import normalize_bd_phone, to_880
+from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
 from modules.identity_brain import _phone_variants
 
 log = logging.getLogger("fazle.escort")
@@ -219,13 +219,21 @@ _DEST_ALIASES: tuple[tuple[re.Pattern, str], ...] = (
 # ── Mobile helpers ─────────────────────────────────────────────────────────────
 
 def _normalize_mobile(raw: str) -> Optional[str]:
-    """Normalize a raw mobile string (may contain +, spaces, dashes) to 01XXXXXXXXX."""
-    digits = re.sub(r"[\s\-+]", "", raw)
-    if digits.startswith("880") and len(digits) == 13:
-        return "0" + digits[3:]
-    if len(digits) == 11 and digits.startswith("01") and digits[2] in "3456789":
-        return digits
-    return None
+    """Normalize a raw mobile string to canonical 01XXXXXXXXX.
+
+    Thin wrapper around modules.fazle_payroll_engine.normalizer.
+    normalize_bd_phone() -- THE declared single source of truth for BD
+    phone normalization repo-wide (Owner Directive 2026-07-01). Previously
+    a separate, weaker reimplementation here that didn't handle Bengali
+    digits, "88"-without-leading-8 country codes, or 10-digit inputs
+    missing their leading zero -- fixed 2026-07-20 as part of the
+    ESCORT_CLIENT_PHONES format-mismatch incident (see
+    knowledge_base/00_governance/management_decisions.md). Every existing
+    caller here already only ever fed it space/dash/+-only-formatted
+    11-or-13-digit strings, so this is a strict superset of previously
+    accepted input with identical output on the overlap -- not a
+    behavior change for any currently-passing case."""
+    return normalize_bd_phone(raw)
 
 
 def _extract_mobile(text: str) -> Optional[str]:
@@ -257,10 +265,22 @@ def _same_phone(a: Optional[str], b: Optional[str]) -> bool:
 
 
 def _escort_client_phone_list() -> list[str]:
+    """Canonical 01XXXXXXXXX form -- MUST match _normalize_mobile()'s
+    output format, since _is_allowed_escort_client() and
+    _is_authoritative_bridge_confirmation() compare this list directly
+    against _normalize_mobile(sender_phone). Previously normalized to
+    880XXXXXXXXXXX (the separate WBOM/RBAC-domain format) via to_880(),
+    which meant those two comparisons could never match any real
+    configured client -- fixed 2026-07-20. NOTE: this is a different,
+    separate function from modules.escort_roster.routes's own
+    _escort_client_phone_list() (used by the admin API and
+    modules.client_billing.profiles, both of which correctly compare
+    880-format against 880-format already) -- that one is untouched by
+    this fix, on purpose, since it isn't broken."""
     raw = getattr(get_settings(), "escort_client_phones", "") or ""
     numbers: list[str] = []
     for item in raw.split(","):
-        mobile = to_880(normalize_bd_phone(item.strip()))
+        mobile = normalize_bd_phone(item.strip())
         if mobile and mobile not in numbers:
             numbers.append(mobile)
     return numbers
