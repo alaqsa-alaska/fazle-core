@@ -5286,3 +5286,24 @@ Real-traffic shadow collection begins from this point
 until 14 calendar days or 30 authorized escort-client conversation
 threads, whichever comes first, before compiling the Owner Decision
 Package.
+
+## Phase B Stage 4 — Shadow Observation Progress Report #1 (2026-07-20T14:37:28Z)
+
+Baseline: 2026-07-20T05:09:18Z (post-ESCORT_CLIENT_PHONES-fix restart).
+Elapsed: ~9.5 hours.
+
+Verified directly against production: zero rows in
+`fazle_conversation_shadow_comparisons`, zero rows in
+`fazle_conversation_threads`, and zero inbound (`direction='in'`) rows in
+`wbom_whatsapp_messages` of ANY role since baseline — not specific to
+escort clients. Root cause is absence of real inbound traffic in this
+window, not a code defect (the fix was independently verified end-to-end
+against a disposable DB before this window began).
+
+Critical-anomaly check (unauthorized acceptance, system-generated
+acceptance, business-row write, false merge) performed directly against
+production data: zero occurrences of each, trivially, since zero messages
+were observed. No alert triggered, no activation-recommendation
+suspension warranted. Activation readiness score: not yet determinable
+(no data). Observation continues unchanged; no code or flag change made
+as a result of this report.
