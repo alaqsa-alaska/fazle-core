@@ -23,6 +23,8 @@
 
 **Updated again 2026-07-19** (Phase B, Conversation Memory Engine, Stage 2): added `054_conversation_memory_shadow_comparisons.sql` -- new table `fazle_conversation_shadow_comparisons`, one structured row per authorized escort-client message observed while `MULTI_MESSAGE_ESCORT_PARSER_ENABLED` is on, recording the single-message-parser result side by side with the conversation-aware (multi-thread grouping-aware) result plus provenance/completion/conflict/grouping metadata. Aggregate metrics (Section 9's required counts) are computed on demand via `GROUP BY` over this table, not a separate running-counters table. Purely additive, no existing table touched, `thread_id` FK to `fazle_conversation_threads` is nullable (a `needs_review` observation may not resolve to a single thread). Verified on a disposable `postgres:17-alpine` container (idempotent re-run, FK constraint holds) before production application.
 
+**Updated again 2026-07-20** (Phase B Stage 4 shadow metrics): added `055_conversation_memory_shadow_metrics.sql` -- adds `processing_latency_ms` to `fazle_conversation_shadow_comparisons` plus an index on `grouping_action`, supporting Stage 4's required "shadow exceptions and processing latency" metric. Purely additive (`ADD COLUMN IF NOT EXISTS`), verified idempotent on a disposable container before production application.
+
 **Updated again 2026-07-19** (Dispatch Phase 2A.3 Stage 2): added `051_dispatch_2a3_change_request_action_widen.sql` (widens `escort_roster_change_requests`'s own `action` CHECK constraint -- separate from and in addition to the application-level whitelist in `create_roster_change_request()` -- to accept `'manual_review_same_date_escort_change'`). Discovered mid-implementation, not anticipated in the Decision Report. Purely additive, no existing row rewritten.
 
 **Updated again 2026-07-19** (Workstream 2, draft-confirmation invariant, Stage 1): added `052_unmatched_escort_confirmations.sql` -- new table `wbom_unmatched_confirmations`, replacing `handle_admin_escort_completion()`'s silent auto-create-on-no-match with a durable admin-review queue (see `modules/escort/__init__.py::_find_pending_program()`/`_create_confirmed_from_admin()`). Purely additive, no existing table touched. Includes a partial unique index on `(source_bridge, source_message_id)` closing a real cross-path duplicate-admission gap: `processed_bridge_messages` and `processed_outgoing_escort_messages` (both `modules/bridge_poller/__init__.py`) each dedup their own ingestion path independently, so the same physical admin confirmation could otherwise reach this queue twice via two different paths. Verified on a genuinely disposable, throwaway `postgres:17-alpine` Docker container (not the shared test DB, which was unavailable this session) before production application: idempotent re-run, unique-violation on true duplicate, multiple `NULL` message-ids permitted (webhook path lacks a reliable id), status `CHECK` enforced, FK to `wbom_escort_programs` enforced. See `knowledge_base/00_governance/management_decisions.md` → "Draft-Confirmation Invariant, Workstream 2 Stage 1" for full detail.
@@ -92,11 +94,12 @@
 052_unmatched_escort_confirmations.sql
 053_conversation_memory_engine.sql
 054_conversation_memory_shadow_comparisons.sql
+055_conversation_memory_shadow_metrics.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
 
-**Next available number for new work: `055`.**
+**Next available number for new work: `056`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
