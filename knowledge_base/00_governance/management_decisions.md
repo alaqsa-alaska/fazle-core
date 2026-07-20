@@ -5225,3 +5225,29 @@ mandatory real two-message example all still pass unchanged.
 
 **Deployment:** code-only change, no schema/data migration. Deployed via
 `scripts/restart_gate.sh --restart`.
+
+## Phase B Observation Baseline Reset (2026-07-20)
+
+All Phase B production observation time prior to **2026-07-20T05:03:04Z**
+is invalid and excluded from any future accuracy/evidence-gathering
+metrics: the `ESCORT_CLIENT_PHONES` format-mismatch bug (see the incident
+entry immediately above) silently rejected every real authorized-client
+message during that entire window, so the true zero-thread count observed
+then reflects the bug, not an absence of real traffic.
+
+**New valid observation baseline: 2026-07-20T05:03:04Z** (post-fix
+deployment + restart, confirmed healthy). `fazle_conversation_threads`
+confirmed at 0 rows immediately after this deployment — consistent with
+"fix just deployed, no real message has arrived yet in the intervening
+seconds," not a recurrence of the bug (live gate function checks against
+the exact production `ESCORT_CLIENT_PHONES` value confirm all 3
+configured clients now correctly resolve `True`).
+
+`MULTI_MESSAGE_ESCORT_PARSER_ENABLED` and `BANGLA_SEMANTIC_PARSER_ENABLED`
+remain `false` in production — Stage 4's instruction to enable them was
+superseded by discovering and fixing this incident first; they were never
+actually flipped to `true` before the incident interrupted that work, so
+there is nothing to "keep enabled." Resuming Stage 4 (flipping these two
+flags for real shadow-mode data collection under the corrected
+authorization gate) is the next step, pending confirmation this report is
+accepted.
