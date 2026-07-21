@@ -762,7 +762,9 @@ async def process_message(
             log.info("[NO_REPLY_NAME_MATCH] %s → no reply, no draft (display_name=%r)", sender, identity.get("display_name"))
             return "", None
         from modules.route_b import handle_route_b_message
-        reply, admin_note = await handle_route_b_message(sender, text, source, identity, intent)
+        reply, admin_note = await handle_route_b_message(
+            sender, text, source, identity, intent, message_id=message_id,
+        )
         if reply:
             return reply, admin_note
 

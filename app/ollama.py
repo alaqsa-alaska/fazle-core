@@ -25,6 +25,11 @@ from shared.reply_policy import (
 
 log = logging.getLogger("fazle.ollama")
 
+# Shared with modules.route_b_handoff -- lets it detect "Ollama produced
+# the fallback string" (Ollama unreachable/non-200/exception) without
+# string-matching a literal in a second place.
+FALLBACK_REPLY_TEXT = "আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।"
+
 
 def _bounded_int(value: int, *, minimum: int, maximum: int, default: int) -> int:
     try:
@@ -131,6 +136,75 @@ async def classify_intent_llm(text: str) -> str:
     return "unknown"
 
 
+_ROUTE_B_HANDOFF_CATEGORIES = frozenset({
+    "recruitment", "employee_claim", "former_employee_claim", "escort_order", "none",
+})
+
+
+async def classify_route_b_category(text: str, history: str = "") -> str:
+    """Route B conversation-handoff hint classifier (2026-07-22).
+
+    Ollama-only, no Groq/GitHub fallback -- same design boundary as the rest
+    of modules.route_b. This is a HINT ONLY: modules.route_b_handoff never
+    trusts this category directly, it only uses it to decide whether to give
+    the existing deterministic checks (recruitment_eligibility(),
+    is_order_complete()) a second look with a wider context window. Never
+    raises -- returns "none" on any failure, exactly like classify_intent_llm
+    above, so a classification failure degrades to "no handoff suggested",
+    never an exception that could drop the message.
+
+    Distinct from classify_intent_llm(): that function classifies WHAT a
+    single message wants (business intent); this one classifies WHO Route
+    B's multi-turn conversation partner appears to be (identity/purpose
+    category), using the fuller conversation history Route B already has
+    and the single-message classifier doesn't see.
+    """
+    if not text:
+        return "none"
+    settings = get_settings()
+    convo = f"{history}\n[latest] {text}" if history else text
+    prompt = (
+        "Read this WhatsApp conversation and classify what the OTHER person "
+        "(not us) most likely is. Reply with ONLY the category name, nothing else.\n\n"
+        "Categories:\n"
+        "recruitment - clearly looking for a job/asking to apply\n"
+        "employee_claim - clearly says they currently work for us\n"
+        "former_employee_claim - clearly says they used to work for us\n"
+        "escort_order - clearly placing a vessel-escort security order\n"
+        "none - unclear, or none of the above\n\n"
+        f"Conversation:\n{convo[:1200]}\n\nCategory:"
+    )
+    async with _ollama_sem:
+        try:
+            payload = {
+                "model": settings.ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 10,
+                    "num_ctx": _bounded_int(
+                        settings.ollama_num_ctx_classify,
+                        minimum=128,
+                        maximum=4096,
+                        default=256,
+                    ),
+                },
+            }
+            if _is_qwen3(settings.ollama_model):
+                payload["think"] = False
+            r = await ollama_daemon.post_generate(payload, timeout=30.0)
+            if r.status_code == 200:
+                result = r.json().get("response", "").strip().lower().split()[0]
+                return result if result in _ROUTE_B_HANDOFF_CATEGORIES else "none"
+            else:
+                log.warning("[ollama] classify_route_b_category non-200: status=%d body=%.100s",
+                            r.status_code, r.text)
+        except Exception as e:
+            log.warning(f"Ollama route_b handoff classify error: {type(e).__name__}: {e}")
+    return "none"
+
+
 async def generate_reply(
     user_message: str,
     intent: str,
@@ -206,10 +280,10 @@ async def generate_reply(
         pass
     asyncio.create_task(_log_llm(
         "generate_reply", settings.ollama_model, prompt,
-        "আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।",
+        FALLBACK_REPLY_TEXT,
         int((time.monotonic() - t0) * 1000), is_fallback=True,
     ))
-    return "আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।"
+    return FALLBACK_REPLY_TEXT
 
 
 async def generate_recruitment_reply(

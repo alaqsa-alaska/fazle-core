@@ -235,10 +235,16 @@ _UNKNOWN_SENDER_PROBE = (
 
 async def handle_route_b_message(
     sender: str, text: str, source: str, identity: dict, intent: str = "",
+    *, message_id: Optional[str] = None,
 ) -> tuple[str, Optional[dict]]:
     """Route B entry point — called from message_router.process_message()
     for roles in identity_brain.ROUTE_B_ROLES, and for a money/advance
-    request from those same roles."""
+    request from those same roles.
+
+    message_id: threaded through from process_message() (2026-07-22) for the
+    conversation-handoff audit record (modules.route_b_handoff) -- optional,
+    only used when the handoff feature flag is on.
+    """
     role = identity.get("identity_role") or identity.get("role") or "unknown"
 
     history = await _get_conversation_history(sender, source)
@@ -261,8 +267,44 @@ async def handle_route_b_message(
 
     admin_notification = None
     if money_request:
+        # Existing, protected advance-request path — deliberately evaluated
+        # and returned BEFORE the handoff layer below runs at all, so the
+        # conversation-handoff feature (flag-gated, 2026-07-22) can never
+        # alter or race this behavior regardless of its own state.
         admin_notification = await _create_money_advance_admin_draft(
             sender=sender, source=source, text=text, reply_text=reply, identity=identity,
         )
+        return reply, admin_notification
+
+    from app.ollama import FALLBACK_REPLY_TEXT
+    if reply == FALLBACK_REPLY_TEXT:
+        # generate_reply() never raises -- it degrades to this fixed string
+        # on any Ollama failure (unreachable/non-200/exception). The sender
+        # already has a safe, non-empty reply; this only additionally alerts
+        # an admin (once per cooldown) so an outage doesn't go unnoticed.
+        try:
+            from modules.route_b_handoff import record_ollama_failure
+            failure_note = await record_ollama_failure(sender, source, message_id)
+            if failure_note:
+                admin_notification = failure_note
+        except Exception as e:
+            log.warning("[route_b] ollama-failure handoff hook error sender=%s: %s", sender, e)
+        return reply, admin_notification
+
+    try:
+        from modules.route_b_handoff import evaluate_handoff
+        handoff = await evaluate_handoff(
+            sender=sender, text=text, source=source, identity=identity,
+            intent=(intent or "unknown"), history=history, message_id=message_id,
+        )
+    except Exception as e:
+        # Handoff evaluation must never be able to take down Route B itself
+        # -- on any unexpected error, fall back to Ollama's own reply exactly
+        # as if the handoff feature didn't exist.
+        log.warning("[route_b] handoff evaluation error sender=%s: %s", sender, e)
+        handoff = None
+
+    if handoff is not None:
+        return handoff.reply, handoff.admin_note
 
     return reply, admin_notification

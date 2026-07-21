@@ -5555,3 +5555,100 @@ regression guard that unmatched contacts still reach Route B normally.
 
 **Cross references:** `../05_workflows/whatsapp_reply_workflow.md` §14,
 `modules/message_router/__init__.py`, `tests/unit/test_message_router_no_reply_name_gate.py`.
+
+## Route B Conversation Handoff — Staged Rollout, Stage 1+2+3 Built, NOT Activated (2026-07-22)
+
+**Decision:** Following the Owner's review of a "Route B — AI Conversational
+Handling" proposal from another session, and after this session's own design
+proposal (identifying that the proposal's "put generic Employee in Route B"
+suggestion would have been a regression — Tier 10's mature, DB-backed
+verification/payroll/advance flows already correctly handle every phone
+registered in `wbom_employees`, active or inactive, before Route B ever
+runs), the Owner approved a narrower, additive capability instead: let Route
+B hand a conversation off to an *existing* canonical workflow once identity/
+intent becomes clear, implemented in strict stages, master-flagged off.
+
+**What did NOT change:** `identity_brain.ROUTE_B_ROLES` is still exactly
+`{escort, security_guard, candidate, unknown}` — `employee` was explicitly
+NOT added, per Owner Decision 1 of the approval. Tier 10 (verification,
+payroll-backed salary answers, advance/slip state machines) is byte-for-byte
+unchanged. A phone already on file in `wbom_employees` — Active or Inactive
+— still never reaches Route B at all; that fact is what makes the Stage 2
+employee-claim design safe (see below).
+
+**What changed — all behind `ROUTE_B_HANDOFF_ENABLED=false` (default off):**
+- New `modules/route_b_handoff/` — Python-only handoff decision layer.
+  Ollama (`app.ollama.classify_route_b_category()`, new, Ollama-only, no
+  Groq/GitHub fallback) only ever supplies a *hint* category; it never
+  writes a role, session, employee record, or phone link. Every function
+  that actually changes state is an existing, unmodified canonical function
+  from `modules.recruitment_flow` / `modules.employee_conversation` /
+  `modules.escort` — nothing in this module duplicates their logic.
+- **Stage 1 (recruitment):** an active `fazle_recruitment_sessions` row is
+  continued unconditionally via the existing `intake_message()` (no keyword
+  gate applies to an in-progress session — this is what makes a bare funnel
+  answer like "25" work). With no active session, the existing
+  `recruitment_eligibility()` runs first exactly as message_router's Tier
+  7/8 already does for this same message; only if that says no *and*
+  Ollama's hint says recruitment does the same deterministic function get a
+  second, wider look (current message + immediately preceding turn) as
+  corroboration — Ollama's raw category alone is never sufficient.
+- **Stage 2 (employee/former-employee claim), built + tested, same flag:**
+  because of the phone-registration fact above, a claim reaching Route B is
+  by construction always a phone `resolve_employee_identity()` cannot
+  verify via phone/ID match against a live wbom_employees row — the safe
+  design decision (Owner-approved) is that this handoff type **never**
+  grants Tier 10 access, verified or not, active or former. It always
+  produces an admin-review draft (`fazle_draft_replies`,
+  `intent='route_b_employee_claim_review'`) with the `resolve_employee_identity()`
+  result attached, reply `""` to the sender either way. Real access is only
+  ever (re-)granted the existing way — an admin corrects/links the phone,
+  identity_brain recognizes it automatically next message. Cooldown
+  (`ROUTE_B_HANDOFF_COOLDOWN_HOURS`, default 6h, tracked in the new
+  `fazle_route_b_handoffs` audit table) suppresses repeated drafts for a
+  repeated claim from the same phone.
+- **Stage 3 (escort/security_guard multi-message order), built + tested,
+  separate flag `ROUTE_B_ESCORT_HANDOFF_ENABLED=false` — "prepared but not
+  activated until separately reviewed," independent of the Stage 1/2 flag
+  even after that one is enabled.** Extracted the existing strict order-
+  completeness gate to `modules.escort.is_order_complete()` (public,
+  behavior-preserving — `message_router`'s private
+  `_is_strict_escort_order_text()`/`_looks_like_slip_or_complaint()`/
+  `_has_client_supplied_escort_assignment()` now delegate to it; committed
+  separately as a standalone, behavior-preserving refactor, verified via the
+  full escort/message_router test suites plus a new dedicated delegation
+  test before the handoff work was built on top of it). Checks the current
+  message, then — if incomplete — the governed conversation history
+  (`wbom_whatsapp_messages`, never Ollama's own output) combined with it,
+  for fields spread across turns. Complete → the existing unverified-sender
+  structured-draft path (`handle_escort_client_message(..., is_verified=False)`),
+  same as Tier 9 already uses. Incomplete → no handoff.
+- **Ollama-failure protection:** `app.ollama.generate_reply()` already never
+  raises (degrades to a fixed `FALLBACK_REPLY_TEXT` string on any failure —
+  extracted to a named constant this pass so Route B can detect it). Route B
+  now detects that exact string and additionally alerts an admin once per
+  cooldown window; the sender-facing reply is unchanged (never empty, never
+  dropped) either way.
+- **Advance-request precedence preserved:** `handle_route_b_message()`'s
+  existing `is_advance_request()` branch is evaluated and returned *before*
+  the handoff layer runs at all — verified via a dedicated regression test
+  (`evaluate_handoff` mock asserted never called on that path).
+- New migration `057_route_b_handoffs.sql` — `fazle_route_b_handoffs` audit
+  table (phone, message_id, source_route, destination, reason, confidence,
+  outcome, timestamp), idempotent per message_id via a partial unique index,
+  purely additive. Not yet applied to production (see report).
+
+**Tests:** `tests/unit/test_route_b_handoff.py` — 18 tests covering all 14
+Owner-required scenarios plus 4 additional Stage 3-specific tests. Full unit
+suite run for regression; see the implementation report for the complete
+before/after comparison against this session's already-established
+pre-existing-failure baseline.
+
+**Owner approval:** Yes — staged, with Stage 1+2 approved to build, test,
+and leave inactive pending report review; Stage 3 explicitly "prepare, do
+not activate" even after that review. No production restart performed, flag
+left off, nothing pushed, per explicit instruction.
+
+**Cross references:** `../05_workflows/whatsapp_reply_workflow.md` §15,
+`modules/route_b_handoff/__init__.py`, `modules/route_b/__init__.py`,
+`db/migrations/057_route_b_handoffs.sql`, `tests/unit/test_route_b_handoff.py`.

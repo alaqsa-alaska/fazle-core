@@ -222,6 +222,21 @@ class Settings(BaseSettings):
     # DB or slow extraction must never be able to hang real routing.
     conversation_memory_shadow_timeout_seconds: float = 5.0
 
+    # Route B conversation handoff (2026-07-22, Owner-approved staged rollout).
+    # Master switch for Stage 1 (recruitment handoff) and Stage 2 (employee/
+    # former-employee claim admin-review path) — both OFF by default until
+    # the implementation report is separately reviewed and approved.
+    route_b_handoff_enabled: bool = False
+    # Stage 3 (escort/security_guard multi-message operational handoff) is
+    # gated by its own, separate flag on top of the master switch above —
+    # "prepared but not activated until separately reviewed" per Owner
+    # decision, distinct from Stage 1/2's review.
+    route_b_escort_handoff_enabled: bool = False
+    # Cooldown window for the handoff-audit dedup check (idempotency/loop
+    # prevention) — same number of hours a repeated ambiguous claim from the
+    # same phone is suppressed from creating a second admin draft.
+    route_b_handoff_cooldown_hours: int = 6
+
     # Fazle Payroll Engine (FPE)
     fpe_sync_chat_jids: str = ""   # comma-separated target JIDs for historical sync
     # Phones authorized to send "Cash <phone> <name> <amount>" commands

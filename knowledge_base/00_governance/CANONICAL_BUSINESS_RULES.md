@@ -699,6 +699,8 @@ Future:      no rename recommended — the real fix is documentation (this secti
 
 **Route A — No Auto Reply, name-based gate (2026-07-22):** within the Route B population, a sender whose *saved contact name* contains Client/Escort/Office/Operation/Accountant/Security Guard/Al-Aqsa/Al-Manaratayn/আল-আকসা/আল-মানারাতাইন anywhere (substring, not prefix) gets no AI/generic/recruitment reply at all — enforced both by `_should_silent_skip()` (early, `wbom_contacts.display_name`) and a backstop immediately before `handle_route_b_message()` is called (`identity_brain`'s resolved name, for contacts not yet synced). Escort-named contacts get one exception: a genuinely order-shaped message (mother vessel + lighter vessel + a mobile number) is still routed to `handle_escort_client_message()` for a structured admin-review draft — the sender still gets no reply, only the destination differs. Full policy: `../05_workflows/whatsapp_reply_workflow.md` §14.
 
+**Route B Conversation Handoff (built 2026-07-22, `ROUTE_B_HANDOFF_ENABLED=false` — NOT YET ACTIVE):** `modules.route_b_handoff` lets Route B transfer a conversation to an existing canonical workflow (recruitment intake, an employee-claim admin review, or — separately flagged, also inactive — an escort-order draft) once identity/intent becomes clear. `employee` was NOT added to `ROUTE_B_ROLES`; a phone already on file in `wbom_employees` (Active or Inactive) still never reaches Route B, so an "employee claim" handoff can never grant Tier 10 access directly — it always produces an admin-review draft, verified or not. Ollama only ever supplies a hint category (`app.ollama.classify_route_b_category()`, Ollama-only); every state-changing call is an existing, unmodified canonical function. Full policy: `../05_workflows/whatsapp_reply_workflow.md` §15.
+
 **Canonical Entity Names:** "Role" (who the sender is: `family`, `admin`, `accountant`, `employee`, `escort`, `security_guard`, `internal_coordinator`, `candidate`/`new_lead`/`unknown`) is a distinct concept from "Intent" (what they want: `recruitment`, `client_order`, `escort_duty`, `attendance`, `slip_submission`, `employee_salary_complaint`, `legal_issue`, `payment_issue`, `salary_query`, `payment_due`, `office_location`, `unknown`). Do not conflate role and intent — a message has exactly one role (the sender's identity classification) and one intent (the message's classified purpose), evaluated by different tiers.
 
 **Canonical Database Tables:** N/A directly (routing logic, not its own storage) — reads identity from `modules/identity_brain`, dispatches into the domain modules covered elsewhere in this document.
@@ -1005,5 +1007,31 @@ should never receive a risky AI-generated reply, even from the new Ollama-based 
 only structured extraction for a well-defined case (a genuine escort order) plus human
 review, or silence.
 **Owner approval:** Yes — implemented and committed per explicit instruction.
+
+### 2026-07-22 — Route B Conversation Handoff (staged rollout, built + tested, NOT activated)
+**Type:** New mechanism, feature-flagged off by default.
+**Section(s) affected:** Message Parser (Message Router), Recruitment, Employee.
+**What changed:** New `modules/route_b_handoff` lets Route B (Ollama-only chat for
+escort/security_guard/candidate/unknown senders) hand a conversation off to an existing
+canonical workflow once identity/intent is clear enough, without Route B gaining write
+access to any business table. `ROUTE_B_ROLES` unchanged (`employee` deliberately NOT
+added — Tier 10 stays the sole employee path). Stage 1: active-recruitment-session
+continuation and a deterministic-first (Ollama-hint-corroborated) recruitment handoff,
+reusing `recruitment_eligibility()`/`route_recruitment_message()`/`intake_message()`
+unmodified. Stage 2 (built, tested, same flag): employee/former-employee claims always
+resolve to an admin-review draft, never live Tier 10 access, because a phone reaching
+Route B by construction already failed identity_brain's `wbom_employees` match. Stage 3
+(built, tested, separate flag `ROUTE_B_ESCORT_HANDOFF_ENABLED`, explicitly not activated
+even after Stage 1/2 review): multi-message escort-order completeness check, reusing the
+newly-extracted `modules.escort.is_order_complete()`. New audit table
+`fazle_route_b_handoffs` (migration 057, not yet applied to production). Full record:
+`management_decisions.md` 2026-07-22, `../05_workflows/whatsapp_reply_workflow.md` §15.
+**Why:** A prior-session proposal suggested adding generic `employee` to Route B for
+better conversational handling; investigation found this would have been a regression
+(Tier 10 already correctly handles every registered phone). This narrower, additive
+capability captures the genuinely missing piece — letting Route B's richer multi-turn
+understanding still result in a real canonical-workflow outcome — without that risk.
+**Owner approval:** Yes — staged approval: build/test Stage 1+2, leave inactive pending
+report review; Stage 3 explicitly build-only, not to be activated even after that review.
 
 

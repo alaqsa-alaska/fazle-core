@@ -26,6 +26,37 @@ work this revision folds in). Read those for full detail — this file is a queu
 
 ---
 
+## What shipped since this file was last updated (2026-07-21 → 2026-07-22, not yet folded into the sections below)
+
+This file's narrative below still reflects the 2026-07-17 (Session 20) state.
+Everything from 2026-07-21 onward is summarized here only, not yet merged
+into "Immediate Next"/"Technical Debt" — do that reconciliation pass before
+trusting this file's older sections for anything routing/identity-related.
+
+- **2026-07-21 — WhatsApp Reply Workflow: Route A / Route B (identity-first
+  routing).** Replaced the old content-based reply-routing gate with
+  identity-first routing. New `modules/route_b` (Ollama-only). Full record:
+  `knowledge_base/00_governance/management_decisions.md` 2026-07-21,
+  `knowledge_base/05_workflows/whatsapp_reply_workflow.md`.
+- **2026-07-22 — Route A: No Auto Reply, contact-name-based gate.** Known
+  business contacts (Client/Escort/Office/Operation/Accountant/Security
+  Guard/Al-Aqsa/Al-Manaratayn-named) get no AI/generic/recruitment reply
+  within the Route B population. `whatsapp_reply_workflow.md` §14.
+- **2026-07-22 — Daily contact sync + `fazle_contact_roles` duplicate
+  cleanup.** `knowledge_base/06_developer_system/contact_sync.md`.
+- **2026-07-22 — Route B Conversation Handoff (built, `ROUTE_B_HANDOFF_ENABLED=false`,
+  NOT YET ACTIVE).** New `modules/route_b_handoff` lets Route B hand a
+  conversation off to the existing recruitment funnel, an employee-claim
+  admin-review path (never live Tier 10 access), or — separately flagged,
+  also inactive — a multi-message escort-order draft, once identity/intent
+  is clear. `employee` was explicitly NOT added to `ROUTE_B_ROLES`; Tier 10
+  is unchanged. `whatsapp_reply_workflow.md` §15. **Does not fix** the
+  already-documented `OPERATIONAL_INTENTS`/`salary_query` recruitment
+  misroute gap below (out of scope for this pass) — see
+  `knowledge_base/04_business_rules/recruitment_business_rules.md`.
+
+---
+
 ## What actually shipped since the last review (2026-07-13 → 2026-07-16, Sessions 13-18)
 
 All Owner-authorized, all committed, all documented in `management_decisions.md`:

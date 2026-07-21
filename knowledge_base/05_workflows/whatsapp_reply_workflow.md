@@ -393,6 +393,86 @@ safety net (§9's `intent`+shape gate), not this gate.
    `display_name`, for a contact not yet synced into `wbom_contacts`
    (see `knowledge_base/06_developer_system/contact_sync.md`).
 
+## 15. Route B Conversation Handoff (Built 2026-07-22 — NOT YET ACTIVE)
+
+**Status: `ROUTE_B_HANDOFF_ENABLED=false` (default). Implemented, tested,
+not yet enabled in production — pending a separate Owner review of the
+implementation report.** This section describes the built behavior for when
+the flag is turned on; until then, Route B behaves exactly as in §4.2, with
+zero change.
+
+**Purpose:** let Route B (Ollama-only chat for escort/security_guard/
+candidate/unknown senders) transfer a conversation to an existing canonical
+workflow once identity/intent becomes sufficiently clear — without Route B
+ever gaining write access to any business table itself, and without
+changing which senders reach Route B in the first place (§4.2's role split
+is unchanged; `employee` was explicitly **not** added to `ROUTE_B_ROLES`).
+
+**Non-negotiable boundary:** Ollama may only ever *recommend* a category
+(`app.ollama.classify_route_b_category()` — Ollama-only, no Groq/GitHub
+fallback, same design boundary as the rest of Route B). It never creates a
+session, assigns a role, activates an employee, links a phone number, or
+writes a final business row. Every state-changing call is an existing,
+unmodified canonical function (`modules.recruitment_flow`,
+`modules.employee_conversation`, `modules.escort`) — `modules/route_b_handoff`
+only decides *when* to call them and *with what corroboration*.
+
+**Three handoff types, all audited in `fazle_route_b_handoffs`:**
+
+1. **Recruitment (Stage 1, flag: `ROUTE_B_HANDOFF_ENABLED`).** An active
+   `fazle_recruitment_sessions` row for the sender is continued
+   unconditionally via `intake_message()` — no Ollama call, no keyword
+   re-check (an existing session's own answer-collection has no keyword
+   gate). With no active session, `recruitment_eligibility()` (deterministic,
+   unmodified) runs first exactly as message_router's own Tier 7/8 already
+   does; only when that says no *and* Ollama's category is `recruitment`
+   does the same deterministic function get a second, wider look — the
+   current message plus the immediately preceding turn — as corroboration.
+   Ollama's raw category is never sufficient by itself.
+2. **Employee/former-employee claim (Stage 2, same flag, built + tested,
+   never live-enabling access).** Because identity_brain's Step 3 phone
+   lookup matches `wbom_employees` regardless of Active/Inactive status,
+   any sender reaching Route B by construction has a phone that did **not**
+   match — so a claim here can never be resolved to live Tier 10 access
+   this way. `resolve_employee_identity()` (phone/employee_id-based, name-
+   only match is `verified=False`) runs against a best-effort, non-Ollama,
+   regex-extracted `employee_id`/name hint; the result — verified or not —
+   always produces an admin-review draft only (`fazle_draft_replies`,
+   `intent='route_b_employee_claim_review'`), reply `""` to the sender
+   either way. Genuine access is only ever (re-)granted the existing way:
+   an admin corrects/links the phone on `wbom_employees`, after which
+   identity_brain recognizes it automatically on the sender's next message.
+   Cooldown (`ROUTE_B_HANDOFF_COOLDOWN_HOURS`, default 6h) suppresses a
+   second draft for a repeated claim from the same phone.
+3. **Escort/security_guard order (Stage 3, separate flag:
+   `ROUTE_B_ESCORT_HANDOFF_ENABLED`, default false — "prepared, not
+   activated" per Owner decision, independent of the Stage 1/2 flag even
+   after that one is turned on).** Reuses `modules.escort.is_order_complete()`
+   (§9's own gate, extracted to a public function, behavior-preserving) —
+   first against the current message alone, then, if incomplete, against
+   the governed conversation history (`wbom_whatsapp_messages`, never
+   Ollama's own output) concatenated with the current message, for fields
+   spread across turns. Complete → `handle_escort_client_message(..., is_verified=False)`,
+   the same unverified-sender structured-draft path §9 already uses.
+   Incomplete → no handoff, Route B's own clarification reply stands.
+
+**Ollama-failure protection:** `app.ollama.generate_reply()` already never
+raises — any failure (unreachable/non-200/exception) degrades to a fixed
+`FALLBACK_REPLY_TEXT` string, so the sender is never left without a reply.
+Route B detects that exact string and additionally alerts an admin once per
+cooldown window (`record_ollama_failure()`), so a prolonged outage doesn't
+go unnoticed — the sender-facing reply is unchanged either way.
+
+**Advance-request precedence:** the existing, protected
+`is_advance_request()` path in `handle_route_b_message()` is evaluated and
+returned *before* the handoff layer runs at all — the handoff feature
+cannot alter or race that behavior regardless of its own flag state.
+
+**Rollout:** Stage 1+2 code exists behind one master flag; Stage 3 requires
+that flag *and* its own, so it can be reviewed and enabled independently
+and later than Stage 1/2. Purely additive DB change (`fazle_route_b_handoffs`,
+migration 057) — safe to leave in place even if never enabled.
+
 ## Cross References
 
 - ../04_business_rules/recruitment_business_rules.md
