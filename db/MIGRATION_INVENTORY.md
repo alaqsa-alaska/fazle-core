@@ -96,6 +96,7 @@
 054_conversation_memory_shadow_comparisons.sql
 055_conversation_memory_shadow_metrics.sql
 056_contact_sync_presence_tracking.sql
+057_route_b_handoffs.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -110,7 +111,18 @@ several much older migrations show as "pending" only because they predate the
 `schema_migrations` tracking table, and running the full queue would have attempted to
 re-apply all of them). Full record: `management_decisions.md` 2026-07-22.
 
-**Next available number for new work: `057`.**
+**`057_route_b_handoffs.sql` (2026-07-22, NOT YET APPLIED to production — see
+`management_decisions.md` 2026-07-22 "Route B Conversation Handoff"):** adds
+`fazle_route_b_handoffs` — audit/idempotency/cooldown table for the new,
+feature-flagged-off Route B conversation-handoff layer (`modules/route_b_handoff`).
+Purely additive (`CREATE TABLE IF NOT EXISTS`, two `CREATE INDEX IF NOT EXISTS`, no
+`ALTER`/`DROP`, no FK to any other table — unlike `003b`'s `wbom_candidates` FK, this
+one cannot fail against a schema that's missing an unrelated table). No data migration,
+no column changes to any existing table. To apply: same direct-script +
+`schema_migrations` insert method used for `056`, only after Owner deployment approval
+(Step 2 of the controlled rollout) — do not run the full `db/migrate.py` queue.
+
+**Next available number for new work: `058`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
