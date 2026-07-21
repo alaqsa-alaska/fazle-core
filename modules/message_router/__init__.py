@@ -138,14 +138,15 @@ _OPERATIONAL_AUTO_CREATE_INTENTS: frozenset[str] = frozenset({
     "slip_submission",
 })
 
-_ESCORT_ASSIGNMENT_FIELDS_RE = re.compile(
-    r"escort\s*(?:name)?\s*:\s*\S.+?escort\s*(?:mobile|mob|number)?\s*:\s*(?:\+?880|0)1[3-9][\d\s\-]{8,}",
-    re.IGNORECASE | re.DOTALL,
-)
-_SLIP_OR_RELEASE_HINT_RE = re.compile(
-    r"(?:\b(?:release|released|completion|completed|duty\s+slip|release\s+slip|"
-    r"food|conveyance|transport|car\s*fare)\b|ভাড়া|ভাড়া|খাবার|রিলিজ|স্লিপ|পালিয়েছে|পালিয়েছে)",
-    re.IGNORECASE,
+# 2026-07-22: the assignment-field/slip-or-release regexes and the strict
+# order-completeness gate moved to modules.escort (is_order_complete() and
+# its dependencies) so modules.route_b_handoff can reuse the exact same
+# canonical check without a reverse import back into this module. These
+# names are kept as thin delegates -- behavior-preserving, no logic here.
+from modules.escort import (
+    has_client_supplied_escort_assignment as _has_client_supplied_escort_assignment,
+    looks_like_slip_or_complaint as _looks_like_slip_or_complaint,
+    is_order_complete as _is_strict_escort_order_text,
 )
 
 
@@ -157,31 +158,6 @@ def _phone_variants(phone: str) -> list[str]:
 def _contact_name_has_escort_order_prefix(identity: dict) -> bool:
     name = (identity.get("display_name") or "").strip().lower()
     return name.startswith(_ESCORT_ORDER_PREFIXES)
-
-
-def _has_client_supplied_escort_assignment(text: str) -> bool:
-    return bool(_ESCORT_ASSIGNMENT_FIELDS_RE.search(text or ""))
-
-
-def _looks_like_slip_or_complaint(text: str) -> bool:
-    return bool(_SLIP_OR_RELEASE_HINT_RE.search(text or "")) or _has_client_supplied_escort_assignment(text)
-
-
-def _is_strict_escort_order_text(text: str) -> bool:
-    """Code-based order gate: mother vessel + lighter + master mobile, no assignment fields."""
-    if not text or _looks_like_slip_or_complaint(text):
-        return False
-    try:
-        order = parse_escort_message(text)
-    except Exception as exc:
-        log.debug("[escort-gate] parse failed: %s", exc)
-        return False
-    if not order.get("mother_vessel"):
-        return False
-    return any(
-        (lighter.get("lighter_vessel") and lighter.get("master_mobile"))
-        for lighter in (order.get("lighters") or [])
-    )
 
 
 async def _seed_unknown_employee_identity(

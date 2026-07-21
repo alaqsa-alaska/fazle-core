@@ -838,6 +838,49 @@ def is_minimum_escort_order(order: EscortOrder) -> bool:
     return False
 
 
+# ── Text-level order-completeness gate (2026-07-22 extraction) ─────────────────
+# Moved here, behavior-preserving, from modules.message_router's private
+# _is_strict_escort_order_text()/_looks_like_slip_or_complaint()/
+# _has_client_supplied_escort_assignment() so the Route B handoff module
+# (modules.route_b_handoff) can reuse the exact same canonical completeness
+# check without a reverse import into message_router (which already imports
+# from this module) or a second, drift-prone copy of the regexes.
+# message_router now delegates to these instead of keeping its own copies.
+_ESCORT_ASSIGNMENT_FIELDS_RE = re.compile(
+    r"escort\s*(?:name)?\s*:\s*\S.+?escort\s*(?:mobile|mob|number)?\s*:\s*(?:\+?880|0)1[3-9][\d\s\-]{8,}",
+    re.IGNORECASE | re.DOTALL,
+)
+_SLIP_OR_RELEASE_HINT_RE = re.compile(
+    r"(?:\b(?:release|released|completion|completed|duty\s+slip|release\s+slip|"
+    r"food|conveyance|transport|car\s*fare)\b|ভাড়া|ভাড়া|খাবার|রিলিজ|স্লিপ|পালিয়েছে|পালিয়েছে)",
+    re.IGNORECASE,
+)
+
+
+def has_client_supplied_escort_assignment(text: str) -> bool:
+    return bool(_ESCORT_ASSIGNMENT_FIELDS_RE.search(text or ""))
+
+
+def looks_like_slip_or_complaint(text: str) -> bool:
+    return bool(_SLIP_OR_RELEASE_HINT_RE.search(text or "")) or has_client_supplied_escort_assignment(text)
+
+
+def is_order_complete(text: str) -> bool:
+    """Code-based order gate on raw text: mother vessel + lighter + master
+    mobile, no assignment/slip/release fields. Text-level wrapper around
+    is_minimum_escort_order() — the single canonical completeness check,
+    reused by both message_router's Tier 9 safety net and
+    modules.route_b_handoff's multi-message escort handoff (Stage 3)."""
+    if not text or looks_like_slip_or_complaint(text):
+        return False
+    try:
+        order = parse_escort_message(text)
+    except Exception as exc:
+        log.debug("[escort] order-completeness parse failed: %s", exc)
+        return False
+    return is_minimum_escort_order(order)
+
+
 # ── Draft builders ─────────────────────────────────────────────────────────────
 
 _TODAY = lambda: date.today().strftime("%d.%m.%Y")
