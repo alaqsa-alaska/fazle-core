@@ -90,11 +90,21 @@ def _is_verified_escort_identity(identity: dict, role_str: str) -> bool:
         return False
     return identity.get("identity_source") != "text_hint"
 
-# Legacy fallback only; runtime source of truth is app.config draft-always settings.
-_SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = ("al-aqsa", "escort", "client", "operation", "tcis", "gms", "dalal", "office")
+# Default no-reply name keywords (Owner decision 2026-07-22: substring match
+# anywhere in the saved contact name, not prefix-only). Checked in addition
+# to, not instead of, app.config draft-always settings — see the union fix
+# in _should_silent_skip() below. "al-manaratayn"/"আল-মানারাতাইন" added per
+# the 2026-07-21 rebrand's augment-don't-replace rule (old "al-aqsa" keyword
+# kept since older saved contacts may still carry the old name).
+_SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = (
+    "al-aqsa", "আল-আকসা", "al-manaratayn", "আল-মানারাতাইন",
+    "escort", "client", "operation", "office", "accountant", "security guard",
+    "tcis", "gms", "dalal",
+)
 # Compiled regex for silent-skip token matching — O(n) single pass vs O(n*k) loop
 _SILENT_SKIP_PATTERN: re.Pattern = re.compile(
-    r"(?:al-aqsa|escort|client|operation|tcis|gms|dalal|office)",
+    r"(?:al-aqsa|আল-আকসা|al-manaratayn|আল-মানারাতাইন|escort|client|operation|"
+    r"office|accountant|security guard|tcis|gms|dalal)",
     re.IGNORECASE,
 )
 
@@ -303,16 +313,20 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
                 break
         if contact:
             name_lower = (contact.get("display_name") or "").lower()
-            name_tokens = settings.draft_always_name_list or list(_SILENT_SKIP_NAME_TOKENS)
-            if name_tokens is list(_SILENT_SKIP_NAME_TOKENS) or not settings.draft_always_name_list:
-                # Use compiled regex for the static default token list (faster)
-                if _SILENT_SKIP_PATTERN.search(name_lower):
-                    m = _SILENT_SKIP_PATTERN.search(name_lower)
-                    return True, f"display_name contains '{m.group()}' ({contact['display_name']!r})"
-            else:
-                for token in name_tokens:
-                    if token in name_lower:
-                        return True, f"display_name contains '{token}' ({contact['display_name']!r})"
+            # 2026-07-22: this must be a UNION of the static default keywords
+            # and any .env-configured draft-always names/roles, not an
+            # either/or fallback — a previous version fell into the `else`
+            # branch (and silently dropped the static list entirely) as soon
+            # as DRAFT_ALWAYS_NAMES/DRAFT_ALWAYS_ROLES had any custom tokens
+            # configured, which is the case in production today. That meant
+            # a generic contact like "Escort Rahim" (not one of the specific
+            # configured names) was never actually being matched.
+            m = _SILENT_SKIP_PATTERN.search(name_lower)
+            if m:
+                return True, f"display_name contains '{m.group()}' ({contact['display_name']!r})"
+            for token in settings.draft_always_name_list:
+                if token in name_lower:
+                    return True, f"display_name contains '{token}' ({contact['display_name']!r})"
             for prefix in settings.draft_name_prefix_list:
                 if prefix and name_lower.startswith(prefix):
                     return True, f"display_name starts with '{prefix}' ({contact['display_name']!r})"
@@ -755,6 +769,22 @@ async def process_message(
     # money/advance phrasing Sprint-3A's own trigger groups didn't already
     # catch. Ollama-only per Owner spec — see modules.route_b docstring.
     if role_str in ROUTE_B_ROLES:
+        # Backstop (2026-07-22 Owner decision): _should_silent_skip() above
+        # already catches name-matched contacts from their wbom_contacts row
+        # at the very top of this function, before Route B ever runs — this
+        # is a second, cheap check against identity_brain's own resolved
+        # display_name for the rare case a brand-new contact hasn't reached
+        # wbom_contacts yet (daily sync) but identity_brain already saw a
+        # name via the bridge. Guarantees Route B/Ollama never auto-replies
+        # to a Client/Escort/Office/Operation/Accountant/Security-Guard/
+        # Al-Aqsa-Al-Manaratayn-named contact, matching the "Route A — no
+        # Auto Reply" business rule.
+        _bn = (identity.get("display_name") or "").lower()
+        if _bn and _SILENT_SKIP_PATTERN.search(_bn):
+            if "escort" in _bn and _looks_like_escort_order(text):
+                return await handle_escort_client_message(text, sender, source, is_verified=False)
+            log.info("[NO_REPLY_NAME_MATCH] %s → no reply, no draft (display_name=%r)", sender, identity.get("display_name"))
+            return "", None
         from modules.route_b import handle_route_b_message
         reply, admin_note = await handle_route_b_message(sender, text, source, identity, intent)
         if reply:

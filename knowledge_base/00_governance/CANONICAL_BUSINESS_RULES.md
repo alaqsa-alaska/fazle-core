@@ -462,6 +462,8 @@ An employee is Office Staff (and therefore eligible for Formula 3, never Formula
 
 **Canonical APIs:** `modules/recruitment_flow::route_recruitment_message()`, `intake_message()`, `is_recruitment_trigger()`, `get_active_session()`, `recruitment_eligibility()`.
 
+**Known open gap (confirmed live 2026-07-21, not yet fixed):** `recruitment_eligibility()`'s `OPERATIONAL_INTENTS` set (`attendance, leave, salary_query, payment_due, advance_request, escort_duty, client_order, slip_submission`) rejects a message as `eligible: False, reason: operational_intent` based on the classified *intent* alone, evaluated before the smarter 3-layer `recruitment_detector` gets a chance to run — regardless of whether the sender's *role* is `unknown`/`candidate`/`new_lead` (i.e. clearly not yet a known operational identity). Confirmed live: a fresh/unidentified sender asking "how much salary for escort, monthly" is classified intent `salary_query` by both the deterministic and live-Ollama classifiers, which trips this gate and prevents the message from ever reaching the recruitment funnel's KB-grounded reply (with the actual `SALARY_REPLY` figures) — it instead falls through to `modules/route_b`'s generic Ollama-only handler, which asks a reasonable clarifying question but doesn't have those figures pre-loaded. This is not a silent-drop (Route B still answers) but it is a misroute — same architectural pattern (blunt keyword/intent match overriding role-aware nuance) as the keyword-priority bug in `modules/social_auto_reply/classifier.py` (see that module's own known issues, not covered by this document). Recommended fix, not yet applied: don't hard-reject on `intent in OPERATIONAL_INTENTS` alone for `unknown`/`candidate`/`new_lead` roles — let the 3-layer detector weigh in first. See `management_decisions.md` 2026-07-21 entry and `../05_workflows/whatsapp_reply_workflow.md`.
+
 **Canonical Status Values (`funnel_stage`):** `collecting`, `new`, `scored`, `expired`. (`already_applied` is an action/response, not a stored stage value.)
 
 **Owner Changeable Rules:** Scoring thresholds, funnel-stage timeout duration, and which fields are collected (`COLLECTION_STEPS`) are business policy.
@@ -691,9 +693,13 @@ Future:      no rename recommended — the real fix is documentation (this secti
 
 **Business Purpose:** Take an inbound WhatsApp/Meta message and route it to the correct business workflow based on who sent it and what they're asking for.
 
-**Canonical Workflow:** `modules/message_router` evaluates **15 numbered tiers in order**: (1) family role, (2) escort-client role, (3) admin, (4) attendance, (5) intent classification, (6) accountant, (7-8) recruitment eligibility, (9) escort order, (10) employee, (11) advance/payment request, (12) office-location fast path, (13) knowledge base, (14) reviewed-reply lookup, (15) AI fallback. Earlier tiers win — a message is routed to the first tier that claims it, not the "best" one by some other measure.
+**Canonical Workflow (updated 2026-07-21 — Route A / Route B):** `modules/message_router` evaluates numbered tiers in order, first match wins: (1) family, (2) escort-client role, (3) admin, (4) attendance, (5) intent classification, (6) accountant, (7-8) recruitment eligibility, (9) escort order, **(9.5) Route B — Ollama-only handler (`modules/route_b`) for any sender whose role is in `identity_brain.ROUTE_B_ROLES` and whose message wasn't claimed by the escort-order safety net**, (10) employee, (11) advance/payment request (Sprint-3A), **(11.5) Route B again — same handler, now reached by escort/security_guard/candidate/unknown senders whose message wasn't a genuine advance request**, (12) office-location fast path, (13) knowledge base, (14) reviewed-reply lookup, (15) AI fallback. Full policy: `../05_workflows/whatsapp_reply_workflow.md`.
 
-**Canonical Entity Names:** "Role" (who the sender is: `family`, `admin`, `accountant`, `employee`, `candidate`/`new_lead`/`unknown`) is a distinct concept from "Intent" (what they want: `recruitment`, `client_order`, `escort_duty`, `attendance`, `slip_submission`, `employee_salary_complaint`, `legal_issue`, `payment_issue`, `salary_query`, `payment_due`, `office_location`, `unknown`). Do not conflate role and intent — a message has exactly one role (the sender's identity classification) and one intent (the message's classified purpose), evaluated by different tiers.
+**Route A / Route B split:** every sender resolves to Route A (admin, accountant, client/buyer roles, family, employee/staff, `internal_coordinator` — the existing tiers above, KB/template/multi-provider `ai.generate_reply()` chain) or Route B (escort, security_guard, candidate, unknown — `modules/route_b`, Ollama only, no Groq/GitHub fallback). Route B is deliberately positioned *after* every existing operational safety tier (escort-order parsing, attendance, Sprint-3A advance flow) so none of that mature logic is preempted — it only claims what would otherwise fall through to the generic KB/AI-fallback tiers. `SOCIAL_AUTO_REPLY_SINGLE_ENGINE`/`_requires_legacy_workflow()`'s content-based fork to `modules/social_auto_reply` was removed for the three WhatsApp entry points (`bridge_poller`, `/webhook/meta`, `/webhook/mcp1`/`mcp2`) — `social_auto_reply` itself is unmodified and remains the live engine for Facebook Messenger DMs and Facebook Page comments only.
+
+**Route A — No Auto Reply, name-based gate (2026-07-22):** within the Route B population, a sender whose *saved contact name* contains Client/Escort/Office/Operation/Accountant/Security Guard/Al-Aqsa/Al-Manaratayn/আল-আকসা/আল-মানারাতাইন anywhere (substring, not prefix) gets no AI/generic/recruitment reply at all — enforced both by `_should_silent_skip()` (early, `wbom_contacts.display_name`) and a backstop immediately before `handle_route_b_message()` is called (`identity_brain`'s resolved name, for contacts not yet synced). Escort-named contacts get one exception: a genuinely order-shaped message (mother vessel + lighter vessel + a mobile number) is still routed to `handle_escort_client_message()` for a structured admin-review draft — the sender still gets no reply, only the destination differs. Full policy: `../05_workflows/whatsapp_reply_workflow.md` §14.
+
+**Canonical Entity Names:** "Role" (who the sender is: `family`, `admin`, `accountant`, `employee`, `escort`, `security_guard`, `internal_coordinator`, `candidate`/`new_lead`/`unknown`) is a distinct concept from "Intent" (what they want: `recruitment`, `client_order`, `escort_duty`, `attendance`, `slip_submission`, `employee_salary_complaint`, `legal_issue`, `payment_issue`, `salary_query`, `payment_due`, `office_location`, `unknown`). Do not conflate role and intent — a message has exactly one role (the sender's identity classification) and one intent (the message's classified purpose), evaluated by different tiers.
 
 **Canonical Database Tables:** N/A directly (routing logic, not its own storage) — reads identity from `modules/identity_brain`, dispatches into the domain modules covered elsewhere in this document.
 
@@ -709,9 +715,9 @@ Future:      no rename recommended — the real fix is documentation (this secti
 
 **Validation Rules:** Not verified beyond the tier/intent vocabulary above.
 
-**Related Modules:** `modules/message_router`, `modules/identity_brain`, `modules/intent`.
+**Related Modules:** `modules/message_router`, `modules/identity_brain`, `modules/intent`, `modules/route_b`, `modules/bridge_poller`.
 
-**Related Documents:** `docs/DEVELOPER_GUIDE.md` §H, `docs/MODULE_MAP.md`.
+**Related Documents:** `docs/DEVELOPER_GUIDE.md` §H, `docs/MODULE_MAP.md`, `../05_workflows/whatsapp_reply_workflow.md`.
 
 ---
 
@@ -841,9 +847,22 @@ Future:      no schema change needed; the risk is three separate normalization f
 
 **Superseded (Owner decision, 2026-07-11):** This passage previously described `'Blocked'` as a value exclusively represented by `is_active=false`. That framing is removed along with the rest of the "blocked number" concept — `is_active=false` simply means an inactive contact record, nothing more; it carries no "blocked"/moderation semantic. Full detail: `docs/CANONICAL_CLIENT_DOMAIN.md` §Client Tier, Client Status, and `is_active`.
 
+**Updated 2026-07-22 — `fazle_contact_roles` phone-format duplicates found and cleaned.**
+The "no FK linking it to `wbom_contacts`, so the two can silently disagree" gap above is
+still open (not resolved by this pass), but a concrete symptom of it was: 8 phone numbers
+had duplicate rows in `fazle_contact_roles` itself, purely from inconsistent phone-string
+format (`01XXXXXXXXX` vs `8801XXXXXXXXX`) bypassing its own `(phone, platform)` unique
+constraint (a string-equality constraint, blind to two different strings representing the
+same number). Cleaned (8 rows removed, audit-backed) and the write path
+(`modules/contact_roles/routes.py`) now normalizes phone before every read/write, making
+the existing constraint actually effective. `wbom_contacts` itself was independently
+checked and found to already have zero such duplicates (protected by consistent
+normalization in `modules/contact_sync`). Full record: `management_decisions.md`
+2026-07-22 "Daily Phone-Contact-Book Sync + Contact-Identity Deduplication."
+
 **Related Modules:** `modules/contact_sync`, `modules/contact_roles`, `modules/wa_chat_frontend`, `modules/drafts`.
 
-**Related Documents:** `docs/CANONICAL_CLIENT_DOMAIN.md` (full discovery + model), `docs/CLIENT_DOMAIN_IMPLEMENTATION_PLAN.md` (phased fix), `docs/PRODUCTION_CERTIFICATION_v1.0.md`, `docs/PHASE2_ENTRY_GATE.md`.
+**Related Documents:** `docs/CANONICAL_CLIENT_DOMAIN.md` (full discovery + model), `docs/CLIENT_DOMAIN_IMPLEMENTATION_PLAN.md` (phased fix), `docs/PRODUCTION_CERTIFICATION_v1.0.md`, `docs/PHASE2_ENTRY_GATE.md`, `../06_developer_system/contact_sync.md`.
 
 ---
 
@@ -867,9 +886,11 @@ Future:      no schema change needed; the risk is three separate normalization f
 
 ## Identity
 
-**Business Purpose:** Resolve "who is this WhatsApp sender" into a role (family/admin/accountant/employee/candidate/unknown) and, where applicable, a specific employee/client record — before any workflow acts on the message.
+**Business Purpose:** Resolve "who is this WhatsApp sender" into a role (family/admin/accountant/employee/escort/security_guard/internal_coordinator/candidate/unknown) and, where applicable, a specific employee/client record — before any workflow acts on the message.
 
 **Canonical Workflow:** Inbound message → `modules/identity_brain` resolves sender phone → role + confidence → `modules/message_router` Tier 1 (family) / Tier 2 (escort-client) / Tier 3 (admin) consume that resolution before any domain-specific tier runs. `shared/identity_map.py::resolve_employee()` is the canonical resolver specifically for "this phone number → which `wbom_employees` row," used by payment/validation code that must not conflate an employee's contact number with their payout number (see Employee section's Naming Rule for the full phone-naming picture this resolver exists to guard against).
+
+**Updated 2026-07-21 — escort/guard split + internal_coordinator:** a `wbom_employees` row no longer resolves unconditionally to role `employee` — `identity_brain._designation_to_role()` maps `designation` to `escort` or `security_guard` when it matches, `employee` otherwise (covers office/"Staff" designations). `wbom_escort_programs` roster matches resolve directly to `escort` (previously `employee`). New role `internal_coordinator` is seed-row-only (`fazle_contact_roles`, checked before `wbom_employees` in resolution order) — used for people who coordinate dispatch/payroll/paperwork but aren't front-line escort/guard staff (e.g. `+8801817201596`). A read-only former/on-leave lifecycle heuristic (`status='Inactive'` → former; `Active` + no recent `wbom_attendance` row → on-leave; no new columns) is attached as `identity_lifecycle` — context for Route B's Ollama prompt, not a routing input (active/former/on-leave escort/guard all route identically). See `../05_workflows/whatsapp_reply_workflow.md` §7.
 
 **Canonical Entity Names:** "Role" (message_router's sender classification: `family`, `admin`, `accountant`, `employee`, `candidate`/`new_lead`/`unknown`) is resolved once per message and consumed by every downstream tier — not to be confused with RBAC's "Role" concept (Roles section above), which governs admin *command* permissions, not sender *identity*. These are two different, same-named concepts in two different subsystems — another instance of the same-name-different-meaning pattern this document exists to surface.
 
@@ -885,9 +906,9 @@ Future:      no schema change needed; the risk is three separate normalization f
 
 **Validation Rules:** Not verified beyond the resolver functions named above.
 
-**Related Modules:** `modules/identity_brain`, `modules/message_router`, `shared/identity_map.py`, `modules/rbac`.
+**Related Modules:** `modules/identity_brain`, `modules/message_router`, `modules/route_b`, `shared/identity_map.py`, `modules/rbac`.
 
-**Related Documents:** `docs/DEVELOPER_GUIDE.md` §H.
+**Related Documents:** `docs/DEVELOPER_GUIDE.md` §H, `../05_workflows/whatsapp_reply_workflow.md`.
 
 ---
 
@@ -932,5 +953,57 @@ Future **policy** changes are expected and welcome — the Owner may change any 
 **What changed:** A dedicated audit (Session 20 Step 3, full report in `management_decisions.md` S20-08 through S20-11) traced every writer to `wbom_employees`/`fpe_employees`/`fpe_cash_transactions`/`fpe_employee_ledger` and found: (1) `message_router::_seed_unknown_employee_identity()` auto-created a `wbom_employees` row (and indirectly an `fpe_employees` row) for **any** sender identity_brain classified as `"unknown"` whose message merely looked like an attendance/escort/advance-request — by construction, every such sender had already failed every trust check the system has. Disabled (Owner directive), not deleted. This document's Message Parser section previously described `_OPERATIONAL_AUTO_CREATE_INTENTS` as a live policy lever without qualification — corrected in place, not left silently stale. (2) The trusted admin→accountant finance path (`payment_ingest::_match_or_create_instruction_employee()`) collapsed two distinct phone values into one search key before ever querying, so an explicit ID-mobile miss never fell back to a payout-number retry — fixed with a 2-line addition. (3) This document's Employee section named only one of two real `wbom_employees`↔`fpe_employees` bridges (`wbom_fpe_sync.py`, a historical/backfill adapter) — added the second, live, real-time bridge (`fpe_bridge.py`) that the fix in (2) actually touched, so a future reader isn't misled into thinking only the backfill path exists. (4) Added a new read-only report, `modules/reports::_b_unresolved_fpe_employees()`, distinguishing genuinely-unlinked employee rows from rows that are already correctly linked but carry a stale `resolution_status` label — confirmed live against production (172 + 81 = 253 unlinked, 153 mislabeled-but-linked).
 **Why:** Owner-initiated audit into unlinked/out-of-sync employee row creation breaking finance workflows. Both code fixes were narrowly scoped (Owner explicitly excluded: `wbom_*`→`fpe_*` renames, the `wbom_employees`/`fpe_employees` merge, `employee_id_phone` uniqueness changes, escort dual-write concurrency, `accounting.py` semantics, `admin_transactions` bypass cleanup — all remain open, undecided).
 **Owner approval:** Yes, each of the 3 implementation phases (disable auto-create; add search fallback; add report) was shown to the Owner as exact current code + exact proposed diff and explicitly approved before any change, per this session's standing process. Full authorization trail: `management_decisions.md` Session 20 Step 3, S20-08 through S20-11; commits `47018f7`, `38dbedd`, `b0c0057`.
+
+### 2026-07-21 — WhatsApp Reply Workflow: Route A / Route B (identity-first routing)
+**Type:** Structural fix + new architecture implemented + one open gap discovered (not yet resolved).
+**Section(s) affected:** Message Parser (Message Router), Identity, Recruitment.
+**What changed:** Replaced the content-based WhatsApp reply-routing gate (`_requires_legacy_workflow()` keyword/regex sniffing on message text) with identity-first routing. New roles `escort`, `security_guard`, `internal_coordinator` added to `modules/identity_brain` (designation-driven, no longer collapsed into generic `employee`). New `modules/route_b` (Ollama-only, no Groq/GitHub fallback) handles escort/security_guard/candidate/unknown senders, wired into `modules/message_router` as a branch positioned after every existing operational safety tier so none is preempted. `modules/social_auto_reply`'s content/code is unmodified — only its WhatsApp entry points (`bridge_poller`, `/webhook/meta`, `/webhook/mcp1`/`mcp2`) were disconnected; it remains live for Facebook Messenger/Page comments. Phone normalization: 2 unauthorized reimplementations (`identity_brain`, `payment_ingest`) fixed to delegate to the documented canonical roots instead of re-implementing digit parsing. Office/deposit canonical text unified across `fazle_knowledge_base` and every code-level fallback. `modules/rag` gap closed: `knowledge_base/**/*.md` DB-mirror rows were reachable by candidate/employee-facing RAG search (no role restriction), now admin/developer-only, matching the raw-file loader's existing intent. Company rebrand applied to customer-facing output; recognition keywords parsing *incoming* content (`escort._AL_AQSA_RE`, OCR/matching lists) augmented, not replaced. Full detail: `management_decisions.md` 2026-07-21 entry, `../05_workflows/whatsapp_reply_workflow.md`.
+**Why:** The prior content-based gate caused two confirmed incidents: a WhatsApp number auto-classified as generic "employee" from one misread OCR string then silently answered by the wrong engine; and casual messages from escorts/guards/unknown senders answered with unrelated `social_auto_reply` keyword-template replies. Root cause was routing on message content instead of sender identity.
+**Owner approval:** Yes — implementation proceeded through an explicit multi-step approval sequence (3 drafts for text/DB-boundary approval, then implementation authorization, then commit authorization, then rebrand + remaining-KB-rows authorization, then push authorization), each step confirmed before proceeding, per `management_decisions.md`. Deployed live via `scripts/restart_gate.sh --restart` (0 warnings) on Owner instruction, verified healthy post-restart.
+**Known open gap (discovered during post-implementation verification, not yet fixed):** `modules/recruitment_flow::recruitment_eligibility()`'s `OPERATIONAL_INTENTS` gate has the same architectural flaw class (blunt intent-keyword rejection ahead of role-aware nuance) — see Recruitment section above for detail. Flagged for Owner review; no code changed for this gap under this entry.
+
+### 2026-07-22 — Daily contact sync + `fazle_contact_roles` phone-format duplicate cleanup
+**Type:** Structural fix (2) + new mechanism implemented.
+**Section(s) affected:** Client.
+**What changed:** Implemented the Owner's daily phone-contact-book ↔ `wbom_contacts` sync
+policy (soft-delete on first miss, hard-delete after N consecutive misses, phone-book
+name canonical over WhatsApp profile name) — found and fixed a bridge2 SQLite-path bug
+along the way (silently reading zero contacts), and found the same wrong
+name-priority bug in `modules/route_b` (built one day earlier in this same project) and
+fixed it there too. On Owner follow-up: found and removed 8 duplicate rows in
+`fazle_contact_roles` caused by inconsistent phone-string format bypassing its own
+unique constraint; normalized the write path so the constraint is now actually effective.
+Full record: `management_decisions.md` 2026-07-22, `../06_developer_system/contact_sync.md`.
+**Why:** Contact data (name, active/deleted status, identity-routing role) needs to stay
+accurate and free of format-based duplication, since it feeds both display and
+identity-based routing.
+**Owner approval:** Yes — implemented per explicit instruction, with the duplicate-cleanup
+scope (found via investigation, not originally specified) confirmed safe before deletion
+(all 8 duplicate groups had identical role/priority/confidence, zero routing-outcome
+risk) and audit-backed before any row was removed.
+
+### 2026-07-22 — Route A: No Auto Reply, contact-name-based gate
+**Type:** New mechanism + bug fix.
+**Section(s) affected:** Message Parser (Message Router).
+**What changed:** Within the Route B population (escort/security_guard/candidate/unknown),
+a sender whose saved contact name contains Client/Escort/Office/Operation/Accountant/
+Security Guard/Al-Aqsa/Al-Manaratayn/আল-আকসা/আল-মানারাতাইন anywhere (substring match, not
+prefix-only) now gets no AI/generic/recruitment reply at all, enforced at two points in
+`modules/message_router/__init__.py`: `_should_silent_skip()` (early gate) and a new
+backstop immediately before Route B's `handle_route_b_message()` call. Escort-named
+contacts get one exception — a genuinely order-shaped message still produces a structured
+admin-review draft via the existing `handle_escort_client_message()` pipeline, with no
+reply to the sender either way. Found and fixed a real bug while implementing:
+`_should_silent_skip()`'s name-token check had an either/or logic error (`list(...) is
+list(...)` is always `False`) that silently dropped the static keyword list entirely
+whenever `.env`'s `DRAFT_ALWAYS_NAMES`/`DRAFT_ALWAYS_ROLES` had any custom tokens
+configured — true in production — so generic contacts like "Md Karim Escort" were never
+actually being matched. Fixed to a real union of both lists. Full record:
+`management_decisions.md` 2026-07-22, `../05_workflows/whatsapp_reply_workflow.md` §14.
+**Why:** Known, name-tagged business contacts (staff, clients, accountant, operations)
+should never receive a risky AI-generated reply, even from the new Ollama-based Route B —
+only structured extraction for a well-defined case (a genuine escort order) plus human
+review, or silence.
+**Owner approval:** Yes — implemented and committed per explicit instruction.
 
 

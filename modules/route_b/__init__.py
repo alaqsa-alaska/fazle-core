@@ -16,7 +16,8 @@ Design boundary (Owner-approved):
   - Bypasses KB/template machinery and calls app.ollama.generate_reply()
     directly — the one Ollama-only function with no Groq/GitHub fallback.
   - Read-only context gathering from: wbom_whatsapp_messages, wbom_contacts,
-    the per-bridge whatsmeow_contacts SQLite (WhatsApp profile name), and
+    the per-bridge whatsmeow_contacts SQLite (phone-book contact name,
+    canonical over WhatsApp's own push_name — see _best_name()), and
     the already-computed identity_brain identity dict. Never queries
     wbom_employees, fpe_cash_transactions, wbom_escort_programs,
     escort_roster_entries, or attendance tables directly.
@@ -96,10 +97,18 @@ def _whatsapp_db_for_source(source: str) -> Optional[str]:
 
 
 def _read_whatsapp_profile_name(whatsapp_db: str, phone_digits: str) -> str:
-    """Read-only whatsmeow_contacts lookup for the sender's real WhatsApp
-    profile name (push_name/full_name/first_name) — same URI=ro pattern
-    bridge_poller._load_lid_map() already uses. Sync — caller runs it in a
-    thread if called from an async context with a tight loop budget."""
+    """Read-only whatsmeow_contacts lookup for the sender's name — same
+    URI=ro pattern bridge_poller._load_lid_map() already uses. Sync — caller
+    runs it in a thread if called from an async context with a tight loop
+    budget.
+
+    Canonical authority (2026-07-22 Owner decision, same rule
+    modules.contact_sync._best_name() applies): the name saved in the
+    admin's own phone contact book (full_name/first_name) is authoritative,
+    not the WhatsApp profile name the other person set for themselves
+    (push_name/business_name) — that's only a fallback for a number the
+    phone hasn't saved a name for at all. Delegates to contact_sync's own
+    priority function rather than re-implementing it here."""
     try:
         con = sqlite3.connect(f"file:{whatsapp_db}?mode=ro", uri=True, timeout=3.0)
         row = con.execute(
@@ -112,7 +121,8 @@ def _read_whatsapp_profile_name(whatsapp_db: str, phone_digits: str) -> str:
         if not row:
             return ""
         push_name, full_name, first_name, business_name = row
-        return (push_name or full_name or first_name or business_name or "").strip()
+        from modules.contact_sync import _best_name
+        return _best_name(full_name, first_name, push_name, business_name)
     except Exception as e:
         log.debug("[route_b] whatsapp profile-name read failed: %s", e)
         return ""
@@ -137,7 +147,13 @@ def _build_identity_context(identity: dict, profile_name: str, contact: Optional
     if identity.get("designation"):
         lines.append(f"Designation: {identity['designation']}")
     if profile_name:
-        lines.append(f"WhatsApp profile name: {profile_name}")
+        # Canonical name from the live SQLite read (phone-book name if the
+        # admin has saved one, WhatsApp's own push_name only as a fallback
+        # for numbers with no saved name — see _best_name()). Not
+        # necessarily "their WhatsApp profile name" despite the source
+        # table's name; labeled generically since we can't tell which case
+        # produced it from here without an extra lookup.
+        lines.append(f"Contact name (from device): {profile_name}")
     if contact:
         if contact.get("display_name"):
             lines.append(f"Saved contact name: {contact['display_name']}")

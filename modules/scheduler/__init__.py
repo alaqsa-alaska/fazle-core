@@ -556,6 +556,13 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     except Exception as e:
         log.warning(f"[scheduler] reports module unavailable: {e}")
 
+    # 2026-07-22 — daily phone-contact-book <-> wbom_contacts sync
+    try:
+        from modules.contact_sync import job_daily_contact_sync
+        register_job("daily_contact_sync", job_daily_contact_sync)
+    except Exception as e:
+        log.warning(f"[scheduler] contact_sync module unavailable: {e}")
+
     # Batch 18 — daily DB backup
     try:
         from modules.backup import job_daily_db_backup
@@ -609,6 +616,14 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     _scheduler.add_job(_wrap("rag_rebuild", job_rag_rebuild),
                        CronTrigger(hour=rag_rebuild_hour, minute=0),
                        id="rag_rebuild", replace_existing=True)
+
+    # 2026-07-22 — daily contact-book sync (default 04:00, before the 09:00
+    # memory-review job and after the 02:00/03:00 payroll/backup jobs)
+    if "daily_contact_sync" in _job_registry:
+        from modules.contact_sync import DAILY_SYNC_HOUR as _contact_sync_hour
+        _scheduler.add_job(_wrap("daily_contact_sync", _job_registry["daily_contact_sync"]),
+                           CronTrigger(hour=_contact_sync_hour, minute=0),
+                           id="daily_contact_sync", replace_existing=True)
 
     # Shared processing-lock cleanup (Phase 1 unification)
     try:

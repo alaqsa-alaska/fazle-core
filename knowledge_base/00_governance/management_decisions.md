@@ -2,7 +2,7 @@
 title: Management Decisions — Active Register
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-07-21
 runtime_index: true
 ---
 
@@ -5307,3 +5307,251 @@ were observed. No alert triggered, no activation-recommendation
 suspension warranted. Activation readiness score: not yet determinable
 (no data). Observation continues unchanged; no code or flag change made
 as a result of this report.
+
+## WhatsApp Reply Workflow — Route A / Route B (Implemented, 2026-07-21)
+
+**Decision:** Replace content-based WhatsApp reply routing (`_requires_legacy_workflow()`
+keyword/regex sniffing) with identity-first routing. Full policy:
+`../05_workflows/whatsapp_reply_workflow.md`.
+
+**Problem this solves:** the prior gate decided which reply engine handled a
+message by scanning the message *text* for escort/vessel keywords, not by
+*who* was sending it. This produced two confirmed incidents: (1) a WhatsApp
+number auto-classified as a generic "employee" off a single misread OCR
+string, then silently answered by the keyword-template `social_auto_reply`
+engine instead of reaching the real order/booking pipeline; (2) casual
+follow-ups from escorts/guards/unknown senders answered with unrelated
+canned templates from `social_auto_reply`'s 25-bucket keyword classifier.
+
+**What changed (all deployed and verified live, 2026-07-21T02:08:51+02:00
+restart, `scripts/restart_gate.sh --restart`, 0 warnings):**
+
+- `modules.identity_brain`: added `escort`, `security_guard`, and
+  `internal_coordinator` roles. `wbom_employees.designation` now drives the
+  escort/guard split. Read-only former/on-leave lifecycle heuristic (status +
+  `wbom_attendance` recency, no new columns) carried as Route B context only.
+- `modules.route_b` (new): Ollama-only reply handler for escort/
+  security_guard/candidate/unknown senders — bypasses KB/templates, calls
+  `app.ollama.generate_reply()` directly (no Groq/GitHub fallback). Read-only
+  context from `wbom_whatsapp_messages`, `wbom_contacts`, and the per-bridge
+  `whatsmeow_contacts` SQLite store; never queries `wbom_employees`,
+  `fpe_cash_transactions`, `wbom_escort_programs`, `escort_roster_entries`,
+  or attendance tables directly — that signal only arrives pre-filtered
+  through `identity_brain`.
+- `modules.message_router`: Route B wired in as a branch inside the existing
+  `process_message()` — placed after the escort-order safety net and after
+  the mature Sprint-3A advance-request catchall, so neither is preempted.
+- `modules.bridge_poller` + `app/main.py` (meta, mcp1, mcp2 webhooks): the
+  `SOCIAL_AUTO_REPLY_SINGLE_ENGINE` fork to `social_auto_reply` is removed
+  for these three WhatsApp entry points. `social_auto_reply` itself is
+  **not** modified or removed — it remains the live, unmodified engine for
+  Facebook Messenger DMs and Facebook Page comments
+  (`_handle_messenger_message`, `_handle_fb_comment`); those call sites were
+  untouched.
+- `fazle_contact_roles`: seed row `+8801817201596` → `internal_coordinator`,
+  overriding a bogus auto-created `wbom_employees` stub without modifying
+  that table.
+- Phone normalization: `modules.identity_brain._normalize_phone()` and
+  `modules.payment_ingest._norm_mobile()` now delegate to the two documented
+  canonical roots instead of re-implementing digit parsing (no new
+  normalizer created).
+- Office/deposit text consolidated to one canonical version across
+  `fazle_knowledge_base` DB rows, `modules.knowledge_base._FALLBACK`,
+  `modules.social_auto_reply.reply_rules`, and
+  `modules.conversation_layer.playbooks` — see workflow doc §13.
+- `modules.rag`: `fazle_knowledge_base` rows mirroring `knowledge_base/**/*.md`
+  (category `knowledge_base`) gated to `admin`/`developer` roles only, closing
+  a gap where candidate/employee-facing RAG search could surface chunks from
+  archived/historical documents (pre-rebrand company name, superseded fee
+  policy) into a live WhatsApp answer.
+- Company rebrand: Al-Aqsa Security Service → Al-Manaratayn Skill Solutions
+  across customer-facing output; recognition keywords that parse *incoming*
+  field content (`modules.escort._AL_AQSA_RE` — the hard gate inside
+  `is_completed_escort_draft()` — plus OCR/matching keyword lists in
+  `escort_slip_extractor`, `escort_roster.history_sync`,
+  `payroll.eligibility`, `app.config.draft_always_names`) were augmented
+  with the new name, old name kept, since existing saved contacts and past
+  field documents still carry it. Archived/dated KB documents and the
+  `al-aqsasecurity.com` domain reference were deliberately left unchanged —
+  see workflow doc and this entry's cross-references for rationale.
+
+**Verification:** full `tests/unit/` suite run to completion three times
+across this work; final run has the same pre-existing failures as the
+unmodified baseline (individually confirmed via `git stash` against the
+prior commit, not assumed) — none newly introduced by this change.
+Post-restart `/health` probe: all green (db, bridge1/bridge2, outbound
+queue, disk, memory, Ollama, Qdrant).
+
+**Known open gap, not yet fixed (flagged, not resolved by this decision):**
+`modules.recruitment_flow.recruitment_eligibility()`'s `OPERATIONAL_INTENTS`
+set (`salary_query`, `escort_duty`, etc.) rejects a message from the
+recruitment funnel based on intent alone, before the smarter 3-layer
+detector runs — same architectural flaw class as the keyword-priority bug
+`social_auto_reply.classifier` has, just in a different module. Confirmed
+live 2026-07-21: a candidate asking "how much salary for escort, monthly"
+is no longer silently dropped (previously confirmed behavior of the retired
+WhatsApp gate) — Route B now answers with a contextual identity-probing
+reply — but the message still doesn't reach the recruitment funnel's
+KB-grounded reply with the actual salary figures, because `salary_query`
+intent trips `OPERATIONAL_INTENTS` before the sender's `unknown`/`candidate`
+role is weighed. Recommended fix: don't hard-reject on intent alone for
+`unknown`/`candidate`/`new_lead` roles — let the 3-layer detector decide.
+Not fixed as part of this decision; pending Owner review.
+
+**Cross references:** `../05_workflows/whatsapp_reply_workflow.md`,
+`../04_business_rules/recruitment_business_rules.md`,
+`CANONICAL_BUSINESS_RULES.md`.
+
+## Daily Phone-Contact-Book Sync + Contact-Identity Deduplication (2026-07-22)
+
+**Decision:** Implement the Owner's daily phone-contact-book ↔ `wbom_contacts` sync
+policy (soft-delete on first miss, hard-delete after N consecutive misses, phone-book
+name canonical over WhatsApp profile name), then — on the Owner's follow-up instruction —
+find and clean up existing same-mobile-number duplicate contact-identity rows and close
+the write-path gap that let them accumulate. Full technical detail:
+`../06_developer_system/contact_sync.md`.
+
+**Bugs found and fixed while implementing (not part of the original ask, found by reading
+the actual code first, per standing policy):**
+- `modules/contact_sync.BRIDGE_SOURCES` hardcoded bridge2's SQLite path to a file that
+  does not exist (`/home/azim/bridges/bridge2/store/whatsapp.db`) — bridge2 contact sync
+  had been silently reading zero contacts. Fixed to read from the same
+  `app.config` settings `bridge_poller` itself uses.
+- The daily/periodic sync was never actually running — `start_contact_sync_loop()`
+  existed but had zero callers anywhere in the codebase; the only live trigger was the
+  admin's manual "sync now" button. Corrected the developer doc, which had claimed it ran
+  on app startup.
+- `modules/route_b`'s own separate WhatsApp-profile-name reader (built 2026-07-21, this
+  same routing project) prioritized `push_name` (the sender's own self-set WhatsApp
+  display name) over `full_name`/`first_name` (the admin's own phone-book entry) — the
+  exact opposite of the canonical-authority rule this decision establishes. Fixed to
+  delegate to `contact_sync._best_name()` rather than duplicate the priority logic.
+
+**What changed:**
+- `modules/contact_sync._best_name()`: priority-first instead of longest-first —
+  `full_name` → `first_name` → `push_name` → `business_name`. Verified empirically
+  against live bridge2 data that these fields genuinely differ (e.g. saved "Escort
+  Saimun" vs their own push_name "Saimun").
+- New tables `fazle_contact_presence` (per-phone-per-bridge absence streak) and
+  `fazle_contact_hard_delete_log` (audit trail written before every hard-delete),
+  migration `056_contact_sync_presence_tracking.sql`, applied directly and recorded in
+  `schema_migrations` (not via `db/migrate.py`'s full run — see note below).
+  `wbom_contacts.is_active`/`marked_for_delete_at` (pre-existing columns) drive the
+  soft-delete; `is_protected=true` contacts are never touched by either step.
+- New scheduler job `daily_contact_sync` (`modules.scheduler`, `CronTrigger` 04:00
+  Asia/Dhaka default, `CONTACT_SYNC_HOUR` env-tunable) — the actual "at least once daily"
+  mechanism.
+- `modules/contact_roles/routes.py` (`upsert_contact_role`, `list_contact_roles`,
+  `update_contact_role`, `delete_contact_role`): phone is now normalized to canonical
+  `8801XXXXXXXXX` before every read/write. This table already had a `(phone, platform)`
+  unique constraint, but it only catches a conflict when the *string* matches —
+  `"01844836824"` and `"8801844836824"` are different strings for the same number, which
+  is exactly how this table accumulated real duplicate rows historically. Normalizing at
+  the write boundary is what makes the pre-existing constraint actually effective going
+  forward, not a new constraint.
+- **`fazle_contact_roles` cleanup:** found 8 phone numbers with duplicate rows (16 rows
+  total) via normalized-phone grouping — all format duplicates (`01XXXXXXXXX` vs
+  `8801XXXXXXXXX` strings for the same number). All 8 groups had *identical*
+  `role`/`priority`/`confidence` between duplicates (only one group, the accountant
+  number, had a different saved `name`) — zero routing-outcome risk confirmed before
+  deleting. Backed up full before/after row data to
+  `contact_roles_dedup_audit_20260722.json` (this directory) before deleting, then
+  deleted the 8 older-format rows inside one transaction. Verified zero duplicate groups
+  remain; verified live post-delete that `detect_identity()` still resolves the
+  accountant/family/vendor numbers involved to the same role/priority as before.
+  `fazle_contact_aliases` also showed 172 phones with multiple rows — **not the same
+  class of issue**, left untouched: that table is deliberately a name-history log (every
+  name variant ever seen for a phone), not meant to be deduplicated to one row.
+
+**Migration application note:** `db/migrate.py --dry-run` showed ~10 old migrations
+(036-045) as "pending" purely because they predate the `schema_migrations` tracking
+table (applied via a different process years ago, never recorded) — running the real
+migration would have attempted to re-apply all of them against live production, an
+unintended and unassessed risk. Applied only migration `056` directly and recorded it in
+`schema_migrations`, leaving the older migrations' pending/tracked status exactly as
+found.
+
+**Verification:** `tests/unit/test_contact_roles.py` (30 tests) and
+`tests/unit/test_identity_brain.py` (20 tests) green after the normalization fix and the
+row deletion. Live spot-check: `detect_identity()` for the accountant, a family number,
+and a vendor number all resolve identically to before. First full sync run (post-fix)
+against both bridges: 1,991 (bridge1) + 1,830 (bridge2) = 3,821 contacts upserted,
+`fazle_contact_presence` populated with exactly matching row count; a second run with no
+real-world contact-book changes correctly found zero new absences.
+
+**Not done / explicitly out of scope this pass:** `fazle_contact_aliases` was
+investigated but deliberately not touched (see above). `init_tables()` remains
+unwired to app startup — not required since the new tables are covered by migration 056,
+matching how the 3 original contact-sync tables were originally created (migration 039,
+not `init_tables()`).
+
+**Cross references:** `../06_developer_system/contact_sync.md`,
+`db/migrations/056_contact_sync_presence_tracking.sql`,
+`contact_roles_dedup_audit_20260722.json` (this directory).
+
+## Route A — No Auto Reply, Contact-Name-Based Gate (2026-07-22)
+
+**Decision:** For any sender whose saved contact name (canonical authority —
+the admin's own phone contact book, never the WhatsApp profile name) contains
+Client/Escort/Office/Operation/Accountant/Security Guard/Al-Aqsa (or
+Al-Manaratayn)/আল-আকসা (or আল-মানারাতাইন) **anywhere** in the name — substring
+match, not prefix-only — Route B (Ollama) must never send an AI-generated,
+generic, or recruitment reply. Escort-named contacts get one exception: a
+genuinely order-shaped message (mother vessel + lighter vessel + a mobile
+number) is parsed and drafted to the admin for review exactly like any other
+escort order; anything else gets full silence. Full policy text:
+`../05_workflows/whatsapp_reply_workflow.md` §14.
+
+**Bug found and fixed while implementing (not part of the original ask, found
+by reading the actual code first, per standing policy):** `_should_silent_skip()`'s
+name-matching in `modules/message_router/__init__.py` had an either/or bug —
+`name_tokens = settings.draft_always_name_list or list(_SILENT_SKIP_NAME_TOKENS)`
+followed by a same-turn `list(...) is list(...)` identity check that is
+always `False` (two freshly-constructed lists are never the same object).
+Net effect: as soon as `.env`'s `DRAFT_ALWAYS_NAMES`/`DRAFT_ALWAYS_ROLES` had
+*any* custom name tokens configured — true in production today (Jakir
+Master, Shohag Security, TCIS W/A, Omar Faruk Lovely, Escort Saimun, Escort
+Masud WA, Client Max Ahmed, Shajin Security) — the static keyword list
+(al-aqsa/escort/client/operation/tcis/gms/dalal/office) was silently never
+checked at all. A generic contact like "Accountant Firm ABC" or "Md Karim
+Escort" — not one of those 8 specific configured names — was never being
+matched. Fixed to check both lists (a real union), not either/or.
+
+**What changed (`modules/message_router/__init__.py`):**
+- `_SILENT_SKIP_NAME_TOKENS`/`_SILENT_SKIP_PATTERN` expanded: added
+  `accountant`, `security guard`, `আল-আকসা`, `al-manaratayn`, `আল-মানারাতাইন`
+  (rebrand keyword augmented alongside the old `al-aqsa`, per the
+  augment-don't-replace rule established 2026-07-21 — existing saved
+  contacts may still carry the old company name).
+- `_should_silent_skip()`: fixed the union bug above.
+- New backstop at the Route B branch (§4.2 of the workflow doc): re-checks
+  `identity_brain`'s own resolved `display_name` against the same keyword
+  pattern immediately before `handle_route_b_message()` is called, for the
+  case a brand-new contact hasn't reached `wbom_contacts` yet (daily sync,
+  see the entry above) but `identity_brain` already saw a name via the
+  bridge. If matched: Escort-named + order-shaped → routed to the existing
+  `handle_escort_client_message()` (same structured-draft pipeline the
+  escort-order safety net already used); otherwise → `("", None)`, Route B
+  never runs.
+- Family (Tier 1's fixed personal greeting) was deliberately left unchanged —
+  it is not an AI reply, a generic reply, or a recruitment reply (the three
+  categories this rule prohibits), so it already satisfied the rule as
+  written; removing a working, intentional greeting on a debatable reading
+  of "Family phone numbers" in the Owner's instruction was judged the wrong
+  default. Flagging this interpretation explicitly for correction if wrong.
+- Verified: a "Client"-named contact's genuinely order-shaped message is
+  *not* silenced — it was already being caught correctly by the pre-existing,
+  role-agnostic Tier 9 escort-order safety net (`intent` + shape gate) before
+  ever reaching this new gate, and continues to be. The new gate's own
+  Escort-name exception exists specifically to also catch order-shaped text
+  in the narrower case that intent classification misses it.
+
+**Tests:** new `tests/unit/test_message_router_no_reply_name_gate.py` (8
+tests) — union-bug regression, new-keyword matching, substring-not-prefix
+matching, Route B backstop silence, escort-exception draft creation
+(isolated from Tier 9 by forcing intent away from client_order/escort_duty),
+non-Escort-named order text still reaching Tier 9, and an explicit
+regression guard that unmatched contacts still reach Route B normally.
+
+**Cross references:** `../05_workflows/whatsapp_reply_workflow.md` §14,
+`modules/message_router/__init__.py`, `tests/unit/test_message_router_no_reply_name_gate.py`.

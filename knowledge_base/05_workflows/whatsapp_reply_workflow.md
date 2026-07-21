@@ -1,0 +1,402 @@
+---
+title: WhatsApp Reply Workflow — Route A / Route B
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-07-21
+runtime_index: true
+---
+
+# WhatsApp Reply Workflow — Route A / Route B
+
+**Status:** Implemented
+**Scope:** Shared WhatsApp DM routing for `bridge1`, `bridge2`, and `meta`
+**Policy Type:** Active operational workflow
+**Language:** Bangla + system identifiers in English
+**Source modules:** `modules.message_router`, `modules.identity_brain`, `modules.route_b`
+
+---
+
+## 1. উদ্দেশ্য
+
+এই ডকুমেন্টে WhatsApp inbound message-এর জন্য অ্যাপের চূড়ান্ত reply workflow, routing policy, identity rules, context rules, phone normalization policy, এবং approved office/fee text নির্ধারণ করা হলো।
+
+এই workflow-এর মূল লক্ষ্য:
+
+- keyword-based ভুল/অপ্রাসঙ্গিক reply বন্ধ করা
+- sender identity/role ভিত্তিক routing চালু করা
+- WhatsApp DM-এর জন্য parallel reply engine বাদ দেওয়া
+- known business contacts বনাম unknown/escort/guard/job-seeker conversations আলাদা করা
+- Route B-তে শুধুমাত্র local Ollama ব্যবহার করা
+- money/advance conversation-এ admin notification নিশ্চিত করা
+
+---
+
+## 2. মূল নীতি
+
+### 2.1 Routing keyword-based হবে না
+
+Routing-এর ভিত্তি হবে:
+
+1. **phone normalization**
+2. **identity resolution**
+3. **conversation context**
+4. **sender role/lifecycle**
+5. **message intent**
+
+শুধু keyword দেখে reply engine নির্বাচন করা যাবে না।
+
+---
+
+## 3. Final Routing Policy
+
+| বিষয় / Sender Type | Route |
+|---|---|
+| Admin ↔ Accountant / Client / Family / Buyer / Staff / Internal Coordinator | **Route A** |
+| Active Escort | **Route B** |
+| Former Escort | **Route B** |
+| On-leave / unclear-status Escort | **Route B** |
+| Active Security Guard | **Route B** |
+| Former Security Guard | **Route B** |
+| On-leave / unclear-status Security Guard | **Route B** |
+| টাকা / অগ্রিম / salary advance / জরুরি অর্থ সহায়তা | **Route B + Admin Notification** |
+| চাকরি খুঁজছে / আবেদন করতে চায় | **Route B** |
+| অফিসের তথ্য জানতে চায় | **Route B** |
+| ফি / ডিপোজিট / joining / processing cost জানতে চায় | **Route B** |
+| Context দেখে Escort/Guard candidate মনে হয় | **Route B** |
+| Unknown sender | **Route B** |
+
+---
+
+## 4. Route Definitions
+
+### 4.1 Route A
+
+**Engine:** Existing mature Python / KB / existing business logic (`modules.message_router.process_message()`)
+**Used for:**
+
+- Admin
+- Accountant
+- Client
+- Family
+- Buyer
+- Staff
+- Internal Coordinator
+
+**Notes:**
+
+- Existing stable Python codepath অক্ষুণ্ণ থাকবে
+- Existing safety gates বজায় থাকবে
+- Customer-facing structured business flow এখানেই চলবে
+
+### 4.2 Route B
+
+**Engine:** **Ollama only** (`modules.route_b.handle_route_b_message()` → `app.ollama.generate_reply()`)
+**No fallback:** Groq / GitHub Models / keyword-template engine ব্যবহার করা যাবে না
+
+**Used for:**
+
+- Escort
+- Security Guard
+- Former / inactive operational workers
+- Unknown sender
+- Job seeker / applicant
+- Office info seeker
+- Fee/deposit seeker
+- Money/advance requester
+- Contextual candidate-like conversations
+
+---
+
+## 5. Shared Channel Policy
+
+নিচের তিনটি channel একই WhatsApp DM routing policy follow করবে:
+
+- `bridge1`
+- `bridge2`
+- `meta`
+
+অর্থাৎ routing behavior channelভেদে আলাদা হবে না।
+
+---
+
+## 6. Parallel Reply Engine Policy
+
+WhatsApp DM-এর জন্য দুইটি parallel reply engine রাখা যাবে না।
+
+### Final Decision
+
+- **Keep:** `message_router`-based unified routing
+- **Retire/disable for WhatsApp DM:** `social_auto_reply`
+
+`social_auto_reply` WhatsApp direct-message reply generator হিসেবে ব্যবহৃত হবে না।
+
+**Scope note:** `social_auto_reply` (classifier/reply_generator/intelligent_generator) মডিউলটি নিজে delete করা হয়নি — এটি এখনও Facebook Messenger DM এবং Facebook Page comment-এর জন্য জীবিত/live engine হিসেবে ব্যবহৃত হচ্ছে (`app.main._handle_messenger_message`, `_handle_fb_comment`)। শুধুমাত্র WhatsApp (bridge1/bridge2/meta) থেকে এই মডিউলে message পাঠানোর gate সরানো হয়েছে।
+
+---
+
+## 7. Identity Policy
+
+### 7.1 Approved roles
+
+System-level routing-এ নিচের role-গুলো বিবেচনায় থাকবে (source: `modules.identity_brain._ROLE_PRIORITY`):
+
+- `admin`
+- `accountant`
+- `client_escort_buyer` / `vip_client` / `repeat_client` (client/buyer)
+- `family`
+- `employee` (staff)
+- `internal_coordinator`
+- `escort`
+- `security_guard`
+- `candidate`
+- `unknown`
+
+### 7.2 Internal Coordinator
+
+`internal_coordinator` approved role।
+
+**Routing:** `internal_coordinator` → **Route A**
+
+**Example:** `+8801817201596` (Alim) → `internal_coordinator` (seeded in `fazle_contact_roles`, 2026-07-21 — overrides a bogus auto-created `wbom_employees` stub without modifying that table).
+
+### 7.3 Former / Inactive Policy
+
+**Strict rule:** `Inactive = former`. এটি hard rule।
+
+### 7.4 On-leave / unclear lifecycle handling
+
+যদি exact lifecycle table/field থেকে স্পষ্ট না হয়, তাহলে Route B local AI context ও follow-up question ব্যবহার করে বুঝবে।
+
+**Allowed contextual questions (examples):**
+
+- ভাই, আপনার নাম কী?
+- আপনি যে পিকচার পাঠিয়েছেন তা পরিষ্কার পড়া যাচ্ছে না। আপনার নাম ও মোবাইল নাম্বার লিখে দিন।
+- আপনি কখন join করেছেন?
+- কত তারিখ থেকে আপনার duty শুরু হয়েছে?
+- duty কি এখনও চলছে, নাকি শেষ?
+- শেষ হলে কখন শেষ হয়েছে?
+- আপনি এখন কোথায় আছেন?
+
+**Important:** এই প্রশ্নগুলো rigid script হিসেবে না, **context-aware conversational logic** হিসেবে ব্যবহার হবে।
+
+**Implementation note:** lifecycle (active/former/on_leave) একটি read-only heuristic (`wbom_employees.status` + `wbom_attendance` recency — কোনো নতুন column ছাড়া), Route B prompt-এর context হিসেবে carry হয়, routing সিদ্ধান্ত হিসেবে নয় — active/former/on-leave escort/guard সবাই একইভাবে Route B-তে যায়।
+
+---
+
+## 8. Unknown Sender Handling
+
+Unknown sender-এর জন্য **hardcoded blind greeting** ব্যবহার করা যাবে না।
+
+**NOT allowed:**
+
+- message না পড়ে fixed reply
+- context ছাড়া "আপনি কে?"
+- robotic opening
+
+**Required behavior:** Local AI reply দেওয়ার আগে:
+
+1. incoming message পড়বে
+2. sender number দেখবে
+3. WhatsApp profile name দেখবে
+4. name matching করবে (first / middle / last token)
+5. linked system features/context দেখবে
+6. past message history থাকলে তা পড়বে
+7. তারপর natural contextual reply দেবে
+
+**Principle:** Unknown sender routing হবে role-based, কিন্তু reply হবে **context-aware**।
+
+---
+
+## 9. Money / Advance Workflow
+
+যদি conversation-এ টাকা / advance / salary advance / emergency financial need detect হয়:
+
+**Route:** Route B
+
+**Additional action:** Admin notification required
+
+**Write boundary:** এই flow-এ write সীমাবদ্ধ থাকবে approved draft path-এ:
+
+- `fazle_draft_replies`
+- `fazle_payment_drafts`
+
+**Not allowed:**
+
+- direct transaction creation
+- payroll write
+- HR table mutation
+- restricted operational table update
+
+---
+
+## 10. Phone Number Normalization Policy
+
+### 10.1 Goal
+
+একটি **single, simple, centralized** phone normalization rule থাকবে।
+
+### 10.2 Reason
+
+আগে multiple normalization logic থাকার ঝুঁকি ছিল। বিশেষ করে:
+
+- leading `0` হারিয়ে যাওয়া
+- WhatsApp-format বনাম user-typed format mismatch
+- DB comparison error
+
+### 10.3 Final policy
+
+Normalization rule:
+
+- Bangladesh mobile number-কেন্দ্রিক
+- simple হবে
+- over-engineered হবে না
+- missing leading `0` issue ঠিক করবে
+- same number-এর সব variant এক normalized form-এ আনা হবে
+
+**Implementation:** two documented canonical roots — `modules.phone_normalizer.normalize_phone()` (8801XXXXXXXXX, WBOM/RBAC domain) এবং `modules.fazle_payroll_engine.normalizer.normalize_bd_phone()` (01XXXXXXXXX, FPE domain), সেতু হিসেবে `to_880()`/`from_880()`। দুইটি ভিন্ন domain-এর জন্য দুইটি root, কোনোটাই duplicate reimplementation না — নতুন normalizer তৈরি করা যাবে না।
+
+### 10.4 Coverage
+
+Normalization apply করতে হবে:
+
+- inbound sender number
+- outbound target number
+- message body-তে user-typed phone number
+- DB lookup comparison
+- identity matching
+- role matching
+
+---
+
+## 11. Local AI Context Read Boundary
+
+Route B local AI **read-only** access পাবে approved context sources-এ।
+
+### 11.1 Allowed read sources
+
+**1) `wbom_whatsapp_messages`** — Allowed fields: `sender_number`, `receiver_number`, `direction`, `message_body`, `ai_response`, `source_timestamp`, `platform`, `identity_role`, `identity_confidence`, `classification`, `intent_detected`, `extracted_text`. Purpose: recent conversation history, both inbound and outbound.
+
+**2) `wbom_contacts`** — Allowed fields: `display_name`, `relation`, `company_name`, `notes`, `personality_hint`, `last_seen`, `interaction_count`. Purpose: saved contact metadata.
+
+**3) Per-bridge WhatsApp SQLite contact store (`whatsmeow_contacts`)** — Read-only mode only. Allowed fields: `push_name`, `first_name`, `full_name`, `business_name`. Purpose: actual WhatsApp-side profile identity hints.
+
+**4) `identity_brain.detect_identity()` output** — Allowed context: `role`, `confidence`, `source`, `employee_id`, `employee_name`, `designation`, lifecycle/context tags. Purpose: restricted tables-এ direct query ছাড়া pre-computed identity signal পাওয়া.
+
+### 11.2 Explicitly out of bounds
+
+Route B handler নিচের table-এ direct query করবে না:
+
+- `wbom_employees`
+- `fpe_employees`
+- `fpe_cash_transactions`
+- `wbom_escort_programs`
+- `escort_roster_entries`
+- `wbom_attendance`
+
+এই table-গুলোর signal শুধুমাত্র existing approved abstraction (`identity_brain`) এর মাধ্যমে context হিসেবে আসতে পারবে।
+
+---
+
+## 12. Safety Rules
+
+নতুন routing চালু হলেও existing safety net ভাঙা যাবে না।
+
+**Must preserve** (all enforced inside `modules.bridge_poller.process_bridge_inbound()`, shared by every entry point):
+
+- cooldown
+- keyword-flood protection
+- prompt-injection protection
+- `DRAFT_ALWAYS`
+- financial-draft forcing
+- loop-detection
+- `AI_SAFE_MODE`
+
+---
+
+## 13. Office Info — Approved Canonical Text
+
+```text
+আমাদের অফিস:
+আল-মানারাতাইন স্কিল সলিউশনস (Al-Manaratayn Skill Solutions)
+আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, খোকনের বিল্ডিং (২য় তলা)
+পোস্ট অফিস: উত্তর কাট্টলি (4217), থানা: পাহাড়তলী, চট্টগ্রাম সিটি কর্পোরেশন
+
+অফিস সময়: সকাল ১০টা – বিকাল ৫টা (শুক্রবার বন্ধ)
+যোগাযোগ: 01958 122300
+সাথে আনুন: NID ফটোকপি (নিজের ও অভিভাবকের) + ৪ কপি পাসপোর্ট ও ২ কপি স্ট্যাম্প সাইজ ছবি + প্রয়োজনীয় কাপড়-চোপড়, কাঁথা, মশারি, বিছানার চাদর (১ টি করে)।
+```
+
+**Source of truth:** `fazle_knowledge_base` row `b11_office_address`, kept in sync with `modules.knowledge_base._FALLBACK`, `modules.social_auto_reply.reply_rules.LOCATION_REPLY`, and `modules.conversation_layer.playbooks.CANONICAL_FACTS["office_location"]`.
+
+## 13.1 Deposit/Fee — Approved Canonical Text
+
+```text
+চাকরির জন্য কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না।
+
+যদিও প্রসেসিং ফি, জয়েনিং ফি ইত্যাদি অন্যান্য প্রতিষ্ঠানের মত আমাদের এখানেও আছে। তবুও আমরা অগ্রীম গ্রহনের পরিবর্তে মাসিক বেতনের সাথে অর্থ্যাৎ বেতন থেকে কিস্তিতে কাটার ব্যবস্থা রেখেছি।
+
+আর্থিক সমস্যার বিষয়ে আলোচনা করা যায়। টাকা নেই - এজন্য কারো চাকরিতে জয়েন বাঁধা হবে না।
+প্রতিষ্ঠানের নির্দিষ্ট মানি-রিসিট বা টাকা জমা দেয়ার রশিদ ছাড়া কেউ টাকা চাইলে তা প্রতারণা — সরাসরি অফিসে যাচাই করুন বা কল দিন 01958 122300 নাম্বারে।
+```
+
+**Source of truth:** `fazle_knowledge_base` row `b11_no_fee`, kept in sync with `modules.knowledge_base._FALLBACK`, `modules.social_auto_reply.reply_rules.FEES_REPLY`, and `modules.conversation_layer.playbooks.CANONICAL_FACTS["fee"]`. Supersedes the older "pay ~৳1,330 at joining, refund after 6 months" framing everywhere it previously appeared.
+
+## 14. Route A — No Auto Reply (Contact-Name-Based Gate)
+
+**Owner decision, 2026-07-22.** Independent of the role-based Route A/B split
+in sections 3–4 above: if the **sender's saved contact name** (canonical
+authority — see §7.1/§10 — the name in the admin's own phone contact book,
+never the WhatsApp profile/display name) contains any of the following
+words **anywhere** — start, middle, or end, substring match, not prefix-only:
+
+```
+Client · Escort · Office · Operation · Accountant · Security Guard
+Al-Aqsa / আল-আকসা · Al-Manaratayn / আল-মানারাতাইন
++ any other .env-configured no-reply name/role/phone (DRAFT_ALWAYS_NAMES,
+  DRAFT_ALWAYS_ROLES non-role tokens, DRAFT_ALWAYS_PHONES)
+```
+
+Examples (all match): "Escort Masud WA", "Md Karim Escort", "Client Nizam
+Office", "Operation Murad", "Al Aqsa Accountant", "Rahim Office Chattogram".
+
+**General behavior:** no AI auto-reply, no generic reply, no recruitment
+reply — the sender gets `""` (nothing sent). This governs the Route B
+population specifically (`escort`/`security_guard`/`candidate`/`unknown` —
+Route A's own mature per-role tiers, e.g. verified `client_escort_buyer`,
+`accountant`, `employee`, `admin`, already never risk an AI-generated reply
+regardless of name, so this gate does not need to re-check them). Family
+(§7 personal-reply Tier 1) is unaffected — that reply is a fixed, non-AI,
+non-generic, non-recruitment greeting, not one of the three prohibited
+categories, and was left unchanged.
+
+**Escort exception:** if the name contains "Escort" specifically, and the
+message contains a mother vessel, a lighter vessel, and at least one mobile
+number (i.e. it parses as a genuine order — reuses the same strict-order
+parser as the escort-order safety net, §9), it is treated as an escort-order
+candidate: Message Parser extracts structured fields, a draft (not a final
+row) is created and sent to the admin number for review — same as any other
+escort order. **No auto-reply is sent to the sender** in this case either;
+only the destination differs (admin review vs. silence). Any other message
+from an Escort-named contact gets full silence, same as the general rule.
+An order-shaped message from a **non**-Escort-named contact (e.g. "Client
+Nizam Office") does not get this name-keyed exception — it is still routed
+to a human review draft, but via the pre-existing, role-agnostic escort-order
+safety net (§9's `intent`+shape gate), not this gate.
+
+**Implementation:** two enforcement points, both in `modules/message_router/__init__.py`:
+1. `_should_silent_skip()` — early gate keyed off `wbom_contacts.display_name`
+   (fires before identity resolution). Fixed 2026-07-22: previously fell
+   into an either/or with `.env`-configured names and silently dropped the
+   static keyword list whenever `DRAFT_ALWAYS_NAMES`/`DRAFT_ALWAYS_ROLES` had
+   any custom tokens configured (true in production) — now a union of both.
+2. Route B branch backstop (§4.2) — keyed off `identity_brain`'s own resolved
+   `display_name`, for a contact not yet synced into `wbom_contacts`
+   (see `knowledge_base/06_developer_system/contact_sync.md`).
+
+## Cross References
+
+- ../04_business_rules/recruitment_business_rules.md
+- ../04_business_rules/escort_business_rules.md
+- ../00_governance/CANONICAL_BUSINESS_RULES.md
+- ../00_governance/management_decisions.md
+</content>

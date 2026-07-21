@@ -75,9 +75,11 @@ async def list_contact_roles(
 ):
     """List contact role entries with pagination, optionally filtered by phone."""
     if phone:
+        from modules.phone_normalizer import normalize_phone as _normalize_phone
+        norm = _normalize_phone(phone) or phone  # fall back to raw input if unparseable
         rows = await fetch_all(
             "SELECT * FROM fazle_contact_roles WHERE phone = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            phone, limit, offset,
+            norm, limit, offset,
         )
     else:
         rows = await fetch_all(
@@ -89,9 +91,23 @@ async def list_contact_roles(
 
 @router.post("/", dependencies=[Depends(_require_api_key)])
 async def upsert_contact_role(body: ContactRoleBody):
-    """Insert or update a contact role (unique on phone+platform)."""
+    """Insert or update a contact role (unique on phone+platform).
+
+    2026-07-22: phone is now normalized to canonical 8801XXXXXXXXX before
+    the write. The (phone, platform) unique constraint below only catches a
+    conflict when the *string* matches -- "01844836824" and
+    "8801844836824" are different strings even though they're the same
+    number, which is exactly how this table accumulated real duplicate
+    rows historically (cleaned up separately, see management_decisions.md
+    2026-07-22). Normalizing here is what makes the existing constraint
+    actually effective going forward.
+    """
     if not body.phone or not body.role:
         raise HTTPException(status_code=400, detail="phone and role are required")
+    from modules.phone_normalizer import normalize_phone as _normalize_phone
+    norm_phone = _normalize_phone(body.phone)
+    if not norm_phone:
+        raise HTTPException(status_code=400, detail=f"invalid phone: {body.phone!r}")
     await execute(
         """
         INSERT INTO fazle_contact_roles
@@ -109,7 +125,7 @@ async def upsert_contact_role(body: ContactRoleBody):
           is_active  = true,
           updated_at = NOW()
         """,
-        body.phone,
+        norm_phone,
         body.platform,
         body.name,
         body.role.value,
@@ -129,6 +145,8 @@ async def update_contact_role(
     body: ContactRoleUpdate,
 ):
     """Update an existing contact role by phone + platform. Returns 404 if not found."""
+    from modules.phone_normalizer import normalize_phone as _normalize_phone
+    phone = _normalize_phone(phone) or phone
     row = await fetch_one(
         """
         UPDATE fazle_contact_roles
@@ -166,6 +184,8 @@ async def delete_contact_role(
 ):
     """Remove a contact role. If platform is given, removes only that platform row;
     otherwise removes all rows for the phone."""
+    from modules.phone_normalizer import normalize_phone as _normalize_phone
+    phone = _normalize_phone(phone) or phone
     if platform:
         await execute(
             "DELETE FROM fazle_contact_roles WHERE phone = $1 AND platform = $2",

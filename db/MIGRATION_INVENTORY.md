@@ -95,11 +95,22 @@
 053_conversation_memory_engine.sql
 054_conversation_memory_shadow_comparisons.sql
 055_conversation_memory_shadow_metrics.sql
+056_contact_sync_presence_tracking.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
 
-**Next available number for new work: `056`.**
+**`056_contact_sync_presence_tracking.sql` (2026-07-22):** adds `fazle_contact_presence`
+(per-phone-per-bridge absence-streak tracking) and `fazle_contact_hard_delete_log`
+(audit trail written before every hard-delete) — supports the new daily contact-sync
+soft-delete-then-hard-delete-after-N-misses policy. Purely additive (`CREATE TABLE IF
+NOT EXISTS`), applied directly against production and recorded in `schema_migrations`
+(not via a full `db/migrate.py` run — see `management_decisions.md` 2026-07-22 for why:
+several much older migrations show as "pending" only because they predate the
+`schema_migrations` tracking table, and running the full queue would have attempted to
+re-apply all of them). Full record: `management_decisions.md` 2026-07-22.
+
+**Next available number for new work: `057`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
