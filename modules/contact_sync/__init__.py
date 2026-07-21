@@ -107,8 +107,22 @@ def _best_name(full_name: Optional[str], first_name: Optional[str],
 
 # ── SQLite read (sync — run in executor) ─────────────────────────────────────
 
+class ContactReadError(Exception):
+    """Raised when a bridge's SQLite contact read fails outright (locked
+    file, missing file, corrupted DB, phone offline mid-export, etc.) --
+    2026-07-22 audit finding: this must be distinguishable from a genuine
+    empty contact list, since sync_bridge() feeds the result straight into
+    absence/deletion processing. Silently returning [] on any failure (the
+    prior behavior) made a total read failure indistinguishable from "every
+    contact was deleted," risking a mass wrongful hard-delete after a few
+    consecutive failed syncs -- exactly the failure mode the original
+    soft-delete-then-hard-delete design was meant to prevent."""
+
+
 def _read_bridge_contacts(whatsapp_db: str, bridge_number: str) -> list[dict]:
-    """Read all personal contacts from a bridge's whatsapp.db. Sync."""
+    """Read all personal contacts from a bridge's whatsapp.db. Sync.
+    Raises ContactReadError on any read failure -- callers must not treat
+    that the same as an empty contact list."""
     contacts = []
     try:
         con = sqlite3.connect(f"file:{whatsapp_db}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)  # S-03 patch
@@ -121,23 +135,24 @@ def _read_bridge_contacts(whatsapp_db: str, bridge_number: str) -> list[dict]:
             """
         ).fetchall()
         con.close()
-
-        for row in rows:
-            jid = row["their_jid"]
-            phone = normalize_phone(jid)
-            if not phone:
-                continue
-            # Skip self
-            if phone == bridge_number:
-                continue
-            name = _best_name(row["full_name"], row["first_name"], row["push_name"], row["business_name"])
-            contacts.append({
-                "phone": phone,
-                "display_name": name,
-                "source_bridge": bridge_number,
-            })
     except Exception as e:
         log.error(f"[contact_sync] SQLite read error ({whatsapp_db}): {e}")
+        raise ContactReadError(str(e)) from e
+
+    for row in rows:
+        jid = row["their_jid"]
+        phone = normalize_phone(jid)
+        if not phone:
+            continue
+        # Skip self
+        if phone == bridge_number:
+            continue
+        name = _best_name(row["full_name"], row["first_name"], row["push_name"], row["business_name"])
+        contacts.append({
+            "phone": phone,
+            "display_name": name,
+            "source_bridge": bridge_number,
+        })
     return contacts
 
 
@@ -379,8 +394,17 @@ async def _handle_missing_contacts(bridge: str, current_phones: set[str]) -> dic
         )
 
         if new_count >= HARD_DELETE_AFTER_ABSENCES:
-            await _hard_delete_contact(phone, bridge, new_count)
-            result["hard_deleted"] += 1
+            if await _is_contact_active_on_other_bridge(phone, bridge):
+                log.warning(
+                    f"[contact_sync] phone={phone} hit hard-delete threshold on "
+                    f"bridge={bridge} but is still present on another bridge -- "
+                    f"skipping hard-delete (2026-07-22 fix: absent on one bridge "
+                    f"is not evidence of deletion when a different device still "
+                    f"confirms the contact)"
+                )
+            else:
+                await _hard_delete_contact(phone, bridge, new_count)
+                result["hard_deleted"] += 1
         elif new_count == 1:
             # First miss this bridge has seen -> soft-delete only.
             await execute(
@@ -397,6 +421,71 @@ async def _handle_missing_contacts(bridge: str, current_phones: set[str]) -> dic
             log.info(f"[contact_sync] soft-delete phone={phone} bridge={bridge} (miss 1/{HARD_DELETE_AFTER_ABSENCES})")
 
     return result
+
+
+async def _is_contact_active_on_other_bridge(phone: str, exclude_bridge: str) -> bool:
+    """2026-07-22 fix: True if this phone is currently tracked as present
+    (consecutive_absences=0) on any bridge OTHER than exclude_bridge, OR if
+    the check itself fails (fail safe toward NOT deleting, never toward
+    deleting). wbom_contacts has one shared row per phone across both
+    bridges, but fazle_contact_presence -- and therefore absence detection
+    -- is scoped per bridge; without this check, one bridge's independent
+    failures (a different physical phone/device) could hard-delete a
+    contact that a different bridge is still actively confirming."""
+    try:
+        row = await fetch_one(
+            """SELECT bridge FROM fazle_contact_presence
+               WHERE phone = $1 AND bridge != $2 AND consecutive_absences = 0
+               LIMIT 1""",
+            phone, exclude_bridge,
+        )
+        return bool(row)
+    except Exception as e:
+        log.warning(f"[contact_sync] other-bridge presence check failed phone={phone}: {e}")
+        return True  # fail safe: assume it might be active elsewhere, block the delete
+
+
+async def _bridge_previously_had_contacts(bridge: str) -> bool:
+    """True if fazle_contact_presence already has any tracked rows for this
+    bridge -- used to distinguish "this bridge has never had contacts"
+    (nothing to protect, safe to proceed) from "this bridge previously
+    tracked contacts but this sync's read came back with none" (suspicious,
+    see the empty-snapshot guard in sync_bridge())."""
+    try:
+        count = await fetch_val("SELECT COUNT(*) FROM fazle_contact_presence WHERE bridge = $1", bridge)
+        return bool(count)
+    except Exception as e:
+        log.warning(f"[contact_sync] previously-had-contacts check failed bridge={bridge}: {e}")
+        return False
+
+
+async def _alert_sync_failure(bridge: str, reason: str) -> None:
+    """Best-effort admin alert for a sync cycle whose absence/deletion
+    processing was skipped because the snapshot couldn't be trusted. Never
+    raises -- a failed alert must not break the sync job itself. This is
+    the "failure alert" the 2026-07-22 audit found missing entirely."""
+    try:
+        from shared.draft_reply import create_draft_reply
+        from modules.message_router import get_primary_admin
+
+        admin_phone = get_primary_admin()
+        if not admin_phone:
+            log.warning("[contact_sync] no admin phone configured, cannot send sync-failure alert")
+            return
+        await create_draft_reply(
+            sender=admin_phone,
+            bridge=bridge,
+            draft_text=(
+                f"⚠️ CONTACT SYNC FAILURE — {bridge}\n\n{reason}\n\n"
+                "Absence/deletion processing was skipped this cycle to avoid "
+                "wrongful deletions. Check bridge/phone connectivity."
+            ),
+            role="admin",
+            intent="contact_sync_failure_alert",
+            source_module="contact_sync",
+        )
+    except Exception as e:
+        log.error(f"[contact_sync] failed to create sync-failure alert draft bridge={bridge}: {e}")
 
 
 async def _hard_delete_contact(phone: str, bridge: str, consecutive_absences: int) -> None:
@@ -432,21 +521,50 @@ async def _hard_delete_contact(phone: str, bridge: str, consecutive_absences: in
 async def sync_bridge(bridge_cfg: dict) -> dict:
     """Full sync for one bridge: upsert everything currently present, then
     detect and act on contacts that disappeared since the last sync. Returns
-    {"upserted": n, "soft_deleted": n, "hard_deleted": n}."""
+    {"upserted": n, "soft_deleted": n, "hard_deleted": n}.
+
+    2026-07-22 fix: a failed SQLite read (ContactReadError) or a read that
+    succeeds but returns zero contacts despite this bridge previously
+    tracking some are both treated as an untrustworthy snapshot -- absence/
+    deletion processing is skipped entirely for this cycle (an admin alert
+    is raised instead) rather than treating "we got nothing" the same as
+    "everything was deleted."
+    """
     bridge = bridge_cfg["bridge"]
     whatsapp_db = bridge_cfg["whatsapp_db"]
     bridge_number = bridge_cfg["number"]
 
     loop = asyncio.get_event_loop()
-    contacts = await loop.run_in_executor(
-        None, _read_bridge_contacts, whatsapp_db, bridge_number
-    )
+    try:
+        contacts = await loop.run_in_executor(
+            None, _read_bridge_contacts, whatsapp_db, bridge_number
+        )
+    except ContactReadError as e:
+        log.error(
+            f"[contact_sync] {bridge}: SQLite read failed -- skipping absence/"
+            f"deletion processing entirely this cycle to avoid false deletions: {e}"
+        )
+        await _alert_sync_failure(bridge, f"SQLite read failed: {e}")
+        return {"upserted": 0, "soft_deleted": 0, "hard_deleted": 0,
+                "error": str(e), "skipped_absence_processing": True}
 
     log.info(f"[contact_sync] {bridge}: {len(contacts)} contacts from SQLite")
     count = await _upsert_contacts(contacts)
     current_phones = {c["phone"] for c in contacts}
     for phone in current_phones:
         await _mark_present(phone, bridge)
+
+    if not current_phones and await _bridge_previously_had_contacts(bridge):
+        log.error(
+            f"[contact_sync] {bridge}: read succeeded but returned ZERO contacts "
+            f"while this bridge previously tracked some -- treating as a "
+            f"suspicious/incomplete snapshot, skipping absence processing this cycle"
+        )
+        await _alert_sync_failure(bridge, "read succeeded but returned zero contacts despite prior tracked history")
+        await _record_sync(bridge, count)
+        return {"upserted": count, "soft_deleted": 0, "hard_deleted": 0,
+                "skipped_absence_processing": True}
+
     absence_result = await _handle_missing_contacts(bridge, current_phones)
     await _record_sync(bridge, count)
     log.info(
