@@ -172,6 +172,17 @@ class Settings(BaseSettings):
     # Example: "bridge1,bridge2,meta"
     escort_trusted_sources: str = "bridge1,bridge2,meta"
 
+    # 2026-07-22: the one WhatsApp group whose ADMIN OUTBOUND messages (via
+    # bridge2 only) are a trusted source of escort orders/confirmations --
+    # "Al-Aqsa Escort Program Group", resolved from bridge2's own messages.db
+    # `chats` table to its real, stable JID (120363428977781821@g.us as of
+    # 2026-07-22 -- group *names* can change, this JID doesn't). Empty
+    # (default) = feature fully inert, group messages stay excluded exactly
+    # per the pre-existing 2026-04-27 "no groups" policy. Never hardcode the
+    # JID in code -- always resolve it from the live bridge2 store and set
+    # it here before enabling.
+    escort_order_group_jid: str = ""
+
     # ── Draft-always gate ────────────────────────────────────────────────────
     # Contacts matching any of these criteria are ALWAYS drafted (never auto-sent)
     # even when AUTO_REPLY_ENABLED=true.

@@ -1122,11 +1122,48 @@ async def _backfill_contact_id_if_missing(program_id: int, phone: Optional[str])
         log.warning(f"[escort] contact_id backfill failed for program_id={program_id}: {e}")
 
 
+async def _find_existing_draft_for_order(
+    mv_clean: str, master_mobile: str, program_date,
+) -> Optional[int]:
+    """2026-07-22: broader, channel-agnostic dedup check for the same
+    real-world order arriving via more than one source (e.g. a DM from the
+    client AND the admin's own group order for the same duty). Deliberately
+    does NOT restrict on contact_id/sender_phone the way
+    save_escort_programs()'s own inline dedup does -- that restriction is
+    correct and left unchanged for the existing DM-vs-DM case (Rule 2: do
+    not modify the existing flow), but it can under-dedup across genuinely
+    different senders reporting the identical order (master_mobile +
+    mother_vessel + date all matching is already strong enough evidence on
+    its own). Used as an EXTRA check by the new group-order path only --
+    save_escort_programs()'s own internal query is completely unchanged."""
+    if not (mv_clean and master_mobile):
+        return None
+    try:
+        row = await fetch_one(
+            """
+            SELECT program_id FROM wbom_escort_programs
+            WHERE COALESCE(master_mobile, '') = $1
+              AND UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $2
+              AND status NOT IN ('cancelled')
+              AND ($3::date IS NULL OR program_date = $3)
+            ORDER BY program_id DESC LIMIT 1
+            """,
+            master_mobile, mv_clean, program_date,
+        )
+        return row["program_id"] if row else None
+    except Exception as e:
+        log.error(f"[escort] cross-channel dedup check error: {e}")
+        return None
+
+
 async def save_escort_programs(
     order: EscortOrder,
     sender_phone: str,
     source: str,
     is_verified: bool = True,
+    *,
+    group_sourced: bool = False,
+    group_jid: Optional[str] = None,
 ) -> list:
     """Save one DB row per valid lighter block only.
 
@@ -1134,6 +1171,11 @@ async def save_escort_programs(
     evidence only, does not change save behavior. False means the sender's
     client_escort_buyer routing came from message-content keyword inference
     (identity_brain Step 6), not a genuine identity source.
+
+    group_sourced/group_jid (2026-07-22, Trusted Group): recorded in
+    remarks so expire_stale_drafts() can exempt these rows from TTL
+    deletion (Owner Decision B) and so the source is auditable. Does not
+    change the save/dedup mechanics below at all -- purely additive tags.
     """
     program_ids = []
     mv = order["mother_vessel"] or ""
@@ -1163,6 +1205,8 @@ async def save_escort_programs(
             "date_hint": order.get("date_hint"),
             "shift": lighter.get("shift") or order_shift,
             "source_verified": is_verified,
+            "group_sourced": group_sourced,
+            "group_jid": group_jid if group_sourced else None,
         }
         try:
             if mv_clean:
@@ -1187,6 +1231,19 @@ async def save_escort_programs(
                     contact_id,
                     sender_phone,
                 )
+                # 2026-07-22: for a group-sourced save specifically, also
+                # check the broader, sender-agnostic dedup (see
+                # _find_existing_draft_for_order docstring) — catches the
+                # case where the SAME order already exists via a different
+                # channel (e.g. a client DM) that the narrower check above
+                # would miss because contact_id/sender_phone differ.
+                if not dup and group_sourced:
+                    cross_pid = await _find_existing_draft_for_order(
+                        mv_clean, lighter.get("master_mobile") or "",
+                        _parse_program_date(order.get("date_hint")),
+                    )
+                    if cross_pid:
+                        dup = {"program_id": cross_pid}
                 if dup:
                     pid = dup["program_id"]
                     log.info(f"[escort] dedup skip: mv={mv} lv={lighter['lighter_vessel']} existing={pid}")
@@ -1579,7 +1636,43 @@ async def _update_program_confirmed(
 ) -> bool:
     """Update an existing draft/program to confirmed status.
     Bridge confirmation is authoritative and overwrites draft fields when present.
+
+    2026-07-22 (Owner Decision, Requirement 5): before writing, compare the
+    incoming escort_name/escort_mobile/mother_vessel/lighter_vessel against
+    the row's current values. If every field would resolve to an identical
+    value, skip the UPDATE entirely and log it as a no-op duplicate --
+    covers both the same confirmation replayed and the same confirmation
+    arriving via a second channel (e.g. DM then group, or vice versa) after
+    the first one already applied. Uses the exact same resolution semantics
+    the SET clause below already uses (escort_name/escort_mobile are always
+    overwritten even if empty; mother_vessel/lighter_vessel only overwrite
+    on a non-empty incoming value) so this check can never disagree with
+    what the real UPDATE below would actually do.
     """
+    try:
+        current = await fetch_one(
+            """SELECT escort_name, escort_mobile, mother_vessel, lighter_vessel
+               FROM wbom_escort_programs WHERE program_id = $1""",
+            program_id,
+        )
+        if current:
+            effective_mv = mother_vessel if (mother_vessel or "").strip() else current["mother_vessel"]
+            effective_lv = lighter_vessel if (lighter_vessel or "").strip() else current["lighter_vessel"]
+            if (
+                (escort_name or "") == (current["escort_name"] or "")
+                and (escort_mobile or "") == (current["escort_mobile"] or "")
+                and (effective_mv or "") == (current["mother_vessel"] or "")
+                and (effective_lv or "") == (current["lighter_vessel"] or "")
+            ):
+                log.info(
+                    f"[escort] confirmation no-op: program_id={program_id} — "
+                    f"escort_name/escort_mobile/mother_vessel/lighter_vessel all "
+                    f"identical to current row, skipping UPDATE"
+                )
+                return True
+    except Exception as e:
+        log.warning(f"[escort] no-op comparison failed for program_id={program_id}, proceeding with update: {e}")
+
     try:
         normalized_destination = _normalize_destination(destination or "") or destination
         columns = await _escort_program_columns()
@@ -2695,6 +2788,75 @@ async def handle_admin_escort_completion(
         "text": final_slip,
         "bridge": client_bridge,
     }
+
+
+# ── Trusted Group order intake (2026-07-22, Owner-approved) ────────────────────
+
+async def handle_group_escort_order(
+    text: str,
+    admin_phone: str,
+    source: str,
+    group_jid: str,
+    message_id: Optional[str] = None,
+) -> tuple[str, Optional[dict]]:
+    """
+    Entry point for a bare (escort-not-yet-assigned) order posted by the
+    admin directly into the Trusted Group. The caller (bridge_poller's
+    outgoing-scan loop) is responsible for the New-Order-vs-Confirmation
+    split: this function is only reached for a message that does NOT match
+    is_completed_escort_draft() -- a message that already has escort_name +
+    escort_mobile + the company signature line goes to the existing,
+    unmodified handle_admin_escort_completion() instead.
+
+    Reuses _is_authoritative_bridge_confirmation() with recipient_phone=""
+    (the same "admin messaging with no specific individual recipient"
+    branch the DM confirmation flow already relies on) -- no new trust
+    logic, no _is_allowed_escort_client() client-allowlist check (that
+    check answers "is this stranger a real client," which doesn't apply
+    here; authority for this path comes entirely from the verified
+    admin-number + verified-group-JID combination, already true by the
+    time this function is called).
+
+    Returns ("", None) for anything that doesn't parse as a real order --
+    silent, matching every other escort-order safety net in this module.
+    The caller does not currently act on the returned strings (mirroring
+    handle_admin_escort_completion()'s existing call site, which also
+    fires-and-forgets) -- returned for API consistency and testability.
+    """
+    ctx: ConfirmationContext = {"bridge_number": admin_phone, "recipient_phone": "", "source": source}
+    if not _is_authoritative_bridge_confirmation(ctx):
+        log.info(
+            "[escort] ignore group order from non-authoritative sender=%s source=%s group=%s",
+            admin_phone, source, group_jid,
+        )
+        return "", None
+
+    try:
+        order = parse_escort_message(text)
+    except Exception as exc:
+        log.debug(f"[escort] group order parse failed: {exc}")
+        return "", None
+
+    if not is_minimum_escort_order(order):
+        return "", None
+
+    log.info(
+        f"[escort] group order: group={group_jid} mv={order['mother_vessel']} "
+        f"lighters={len(order['lighters'])} msg={message_id}"
+    )
+
+    program_ids = await save_escort_programs(
+        order, admin_phone, source, is_verified=True,
+        group_sourced=True, group_jid=group_jid,
+    )
+    if not program_ids:
+        return "", None
+
+    return (
+        f"✅ Order captured as draft (program_id={program_ids[0]}) from Trusted Group, "
+        f"TTL-exempt until confirmed or manually cancelled.",
+        None,
+    )
 
 
 # ── Legacy compatibility shim (called by old message_router path) ──────────────

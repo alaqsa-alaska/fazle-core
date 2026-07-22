@@ -1245,6 +1245,19 @@ async def expire_stale_drafts(hours: int = 24, actor: str = "scheduler") -> dict
           AND created_at < NOW() - ($1 || ' hours')::INTERVAL
           AND (escort_name IS NULL OR TRIM(escort_name) = '')
           AND (escort_mobile IS NULL OR TRIM(escort_mobile) = '')
+          AND NOT EXISTS (
+              -- 2026-07-22, Owner Decision B: Trusted-Group-sourced drafts
+              -- (tagged in wbom_escort_programs.remarks by
+              -- modules.escort.save_escort_programs(group_sourced=True))
+              -- are exempt from TTL deletion -- they survive until
+              -- explicitly confirmed or manually cancelled. Regex match on
+              -- the raw text column, not a jsonb cast, so a malformed
+              -- legacy remarks value can never turn this into a hard error
+              -- that blocks expiry for every other draft in the same run.
+              SELECT 1 FROM wbom_escort_programs p
+              WHERE p.program_id = escort_roster_entries.program_id
+                AND p.remarks ~ '"group_sourced"\s*:\s*true'
+          )
         """,
         str(hours),
     )

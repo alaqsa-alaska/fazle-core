@@ -462,6 +462,7 @@ def _fetch_image_context_rows(messages_db: str, chat_jid: str, timestamp) -> lis
 def _fetch_outgoing_escort_completions(
     messages_db: str,
     since_ts: datetime,
+    trusted_group_jid: str = "",
 ) -> tuple[list[dict], datetime]:
     """
     Fetch outgoing (is_from_me=1) DM messages from bridge2 SQLite newer than
@@ -471,6 +472,13 @@ def _fetch_outgoing_escort_completions(
     These messages are sent BY the admin TO clients via bridge2, so they never
     appear in the inbound (is_from_me=0) query above. We need a separate cursor
     for these so we don't re-process on every poll.
+
+    trusted_group_jid (2026-07-22, Owner-approved Trusted Group source):
+    when set (Settings.escort_order_group_jid), one narrow, explicit
+    exception is added to the blanket "@g.us excluded" filter below -- this
+    exact group JID only. Every other group stays excluded exactly per the
+    pre-existing 2026-04-27 "no groups" policy; empty (default) changes
+    nothing at all.
     """
     messages: list[dict] = []
     max_ts = since_ts
@@ -486,12 +494,12 @@ def _fetch_outgoing_escort_completions(
             FROM messages
             WHERE is_from_me = 1
               AND datetime(timestamp) > datetime(:since)
-              AND chat_jid NOT LIKE '%@g.us'
+              AND (chat_jid NOT LIKE '%@g.us' OR chat_jid = :trusted_group_jid)
               AND content IS NOT NULL
             ORDER BY datetime(timestamp) ASC
             LIMIT 100
             """,
-            {"since": ts_iso},
+            {"since": ts_iso, "trusted_group_jid": trusted_group_jid or ""},
         ).fetchall()
         con.close()
 
@@ -1186,15 +1194,27 @@ async def _poll_bridge(config: dict):
             if bridge_name in ("bridge1", "bridge2"):
                 out_cursor = await _get_outgoing_cursor(bridge_name)
                 loop2 = asyncio.get_event_loop()
+                # 2026-07-22, Owner-approved Trusted Group: the group-JID
+                # exception is only ever passed for bridge2 -- bridge1's
+                # query is never extended to include any group, full stop,
+                # per Rule 4 ("valid ONLY ... via Bridge2"). This is the
+                # first of two enforcement points (SQL-level); the second
+                # is the explicit bridge_name check below.
+                trusted_group_jid = (
+                    _settings.escort_order_group_jid if bridge_name == "bridge2" else ""
+                )
                 out_msgs, new_out_cursor = await loop2.run_in_executor(
-                    None, _fetch_outgoing_escort_completions, messages_db, out_cursor
+                    None, _fetch_outgoing_escort_completions, messages_db, out_cursor, trusted_group_jid
                 )
 
                 if out_msgs:
                     log.info(f"[{bridge_name}] {len(out_msgs)} outgoing message(s) to check for escort completions")
                     _had_activity = True
 
-                from modules.escort import is_completed_escort_draft, handle_admin_escort_completion
+                from modules.escort import (
+                    is_completed_escort_draft, handle_admin_escort_completion,
+                    is_order_complete, handle_group_escort_order,
+                )
                 from modules.escort_lifecycle import is_release_confirmation, handle_admin_release_confirmation
 
                 admin_number = (
@@ -1211,6 +1231,17 @@ async def _poll_bridge(config: dict):
                         continue
 
                     await _mark_outgoing_processed(omsg_id, bridge_name)
+
+                    # 2026-07-22: second enforcement point for "bridge2 only"
+                    # -- even though the SQL query above already only ever
+                    # requests this JID for bridge2, this explicit check
+                    # means a future refactor of the query-building code
+                    # can't silently widen the group exception to bridge1.
+                    is_trusted_group_msg = bool(
+                        trusted_group_jid
+                        and bridge_name == "bridge2"
+                        and chat_jid == trusted_group_jid
+                    )
 
                     # Phase 22: release confirmation takes priority
                     if is_release_confirmation(otext):
@@ -1230,29 +1261,48 @@ async def _poll_bridge(config: dict):
                             log.error(f"[{bridge_name}] release confirm error for msg {omsg_id}: {_rc_err}")
                         continue
 
-                    if not is_completed_escort_draft(otext):
+                    if is_completed_escort_draft(otext):
+                        if _is_system_generated_notification(otext):
+                            log.warning(
+                                f"[{bridge_name}] outgoing text matches is_completed_escort_draft() but "
+                                f"starts with a known system-notification prefix -- rejecting as a false-"
+                                f"positive confirmation candidate, msg={omsg_id}"
+                            )
+                            continue
+
+                        log.info(f"[{bridge_name}] outgoing escort completion detected → jid={chat_jid}")
+                        try:
+                            # 2026-07-22: a group JID is never a phone number --
+                            # passing "" here (instead of digit-stripping the
+                            # group JID into garbage) routes correctly through
+                            # _is_authoritative_bridge_confirmation()'s existing
+                            # "admin messaging with no specific recipient"
+                            # branch, unmodified.
+                            recipient_phone = "" if is_trusted_group_msg else re.sub(r"\D", "", chat_jid or "")
+                            await handle_admin_escort_completion(
+                                otext,
+                                admin_number,
+                                bridge_name,
+                                recipient_phone=recipient_phone,
+                                message_id=omsg_id,
+                            )
+                        except Exception as _ec_err:
+                            log.error(f"[{bridge_name}] escort completion error for msg {omsg_id}: {_ec_err}")
                         continue
 
-                    if _is_system_generated_notification(otext):
-                        log.warning(
-                            f"[{bridge_name}] outgoing text matches is_completed_escort_draft() but "
-                            f"starts with a known system-notification prefix -- rejecting as a false-"
-                            f"positive confirmation candidate, msg={omsg_id}"
-                        )
-                        continue
-
-                    log.info(f"[{bridge_name}] outgoing escort completion detected → jid={chat_jid}")
-                    try:
-                        recipient_phone = re.sub(r"\D", "", chat_jid or "")
-                        await handle_admin_escort_completion(
-                            otext,
-                            admin_number,
-                            bridge_name,
-                            recipient_phone=recipient_phone,
-                            message_id=omsg_id,
-                        )
-                    except Exception as _ec_err:
-                        log.error(f"[{bridge_name}] escort completion error for msg {omsg_id}: {_ec_err}")
+                    # 2026-07-22: New-Order path -- only reachable for the
+                    # Trusted Group (never for ordinary DMs; a plain outgoing
+                    # DM that merely looks order-shaped is not a business
+                    # event on its own, unlike an admin actively posting a
+                    # dispatch order into the verified group).
+                    if is_trusted_group_msg and is_order_complete(otext):
+                        log.info(f"[{bridge_name}] outgoing group order detected → jid={chat_jid}")
+                        try:
+                            await handle_group_escort_order(
+                                otext, admin_number, bridge_name, chat_jid, message_id=omsg_id,
+                            )
+                        except Exception as _go_err:
+                            log.error(f"[{bridge_name}] group order error for msg {omsg_id}: {_go_err}")
 
                 if new_out_cursor > out_cursor:
                     await _set_outgoing_cursor(bridge_name, new_out_cursor)
