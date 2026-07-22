@@ -13,6 +13,16 @@
 -- (Bangla name + parenthetical English name together) so it doesn't leave
 -- an orphaned empty "()" behind, then the remaining bare-Bangla and
 -- bare-English forms, then the older pre-rebrand-1 name.
+--
+-- 2026-07-22 fix (before this migration was ever successfully applied
+-- anywhere -- first attempt against production failed cleanly, whole
+-- transaction rolled back, so editing in place here is safe and does not
+-- create drift against any environment that already has this version):
+-- production's real fazle_knowledge_base table has no updated_at column,
+-- unlike the CREATE TABLE definition in db/migrations/002_align_tables.sql
+-- (schema drift -- see management_decisions.md "Test/prod schema drift").
+-- This migration only corrects text content, so it never needed to touch
+-- updated_at at all -- removed rather than worked around.
 
 BEGIN;
 
@@ -39,8 +49,7 @@ SET
                 'Al-Manaratayn Skill Solutions', 'Al-Rifa''i Integrated Services'),
             'আল-আকসা সিকিউরিটি সার্ভিস অ্যান্ড ট্রেডিং সেন্টার', 'Al-Rifa''i Integrated Services'),
         'আল-আকসা সিকিউরিটি', 'Al-Rifa''i Integrated Services'
-    ) END,
-    updated_at = NOW()
+    ) END
 WHERE reply_text LIKE '%আল-মানারাতাইন%'
    OR reply_text LIKE '%Al-Manaratayn%'
    OR reply_text LIKE '%আল-আকসা%'
