@@ -97,6 +97,7 @@
 055_conversation_memory_shadow_metrics.sql
 056_contact_sync_presence_tracking.sql
 057_route_b_handoffs.sql
+058_rebrand_al_rifai_kb_text.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -122,7 +123,17 @@ no column changes to any existing table. To apply: same direct-script +
 `schema_migrations` insert method used for `056`, only after Owner deployment approval
 (Step 2 of the controlled rollout) — do not run the full `db/migrate.py` queue.
 
-**Next available number for new work: `058`.**
+**`058_rebrand_al_rifai_kb_text.sql` (2026-07-22):** content-only `UPDATE` of
+`fazle_knowledge_base.reply_text`/`reply_short` — replaces the old company
+name(s) ("Al-Manaratayn Skill Solutions"/আল-মানারাতাইন স্কিল সলিউশনস, and the
+pre-rebrand-1 "Al-Aqsa..." forms) with the current brand, "Al-Rifa'i
+Integrated Services". No schema change, no `ALTER`/`DROP`. Idempotent (each
+`REPLACE()` is a no-op once the old string is gone; the `WHERE` clause scopes
+to rows that still contain an old name). See `management_decisions.md`
+2026-07-22 "Second Rebrand" for the full company-name centralization change
+this is part of.
+
+**Next available number for new work: `059`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 

@@ -307,19 +307,46 @@ class TestRouteBKnowledgeBaseContext:
 # ===========================================================================
 
 class TestOllamaCompanyIdentity:
+    """2026-07-22: company name is now centralized (Settings.company_name,
+    app/config.py) and read dynamically at call time -- these assert against
+    the live setting, not a hardcoded name, so they survive future rebrands
+    without needing an edit here (that's the whole point of centralizing it)."""
 
-    def test_general_identity_uses_correct_company_name(self):
+    def test_general_identity_uses_live_company_name(self):
         import shared.reply_policy as rp
-        assert "আল-মানারাতাইন" in rp._GENERAL_IDENTITY
-        assert "আল-আকসা সিকিউরিটি সার্ভিস অ্যান্ড ট্রেডিং সেন্টার" not in rp._GENERAL_IDENTITY
+        from app.config import get_settings
+        identity = rp._general_identity()
+        assert get_settings().company_name in identity
+        assert "আল-আকসা সিকিউরিটি সার্ভিস অ্যান্ড ট্রেডিং সেন্টার" not in identity
+        assert "আল-মানারাতাইন স্কিল সলিউশনস" not in identity
 
-    def test_recruitment_role_uses_correct_company_name(self):
+    def test_recruitment_role_uses_live_company_name(self):
         import shared.reply_policy as rp
-        assert "আল-মানারাতাইন" in rp._RECRUITMENT_ROLE
+        from app.config import get_settings
+        assert get_settings().company_name in rp._recruitment_role()
 
-    def test_ollama_module_prompts_use_correct_company_name(self):
+    def test_ollama_module_prompts_use_live_company_name(self):
         import inspect
         import app.ollama as ollama_mod
+        from app.config import get_settings
         source = inspect.getsource(ollama_mod)
         assert "আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেড" not in source
-        assert "আল-মানারাতাইন" in source
+        assert "আল-মানারাতাইন স্কিল সলিউশনস" not in source
+        assert "settings.company_name" in source
+
+    def test_company_name_setting_is_the_new_brand(self):
+        from app.config import get_settings
+        assert get_settings().company_name == "Al-Rifa'i Integrated Services"
+
+    def test_no_reply_policy_module_level_import_is_lazy(self):
+        """Regression guard: _company_name() must never be called at bare
+        module-import time (it transitively calls get_settings() ->
+        Settings(), which requires DATABASE_URL and would crash any import
+        of this module before the environment is fully configured). All
+        three prompt builders must be functions, not pre-evaluated
+        constants."""
+        import shared.reply_policy as rp
+        import inspect
+        assert inspect.isfunction(rp._general_identity)
+        assert inspect.isfunction(rp._recruitment_role)
+        assert inspect.isfunction(rp._base_prompt)

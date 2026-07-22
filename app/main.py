@@ -1967,7 +1967,7 @@ h1{{color:#1a472a;font-size:24px}}
 </style>
 </head>
 <body>
-<h1>🌿 Fazle Core — Al-Manaratayn Skill Solutions</h1>
+<h1>🌿 Fazle Core — {get_settings().company_name}</h1>
 {safe_banner}
 <div class="grid">
   <div class="card"><div class="num">{emp_count['n']}</div><div class="label">Active Employees</div></div>

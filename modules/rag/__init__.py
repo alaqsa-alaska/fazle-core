@@ -512,40 +512,60 @@ def _load_resource_files() -> list[tuple[str, str, str, bool, frozenset[str]]]:
     if not os.path.isdir(RESOURCES_DIR):
         log.warning(f"[rag] resources dir missing: {RESOURCES_DIR}")
         return out
-    for name in sorted(os.listdir(RESOURCES_DIR)):
-        path = os.path.join(RESOURCES_DIR, name)
-        # PATCH 1: skip subdirectories — log internal ones
-        if os.path.isdir(path):
-            if name in _EXCLUDED_DIRS or name.startswith("_"):
-                log.info(f"[RAG_FILE_SKIPPED_INTERNAL] dir={name!r} reason=excluded_dir")
-            continue
-        if not name.lower().endswith(".txt"):
-            continue
-        # PATCH 3: skip backup/temp files by substring pattern
-        name_lower = name.lower()
-        skip_pat = next((p for p in _EXCLUDED_FILE_PATTERNS if p in name_lower), None)
-        if skip_pat:
-            log.info(
-                f"[RAG_FILE_SKIPPED_BACKUP] file={name!r} reason=backup_pattern:{skip_pat}"
-            )
-            continue
-        # PATCH 1: skip files with internal keywords in filename
-        skip_kw = next((kw for kw in _EXCLUDED_NAME_KEYWORDS if kw in name_lower), None)
-        if skip_kw:
-            log.warning(
-                f"[RAG_FILE_SKIPPED_INTERNAL] file={name!r} reason=keyword:{skip_kw}"
-            )
-            continue
+    # 2026-07-22: one level of recursion into non-excluded subdirectories
+    # (e.g. resources/ops/) -- previously EVERY subdirectory was
+    # unconditionally skipped regardless of whether it was on the exclude
+    # list, which silently meant resources/ops/recruitment_source_of_truth.txt
+    # (the file shared/reply_policy.py's own _RECRUITMENT_SYSTEM_HEADER
+    # prompt instructs the LLM to treat as THE approved source of truth) was
+    # never actually indexed or reachable by any live reply. Same exclude/
+    # safety filters apply at every level; only one level deep (no further
+    # recursion) to keep this a minimal, easily-audited change.
+    def _scan_dir(dir_path: str, rel_prefix: str, depth: int) -> None:
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
+            entries = sorted(os.listdir(dir_path))
         except Exception as e:
-            log.warning(f"[rag] failed to read {name}: {e}")
-            continue
-        if not text.strip():
-            continue
-        title = name.rsplit(".", 1)[0]
-        out.append((f"file:{name}", title, text, True, _DEFAULT_ALLOWED))
+            log.warning(f"[rag] failed to list {dir_path}: {e}")
+            return
+        for name in entries:
+            path = os.path.join(dir_path, name)
+            if os.path.isdir(path):
+                if name in _EXCLUDED_DIRS or name.startswith("_"):
+                    log.info(f"[RAG_FILE_SKIPPED_INTERNAL] dir={name!r} reason=excluded_dir")
+                elif depth == 0:
+                    _scan_dir(path, f"{rel_prefix}{name}/", depth + 1)
+                else:
+                    log.info(f"[RAG_FILE_SKIPPED_INTERNAL] dir={name!r} reason=max_depth")
+                continue
+            if not name.lower().endswith(".txt"):
+                continue
+            # PATCH 3: skip backup/temp files by substring pattern
+            name_lower = name.lower()
+            skip_pat = next((p for p in _EXCLUDED_FILE_PATTERNS if p in name_lower), None)
+            if skip_pat:
+                log.info(
+                    f"[RAG_FILE_SKIPPED_BACKUP] file={name!r} reason=backup_pattern:{skip_pat}"
+                )
+                continue
+            # PATCH 1: skip files with internal keywords in filename
+            skip_kw = next((kw for kw in _EXCLUDED_NAME_KEYWORDS if kw in name_lower), None)
+            if skip_kw:
+                log.warning(
+                    f"[RAG_FILE_SKIPPED_INTERNAL] file={name!r} reason=keyword:{skip_kw}"
+                )
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except Exception as e:
+                log.warning(f"[rag] failed to read {name}: {e}")
+                continue
+            if not text.strip():
+                continue
+            title = name.rsplit(".", 1)[0]
+            out.append((f"file:{rel_prefix}{name}", title, text, True, _DEFAULT_ALLOWED))
+
+    _scan_dir(RESOURCES_DIR, "", 0)
     return out
 
 

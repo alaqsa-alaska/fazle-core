@@ -95,16 +95,19 @@ def _is_verified_escort_identity(identity: dict, role_str: str) -> bool:
 # to, not instead of, app.config draft-always settings — see the union fix
 # in _should_silent_skip() below. "al-manaratayn"/"আল-মানারাতাইন" added per
 # the 2026-07-21 rebrand's augment-don't-replace rule (old "al-aqsa" keyword
-# kept since older saved contacts may still carry the old name).
+# kept since older saved contacts may still carry the old name). "al-rifa'i"/
+# "al rifai" added 2026-07-22 for the second rebrand (Al-Rifa'i Integrated
+# Services) — same augment-don't-replace rule, both older brand tokens kept.
 _SILENT_SKIP_NAME_TOKENS: tuple[str, ...] = (
     "al-aqsa", "আল-আকসা", "al-manaratayn", "আল-মানারাতাইন",
+    "al-rifa'i", "al rifai",
     "escort", "client", "operation", "office", "accountant", "security guard",
     "tcis", "gms", "dalal",
 )
 # Compiled regex for silent-skip token matching — O(n) single pass vs O(n*k) loop
 _SILENT_SKIP_PATTERN: re.Pattern = re.compile(
-    r"(?:al-aqsa|আল-আকসা|al-manaratayn|আল-মানারাতাইন|escort|client|operation|"
-    r"office|accountant|security guard|tcis|gms|dalal)",
+    r"(?:al-aqsa|আল-আকসা|al-manaratayn|আল-মানারাতাইন|al-rifa'i|al rifai|"
+    r"escort|client|operation|office|accountant|security guard|tcis|gms|dalal)",
     re.IGNORECASE,
 )
 

@@ -156,8 +156,14 @@ class Settings(BaseSettings):
     fb_page_access_token: str = ""
     fb_page_id: str = ""
 
-    # Company
-    company_name: str = "Al-Manaratayn Skill Solutions"
+    # Company (2026-07-22: single source of truth for the company's brand
+    # name -- every WhatsApp reply, AI prompt, and frontend page should read
+    # this instead of a hardcoded literal, so a future rebrand is a one-line
+    # .env/default edit here, not a repo-wide find-and-replace. Previously
+    # defined but never actually read anywhere (dead config) while ~20 files
+    # each hardcoded their own copy of the name, independently drifting
+    # across two rebrands -- see management_decisions.md 2026-07-22.
+    company_name: str = "Al-Rifa'i Integrated Services"
     accountant_phone: str = ""
     admin_numbers: str = ""
     admin_meta_number: str = ""

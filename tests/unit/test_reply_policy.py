@@ -72,10 +72,12 @@ def test_general_policy_contains_base_rules():
         intent="greeting",
     )
     assert "ফজলে" in prompt
-    # 2026-07-22: corrected from the pre-rebrand "আল-আকসা" company name to
-    # the actual current company, আল-মানারাতাইন স্কিল সলিউশনস (Al-Manaratayn
-    # Skill Solutions) — see management_decisions.md 2026-07-22.
-    assert "আল-মানারাতাইন" in prompt
+    # 2026-07-22: company name is now centralized (Settings.company_name,
+    # app/config.py) and read dynamically rather than hardcoded in the
+    # prompt string — assert against the live setting so this test survives
+    # future rebrands without needing an edit here too.
+    from app.config import get_settings
+    assert get_settings().company_name in prompt
     assert "বাংলায়" in prompt
 
 

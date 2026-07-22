@@ -1,7 +1,14 @@
-"""Approved social auto-reply business text for Al-Manaratayn Skill Solutions."""
+"""Approved social auto-reply business text.
+
+2026-07-22: COMPANY_NAME now reads app.config.Settings.company_name (the
+repo-wide single source of truth for the brand name) instead of hardcoding
+its own literal, so this module's replies stay in sync with every other
+rebrand-aware reply path without a separate edit here."""
 from __future__ import annotations
 
-COMPANY_NAME = "Al-Manaratayn Skill Solutions"
+from app.config import get_settings
+
+COMPANY_NAME = get_settings().company_name
 OFFICE_ADDRESS = "আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, খোকনের বিল্ডিং (২য় তলা), পাহাড়তলী, চট্টগ্রাম"
 OFFICE_TIME = "সকাল ১০টা থেকে বিকেল ৫টা"
 OFFICE_NUMBERS = "01958-122300"
@@ -11,9 +18,9 @@ ADM_WHATSAPP = "011004669"
 MIN_AGE = 18
 MAX_AGE = 55
 
-WELCOME_REPLY = """আসসালামু আলাইকুম।
+WELCOME_REPLY = f"""আসসালামু আলাইকুম।
 
-আল-মানারাতাইন স্কিল সলিউশনসে যোগাযোগ করার জন্য ধন্যবাদ।
+{COMPANY_NAME}-এ যোগাযোগ করার জন্য ধন্যবাদ।
 
 চট্টগ্রাম বন্দরের লাইটার জাহাজে Survey Scout পদে জরুরি নিয়োগ চলছে।
 
@@ -33,7 +40,7 @@ LOCATION_REPLY = f"""আসসালামু আলাইকুম।
 
 আমাদের অফিস:
 
-আল-মানারাতাইন স্কিল সলিউশনস
+{COMPANY_NAME}
 {OFFICE_ADDRESS}।
 
 অফিস সময়:
@@ -108,7 +115,7 @@ APPLICANT_INFO_RECEIVED_REPLY = f"""আপনার তথ্য পাওয়া
 
 অফিস:
 
-আল-মানারাতাইন স্কিল সলিউশনস
+{COMPANY_NAME}
 {OFFICE_ADDRESS}।
 
 অফিস সময়:
@@ -121,7 +128,7 @@ APPLICANT_INFO_RECEIVED_REPLY = f"""আপনার তথ্য পাওয়া
 
 কোম্পানি যেখানে থাকার ব্যবস্থা করবে সেখানে অবস্থান করে দায়িত্ব পালন করতে হতে পারে, তাই প্রয়োজনীয় প্রস্তুতি নিয়ে আসবেন।"""
 
-AGE_ISSUE_REPLY = f"""আল-মানারাতাইন স্কিল সলিউশনসের নিয়োগ নীতি অনুয়ায়ী:
+AGE_ISSUE_REPLY = f"""{COMPANY_NAME}-এর নিয়োগ নীতি অনুয়ায়ী:
 
 বয়সসীমা: {MIN_AGE}–{MAX_AGE} বছর।
 

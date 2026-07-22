@@ -912,7 +912,7 @@ def build_admin_draft(
         "Escort Mobile:",
         f"{d} ({shift_label})",
         "",
-        "Al-Manaratayn Skill Solutions",
+        get_settings().company_name,
     ]
     return "\n".join(lines)
 
@@ -1067,7 +1067,7 @@ def build_final_slip(draft: CompletedDraft, db_destination: Optional[str] = None
 
     Field labels and footer match the exact format used in the field:
       Mother Vessel / Lighter Vessel / Master Mobile / Destination /
-      Escort Name / Escort Mobile / Start Date (D/N) / Al-Manaratayn Skill Solutions
+      Escort Name / Escort Mobile / Start Date (D/N) / <company name, from Settings.company_name>
     """
     shift_label = f" ({draft['shift']})" if draft.get("shift") else ""
     destination = draft.get("destination") or db_destination or ""
@@ -1079,7 +1079,7 @@ def build_final_slip(draft: CompletedDraft, db_destination: Optional[str] = None
         f"Escort Name: {draft['escort_name'] or '—'}",
         f"Escort Mobile: {draft['escort_mobile'] or '—'}",
         f"Start Date: {draft['date_str'] or _TODAY()}{shift_label}",
-        "Al-Manaratayn Skill Solutions",
+        get_settings().company_name,
     ]
     return "\n".join(lines)
 

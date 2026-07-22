@@ -334,7 +334,7 @@ Route B handler নিচের table-এ direct query করবে না:
 
 ```text
 আমাদের অফিস:
-আল-মানারাতাইন স্কিল সলিউশনস (Al-Manaratayn Skill Solutions)
+Al-Rifa'i Integrated Services
 আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, খোকনের বিল্ডিং (২য় তলা)
 পোস্ট অফিস: উত্তর কাট্টলি (4217), থানা: পাহাড়তলী, চট্টগ্রাম সিটি কর্পোরেশন
 
@@ -343,7 +343,9 @@ Route B handler নিচের table-এ direct query করবে না:
 সাথে আনুন: NID ফটোকপি (নিজের ও অভিভাবকের) + ৪ কপি পাসপোর্ট ও ২ কপি স্ট্যাম্প সাইজ ছবি + প্রয়োজনীয় কাপড়-চোপড়, কাঁথা, মশারি, বিছানার চাদর (১ টি করে)।
 ```
 
-**Source of truth:** `fazle_knowledge_base` row `b11_office_address`, kept in sync with `modules.knowledge_base._FALLBACK`, `modules.social_auto_reply.reply_rules.LOCATION_REPLY`, and `modules.conversation_layer.playbooks.CANONICAL_FACTS["office_location"]`.
+**Source of truth:** `fazle_knowledge_base` row `b11_office_address`, kept in sync with `modules.knowledge_base._FALLBACK`, `modules.social_auto_reply.reply_rules.LOCATION_REPLY`, and `modules.conversation_layer.playbooks.CANONICAL_FACTS["office_location"]`. Company name itself now centralized in `Settings.company_name` (`app/config.py`) — see management_decisions.md 2026-07-22 "Second Rebrand".
+
+**Known open data-quality issue (not resolved by the rebrand pass, flagged for Owner review):** office contact numbers are inconsistent across sources — 01958-122300 (this canonical text, `resources/office_info.txt`), 01958-122322 (`resources/ops/recruitment_source_of_truth.txt`), and other desk-specific numbers (122311, 122327) appear in various KB fallback entries without it being clear which is authoritative for which purpose. Not silently reconciled — needs an Owner decision on which number(s) are correct per desk/purpose.
 
 ## 13.1 Deposit/Fee — Approved Canonical Text
 
@@ -368,10 +370,13 @@ words **anywhere** — start, middle, or end, substring match, not prefix-only:
 
 ```
 Client · Escort · Office · Operation · Accountant · Security Guard
-Al-Aqsa / আল-আকসা · Al-Manaratayn / আল-মানারাতাইন
+Al-Aqsa / আল-আকসা · Al-Manaratayn / আল-মানারাতাইন · Al-Rifa'i / al rifai
++ tcis · gms · dalal (Owner-confirmed 2026-07-22, kept as-is)
 + any other .env-configured no-reply name/role/phone (DRAFT_ALWAYS_NAMES,
   DRAFT_ALWAYS_ROLES non-role tokens, DRAFT_ALWAYS_PHONES)
 ```
+All three brand-name generations kept simultaneously (augment-don't-replace
+rule) since older saved contacts may still carry an earlier name.
 
 Examples (all match): "Escort Masud WA", "Md Karim Escort", "Client Nizam
 Office", "Operation Murad", "Al Aqsa Accountant", "Rahim Office Chattogram".

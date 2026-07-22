@@ -5788,3 +5788,118 @@ for review. Nothing pushed, migrated, deployed, or flag-enabled.
 `modules/message_router/__init__.py`, `modules/recruitment_flow/__init__.py`,
 `modules/route_b/__init__.py`, `shared/reply_policy.py`, `app/ollama.py`,
 `tests/unit/test_final_instruction_fixes.py`.
+
+## Second Rebrand — "Al-Rifa'i Integrated Services" + Recruitment RAG Fix (2026-07-22)
+
+**Decision 1 — protected no-reply terms:** Owner confirmed `tcis`/`gms`/`dalal`
+stay in `_SILENT_SKIP_NAME_TOKENS` (`modules/message_router/__init__.py`) as
+previously flagged — kept as-is, no change.
+
+**Decision 2 — company rebrand, centralized:** the company is rebranding
+again, from "Al-Manaratayn Skill Solutions" to **"Al-Rifa'i Integrated
+Services"**. Rather than repeat the previous rebrand's scattered find-and-
+replace (the 2026-07-21 Al-Aqsa → Al-Manaratayn rebrand left `Settings.company_name`
+defined in `app/config.py` but never actually read anywhere — ~20 backend
+files each independently hardcoded their own copy of the name, which is
+exactly how the audit this session found the system was still telling
+Ollama users its name was the pre-rebrand-1 "Al-Aqsa Security..." in 4
+places), this pass makes `Settings.company_name` the real, live single
+source of truth:
+- `app/config.py`: `company_name` default set to `"Al-Rifa'i Integrated Services"`.
+- `shared/reply_policy.py`: `_GENERAL_IDENTITY`/`_RECRUITMENT_ROLE`/`_BASE`
+  converted from module-level string constants to functions
+  (`_general_identity()`/`_recruitment_role()`/`_base_prompt()`) that read
+  `get_settings().company_name` at call time — **must** stay functions, not
+  constants, since `get_settings()` constructs a real `Settings()` (requires
+  `DATABASE_URL`), which must never run at bare module-import time.
+- `app/ollama.py`, `app/groq_provider.py`, `app/github_models.py`,
+  `app/main.py` (dashboard HTML title), `modules/admin_commands/__init__.py`:
+  now interpolate `settings.company_name` (all already had `get_settings()`
+  in scope at the call site).
+- `modules/social_auto_reply/reply_rules.py`: `COMPANY_NAME` now reads
+  `get_settings().company_name` instead of its own hardcoded literal (module-
+  level call, consistent with the existing `app/ollama.py:_settings = get_settings()`
+  pattern already used elsewhere in this codebase).
+- `modules/admin_commands/nl_outbound.py` (8 template closers),
+  `modules/reply_templates/__init__.py`, `modules/social_auto_reply/intelligent_generator.py`,
+  `modules/knowledge_base/__init__.py` (`_FALLBACK` entries),
+  `modules/conversation_layer/playbooks.py` (`CANONICAL_FACTS["office_location"]`/`["trust"]`):
+  these are module-level string/dict literals where converting to a fully
+  dynamic read would have meant restructuring the whole literal into a
+  function — out of scope for a rebrand pass focused on correctness over
+  architecture. Fixed via a direct, correct literal edit instead. **Known
+  residual:** these will need a manual edit on the *next* rebrand, unlike the
+  fully-centralized paths above — flagged, not hidden.
+- Frontend (`app/static/manifest.json`, `app/static/payroll.html`,
+  `app/static/wa_chat.html`): no templating layer exists (confirmed: plain
+  `StaticFiles` mount, no Jinja2Templates) — literal string edits, same
+  residual-on-next-rebrand caveat as above.
+- `db/migrations/058_rebrand_al_rifai_kb_text.sql`: content-only, idempotent
+  `UPDATE` correcting already-seeded `fazle_knowledge_base.reply_text`/`reply_short`
+  rows (both this rebrand and the still-present pre-rebrand-1 "Al-Aqsa" text
+  in some older rows). No schema change.
+- `modules/message_router/__init__.py`'s `_SILENT_SKIP_NAME_TOKENS`: added
+  `al-rifa'i`/`al rifai`, kept `al-aqsa`/`al-manaratayn` (all three brand
+  generations now coexist — augment-don't-replace, since older saved
+  contacts may carry any prior name).
+- KB docs updated: `../05_workflows/whatsapp_reply_workflow.md` §13/§14,
+  `CANONICAL_BUSINESS_RULES.md` (no-reply gate token list references).
+
+**Decision 3 — recruitment info completeness, real gaps found and fixed:**
+audited whether the system can cleanly answer a job applicant's questions
+(company info, vacant posts, duties, salary, benefits, qualifications, how
+to apply/join, duty location, food/housing) via message *understanding*
+(identity + history + content), not keyword templates. Findings:
+  - The live recruitment reply path (`modules.conversation_layer.recruitment.generate_recruitment_reply()`,
+    reached via `modules.recruitment_flow.route_recruitment_message()`) already
+    does use conversation history (last 5 inbound messages,
+    `modules.message_router.get_recent_history()`) and a real BM25/hybrid-vector
+    RAG index (`modules.rag`), not bare keyword templates — the "understand
+    the message, don't just match keywords" architecture the Owner asked for
+    already existed.
+  - **Real bug found and fixed:** `modules.rag._load_resource_files()`
+    unconditionally skipped every subdirectory under `resources/`, including
+    `resources/ops/` — meaning `resources/ops/recruitment_source_of_truth.txt`
+    (the file `shared/reply_policy.py`'s own `_RECRUITMENT_SYSTEM_HEADER`
+    prompt calls "the Approved Recruitment Source of Truth") and 8 other
+    real HR-policy files (`salary_structure.txt`, `probation_and_training.txt`,
+    `food_expense_policy.txt`, `transport_allowances.txt`, `joining_fee_policy.txt`,
+    `attendance_rules.txt`, `release_workflow.txt`, `company_identity.txt`)
+    were never actually indexed or reachable by any live reply. Fixed: one
+    level of recursion into non-excluded subdirectories, same safety filters
+    apply at every level. Verified empirically — all 9 `resources/ops/*.txt`
+    files now appear in the index source list.
+  - The "known employee texting from an unknown WhatsApp number" mechanism
+    the Owner described already exists (`modules.route_b_handoff` Stage 2,
+    "employee claim" — never grants access, always routes to admin review)
+    but is flag-gated off (`ROUTE_B_HANDOFF_ENABLED=false`). **Not enabled
+    this pass** — flagged for one more explicit word from the Owner before
+    flipping a flag that changes live behavior for a whole class of
+    messages, consistent with this session's standing rule of never
+    enabling a flag without a fresh, explicit instruction naming it.
+  - **Real content-accuracy problems found, NOT silently resolved (Owner
+    decision needed, cannot be guessed at):** contradicting salary figures
+    for the same post across different source files; contradicting office
+    contact numbers (01958-122300 vs 122322 vs others); a direct
+    contradiction on Operation Officer's education requirement ("no specific
+    qualification" in one file vs. "graduate degree required" in
+    `playbooks.py`'s `CANONICAL_FACTS`); one indexed-but-excluded file
+    (`resources/al_aqsa_career_hr_intents.txt`, excluded from RAG by its own
+    "intent" filename-keyword match, confirmed empirically — NOT actually
+    reaching candidates despite an earlier audit pass believing it was) still
+    carries the pre-rebrand-1 company name and says "৬টি পদে" (6 posts) where
+    the canonical list is 9; Security In-Charge and Ghat Supervisor have only
+    generic one-line duty/benefit/location coverage vs. the other 7 posts'
+    detailed coverage. None of these were picked/resolved unilaterally —
+    real business figures (salary, phone numbers, qualifications) are not
+    something to invent or silently choose between conflicting sources.
+
+**Owner approval:** explicit, this session — company rebrand name and
+target scope given directly; recruitment RAG fix and the tcis/gms/dalal
+retention likewise directly confirmed. `ROUTE_B_HANDOFF_ENABLED` deliberately
+left off pending one more explicit word (see above).
+
+**Cross references:** `app/config.py`, `shared/reply_policy.py`,
+`modules/rag/__init__.py`, `modules/message_router/__init__.py`,
+`db/migrations/058_rebrand_al_rifai_kb_text.sql`,
+`../05_workflows/whatsapp_reply_workflow.md` §13/§14.

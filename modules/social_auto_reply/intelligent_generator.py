@@ -147,7 +147,7 @@ def _combined_rule_reply(platform: str, text: str, intents: list[str], history: 
     already = set((state or {}).get("answered_intents") or [])
     parts: list[str] = []
     if "greeting" in intents and not already:
-        parts.append("আসসালামু আলাইকুম। আল-আকসা সিকিউরিটি সার্ভিসে যোগাযোগ করার জন্য ধন্যবাদ।")
+        parts.append("আসসালামু আলাইকুম। Al-Rifa'i Integrated Services-এ যোগাযোগ করার জন্য ধন্যবাদ।")
     if "interested" in intents and "applicant_info_complete" not in intents and "interested" not in already:
         parts.append(rules.INTERESTED_REPLY)
     if "applicant_info_complete" in intents:

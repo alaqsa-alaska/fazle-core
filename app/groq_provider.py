@@ -193,7 +193,7 @@ async def generate_chat_reply(
     use_model = model or settings.groq_model_name
 
     system_content = (
-        "তুমি ফজলে — আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেডের AI সহকারী (Admin Chat Lab)।\n\n"
+        f"তুমি ফজলে — {settings.company_name}-এর AI সহকারী (Admin Chat Lab)।\n\n"
         "নিয়ম:\n"
         "- বাংলায় উত্তর দাও (প্রশ্ন ইংরেজিতে হলে ইংরেজিতে)\n"
         "- সর্বোচ্চ ৪-৫ বাক্য; সরাসরি ও তথ্যবহুল হও\n"

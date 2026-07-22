@@ -24,7 +24,18 @@ from __future__ import annotations
 
 import logging
 
+from app.config import get_settings
+
 log = logging.getLogger("fazle.shared.reply_policy")
+
+
+def _company_name() -> str:
+    """2026-07-22: single source of truth for the brand name in every
+    prompt built here — reads Settings.company_name (app/config.py) at call
+    time rather than baking a literal string into a module-level constant,
+    so a future rebrand is a one-line settings edit, not a repo-wide
+    find-and-replace across every prompt string in this module."""
+    return get_settings().company_name
 
 POLICY_VERSION = "structured_v2"
 WHATSAPP_SOURCES: frozenset[str] = frozenset({"bridge1", "bridge2", "meta"})
@@ -62,11 +73,12 @@ INTENT_HINTS: dict[str, str] = {
 }
 
 # ── Recruitment: Role identity ─────────────────────────────────────────────────
-_RECRUITMENT_ROLE = (
-    "তুমি ফজলে — আল-মানারাতাইন স্কিল সলিউশনস (Al-Manaratayn Skill Solutions)-এর WhatsApp নিয়োগ সহকারী।\n"
-    "চাকরির আবেদনকারীদের সাথে বাংলায়, সরাসরি, স্বাভাবিক ভাষায় কথা বলো।\n"
-    "বাংলা/বাংলিশ/English — যেভাবে প্রশ্ন এসেছে সেই ভাষায় সহজে উত্তর দাও।"
-)
+def _recruitment_role() -> str:
+    return (
+        f"তুমি ফজলে — {_company_name()}-এর WhatsApp নিয়োগ সহকারী।\n"
+        "চাকরির আবেদনকারীদের সাথে বাংলায়, সরাসরি, স্বাভাবিক ভাষায় কথা বলো।\n"
+        "বাংলা/বাংলিশ/English — যেভাবে প্রশ্ন এসেছে সেই ভাষায় সহজে উত্তর দাও।"
+    )
 
 # ── Shared: Bangla/Banglish nuance instructions (2026-07-11 addition) ─────────
 # Small, additive strengthening only -- the "reply in the same language"
@@ -106,9 +118,12 @@ _RECRUITMENT_WORKFLOW = (
 )
 
 # ── General: Identity (used in structured section 1) ─────────────────────────
-_GENERAL_IDENTITY = (
-    "তুমি ফজলে — আল-মানারাতাইন স্কিল সলিউশনস (Al-Manaratayn Skill Solutions), চট্টগ্রাম-এর ফ্রন্ট ডেস্ক সহকারী। এটি একটি প্রাইভেট অভ্যন্তরীণ সিস্টেম — শুধুমাত্র প্রতিষ্ঠানের মালিক ও অনুমোদিত ব্যবহারকারীদের সহায়তা করো।"
-)
+def _general_identity() -> str:
+    return (
+        f"তুমি ফজলে — {_company_name()}, চট্টগ্রাম-এর ফ্রন্ট ডেস্ক সহকারী। এটি একটি "
+        "প্রাইভেট অভ্যন্তরীণ সিস্টেম — শুধুমাত্র প্রতিষ্ঠানের মালিক ও অনুমোদিত "
+        "ব্যবহারকারীদের সহায়তা করো।"
+    )
 
 # ── General: Business rules ────────────────────────────────────────────────────
 _GENERAL_RULES = (
@@ -126,17 +141,24 @@ _GENERAL_RULES = (
 )
 
 # ── Kept for import compatibility only — not used in new builders ─────────────
-_BASE = (
-    "তুমি ফজলে — আল-মানারাতাইন স্কিল সলিউশনস (Al-Manaratayn Skill Solutions), চট্টগ্রাম-এর ফ্রন্ট ডেস্ক সহকারী। এটি একটি প্রাইভেট অভ্যন্তরীণ সিস্টেম — শুধুমাত্র প্রতিষ্ঠানের মালিক ও অনুমোদিত ব্যবহারকারীদের সহায়তা করো।\n\n"
-    "মূল নিয়ম:\n"
-    "১. সবসময় বাংলায় জবাব দাও, যদি না ইংরেজিতে জিজ্ঞেস করা হয়।\n"
-    "২. জবাব সংক্ষিপ্ত রাখো — সর্বোচ্চ ৩-৪ বাক্য।\n"
-    "৩. শুধুমাত্র দেওয়া তথ্য ব্যবহার করো। নিজে থেকে বেতন বা পরিমাণ বানিও না।\n"
-    "৪. তথ্য না জানলে বলো: \"অফিসে যোগাযোগ করুন অথবা পরে আবার জিজ্ঞেস করুন।\"\n"
-    "৫. রোবোটিক বা ইংরেজি phrase ব্যবহার করো না।\n"
-    "৬. সম্মানজনক ও আন্তরিক ভাষায় কথা বলো।\n"
-    "৭. কোনো emoji বা বিশেষ চিহ্ন ব্যবহার করবে না। শুধু সাধারণ বাংলা টেক্সট লিখবে।\n"
-)
+# 2026-07-22: must stay a FUNCTION, not a module-level constant -- it used to
+# be a plain string, but now needs _company_name() -> get_settings(), and
+# get_settings() constructs a real Settings() (requires DATABASE_URL etc.)
+# which must never run at bare import time (breaks any context that imports
+# this module before .env/environment is fully configured, e.g. some test
+# collection paths). Evaluated lazily, only if a caller actually invokes it.
+def _base_prompt() -> str:
+    return (
+        f"তুমি ফজলে — {_company_name()}, চট্টগ্রাম-এর ফ্রন্ট ডেস্ক সহকারী। এটি একটি প্রাইভেট অভ্যন্তরীণ সিস্টেম — শুধুমাত্র প্রতিষ্ঠানের মালিক ও অনুমোদিত ব্যবহারকারীদের সহায়তা করো।\n\n"
+        "মূল নিয়ম:\n"
+        "১. সবসময় বাংলায় জবাব দাও, যদি না ইংরেজিতে জিজ্ঞেস করা হয়।\n"
+        "২. জবাব সংক্ষিপ্ত রাখো — সর্বোচ্চ ৩-৪ বাক্য।\n"
+        "৩. শুধুমাত্র দেওয়া তথ্য ব্যবহার করো। নিজে থেকে বেতন বা পরিমাণ বানিও না।\n"
+        "৪. তথ্য না জানলে বলো: \"অফিসে যোগাযোগ করুন অথবা পরে আবার জিজ্ঞেস করুন।\"\n"
+        "৫. রোবোটিক বা ইংরেজি phrase ব্যবহার করো না।\n"
+        "৬. সম্মানজনক ও আন্তরিক ভাষায় কথা বলো।\n"
+        "৭. কোনো emoji বা বিশেষ চিহ্ন ব্যবহার করবে না। শুধু সাধারণ বাংলা টেক্সট লিখবে।\n"
+    )
 
 _RECRUITMENT_SYSTEM_HEADER = (
     "তুমি একটি সংক্ষিপ্ত WhatsApp recruitment reply assistant।\n\n"
@@ -183,7 +205,7 @@ def build_whatsapp_reply_policy(
 
     parts: list[str] = [
         "## ভূমিকা (Role)",
-        _GENERAL_IDENTITY,
+        _general_identity(),
         role_hint,
         "",
         "## ব্যবসায়িক নিয়ম (Business Rules)",
@@ -277,7 +299,7 @@ def build_whatsapp_recruitment_policy(
 
     parts: list[str] = [
         "## ভূমিকা (Role)",
-        _RECRUITMENT_ROLE,
+        _recruitment_role(),
         "",
         "## ব্যবসায়িক নিয়ম (Business Rules)",
         _RECRUITMENT_RULES,

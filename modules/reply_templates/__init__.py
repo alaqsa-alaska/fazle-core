@@ -59,7 +59,7 @@ _RECRUITMENT_FRUSTRATED = [
 _GREETING_NORMAL = [
     (
         "ওয়ালাইকুম আস্সালাম,\n\n"
-        "আমি Fazle, The Assistant। আপনাকে আল-আকসা সিকিউরিটি সার্ভিসে স্বাগত।\n"
+        "আমি Fazle, The Assistant। আপনাকে Al-Rifa'i Integrated Services-এ স্বাগত।\n"
         "কী জানতে চান বলুন — আপনাকে কীভাবে সাহায্য করতে পারি?"
     ),
     (

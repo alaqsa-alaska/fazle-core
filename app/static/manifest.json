@@ -1,6 +1,6 @@
 {
-  "name": "Al-Aqsa HR & Admin",
-  "short_name": "Al-Aqsa HR",
+  "name": "Al-Rifa'i Integrated Services HR & Admin",
+  "short_name": "Al-Rifa'i HR",
   "description": "Payroll and admin dashboard",
   "start_url": "/payroll",
   "scope": "/",
