@@ -72,7 +72,10 @@ def test_general_policy_contains_base_rules():
         intent="greeting",
     )
     assert "ফজলে" in prompt
-    assert "আল-আকসা" in prompt
+    # 2026-07-22: corrected from the pre-rebrand "আল-আকসা" company name to
+    # the actual current company, আল-মানারাতাইন স্কিল সলিউশনস (Al-Manaratayn
+    # Skill Solutions) — see management_decisions.md 2026-07-22.
+    assert "আল-মানারাতাইন" in prompt
     assert "বাংলায়" in prompt
 
 

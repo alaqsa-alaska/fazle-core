@@ -5652,3 +5652,139 @@ left off, nothing pushed, per explicit instruction.
 **Cross references:** `../05_workflows/whatsapp_reply_workflow.md` §15,
 `modules/route_b_handoff/__init__.py`, `modules/route_b/__init__.py`,
 `db/migrations/057_route_b_handoffs.sql`, `tests/unit/test_route_b_handoff.py`.
+
+## Commit `b02b7c7` — Bridge 2 Trusted Group Escort-Order Correlation (2026-07-22)
+
+**Decision:** implement the Owner-approved Trusted Group source (single
+verified JID `120363428977781821@g.us`, "Al-Aqsa Escort Program Group",
+resolved read-only from bridge2's own `messages.db` chats table — three
+similarly-named but different groups also exist and are documented as
+tripwires in `app/config.py`'s `escort_order_group_jid` comment). Full 8
+confirmed business rules plus Decisions A (no-match → `wbom_unmatched_confirmations`
+review queue, never auto-create) and B (group-sourced drafts TTL-exempt).
+See `../05_workflows/whatsapp_reply_workflow.md` for the flow, and
+`modules/escort/__init__.py`'s `handle_group_escort_order()`/
+`_find_existing_draft_for_order()`/`_update_program_confirmed()` docstrings
+for the design rationale.
+
+**Judgment call flagged to Owner:** the existing DM-path dedup in
+`save_escort_programs()` only matches on `contact_id`/`sender_phone`, so a
+new, additive, sender-agnostic `_find_existing_draft_for_order()` check was
+added for the group-sourced path only (Rule 2 protects the existing DM
+dedup from modification). 21 tests, `tests/unit/test_trusted_group_escort_orders.py`.
+
+**Status:** flag (`escort_order_group_jid`) empty by default — feature
+fully inert. Not deployed to production; committed on `main` in an isolated
+worktree only.
+
+## Final Instruction (2026-07-22) — Recruitment, Salary/Money Routing, Ollama System-Assistant Fixes
+
+**Decision:** following a full read-only audit (4 parallel research passes
+covering recruitment conversation capability, salary/money intent routing,
+keyword-vs-identity-aware reply paths, and Ollama's system prompt/context/
+authority), fixed the real gaps found — all in the isolated worktree, none
+deployed, none flag-enabled.
+
+**Section 3 reconstruction conflict — resolved, Owner confirmed:** the
+Final Instruction's "reconstruct and create one canonical program when the
+temporary draft has expired" was flagged as conflicting with the prior
+session's Decision A (never auto-create on no-match) and Decision B (group
+drafts are TTL-exempt, so nothing expires). Owner chose to keep Decision
+A/B as-is — no auto-create path was added. The TTL exemption already
+satisfies the underlying concern (nothing needs reconstruction because
+group-sourced drafts never expire in the first place).
+
+**Section 2 — no-reply gate employee exemption:** `identity_brain.is_registered_employee_phone()`
+(new, thin wrapper over the existing `_lookup_employee()`) is now checked
+in `message_router._should_silent_skip()` BEFORE the protected-name-token
+match — a phone verified in `wbom_employees`/`fpe_employees` (active or
+inactive) is never silenced by a saved contact name like "Escort Rahim."
+Flagged, not changed: the live token list also includes `tcis`/`gms`/`dalal`
+alongside the 8 documented terms (Client/Escort/Office/Operation/
+Accountant/Security Guard/Al-Aqsa/Al-Manaratayn) — left untouched pending
+Owner confirmation these were separately approved.
+
+**Section 4/6 — recruitment funnel real bug found and fixed:**
+`modules.recruitment_flow.route_recruitment_message()` called
+`generate_recruitment_reply()` first and only fell back to `intake_message()`
+(the actual `fazle_recruitment_sessions`-writing state machine) when that
+reply was empty — which it almost never was (the KB/rule layer has no
+empty-return branch). This meant an active recruitment session almost never
+actually advanced past its first question, and a brand-new explicit job
+inquiry almost never opened a session at all, independent of any feature
+flag. Fixed: an active session now always calls `intake_message()` first;
+a new, high-confidence (autosend) inquiry with no active session now also
+opens one in the background. Also removed `"salary_query"` from
+`OPERATIONAL_INTENTS` (role is already checked first, so this only affects
+candidate/unknown/new_lead senders) so "escort e koto salary?" reaches the
+recruitment reply path instead of being rejected as an operational intent.
+
+**Section 5/6 — salary/money misrouting fixed:** in `message_router`'s
+employee tier, a known employee's informational salary question ("আমার
+বেতন কবে দিবেন?") was being intercepted by the bare-keyword payment-request
+trigger (`detect_payment_request_trigger()` matches the plain word "বেতন")
+before ever reaching the real payroll-backed answer
+(`get_payroll_summary()`). Fixed by checking `intent in ("salary_query",
+"payment_due")` first, ahead of the trigger scan — a genuine advance
+request (different intent) still reaches the Sprint-3A payment workflow
+unchanged. In `modules.route_b`, `is_advance_request()` had no identity
+check at all and fired identically for all four `ROUTE_B_ROLES` — a
+candidate/unknown sender's generic distress word ("বিপদ", "সাহায্য লাগবে")
+was framed as an operational MONEY/ADVANCE REQUEST admin draft. Scoped to
+`escort`/`security_guard` roles only (the two ROUTE_B_ROLES that are real
+on-duty workers); candidate/unknown still get a normal, identity-aware
+reply, just not the admin-notification framing. Not fixed this pass
+(flagged as a known remaining gap): `wbom_billing_records` (client
+escort-service pricing) has zero rows and no writing code, so there is no
+canonical source to ground a client price answer against yet; the two
+independently-maintained hardcoded salary-figure sources
+(`modules.knowledge_base._FALLBACK` and
+`modules.conversation_layer.playbooks.CANONICAL_FACTS`) were not
+deduplicated (correctness unaffected, only a maintainability/drift risk).
+
+**Section 6 — keyword-only paths:** audit found the live WhatsApp reply
+surface is predominantly identity-first already (escort order/release
+detection, admin commands, and the silent-skip gate all key off resolved
+role/saved-name before any keyword logic fires). The two real gaps found
+(Route B's money/advance detector, and the generic Tier-13 KB fallback
+firing role-blind) — the first is fixed above; the second was left as a
+flagged, low-severity item (draft/admin-review only, no private data or
+money movement).
+
+**Section 7/8 — Ollama system-assistant fixes:** the system prompt
+identified the assistant as "আল-আকসা সিকিউরিটি সার্ভিস অ্যান্ড ট্রেডিং সেন্টার" / "আল-আকসা
+সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেড" in `shared/reply_policy.py` and
+`app/ollama.py` — the pre-rebrand company name, never "আল-মানারাতাইন স্কিল
+সলিউশনস (Al-Manaratayn Skill Solutions)," the actual current company name
+per `../05_workflows/whatsapp_reply_workflow.md` §13. Fixed at all 4
+occurrences, plus added an explicit standing "ask a clarifying question
+when intent/identity is uncertain" rule to `_GENERAL_RULES` (previously
+only a conditional unknown-sender-specific prompt injection in
+`modules/route_b/__init__.py`, not a general rule). Also: `modules.route_b`
+never consulted `modules.knowledge_base`/RAG at all (explicit in its own
+docstring) — added a best-effort, read-only, exception-safe KB lookup
+folded into the Ollama context as additional grounding, never replacing or
+short-circuiting the actual `generate_reply()` call. No tool-calling
+capability exists (confirmed absent, not added this pass — out of scope,
+would be a larger architectural change). Write authority was already
+correctly gated (draft/admin-review before any send; Ollama's raw
+category/text output can never itself cause a business-table write without
+an existing deterministic function in between) — confirmed, not changed.
+
+**Tests:** `tests/unit/test_final_instruction_fixes.py` — 16 new tests
+covering recruitment session continuation, salary_query eligibility,
+employee salary-query priority, Route B money-request role scoping, and
+Route B KB-context wiring (including a KB-lookup-failure-never-breaks-reply
+test). `tests/unit/test_message_router_no_reply_name_gate.py` extended with
+2 new tests for the employee exemption.
+
+**Owner approval:** implementation authorized in the isolated worktree
+only; Owner explicitly confirmed (1) keep Decision A/B as-is over
+reopening auto-create, and (2) fix bugs in the isolated worktree first,
+stop before any deployment/restart/flag-enable step, deliver as one batch
+for review. Nothing pushed, migrated, deployed, or flag-enabled.
+
+**Cross references:** `modules/identity_brain/__init__.py`,
+`modules/message_router/__init__.py`, `modules/recruitment_flow/__init__.py`,
+`modules/route_b/__init__.py`, `shared/reply_policy.py`, `app/ollama.py`,
+`tests/unit/test_final_instruction_fixes.py`.

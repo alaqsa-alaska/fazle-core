@@ -256,8 +256,41 @@ async def handle_route_b_message(
     if role == "unknown":
         db_context_parts.append(_UNKNOWN_SENDER_PROBE)
 
-    money_request = is_advance_request(text)
+    # 2026-07-22 (Final Instruction Section 5): is_advance_request() is a
+    # bare keyword/distress-word match (see modules.payment_workflow) with
+    # no identity awareness of its own -- previously it fired identically
+    # for all four ROUTE_B_ROLES, so a candidate or genuinely unknown
+    # sender using a generic distress word (e.g. "বিপদ", "সাহায্য লাগবে") for
+    # an unrelated reason got framed as a MONEY/ADVANCE REQUEST and an
+    # admin draft was raised on their behalf. Scoped to escort/
+    # security_guard only -- the two ROUTE_B_ROLES that are actually
+    # real, on-duty operational workers this flow exists to serve. A
+    # candidate/unknown sender's money-shaped message still gets a normal,
+    # identity-aware Ollama reply (including the unknown-sender probe
+    # above when applicable) -- just not the operational admin-notification
+    # framing, since there is no established employee/payroll relationship
+    # to act on for those roles.
+    money_request = role in ("escort", "security_guard") and is_advance_request(text)
     effective_intent = _MONEY_ADVANCE_INTENT if money_request else (intent or "unknown")
+
+    # 2026-07-22 (Final Instruction Section 7/8): Route B previously never
+    # consulted modules.knowledge_base/RAG at all -- its own docstring said
+    # so explicitly ("bypasses KB/template machinery"). That left the
+    # system prompt's existing "only use given Knowledge, never invent a
+    # figure" rule with nothing to actually ground itself on for a Route B
+    # reply. Best-effort, additive, and read-only: a KB/RAG match (if any)
+    # is folded in as extra grounding CONTEXT for the one real
+    # ollama_generate_reply() call below -- it does not short-circuit or
+    # replace that call, and any failure here must never break the
+    # underlying reply (matches the fail-open pattern already used for the
+    # handoff/ollama-failure hooks in this same function).
+    try:
+        from modules.knowledge_base import get_reply as _kb_get_reply
+        kb_hit = await _kb_get_reply(text, intent=effective_intent)
+        if kb_hit:
+            db_context_parts.append(f"[Knowledge base]\n{kb_hit}")
+    except Exception as e:
+        log.debug("[route_b] KB context lookup failed sender=%s: %s", sender, e)
 
     db_context = "\n\n".join(p for p in db_context_parts if p)
 

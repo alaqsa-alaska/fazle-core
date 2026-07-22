@@ -30,7 +30,7 @@ from app.database import fetch_one, fetch_all, fetch_val, execute
 from shared.draft_reply import create_draft_reply
 from modules.intent import classify
 from modules.phone_normalizer import normalize_phone
-from modules.identity_brain import detect_identity, ROUTE_B_ROLES
+from modules.identity_brain import detect_identity, ROUTE_B_ROLES, is_registered_employee_phone
 from modules.number_identity import normalize_phone as get_phone_variants
 from app import llm as ai
 from modules.payroll_logic import get_payroll_summary, format_payroll_context
@@ -288,6 +288,18 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
             if contact:
                 break
         if contact:
+            # 2026-07-22 (Final Instruction §2): a phone verified in the
+            # canonical employee tables must never be silenced just because
+            # its saved contact name happens to contain a protected term
+            # ("Escort Karim", "Office Runner", etc.) -- active employees
+            # must keep reaching their existing employee/Tier 10 workflow,
+            # and inactive/former employees must still reach the normal
+            # identity-based verification/admin-review path below, not this
+            # name-only gate. Checked BEFORE the name-token match so a
+            # registered employee is never even evaluated against it.
+            if await is_registered_employee_phone(sender):
+                return False, ""
+
             name_lower = (contact.get("display_name") or "").lower()
             # 2026-07-22: this must be a UNION of the static default keywords
             # and any .env-configured draft-always names/roles, not an
@@ -684,6 +696,27 @@ async def process_message(
             log.warning("[COMPLAINT_DRAFT] intent=%s sender=%s emp_id=%s", intent, sender, emp_id)
             return "আপনার বার্তা পেয়েছি। দায়িত্বশীল ব্যক্তি শীঘ্রই যোগাযোগ করবেন।", None
 
+        # 2026-07-22 (Final Instruction Section 5): an INFORMATIONAL salary
+        # question ("আমার বেতন কবে দিবেন?") must reach the real payroll-backed
+        # answer, not the payment-REQUEST workflow below. Previously this
+        # check ran after the bare-keyword ec_trigger scan (TRIGGER_GROUPS
+        # includes the plain word "বেতন"), so a genuine known employee's
+        # salary question was intercepted by ec_handle_payment_request()
+        # ("started an advance request, please enter an amount") before ever
+        # reaching get_payroll_summary() -- the classifier's own
+        # intent=="salary_query"/"payment_due" signal is deliberately
+        # checked FIRST here, ahead of the generic keyword trigger, so the
+        # already-more-precise classification wins over a bare substring
+        # match. An employee genuinely wanting to REQUEST an advance still
+        # reaches ec_trigger below (e.g. intent will classify as
+        # advance_request/payment_issue, not salary_query/payment_due).
+        if intent in ("salary_query", "payment_due") and emp_id:
+            payroll = await get_payroll_summary(emp_id)
+            db_ctx = format_payroll_context(payroll)
+            history = "\n".join(await get_recent_history(sender))
+            reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
+            return reply, None
+
         # Sprint-3A: Route payment requests through the AI conversation workflow.
         # This replaces the legacy start_advance_verification with a full
         # multi-step conversation that collects reason, amount, payout, and
@@ -699,13 +732,6 @@ async def process_message(
             # fall through to legacy advance verification.
             if is_advance_request(text):
                 return await start_advance_verification(sender, source, emp_id)
-
-        if intent in ("salary_query", "payment_due") and emp_id:
-            payroll = await get_payroll_summary(emp_id)
-            db_ctx = format_payroll_context(payroll)
-            history = "\n".join(await get_recent_history(sender))
-            reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
-            return reply, None
 
     # ── 11. ADVANCE/PAYMENT REQUEST (any role not already handled) ───────────
     # Catches employees, supervisors, unknown senders who ask for money.

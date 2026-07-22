@@ -23,9 +23,17 @@ OPERATIONAL_ROLES = frozenset({
     "vendor", "known_contact",
 })
 OPERATIONAL_INTENTS = frozenset({
-    "attendance", "leave", "salary_query", "payment_due", "advance_request",
+    "attendance", "leave", "payment_due", "advance_request",
     "escort_duty", "client_order", "slip_submission",
 })
+# "salary_query" deliberately excluded (2026-07-22, Final Instruction
+# Section 4/5): by the time this set is even consulted in
+# recruitment_eligibility(), role has already been confirmed non-operational
+# (unknown/new_lead/candidate) -- a real employee's salary question never
+# reaches this check at all, it's already rejected by the role check above.
+# For a candidate/unknown sender, "escort e monthly koto salary?" IS a
+# legitimate recruitment question and must not be excluded from the
+# recruitment reply path.
 
 # ── Intake trigger keywords ────────────────────────────────────────────────────
 INTAKE_KEYWORDS: set[str] = {
@@ -458,6 +466,30 @@ async def route_recruitment_message(
             "reply": None,
         }
 
+    active_session = decision.get("active_session")
+
+    # 2026-07-22 (Final Instruction Section 4 — recruitment audit found
+    # this was FAIL for multi-message continuation): an in-progress funnel
+    # must always advance via intake_message() first. Previously
+    # intake_message() was only reached as a fallback when
+    # generate_recruitment_reply() returned an empty string, which it
+    # almost never does (its KB/rule/LLM layer nearly always produces some
+    # informational text) -- so collection_step effectively never advanced
+    # past the first question in practice, even with an active session.
+    if active_session:
+        intake = await intake_message(phone, text, source, role=role)
+        intake_reply = (intake.get("reply") or "").strip()
+        if intake_reply:
+            return {
+                "eligible": True,
+                "autosend": bool(decision.get("autosend")),
+                "reason": decision.get("reason", "session_continuation"),
+                "reply": intake_reply,
+            }
+        # intake_message() produced nothing (e.g. an "already_applied"
+        # template that happened to be empty) — fall through to the
+        # informational reply below as a safety net, same as before.
+
     from modules.conversation_layer import generate_recruitment_reply
 
     reply = await generate_recruitment_reply(
@@ -469,13 +501,28 @@ async def route_recruitment_message(
     )
 
     if not reply:
-        active_session = decision.get("active_session") or {}
         step = active_session.get("collection_step") if isinstance(active_session, dict) else None
         if step:
             reply = STEP_QUESTIONS.get(step, STEP_QUESTIONS["name"])
         else:
             intake = await intake_message(phone, text, source, role=role)
             reply = (intake.get("reply") or "").strip() or STEP_QUESTIONS["name"]
+    elif not active_session and decision.get("autosend"):
+        # 2026-07-22: a genuinely new, high-confidence job inquiry (explicit
+        # keyword trigger or the entity-layer detector) must actually open
+        # a fazle_recruitment_sessions row in the background, not just
+        # receive an informational answer -- otherwise there is nothing for
+        # the NEXT message to continue via the branch above, and the
+        # candidate never enters the real data-collection funnel at all.
+        # Best-effort only: never overrides the informational reply already
+        # computed above, and intake_message()'s own INTAKE_KEYWORDS check
+        # means this is a no-op for eligibility reached only via the
+        # detector layers (context/intent), which is the correct, more
+        # conservative behavior for lower-confidence matches.
+        try:
+            await intake_message(phone, text, source, role=role)
+        except Exception as e:
+            log.debug(f"[recruit] background session-open failed: {e}")
 
     return {
         "eligible": True,

@@ -54,6 +54,9 @@ class TestShouldSilentSkipNameMatch:
         import modules.message_router as router
 
         monkeypatch.setattr(
+            router, "is_registered_employee_phone", AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(
             router,
             "fetch_one",
             AsyncMock(return_value={"display_name": "Accountant Firm ABC"}),
@@ -72,6 +75,9 @@ class TestShouldSilentSkipNameMatch:
     async def test_security_guard_and_rebrand_tokens_match(self, monkeypatch):
         import modules.message_router as router
 
+        monkeypatch.setattr(
+            router, "is_registered_employee_phone", AsyncMock(return_value=False),
+        )
         for name in ("Security Guard Karim", "Al-Manaratayn Office", "আল-আকসা Office Chattogram"):
             monkeypatch.setattr(
                 router, "fetch_one", AsyncMock(return_value={"display_name": name})
@@ -85,6 +91,9 @@ class TestShouldSilentSkipNameMatch:
         import modules.message_router as router
 
         monkeypatch.setattr(
+            router, "is_registered_employee_phone", AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(
             router, "fetch_one", AsyncMock(return_value={"display_name": "Md Karim Escort"})
         )
         skip, reason = await router._should_silent_skip("8801700000003")
@@ -96,10 +105,47 @@ class TestShouldSilentSkipNameMatch:
         import modules.message_router as router
 
         monkeypatch.setattr(
+            router, "is_registered_employee_phone", AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(
             router, "fetch_one", AsyncMock(return_value={"display_name": "Rahim Uddin"})
         )
         skip, reason = await router._should_silent_skip("8801700000004")
         assert skip is False
+
+    @pytest.mark.asyncio
+    async def test_registered_employee_phone_bypasses_name_gate_entirely(self, monkeypatch):
+        """Final Instruction §2 (2026-07-22): a phone verified in the
+        canonical employee tables must not be silenced only because its
+        saved name contains a protected term. 'Escort Rahim' is exactly the
+        example given in the instruction's own required-tests list."""
+        import modules.message_router as router
+
+        monkeypatch.setattr(
+            router, "is_registered_employee_phone", AsyncMock(return_value=True),
+        )
+        monkeypatch.setattr(
+            router, "fetch_one", AsyncMock(return_value={"display_name": "Escort Rahim"})
+        )
+        skip, reason = await router._should_silent_skip("8801700000009")
+        assert skip is False
+        assert reason == ""
+
+    @pytest.mark.asyncio
+    async def test_non_employee_with_same_name_still_silenced(self, monkeypatch):
+        """The exemption is phone-specific, not name-specific — a different,
+        non-employee phone saved under the identical name text must still
+        be silenced exactly as before."""
+        import modules.message_router as router
+
+        monkeypatch.setattr(
+            router, "is_registered_employee_phone", AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(
+            router, "fetch_one", AsyncMock(return_value={"display_name": "Escort Rahim"})
+        )
+        skip, reason = await router._should_silent_skip("8801700000010")
+        assert skip is True
 
 
 class TestRouteBBackstop:

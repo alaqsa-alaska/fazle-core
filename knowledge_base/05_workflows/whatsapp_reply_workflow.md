@@ -227,6 +227,21 @@ Unknown sender-এর জন্য **hardcoded blind greeting** ব্যবহ�
 - HR table mutation
 - restricted operational table update
 
+**2026-07-22 update — role scoping fix:** `is_advance_request()` (keyword/
+distress-word match, no identity awareness of its own) previously fired
+identically for all four `ROUTE_B_ROLES`, so a candidate/unknown sender's
+generic distress word could be framed as a MONEY/ADVANCE REQUEST admin
+draft with no employee/payroll relationship for the admin to act on. Now
+scoped in `modules.route_b.handle_route_b_message()` to `escort`/
+`security_guard` roles only — the two `ROUTE_B_ROLES` that are real,
+on-duty operational workers. Candidate/unknown senders still receive a
+normal, identity-aware Route B reply for a money-shaped message, just
+without the admin-notification framing. Separately, a known EMPLOYEE's
+informational salary question (role `"employee"`, Route A/Tier 10) is
+answered directly from `get_payroll_summary()` — checked ahead of the
+Sprint-3A payment-request trigger scan so the bare keyword "বেতন" no longer
+intercepts an informational question before the real payroll answer.
+
 ---
 
 ## 10. Phone Number Normalization Policy
@@ -281,6 +296,8 @@ Route B local AI **read-only** access পাবে approved context sources-এ�
 **3) Per-bridge WhatsApp SQLite contact store (`whatsmeow_contacts`)** — Read-only mode only. Allowed fields: `push_name`, `first_name`, `full_name`, `business_name`. Purpose: actual WhatsApp-side profile identity hints.
 
 **4) `identity_brain.detect_identity()` output** — Allowed context: `role`, `confidence`, `source`, `employee_id`, `employee_name`, `designation`, lifecycle/context tags. Purpose: restricted tables-এ direct query ছাড়া pre-computed identity signal পাওয়া.
+
+**5) `modules.knowledge_base.get_reply()` (2026-07-22 addition)** — Allowed as best-effort, read-only, exception-safe grounding context only. Before 2026-07-22, `modules.route_b` never consulted KB/RAG at all (documented explicitly in its own module docstring), which left the system prompt's existing "only use given Knowledge, never invent a figure" rule with nothing to actually ground itself on. A KB/RAG hit (if any) is now folded into the same prompt context as sources 1-4 — it never short-circuits or replaces the actual `app.ollama.generate_reply()` call, and a lookup failure degrades silently (reply proceeds exactly as before).
 
 ### 11.2 Explicitly out of bounds
 
@@ -392,6 +409,23 @@ safety net (§9's `intent`+shape gate), not this gate.
 2. Route B branch backstop (§4.2) — keyed off `identity_brain`'s own resolved
    `display_name`, for a contact not yet synced into `wbom_contacts`
    (see `knowledge_base/06_developer_system/contact_sync.md`).
+
+**Registered-employee exemption (2026-07-22 addition):** a phone verified in
+the canonical employee tables (`wbom_employees`/`fpe_employees`, active or
+inactive — checked via the new `identity_brain.is_registered_employee_phone()`)
+now bypasses `_should_silent_skip()`'s name-token match entirely, checked
+*before* the token match runs. Previously a genuine employee saved under a
+contact name like "Escort Rahim" would be silenced by this gate exactly like
+a stranger, even though their phone is on file — they now continue to their
+normal identity-based routing (Route A employee/Tier 10 for active
+employees, verification/admin-review for inactive) instead. The exemption is
+phone-specific, not name-specific: a *different*, non-employee phone saved
+under the identical name text is still silenced as before.
+
+**Known open item (not resolved this pass):** the live token list also
+includes `tcis`, `gms`, `dalal` alongside the 8 documented terms above —
+left unchanged pending Owner confirmation these were separately approved,
+rather than silently removed or kept.
 
 ## 15. Route B Conversation Handoff (Built 2026-07-22 — NOT YET ACTIVE)
 

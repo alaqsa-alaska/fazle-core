@@ -370,9 +370,14 @@ async def test_advance_request_path_unchanged_regardless_of_flag(monkeypatch):
     handoff_mock = AsyncMock()
     monkeypatch.setattr("modules.route_b_handoff.evaluate_handoff", handoff_mock)
 
+    # 2026-07-22: role must be escort/security_guard for the money-request
+    # path to fire at all (Final Instruction Section 5 fix — is_advance_request()
+    # is now scoped to real operational roles; "unknown" no longer qualifies).
+    # This test's actual invariant (advance path precedes the handoff layer
+    # regardless of ROUTE_B_HANDOFF_ENABLED) is unaffected by that scoping.
     reply, admin_note = await route_b.handle_route_b_message(
         "8801700000099", "আমার এডভান্স লাগবে", "bridge1",
-        {"role": "unknown", "display_name": ""}, "unknown",
+        {"role": "escort", "display_name": ""}, "unknown",
     )
 
     assert reply == "ঠিক আছে, দেখছি"

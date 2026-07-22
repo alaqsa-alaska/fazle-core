@@ -1136,7 +1136,20 @@ async def _find_existing_draft_for_order(
     mother_vessel + date all matching is already strong enough evidence on
     its own). Used as an EXTRA check by the new group-order path only --
     save_escort_programs()'s own internal query is completely unchanged."""
-    if not (mv_clean and master_mobile):
+    # 2026-07-22 (Final Instruction Section 3 review -- "confirm it cannot
+    # merge two different real orders"): unlike save_escort_programs()'s
+    # own inline dedup (bounded by contact_id/sender_phone even when date
+    # is unknown), this function drops that restriction on purpose, which
+    # means master_mobile+mother_vessel alone is the ONLY remaining signal
+    # once date is unresolved -- and a master who regularly tows the same
+    # mother vessel on different dates/duties is a plausible real scenario,
+    # not a hypothetical. A NULL-date wildcard here could silently merge
+    # two genuinely different orders. So program_date is now REQUIRED --
+    # with no date, this returns None (no cross-channel match) and the
+    # caller falls through to creating a new draft. A false negative
+    # (occasional duplicate draft, resolvable by admin review) is the safe
+    # failure mode; a false positive (two orders silently merged) is not.
+    if not (mv_clean and master_mobile and program_date):
         return None
     try:
         row = await fetch_one(
@@ -1145,7 +1158,7 @@ async def _find_existing_draft_for_order(
             WHERE COALESCE(master_mobile, '') = $1
               AND UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $2
               AND status NOT IN ('cancelled')
-              AND ($3::date IS NULL OR program_date = $3)
+              AND program_date = $3
             ORDER BY program_id DESC LIMIT 1
             """,
             master_mobile, mv_clean, program_date,

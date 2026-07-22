@@ -358,6 +358,23 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
     return dict(row) if row and row.get("employee_id") else None
 
 
+async def is_registered_employee_phone(phone: str) -> bool:
+    """Public wrapper over _lookup_employee() -- True for ANY phone on file
+    in wbom_employees/fpe_employees, active or inactive, regardless of the
+    caller's own role/text context.
+
+    2026-07-22 (no-reply gate exemption): message_router's saved-contact-name
+    silent-skip gate (_should_silent_skip()) must never silence a phone that
+    is genuinely a registered employee just because someone once saved their
+    contact as "Escort Karim" or "Office Runner" -- that phone still needs
+    to reach the payroll/Tier 10 flow. This is a status-blind existence
+    check only; the caller (message_router) is responsible for routing
+    Active vs Inactive differently afterward via the normal identity_brain/
+    Tier 10 path -- this function does not itself decide access level.
+    """
+    return await _lookup_employee(phone) is not None
+
+
 async def _lookup_cash_identity(phone: str) -> Optional[dict]:
     """Resolve operational identity from existing cash/payment records."""
     variants = _phone_variants(phone)
