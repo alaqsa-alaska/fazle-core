@@ -212,6 +212,104 @@ class TestSecondarySignalsPositionIndependent:
         assert _normalize_capacity(f"local {bare}", allow_bare=True) == expected
 
 
+class TestMotherVesselFieldBoundaryRegression:
+    """Regression coverage for the 2026-07-26 mother-vessel/importer
+    field-boundary bug. The two real messages below are verbatim from
+    wbom_whatsapp_messages (sender 8801670535255, message_id 12815 and
+    12809) -- the actual production input that produced the reported bad
+    admin drafts ("Mother Vessel: MV AT-O/A", "Importer: ity 1400Mts").
+
+    Root causes fixed:
+    1. A bare "At-O/A" line (a clue/marker per the KB, not a name -- the
+       real vessel name was on the next line) was accepted as the
+       mother-vessel candidate itself instead of being skipped.
+    2. _IMPORTER_RE's "a/c" alternative matched mid-word inside
+       "Capacity" (the "ac" in "C-ap-ac-ity"), bleeding the remainder
+       ("ity 1400Mts") into the importer field.
+    3. An explicit "Mother Vessel:" label must take precedence over the
+       weaker trailing "(MV ...)" heuristic, which previously ran
+       unconditionally before any explicit-label check.
+    """
+
+    _REAL_INCIDENT_TEXT = (
+        "21) Mv Fatema Sattar 5\n"
+        "Capacity 1400Mts\n"
+        "Rupshi A/c Nourish\n"
+        "01718643830\n"
+        "\n"
+        "At-O/A\n"
+        "Mv. Qing Quan Shan"
+    )
+
+    def test_at_oa_marker_line_not_used_as_mother_vessel_name(self):
+        from modules.escort import parse_escort_message
+
+        order = parse_escort_message(self._REAL_INCIDENT_TEXT)
+        assert order["mother_vessel"] == "MV QING QUAN SHAN"
+        assert "AT-O/A" not in order["mother_vessel"]
+
+    def test_capacity_word_does_not_bleed_into_importer(self):
+        from modules.escort import parse_escort_message
+
+        order = parse_escort_message(self._REAL_INCIDENT_TEXT)
+        assert order["importer"] == "Nourish"
+
+    def test_lighter_and_mobile_unaffected_by_fix(self):
+        """Fields that already parsed correctly in the real message must
+        remain correct — no unrelated regression from the fix."""
+        from modules.escort import parse_escort_message
+
+        order = parse_escort_message(self._REAL_INCIDENT_TEXT)
+        lighter = order["lighters"][0]
+        assert lighter["master_mobile"] == "01718643830"
+        assert "FATEMA SATTAR" in lighter["lighter_vessel"].upper()
+        assert lighter["destination"] == "Narayanganj"  # Rupshi alias
+
+    def test_existing_african_isabelle_message_still_correct(self):
+        """Sibling real message, message_id=12809 (2026-07-26) — already
+        parsed correctly before the fix; must still parse correctly
+        after (no regression on the non-broken sibling case)."""
+        from modules.escort import parse_escort_message
+
+        text = (
+            "Mv.African Isabelle /soyabean ext\n"
+            "A/c.Padma feed\n"
+            "1.S .Hossain -01321170933 n.para 900 m t"
+        )
+        order = parse_escort_message(text)
+        assert order["mother_vessel"] == "MV AFRICAN ISABELLE"
+        assert order["importer"] == "Padma feed"
+
+    def test_explicit_mother_vessel_label_wins_over_trailing_paren(self):
+        """KB: 'If Mother Vessel: label is present, that value wins for
+        mother vessel' -- must hold even when the message also contains
+        a trailing (MV ...) elsewhere."""
+        from modules.escort import parse_escort_message
+
+        text = (
+            "Mother Vessel: MV Real Name\n"
+            "Lighter Vessel: City-46\n"
+            "01711273432\n"
+            "Remarks: last seen near (MV Decoy)"
+        )
+        order = parse_escort_message(text)
+        assert order["mother_vessel"] == "MV REAL NAME"
+
+    def test_trailing_paren_still_wins_when_no_explicit_label(self):
+        """Unchanged existing behavior: with no explicit label, the
+        trailing (MV ...) heuristic still applies."""
+        from modules.escort import parse_escort_message
+
+        text = (
+            "M.V Al Balad-3\n"
+            "2200 M.T\n"
+            "01716-797411\n"
+            "(MV HORDA)"
+        )
+        order = parse_escort_message(text)
+        assert order["mother_vessel"] == "MV HORDA"
+
+
 class TestIsEscortMessage:
     """Test is_escort_message() detection function."""
 
