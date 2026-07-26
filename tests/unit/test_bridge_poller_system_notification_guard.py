@@ -116,10 +116,28 @@ async def test_real_bridge_client_send_appends_the_marker():
     "⚠️ COMPLETED ESCORT SLIP RECEIVED FROM NON-ADMIN",
     "⚠️ RELEASE REVIEW REQUIRED",
     "📩 DRAFT-ONLY CONTACT MESSAGE",
+    "⚠️ ALERT:",
 ])
 def test_every_known_notification_title_is_caught(prefix):
     from modules.bridge_poller import _is_system_generated_notification
     assert _is_system_generated_notification(f"{prefix}\nSender: x\n\nsome body text") is True
+
+
+def test_circuit_open_alert_is_recognized_regardless_of_bridge_name():
+    """modules.outbound._alert_circuit_open() builds
+    f"⚠️ ALERT: {source_bridge} circuit OPEN. Outbound paused 60s.
+    Investigate." -- the bridge name varies (bridge1/bridge2/bridge3), so
+    the guard must match on the fixed "⚠️ ALERT:" lead-in, not the full
+    dynamic string. Before this was added to
+    SYSTEM_NOTIFICATION_TITLE_PREFIXES, a circuit-open alert relied only
+    on the generic _AUTOMATED_SUFFIX_ANCHOR/SAFE_MODE path for loop
+    protection, not this dedicated guard (real 2026-07-26 bridge3
+    incident)."""
+    from modules.bridge_poller import _is_system_generated_notification
+
+    for bridge in ("bridge1", "bridge2", "bridge3"):
+        text = f"⚠️ ALERT: {bridge} circuit OPEN. Outbound paused 60s. Investigate."
+        assert _is_system_generated_notification(text) is True
 
 
 def test_leading_whitespace_does_not_bypass_the_guard():

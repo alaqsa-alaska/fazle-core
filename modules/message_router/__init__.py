@@ -238,6 +238,7 @@ SYSTEM_NOTIFICATION_TITLE_PREFIXES: tuple[str, ...] = (
     "⚠️ COMPLETED ESCORT SLIP RECEIVED FROM NON-ADMIN",
     "⚠️ RELEASE REVIEW REQUIRED",
     "📩 DRAFT-ONLY CONTACT MESSAGE",
+    "⚠️ ALERT:",  # modules.outbound._alert_circuit_open() circuit-open alert
 )
 
 

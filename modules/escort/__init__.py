@@ -99,8 +99,19 @@ _MV_LABEL_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9\s.\-]{1,40}?)(?=\s*[,\n/]|\s+lighter\b|$)",
     re.IGNORECASE | re.MULTILINE,
 )
+# An explicit "Mother Vessel:" label (as opposed to a bare "MV"/"M.V."
+# token) is the KB's highest-priority mother-vessel source
+# (knowledge_base/06_developer_system/escort_order_parser.md, "Mother
+# Vessel" section) and must win over weaker heuristics -- notably the
+# trailing "(MV ...)" signal below, which previously ran unconditionally
+# before any explicit-label check. Captures to end of line (not stopping
+# at "/") so a genuine labeled value is not truncated.
+_EXPLICIT_MOTHER_VESSEL_LABEL_RE = re.compile(
+    r"mother\s*vessel\s*[:\-]\s*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _IMPORTER_RE = re.compile(
-    r"(?:a/?c\.?\s*[:.\-]?\s*|account\s*:?\s*|importer\s*:?\s*)\*?([A-Za-z][\w\s&.\-/]{2,80}?)[*_~]*\s*(?=[\n]|$)",
+    r"(?:\ba/?c\b\.?\s*[:.\-]?\s*|account\s*:?\s*|importer\s*:?\s*)\*?([A-Za-z][\w\s&.\-/]{2,80}?)[*_~]*\s*(?=[\n]|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 _CARGO_RE = re.compile(
@@ -435,6 +446,14 @@ def _looks_like_lighter_candidate_line(lines: list[str], idx: int) -> bool:
 
 
 def _extract_mother_vessel_canonical(lines: list[str], full_text: str) -> Optional[str]:
+    # Explicit "Mother Vessel:" label wins over every heuristic below,
+    # including the trailing-(MV ...) signal immediately after this block.
+    explicit = _EXPLICIT_MOTHER_VESSEL_LABEL_RE.search(full_text)
+    if explicit:
+        name = _clean_vessel_name(explicit.group(1), force_mv=True)
+        if name:
+            return name
+
     # Strong signal: a trailing parenthesized MV line is mother vessel.
     for raw in reversed(lines):
         m = _TRAILING_MV_PAREN_RE.search(raw.strip())
@@ -465,7 +484,11 @@ def _extract_mother_vessel_canonical(lines: list[str], full_text: str) -> Option
             m = re.search(r"\bat[-\s]*o/?a\s*[:.\-]?\s*(.+)$", line, re.I)
             if m:
                 candidates.append((score, _strip_inline_importer_from_mv(m.group(1))))
-                continue
+            # "At-O/A" alone (no vessel text after it on the same line) is a
+            # clue/marker, not a name -- the real mother vessel is elsewhere
+            # (commonly the next line). Never save the bare marker itself
+            # as a candidate name.
+            continue
         candidates.append((score, line_for_mv))
 
     if not candidates:

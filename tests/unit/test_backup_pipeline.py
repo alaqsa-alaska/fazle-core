@@ -475,11 +475,6 @@ class TestJobBackupStaleness:
         assert result.get("alerted", False) is False
         mock_enqueue.assert_not_called()
 
-    test_fresh_backup_no_alert = pytest.mark.xfail(
-        reason="ISSUE-REL-2026-07-W1-LEGACY-BACKUP-001: scheduler stale-age return payload inconsistent (newest_age_h/alerted)",
-        strict=False,
-    )(test_fresh_backup_no_alert)
-
     async def test_stale_backup_fires_alert(self, backup_env):
         """Backup older than BACKUP_STALE_HOURS (48h) → alert fires."""
         subdir = backup_env["subdir"]
@@ -562,11 +557,6 @@ class TestJobBackupStaleness:
         )
         mock_enqueue.assert_not_called()
 
-    test_correct_subdir_fresh_wins_over_stale_root = pytest.mark.xfail(
-        reason="ISSUE-REL-2026-07-W1-LEGACY-BACKUP-001: stale scanner path selection regressed versus expected subdir behavior",
-        strict=False,
-    )(test_correct_subdir_fresh_wins_over_stale_root)
-
     async def test_root_only_dump_not_counted(self, backup_env):
         """
         A .dump file at BACKUP_DIR root is NOT a valid managed backup.
@@ -590,11 +580,6 @@ class TestJobBackupStaleness:
             "Root-level dump was counted as a valid backup! "
             "job_backup_staleness() must look in BACKUP_DIR/BACKUP_SUBDIR only."
         )
-
-    test_root_only_dump_not_counted = pytest.mark.xfail(
-        reason="ISSUE-REL-2026-07-W1-LEGACY-BACKUP-001: stale scanner payload/key contract mismatch (alerted missing)",
-        strict=False,
-    )(test_root_only_dump_not_counted)
 
     async def test_only_fazle_pg_pattern_counted(self, backup_env):
         """
@@ -635,11 +620,6 @@ class TestJobBackupStaleness:
         assert result.get("alerted", False) is False
         assert result.get("newest_age_h", 999) < 48
 
-    test_newest_file_wins_when_multiple = pytest.mark.xfail(
-        reason="ISSUE-REL-2026-07-W1-LEGACY-BACKUP-001: newest file age resolution unstable in scheduler output",
-        strict=False,
-    )(test_newest_file_wins_when_multiple)
-
 
 # ── 8. TestStaleAlertThreshold ────────────────────────────────────────────────
 
@@ -660,11 +640,6 @@ class TestStaleAlertThreshold:
 
         assert result.get("alerted", False) is False
         mock_enqueue.assert_not_called()
-
-    test_under_threshold_no_alert = pytest.mark.xfail(
-        reason="ISSUE-REL-2026-07-W1-LEGACY-BACKUP-001: threshold evaluation returns stale alert with None newest_age_h",
-        strict=False,
-    )(test_under_threshold_no_alert)
 
     async def test_over_threshold_alerts(self, backup_env, monkeypatch):
         monkeypatch.setenv("BACKUP_STALE_HOURS", "24")

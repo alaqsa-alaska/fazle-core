@@ -186,7 +186,13 @@ async def job_dlq_alert() -> dict:
         return {"status": "ok", "dlq": dlq, "actionable": 0, "pending": pend, "alerted": False}
     admin = _admin_number()
     if admin:
-        key = f"dlq-alert-actionable-{actionable}-pending-{pend}"
+        # Day-based key (not count-based): the job runs every 15 min, and
+        # actionable/pending counts fluctuate constantly, so keying by the
+        # live counts produced a fresh "unique" alert on every fluctuation
+        # -- effectively no cooldown. One alert per day is enough to flag
+        # that DLQ needs investigating; the counts inside the message text
+        # are still always current at send time.
+        key = f"dlq-alert-{datetime.utcnow().strftime('%Y%m%d')}"
         msg = f"⚠️ Outbound has {actionable} recent actionable DLQ message(s). Pending: {pend}. Investigate."
         await outbound.enqueue(admin, msg, source_bridge="bridge1",
                                purpose="dlq-alert", idempotency_key=key)
@@ -344,13 +350,20 @@ async def job_payment_reconciliation() -> dict:
 
 
 async def job_backup_staleness() -> dict:
-    """B16.6 — alert if newest backup is older than N hours."""
-    backup_dir = Path(os.getenv("BACKUP_DIR", "/home/azim/backups"))
+    """B16.6 — alert if newest backup is older than N hours.
+
+    Must scan the same directory modules.backup.run_backup() actually
+    writes to (BACKUP_DIR/BACKUP_SUBDIR, default .../fazle) -- not
+    BACKUP_DIR itself. Scanning the root previously produced false
+    "no backups found" alerts even with fresh backups present one level
+    down.
+    """
+    backup_dir = Path(os.getenv("BACKUP_DIR", "/home/azim/backups")) / os.getenv("BACKUP_SUBDIR", "fazle")
     stale_hours = int(os.getenv("BACKUP_STALE_HOURS", "48"))
     if not backup_dir.exists():
         return {"status": "ok", "skipped": "no backup dir"}
     newest_age_h: Optional[float] = None
-    for p in backup_dir.glob("*.dump"):
+    for p in backup_dir.glob("fazle_pg_*.dump"):
         try:
             age_h = (time.time() - p.stat().st_mtime) / 3600
             if newest_age_h is None or age_h < newest_age_h:
