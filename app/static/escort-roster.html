@@ -74,6 +74,13 @@ main{padding:20px 24px;max-width:1560px;margin:0 auto;width:100%;flex:1}
 .btn-ok{background:#dcfce7;color:#166534}
 .btn-icon{padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px}
 .btn-icon:hover{background:var(--surface)}
+.suggest-wrap{position:relative}
+.suggest-drop{display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);max-height:220px;overflow-y:auto;z-index:50;margin-top:2px}
+.suggest-drop.open{display:block}
+.suggest-drop .suggest-row{padding:8px 12px;cursor:pointer;font-size:13px}
+.suggest-drop .suggest-row:hover{background:var(--surface)}
+.suggest-drop .suggest-row .name{font-weight:600}
+.suggest-drop .suggest-row .meta{font-size:11px;color:var(--muted)}
 .icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--border);border-radius:7px;background:#fff;cursor:pointer;font-size:15px}
 .icon-btn:hover{background:var(--surface)}
 .icon-btn.warn{color:#92400e}
@@ -236,6 +243,8 @@ td.actions{white-space:nowrap;text-align:center}
   .filter-row input[type=search]{max-width:100%}
   .kv-grid{grid-template-columns:1fr}
   .form-row{grid-template-columns:1fr}
+  .icon-btn{width:40px;height:40px}
+  .btn-icon{min-height:40px;padding:8px 10px}
 }
 </style>
 </head>
@@ -547,7 +556,13 @@ td.actions{white-space:nowrap;text-align:center}
     </div>
     <div class="form-row-3">
       <div class="form-field"><label>Master Mobile</label><input type="tel" id="editMasterMobile" placeholder="017…"></div>
-      <div class="form-field"><label>Escort Name</label><input type="text" id="editEscortName" placeholder="Name"></div>
+      <div class="form-field">
+        <label>Escort Name</label>
+        <div class="suggest-wrap">
+          <input type="text" id="editEscortName" placeholder="Name" autocomplete="off">
+          <div id="editEscortNameDrop" class="suggest-drop"></div>
+        </div>
+      </div>
       <div class="form-field"><label>Escort Mobile</label><input type="tel" id="editEscortMobile" placeholder="017…"></div>
     </div>
     <div class="form-row">
@@ -1156,6 +1171,53 @@ function openEdit(data) {
   document.getElementById('editDeleteBtn').style.display = canDirectDelete() ? 'inline-flex' : 'none';
   document.getElementById('editDeleteBtn').textContent = canDirectDelete() ? '🗑 Delete Program' : '🗑 Request Delete';
   document.getElementById('editModal').classList.add('show');
+  wireEscortNameLookup();
+}
+
+// ── Escort Name typeahead (reuses /admin/attendance/lookup/suggest — the
+// wbom_employees-domain lookup, same auth as this page already uses) ──────
+let _escortSuggestItems = [];
+let _escortSuggestTimer = null;
+
+function wireEscortNameLookup() {
+  const input = document.getElementById('editEscortName');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    clearTimeout(_escortSuggestTimer);
+    const drop = document.getElementById('editEscortNameDrop');
+    const q = input.value.trim();
+    if (!q || q.length < 2) { if (drop) drop.classList.remove('open'); return; }
+    _escortSuggestTimer = setTimeout(async () => {
+      try {
+        const data = await apiGet('/admin/attendance/lookup/suggest?q=' + encodeURIComponent(q) + '&limit=8');
+        _escortSuggestItems = data.results || [];
+        if (!drop) return;
+        drop.innerHTML = _escortSuggestItems.length
+          ? _escortSuggestItems.map((e, i) => `<div class="suggest-row" onmousedown="event.preventDefault();pickEscortSuggest(${i})">
+              <div class="name">${esc(e.employee_name || '')}</div>
+              <div class="meta">${esc(e.employee_mobile || e.employee_id_phone || '')}</div>
+            </div>`).join('')
+          : '<div class="suggest-row" style="color:var(--muted)">No matches — you can still type a new name</div>';
+        drop.classList.add('open');
+      } catch (_) { /* typeahead is a convenience; ignore errors silently */ }
+    }, 280);
+  });
+  input.addEventListener('blur', () => setTimeout(() => {
+    const drop = document.getElementById('editEscortNameDrop');
+    if (drop) drop.classList.remove('open');
+  }, 200));
+}
+
+function pickEscortSuggest(idx) {
+  const e = _escortSuggestItems[idx];
+  if (!e) return;
+  document.getElementById('editEscortName').value = e.employee_name || '';
+  if (!document.getElementById('editEscortMobile').value.trim()) {
+    document.getElementById('editEscortMobile').value = e.employee_mobile || e.employee_id_phone || '';
+  }
+  const drop = document.getElementById('editEscortNameDrop');
+  if (drop) drop.classList.remove('open');
 }
 
 function openAddProgram() {
@@ -1178,6 +1240,7 @@ function openAddProgram() {
   document.getElementById('editStatus').value = 'draft';
   document.getElementById('editNotes').value = '';
   document.getElementById('editModal').classList.add('show');
+  wireEscortNameLookup();
 }
 
 function closeEdit() { document.getElementById('editModal').classList.remove('show'); }

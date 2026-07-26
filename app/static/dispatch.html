@@ -11,6 +11,9 @@ body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:
 h1{color:var(--accent);font-size:20px;margin-bottom:4px}
 h2{font-size:15px;margin:18px 0 10px;color:var(--accent2)}
 p.sub{color:var(--muted);font-size:13px;margin-bottom:12px}
+.pagelinks{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}
+.pagelinks a{color:var(--accent2);text-decoration:none;font-size:12px}
+.pagelinks a:hover{text-decoration:underline}
 #loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
 #loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
 #loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
@@ -18,6 +21,13 @@ p.sub{color:var(--muted);font-size:13px;margin-bottom:12px}
 .readonly-banner{background:#fef3c7;color:#92400e;border:1.5px solid #fcd34d;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;font-weight:600;text-align:center}
 .card{background:#fff;border-radius:10px;padding:16px 18px;box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:16px}
 .filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px}
+.suggest-wrap{position:relative}
+.suggest-drop{display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);max-height:220px;overflow-y:auto;z-index:50;margin-top:2px}
+.suggest-drop.open{display:block}
+.suggest-drop .suggest-row{padding:8px 12px;cursor:pointer;font-size:13px}
+.suggest-drop .suggest-row:hover{background:var(--surface)}
+.suggest-drop .suggest-row .name{font-weight:600}
+.suggest-drop .suggest-row .meta{font-size:11px;color:var(--muted)}
 .field label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
 .field input,.field select{width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px}
 .btn{padding:9px 16px;border-radius:7px;border:1px solid var(--border);background:#fff;cursor:pointer;font-size:13px;font-weight:600}
@@ -50,7 +60,7 @@ details.conflict-detail summary{cursor:pointer;color:var(--accent2)}
 .confirm-box dl{display:grid;grid-template-columns:140px 1fr;gap:4px 10px;font-size:12.5px;margin:8px 0}
 .confirm-box dt{color:var(--muted);font-weight:600}
 .hidden{display:none !important}
-@media (max-width:640px){.filter-grid{grid-template-columns:1fr 1fr}}
+@media (max-width:640px){.filter-grid{grid-template-columns:1fr 1fr}.btn{min-height:44px}}
 </style>
 </head>
 <body>
@@ -65,6 +75,17 @@ details.conflict-detail summary{cursor:pointer;color:var(--accent2)}
 
 <div id="app">
   <h1>Dispatch <a href="/unmatched-confirmations" style="float:right;font-size:13px;font-weight:normal">→ Unmatched Confirmations review queue</a></h1>
+  <div class="pagelinks">
+    <a href="/">Dashboard</a>
+    <a href="/payroll">Payroll</a>
+    <a href="/escort-roster">Escort Roster</a>
+    <a href="/drafts">Drafts</a>
+    <a href="/kb">KB</a>
+    <a href="/open-chat">Open Chat</a>
+    <a href="/wa-chat">WA Chat</a>
+    <a href="/wbom-create-link">WBOM Create Link</a>
+    <a href="/wbom-link-review">WBOM Link Review</a>
+  </div>
   <div class="readonly-banner">🔒 Availability, conflict detection, and suggestions below are read-only — nothing here writes to the database.</div>
   <div id="assignBanner" class="assign-banner hidden">✓ Your role can perform controlled manual assignment — see the Assign / Reassign Escort section below.</div>
   <p class="sub">Escort-worker availability and conflict detection, derived from <code>wbom_escort_programs</code> (the canonical assignment source).</p>
@@ -135,7 +156,13 @@ details.conflict-detail summary{cursor:pointer;color:var(--accent2)}
       <div class="field"><label>Mother Vessel</label><input id="rMotherVessel" type="text"></div>
       <div class="field"><label>Lighter Vessel</label><input id="rLighterVessel" type="text"></div>
       <div class="field"><label>New Escort Employee ID (optional)</label><input id="rEmployeeId" type="number"></div>
-      <div class="field"><label>New Escort Name</label><input id="rEscortName" type="text"></div>
+      <div class="field">
+        <label>New Escort Name</label>
+        <div class="suggest-wrap">
+          <input id="rEscortName" type="text" autocomplete="off">
+          <div id="rEscortNameDrop" class="suggest-drop"></div>
+        </div>
+      </div>
       <div class="field"><label>New Escort Mobile</label><input id="rEscortMobile" type="text"></div>
       <div class="field"><label>New Start Date</label><input id="rStartDate" type="date"></div>
       <div class="field"><label>New Start Shift</label><select id="rStartShift"><option value="D">Day (D)</option><option value="N">Night (N)</option></select></div>
@@ -215,6 +242,58 @@ async function boot() {
   loadOverlaps();
   loadSameVesselQueue();
   if (CAN_ADMIN) { loadIncompleteDrafts(); loadReleaseSlips(); }
+  wireEscortNameLookup();
+}
+
+// ── Escort Name typeahead (reuses /admin/attendance/lookup/suggest — the
+// wbom_employees-domain lookup, same auth as this page already uses) ──────
+let _escortSuggestItems = [];
+let _escortSuggestTimer = null;
+
+function wireEscortNameLookup() {
+  const input = document.getElementById('rEscortName');
+  if (!input || input._wired) return;
+  input._wired = true;
+  input.addEventListener('input', () => {
+    clearTimeout(_escortSuggestTimer);
+    const drop = document.getElementById('rEscortNameDrop');
+    const q = input.value.trim();
+    if (!q || q.length < 2) { if (drop) drop.classList.remove('open'); return; }
+    _escortSuggestTimer = setTimeout(async () => {
+      try {
+        const r = await FazleAuthFetch.fetch('/admin/attendance/lookup/suggest?q=' + encodeURIComponent(q) + '&limit=8', API_KEY);
+        if (!r.ok) return;
+        const data = await r.json();
+        _escortSuggestItems = data.results || [];
+        if (!drop) return;
+        drop.innerHTML = _escortSuggestItems.length
+          ? _escortSuggestItems.map((e, i) => `<div class="suggest-row" onmousedown="event.preventDefault();pickEscortSuggest(${i})">
+              <div class="name">${esc(e.employee_name || '')}</div>
+              <div class="meta">${esc(e.employee_mobile || e.employee_id_phone || '')}</div>
+            </div>`).join('')
+          : '<div class="suggest-row" style="color:var(--muted)">No matches — you can still type a new name</div>';
+        drop.classList.add('open');
+      } catch (_) { /* typeahead is a convenience; ignore errors silently */ }
+    }, 280);
+  });
+  input.addEventListener('blur', () => setTimeout(() => {
+    const drop = document.getElementById('rEscortNameDrop');
+    if (drop) drop.classList.remove('open');
+  }, 200));
+}
+
+function pickEscortSuggest(idx) {
+  const e = _escortSuggestItems[idx];
+  if (!e) return;
+  document.getElementById('rEscortName').value = e.employee_name || '';
+  if (!document.getElementById('rEscortMobile').value.trim()) {
+    document.getElementById('rEscortMobile').value = e.employee_mobile || e.employee_id_phone || '';
+  }
+  if (e.employee_id && !document.getElementById('rEmployeeId').value.trim()) {
+    document.getElementById('rEmployeeId').value = e.employee_id;
+  }
+  const drop = document.getElementById('rEscortNameDrop');
+  if (drop) drop.classList.remove('open');
 }
 
 // Reuses the exact same /api/admin/session mechanism payroll.html and

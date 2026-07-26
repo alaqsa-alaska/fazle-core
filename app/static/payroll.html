@@ -49,7 +49,7 @@ header{background:var(--accent);color:#fff;padding:0 20px;height:56px;
 header .brand{display:flex;align-items:center;gap:12px;min-width:0}
 header .brand-link{display:inline-flex;align-items:center;text-decoration:none}
 header .brand-logo{height:46px;width:auto;display:block;object-fit:contain}
-header h1{font-size:22px;font-weight:700;letter-spacing:.2px}
+header h1{font-size:22px;font-weight:700;letter-spacing:.2px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 header .spacer{flex:1}
 .mobile-hide{display:inline-flex}
 .header-tools{display:flex;align-items:center;gap:8px;margin-left:auto}
@@ -429,6 +429,7 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
   header h1{font-size:18px}
   header .brand-logo{height:32px}
   .header-icon,.hamburger-btn{width:34px;height:34px;border-radius:9px}
+  .social-facebook,.social-instagram,.social-email,.social-whatsapp{display:none}
   nav button{padding:12px 12px;font-size:11px;min-height:48px}
   main{padding:8px}
   
@@ -992,6 +993,10 @@ label{font-size:12px;color:var(--muted);font-weight:500;display:block;margin-bot
           </div>
           <input id="opEmpId" type="hidden">
           <div id="opEmpPicked" class="inline-help">Employee not selected yet.</div>
+        </div>
+        <div class="form-group">
+          <label>Employee Name</label>
+          <input id="opEmpName" type="text" readonly placeholder="Auto-filled from employee record" style="width:100%;background:var(--surface)">
         </div>
         <div class="form-group">
           <label>Amount (BDT) *</label>
@@ -1984,6 +1989,15 @@ const NAV_GROUPS = [
   { key: 'employee',    label: 'Employee',           tabs: ['employees','addemployee','search','manual','operator','empeditreq'] },
   { key: 'attendance',  label: 'Office Attendance',  tabs: ['attendance-office'], viewerGate: true },
   { key: 'escort',      label: 'Escort Program',     external: '/escort-roster' },
+  { key: 'dashboard',   label: 'Dashboard',          external: '/' },
+  { key: 'dispatch',    label: 'Dispatch',           external: '/dispatch' },
+  { key: 'unmatched2',  label: 'Unmatched',          external: '/unmatched-confirmations' },
+  { key: 'drafts2',     label: 'Drafts',             external: '/drafts' },
+  { key: 'kb2',         label: 'KB',                 external: '/kb' },
+  { key: 'openchat',    label: 'Open Chat',          external: '/open-chat' },
+  { key: 'wachat',      label: 'WA Chat',            external: '/wa-chat' },
+  { key: 'wbomcreate',  label: 'WBOM Create',        external: '/wbom-create-link' },
+  { key: 'wbomreview',  label: 'WBOM Review',        external: '/wbom-link-review' },
   { key: 'admin',       label: 'Admin',              tabs: ['admin'], adminGate: true },
 ];
 
@@ -3690,8 +3704,8 @@ async function _fetchTxnSuggest(q) {
     }
     drop.innerHTML = _txnSuggestItems.map((s, i) => `
       <div class="suggest-row" data-idx="${i}" onmousedown="event.preventDefault();_selectTxnSuggest(${i})">
-        <b>${s.full_name}</b>
-        <span class="suggest-hint">${s.employee_code || ''} · ${s.display_phone || s.primary_phone || ''}</span>
+        <b>${s.display_name || ''}</b>
+        <span class="suggest-hint">${s.employee_id_phone || s.mobile_number || ''}</span>
       </div>`).join('');
   } catch(e) {
     if (e.name === 'AbortError') return; // normal cancellation — ignore silently
@@ -3705,9 +3719,9 @@ function _selectTxnSuggest(idx) {
   _txnSuggestSelected = s;
   const nameEl = document.getElementById('addTxnEmpName');
   const phoneEl = document.getElementById('addTxnIdPhone');
-  if (nameEl) nameEl.value = s.full_name;
-  if (phoneEl && (s.employee_id_phone || s.primary_phone)) {
-    phoneEl.value = s.employee_id_phone || s.primary_phone;
+  if (nameEl) nameEl.value = s.display_name || '';
+  if (phoneEl && (s.employee_id_phone || s.mobile_number)) {
+    phoneEl.value = s.employee_id_phone || s.mobile_number;
   }
   const drop = document.getElementById('addTxnSuggestDrop');
   if (drop) drop.innerHTML = '';
@@ -4355,6 +4369,7 @@ function wireOperatorEmployeeLookup() {
   input.addEventListener('input', () => {
     _opSelectedEmployee = null;
     document.getElementById('opEmpId').value = '';
+    document.getElementById('opEmpName').value = '';
     document.getElementById('opEmpPicked').textContent = 'Looking up employee...';
     const q = input.value.trim();
     if (!q) {
@@ -4391,6 +4406,7 @@ function pickOperatorEmployee(idx) {
   _opSelectedEmployee = row;
   document.getElementById('opEmpId').value = row.employee_id;
   document.getElementById('opEmpLookup').value = row.employee_id_phone || row.mobile_number || '';
+  document.getElementById('opEmpName').value = row.display_name || row.full_name || '';
   document.getElementById('opEmpPicked').textContent = 'Selected ' + (row.display_name || row.full_name);
   if (!document.getElementById('opPhone').value) {
     document.getElementById('opPhone').value = row.mobile_number || row.employee_id_phone || '';
@@ -4430,7 +4446,7 @@ async function submitOperator() {
     });
     showToast('Submitted for approval — pending #' + (r.pending_id || '?'), 'ok');
     // Clear form
-    ['opEmpId','opEmpLookup','opAmount','opPhone','opNotes'].forEach(id => document.getElementById(id).value = '');
+    ['opEmpId','opEmpLookup','opEmpName','opAmount','opPhone','opNotes'].forEach(id => document.getElementById(id).value = '');
     _opSelectedEmployee = null;
     document.getElementById('opEmpPicked').textContent = 'Employee not selected yet.';
     document.getElementById('opDate').value = new Date().toISOString().slice(0,10);
@@ -5310,9 +5326,9 @@ function rvApprSuggest(q){
       if (!rows.length) {
         drop.innerHTML = '<div class="suggest-empty">No matches</div>';
       } else {
-        drop.innerHTML = rows.map(r => `<div class="suggest-row" onclick="rvApprPick(${r.id||r.employee_id},'${esc((r.name||'').replace(/'/g,"\\'"))}', '${esc(r.primary_phone||r.phone||'')}')">
-          <div><div class="name">${esc(r.name||'(unnamed)')}</div>
-            <div class="meta">#${r.id||r.employee_id} ${esc(r.primary_phone||r.phone||'')}</div></div>
+        drop.innerHTML = rows.map(r => `<div class="suggest-row" onclick="rvApprPick(${r.employee_id},'${esc((r.display_name||'').replace(/'/g,"\\'"))}', '${esc(r.employee_id_phone||r.mobile_number||'')}')">
+          <div><div class="name">${esc(r.display_name||'(unnamed)')}</div>
+            <div class="meta">#${r.employee_id} ${esc(r.employee_id_phone||r.mobile_number||'')}</div></div>
           <div class="right"><span class="sim">${r.match_type||r.similarity||''}</span></div>
         </div>`).join('');
       }

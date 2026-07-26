@@ -10,6 +10,9 @@
 body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:20px}
 h1{color:var(--accent);font-size:20px;margin-bottom:4px}
 p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+.pagelinks{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}
+.pagelinks a{color:var(--accent2);text-decoration:none;font-size:12px}
+.pagelinks a:hover{text-decoration:underline}
 #loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
 #loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
 #loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
@@ -27,6 +30,10 @@ p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
 .btn.create{background:var(--ok);color:#fff;border-color:var(--ok)}
 .btn.skip{background:var(--surface);color:var(--muted)}
 .btn:disabled{opacity:.5;cursor:not-allowed}
+@media(max-width:520px){
+  .row{grid-template-columns:1fr}
+  .btn{min-height:44px}
+}
 .status{margin-top:10px;font-size:13px}
 .status.ok{color:var(--ok)}
 .status.err{color:var(--err)}
@@ -46,6 +53,16 @@ p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
 
 <div id="app">
   <h1>WBOM Create + Link</h1>
+  <div class="pagelinks">
+    <a href="/">Dashboard</a>
+    <a href="/payroll">Payroll</a>
+    <a href="/escort-roster">Escort Roster</a>
+    <a href="/dispatch">Dispatch</a>
+    <a href="/unmatched-confirmations">Unmatched Confirmations</a>
+    <a href="/drafts">Drafts</a>
+    <a href="/kb">KB</a>
+    <a href="/wbom-link-review">WBOM Link Review</a>
+  </div>
   <p class="sub">FPE employees with no WBOM record and no phone-matchable candidate (live from <code>GET /reports/unresolved_fpe_employees</code>, category <code>no_wbom_match</code>). Enter the employee's real designation (required — "Unknown" is rejected by the server) and confirm salary, then Create + Link. Skip moves to the next one with no DB change. Already-linked rows (e.g. handled in another tab, or by another category's fix) are detected when you try to submit and skipped automatically.</p>
   <div id="progress"></div>
   <div id="cardHost"></div>

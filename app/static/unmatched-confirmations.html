@@ -11,6 +11,9 @@ body{font-family:Georgia,serif;background:var(--bg);color:var(--text);font-size:
 h1{color:var(--accent);font-size:20px;margin-bottom:2px}
 h1 .bn{font-size:13px;color:var(--muted);font-weight:normal;display:block;margin-top:2px}
 p.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+.pagelinks{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}
+.pagelinks a{color:var(--accent2);text-decoration:none;font-size:12px}
+.pagelinks a:hover{text-decoration:underline}
 #loginBox{max-width:420px;margin:60px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
 #loginBox input{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:10px}
 #loginBox button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
@@ -72,6 +75,18 @@ label.ack{display:flex;align-items:flex-start;gap:6px;font-size:12.5px;margin-bo
 
 <div id="app">
   <h1>Unmatched Confirmations <span class="bn">অমিল এস্কর্ট কনফার্মেশন</span></h1>
+  <div class="pagelinks">
+    <a href="/">Dashboard</a>
+    <a href="/payroll">Payroll</a>
+    <a href="/escort-roster">Escort Roster</a>
+    <a href="/dispatch">Dispatch</a>
+    <a href="/drafts">Drafts</a>
+    <a href="/kb">KB</a>
+    <a href="/open-chat">Open Chat</a>
+    <a href="/wa-chat">WA Chat</a>
+    <a href="/wbom-create-link">WBOM Create Link</a>
+    <a href="/wbom-link-review">WBOM Link Review</a>
+  </div>
   <p class="sub">Admin confirmations that couldn't be confidently linked to a draft (Draft-Confirmation Invariant, Workstream 2). No program is created until you resolve an item here. Admin/superadmin only.</p>
   <div class="tabs" id="tabs"></div>
   <div id="progress" style="font-size:13px;color:var(--muted);margin-bottom:12px;background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07);display:flex;justify-content:space-between;align-items:center;gap:10px"></div>

@@ -30,7 +30,7 @@
 
   .topbar {
     background: #0d47a1; color: white; padding: 14px 24px;
-    display: flex; align-items: center; gap: 16px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
     position: sticky; top: 0; z-index: 100;
     box-shadow: 0 2px 8px rgba(0,0,0,0.2);
   }
@@ -73,6 +73,9 @@
   .btn-danger  { background: #c5221f; color: white; }
   .btn-sm { padding: 5px 12px; font-size: 0.8rem; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  @media (max-width: 768px) {
+    .btn-sm { min-height: 38px; padding: 8px 14px; }
+  }
 
   .progress {
     height: 4px; background: #e0e0e0; border-radius: 2px;
@@ -107,7 +110,7 @@
 
   .entries-box {
     background: white; border-radius: 10px; padding: 16px 20px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1); overflow-x: auto;
   }
   .entries-box h3 { font-size: 1rem; margin-bottom: 12px; }
 
@@ -147,6 +150,12 @@
   <a href="/drafts">Drafts</a>
   <a href="/payroll">Payroll</a>
   <a href="/escort-roster">Escort</a>
+  <a href="/dispatch">Dispatch</a>
+  <a href="/unmatched-confirmations">Unmatched</a>
+  <a href="/open-chat">Open Chat</a>
+  <a href="/wa-chat">WA Chat</a>
+  <a href="/wbom-create-link">WBOM Create</a>
+  <a href="/wbom-link-review">WBOM Review</a>
 </div>
 
 <div class="container">

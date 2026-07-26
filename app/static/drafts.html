@@ -49,7 +49,7 @@
   .topbar {
     background: #1a73e8; color: white;
     padding: 14px 24px;
-    display: flex; align-items: center; gap: 16px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
     position: sticky; top: 0; z-index: 100;
     box-shadow: 0 2px 8px rgba(0,0,0,0.2);
   }
@@ -101,6 +101,9 @@
     transition: opacity 0.15s; white-space: nowrap;
   }
   .btn:hover { opacity: 0.82; }
+  @media (max-width: 768px) {
+    .btn { min-height: 40px; padding: 8px 14px; }
+  }
   .btn-success { background: #137333; color: white; }
   .btn-primary { background: #1a73e8; color: white; }
   .btn-warning { background: #e65100; color: white; }
@@ -226,6 +229,13 @@
   <a href="/">Dashboard</a>
   <a href="/payroll">Payroll</a>
   <a href="/escort-roster">Escort Roster</a>
+  <a href="/dispatch">Dispatch</a>
+  <a href="/unmatched-confirmations">Unmatched</a>
+  <a href="/kb">KB</a>
+  <a href="/open-chat">Open Chat</a>
+  <a href="/wa-chat">WA Chat</a>
+  <a href="/wbom-create-link">WBOM Create</a>
+  <a href="/wbom-link-review">WBOM Review</a>
   <button class="refresh-btn" onclick="loadDrafts()">&#8635; Refresh</button>
 </div>
 

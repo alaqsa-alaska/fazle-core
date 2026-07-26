@@ -71,6 +71,15 @@ input:checked + .slider:before{transform:translateX(20px)}
 /* ── App Layout (3 panels) ─────────────────────────────────────── */
 #appLayout{display:grid;grid-template-columns:310px 1fr 300px;flex:1;min-height:0;overflow:hidden}
 #sidebar,#centerPanel,#draftsPanel{min-height:0}
+@media(max-width:768px){
+  body{overflow:auto}
+  #appLayout{grid-template-columns:1fr;grid-template-rows:auto 1fr auto;overflow-y:auto}
+  #sidebar{max-height:35vh;border-right:none;border-bottom:1px solid var(--border)}
+  #draftsPanel{max-height:35vh;border-left:none;border-top:1px solid var(--border)}
+  #centerPanel{min-height:40vh}
+  #topbar{flex-wrap:wrap;height:auto;padding:8px 12px}
+  #topbar nav{flex-wrap:wrap}
+}
 
 /* ── Left Panel ────────────────────────────────────────────────── */
 #sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);
@@ -264,6 +273,19 @@ input:checked + .slider:before{transform:translateX(20px)}
     <div class="dropdown">
       <button onclick="toggleSettingsDropdown(this)">⚙️ Settings ▾</button>
       <div class="dropdown-body" id="settingsDropdown">
+        <h4>Pages</h4>
+        <div style="display:flex;flex-wrap:wrap;gap:8px 12px;margin-bottom:12px">
+          <a href="/" style="font-size:12px">Dashboard</a>
+          <a href="/payroll" style="font-size:12px">Payroll</a>
+          <a href="/escort-roster" style="font-size:12px">Escort Roster</a>
+          <a href="/dispatch" style="font-size:12px">Dispatch</a>
+          <a href="/unmatched-confirmations" style="font-size:12px">Unmatched Confirmations</a>
+          <a href="/drafts" style="font-size:12px">Drafts</a>
+          <a href="/kb" style="font-size:12px">KB</a>
+          <a href="/open-chat" style="font-size:12px">Open Chat</a>
+          <a href="/wbom-create-link" style="font-size:12px">WBOM Create Link</a>
+          <a href="/wbom-link-review" style="font-size:12px">WBOM Link Review</a>
+        </div>
         <h4>Auto-Reply Controls</h4>
         <div id="toggleList"></div>
       </div>

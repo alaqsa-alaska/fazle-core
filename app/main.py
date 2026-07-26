@@ -1925,6 +1925,24 @@ async def wa_chat_spa_dashboard():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "wa_chat.html"))
 
 
+@app.get("/dispatch", response_class=HTMLResponse)
+async def dispatch_spa():
+    """Escort dispatch/availability console SPA — previously only reachable via /static/dispatch.html."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "dispatch.html"))
+
+
+@app.get("/wbom-create-link", response_class=HTMLResponse)
+async def wbom_create_link_spa():
+    """WBOM create+link cleanup tool SPA — previously only reachable via /static/wbom-create-link.html."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "wbom-create-link.html"))
+
+
+@app.get("/wbom-link-review", response_class=HTMLResponse)
+async def wbom_link_review_spa():
+    """WBOM link-review cleanup tool SPA — previously only reachable via /static/wbom-link-review.html."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "wbom-link-review.html"))
+
+
 @app.get("/dashboard/legacy", response_class=HTMLResponse)
 async def dashboard_legacy():
     try:

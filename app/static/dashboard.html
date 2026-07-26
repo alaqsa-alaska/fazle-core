@@ -13,9 +13,12 @@ header .spacer{flex:1}
 header .badge{background:rgba(255,255,255,.15);padding:4px 10px;border-radius:12px;font-size:12px}
 nav{background:#fff;border-bottom:1px solid var(--border);padding:0 22px;display:flex;gap:4px;overflow-x:auto}
 nav button{background:none;border:none;padding:12px 16px;cursor:pointer;font-size:14px;color:#555;border-bottom:3px solid transparent;white-space:nowrap}
+.pagelinks{background:#fafafa;border-bottom:1px solid var(--border);padding:6px 22px;display:flex;gap:14px;overflow-x:auto;white-space:nowrap}
+.pagelinks a{color:#555;text-decoration:none;font-size:12px}
+.pagelinks a:hover{color:var(--accent);text-decoration:underline}
 nav button.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 main{padding:18px 22px;max-width:1400px;margin:0 auto}
-.card{background:var(--card);border-radius:8px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:14px}
+.card{background:var(--card);border-radius:8px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:14px;overflow-x:auto}
 .card h2{margin:0 0 12px;font-size:15px;color:var(--accent2);border-bottom:1px solid var(--border);padding-bottom:8px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
 .stat{background:#fafbfc;border:1px solid var(--border);border-radius:6px;padding:12px;text-align:center}
@@ -39,6 +42,10 @@ button.btn:hover{background:var(--accent2)}
 button.btn.sm{padding:4px 10px;font-size:12px}
 button.btn.danger{background:var(--err)}
 input,select{padding:6px 9px;border:1px solid var(--border);border-radius:5px;font-size:13px;font-family:inherit}
+@media(max-width:768px){
+  button.btn{min-height:40px}
+  button.btn.sm{min-height:36px;padding:6px 12px}
+}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 pre{background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:6px;overflow:auto;font-size:12px;max-height:400px}
 .muted{color:var(--muted)}
@@ -71,6 +78,19 @@ small.dim{color:var(--muted);font-size:11px}
   <button class="btn sm" onclick="refreshAll()">⟳ Refresh</button>
   <button class="btn sm danger" onclick="logout()">Logout</button>
 </header>
+
+<div class="pagelinks">
+  <a href="/payroll">Payroll</a>
+  <a href="/escort-roster">Escort Roster</a>
+  <a href="/dispatch">Dispatch</a>
+  <a href="/unmatched-confirmations">Unmatched Confirmations</a>
+  <a href="/drafts">Drafts</a>
+  <a href="/kb">KB</a>
+  <a href="/open-chat">Open Chat</a>
+  <a href="/wa-chat">WA Chat</a>
+  <a href="/wbom-create-link">WBOM Create Link</a>
+  <a href="/wbom-link-review">WBOM Link Review</a>
+</div>
 
 <nav>
   <button class="active" data-tab="overview">Overview</button>
