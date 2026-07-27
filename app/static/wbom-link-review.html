@@ -35,6 +35,10 @@ tr.skipped{opacity:.4;text-decoration:line-through}
 .status{font-size:12px;margin-top:3px}
 .status.ok{color:var(--ok)}
 .status.err{color:var(--err)}
+@media(max-width:480px){
+  body{padding:12px}
+  .btn{min-height:40px;padding:8px 12px}
+}
 </style>
 </head>
 <body>
@@ -57,6 +61,8 @@ tr.skipped{opacity:.4;text-decoration:line-through}
     <a href="/unmatched-confirmations">Unmatched Confirmations</a>
     <a href="/drafts">Drafts</a>
     <a href="/kb">KB</a>
+    <a href="/open-chat">Open Chat</a>
+    <a href="/wa-chat">WA Chat</a>
     <a href="/wbom-create-link">WBOM Create Link</a>
   </div>
   <p class="sub">Phone-matched FPE ↔ WBOM employee records with no existing link (live from <code>GET /reports/unresolved_fpe_employees</code>, category <code>wbom_match_unlinked</code>). Review each pair, then click Link or Skip. Nothing is changed until you click Link on that specific row — no bulk action exists on this page.</p>
