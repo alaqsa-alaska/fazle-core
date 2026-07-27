@@ -66,6 +66,15 @@ def _dedup_seen(text: str, admin_phone: str) -> bool:
 _APPROVE_RE       = re.compile(r"^approve\s+([\d,\s]+)$", re.IGNORECASE)
 _REJECT_RE        = re.compile(r"^reject\s+([\d,\s]+)$", re.IGNORECASE)
 _EDIT_RE          = re.compile(r"^edit\s+(\d+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+# 2026-07-27: Human-format admin replies from the draft-review message.
+# Supports: "Draft 123 / 1", "Draft 123 / Approved", "Draft 123 / 1. Approved",
+#           "Draft 123 / 2 / <edited text>", "Draft 123 / Edit / <edited text>",
+#           "Draft 123 / 3", "Draft 123 / Reject"
+# Option keywords map: 1/Approved→approve, 2/Edit→edit, 3/Reject→reject
+_DRAFT_REPLY_RE   = re.compile(
+    r"^draft\s+(\d+)\s*[/\-:]\s*(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
 _PAID_RE          = re.compile(r"^paid\s+(\d+)\s+(\d[\d,]*)\s*(bkash|nagad|cash)?$", re.IGNORECASE)
 _ADVANCE_RE       = re.compile(r"^advance\s+(\d+)\s+(\d[\d,]*)\s*(bkash|nagad|cash)?$", re.IGNORECASE)
 # Sprint-3B: Canonical Draft Approval commands
@@ -170,6 +179,7 @@ def is_admin_command(text: str) -> bool:
     t = text.strip()
     return bool(
         _APPROVE_RE.match(t) or _REJECT_RE.match(t) or _EDIT_RE.match(t) or
+        _DRAFT_REPLY_RE.match(t) or
         _PAID_RE.match(t) or _ADVANCE_RE.match(t) or _STATUS_RE.match(t) or
         _ESCORTCONFIRM_RE.match(t) or _PAYIMPORT_RE.match(t) or _RELEASE_RE.match(t) or
         _PAYROLL_COMPUTE_RE.match(t) or _PAYROLL_TRANS_RE.match(t) or
@@ -194,6 +204,7 @@ def _classify_command(t: str) -> Optional[str]:
     """Map text → COMMAND_ROLE key (used by RBAC). Returns None if not admin cmd."""
     pairs = (
         (_APPROVE_RE, "approve"), (_REJECT_RE, "reject"), (_EDIT_RE, "edit"),
+        (_DRAFT_REPLY_RE, "approve"),  # human-format draft reply — same RBAC as approve
         (_PAID_RE, "paid"), (_ADVANCE_RE, "advance"),
         (_STATUS_RE, "status"),
         (_PAYIMPORT_RE, "payimport"), (_RELEASE_RE, "release"),
@@ -296,6 +307,14 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
         except Exception as e:
             log.warning(f"[admin_cmd] audit (allowed) failed: {e}")
     # ─────────────────────────────────────────────────────────────────────────
+
+    # 2026-07-27: Human-format "Draft <id> / <option>" replies — checked
+    # BEFORE the legacy APPROVE/REJECT/EDIT patterns so the new format wins
+    # when admin replies directly to the draft-review WhatsApp message.
+    m = _DRAFT_REPLY_RE.match(t)
+    if m:
+        draft_id = int(m.group(1))
+        return await _cmd_draft_reply(draft_id, m.group(2), admin_phone)
 
     m = _APPROVE_RE.match(t)
     if m:
@@ -653,13 +672,23 @@ async def _cmd_reject(draft_id: int, admin_phone: str) -> str:
 
 
 async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
-    """Edit draft reply text."""
+    """Edit draft reply text AND send the edited text to the original sender.
+
+    2026-07-27: Previously only updated the draft text in DB without sending.
+    Now completes the full edit flow: update draft → send edited text to the
+    original recipient via the SAME inbound bridge/Meta number/channel
+    (stored in fazle_draft_replies.source) → mark sent. This mirrors the
+    _cmd_approve flow's delivery mechanism exactly.
+    """
     try:
         row = await fetch_one(
             "SELECT * FROM fazle_draft_replies WHERE id = $1", draft_id
         )
         if not row:
             return f"❌ Draft #{draft_id} পাওয়া যায়নি।"
+
+        recipient = row.get("recipient", "")
+        source = row.get("source", "bridge1")
 
         await execute(
             "UPDATE fazle_draft_replies SET reply_text=$1, status='edited', admin_phone=$2 WHERE id=$3",
@@ -677,10 +706,133 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         except Exception as _rrm_err:
             log.debug("[admin_cmd] reviewed_reply_memory store non-fatal: %s", _rrm_err)
 
-        return f"✏️ Draft #{draft_id} আপডেট করা হয়েছে।\n\nনতুন বার্তা:\n{new_text[:300]}"
+        # Send the edited text to the original sender via the SAME bridge
+        sent = False
+        error_text = ""
+        try:
+            from app.bridge import get_bridge1, get_bridge2
+            bridge = get_bridge1() if source in ("bridge1", "meta") else get_bridge2()
+            jid = recipient if "@" in recipient else f"{recipient}@s.whatsapp.net"
+            sent = await bridge.send(jid, new_text)
+            if sent:
+                await execute(
+                    "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
+                    draft_id,
+                )
+                log.info(f"[admin_cmd] Edited draft #{draft_id} sent to {recipient} via {source}")
+            else:
+                error_text = "Bridge send returned false"
+                await execute(
+                    "UPDATE fazle_draft_replies SET error_text=$1 WHERE id=$2",
+                    error_text, draft_id,
+                )
+        except Exception as send_err:
+            error_text = str(send_err)[:200]
+            log.error(f"[admin_cmd] Edited draft #{draft_id} send error: {send_err}")
+            await execute(
+                "UPDATE fazle_draft_replies SET error_text=$1 WHERE id=$2",
+                error_text, draft_id,
+            )
+
+        preview = new_text[:200] if new_text else ""
+        if sent:
+            return (
+                f"✏️ Draft #{draft_id} আপডেট করে পাঠানো হয়েছে।\n\n"
+                f"প্রাপক: {recipient}\n"
+                f"বার্তা:\n{preview}"
+            )
+        else:
+            return (
+                f"✏️ Draft #{draft_id} আপডেট হয়েছে — কিন্তু পাঠাতে সমস্যা হয়েছে।\n"
+                f"ত্রুটি: {error_text}\n\n"
+                f"প্রাপক: {recipient}\n"
+                f"বার্তা:\n{preview}"
+            )
     except Exception as e:
         log.error(f"[admin_cmd] edit error: {e}")
         return f"❌ ত্রুটি: {e}"
+
+
+# ── Human-format draft-reply parser (2026-07-27) ───────────────────────────────
+
+# Maps option keywords/numbers to actions. Case-insensitive.
+# Accepted: "1", "approved", "2", "edit", "3", "reject"
+_APPROVE_TOKENS = frozenset({"1", "approved", "approve"})
+_EDIT_TOKENS    = frozenset({"2", "edit", "edited"})
+_REJECT_TOKENS  = frozenset({"3", "reject", "rejected"})
+
+
+def _parse_draft_reply_option(option_text: str) -> tuple[str, Optional[str]]:
+    """Parse the option portion of a "Draft <id> / <option>" reply.
+
+    Returns (action, edited_text) where action is 'approve'|'edit'|'reject'
+    and edited_text is only set for 'edit'.
+
+    Accepted formats (case-insensitive):
+      "1" / "1." / "1. Approved" / "Approved"   → approve
+      "2" / "2." / "2 / <text>" / "Edit / <text>" → edit (with text)
+      "3" / "3." / "3. Reject" / "Reject"       → reject
+    """
+    raw = option_text.strip()
+    if not raw:
+        return "unknown", None
+
+    # Split on "/" to separate option number from edited text (for edit flow)
+    # e.g. "2 / hello world" → option="2", text="hello world"
+    # e.g. "Edit / hello world" → option="Edit", text="hello world"
+    parts = raw.split("/", 1)
+    option_part = parts[0].strip()
+
+    # Strip leading "N." or "N)" numbering like "1. Approved"
+    num_prefix = re.match(r"^(\d+)[.)]\s*(.*)$", option_part, re.IGNORECASE)
+    if num_prefix:
+        option_part = (num_prefix.group(2) or num_prefix.group(1)).strip()
+
+    option_lower = option_part.lower().strip()
+
+    # Check for edit with text: "2 / <text>" or "Edit / <text>"
+    if option_lower in _EDIT_TOKENS and len(parts) > 1:
+        edited_text = parts[1].strip()
+        return "edit", edited_text if edited_text else None
+
+    # Bare option without text
+    if option_lower in _APPROVE_TOKENS:
+        return "approve", None
+    if option_lower in _EDIT_TOKENS:
+        # Edit without text — invalid, but return so caller can error
+        return "edit", None
+    if option_lower in _REJECT_TOKENS:
+        return "reject", None
+
+    return "unknown", None
+
+
+async def _cmd_draft_reply(draft_id: int, option_text: str, admin_phone: str) -> str:
+    """Handle human-format "Draft <id> / <option>" admin replies.
+
+    Routes to the existing _cmd_approve / _cmd_edit / _cmd_reject handlers
+    so the actual decision logic is never duplicated.
+    """
+    action, edited_text = _parse_draft_reply_option(option_text)
+
+    if action == "approve":
+        return await _cmd_approve(draft_id, admin_phone)
+
+    if action == "reject":
+        return await _cmd_reject(draft_id, admin_phone)
+
+    if action == "edit":
+        if not edited_text or len(edited_text.strip()) < 2:
+            return (
+                f"❌ Draft #{draft_id}: Edit করতে নতুন বার্তা লিখুন।\n"
+                f"উদাহরণ: Draft {draft_id} / 2 / আপনার নতুন বার্তা এখানে"
+            )
+        return await _cmd_edit(draft_id, edited_text.strip(), admin_phone)
+
+    return (
+        f"❌ Draft #{draft_id}: অবৈধ অপশন।\n"
+        f"ব্যবহার: Draft {draft_id} / 1 (Approved) | Draft {draft_id} / 2 / <বার্তা> (Edit) | Draft {draft_id} / 3 (Reject)"
+    )
 
 
 # ── Sprint-3B: Canonical Draft Approval handlers ──────────────────────────────

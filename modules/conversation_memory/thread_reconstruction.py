@@ -104,12 +104,12 @@ async def _observe(*, text: str, sender_phone: str, source: str, message_id: Opt
             )
         return
 
-    # Inbound client messages should never carry the outbound-only
-    # _AUTOMATED_SUFFIX_ANCHOR marker (a human never types it, and this
-    # is the inbound path -- bridge_poller's own guard is for the
-    # OUTGOING scan). Checked anyway, explicitly, rather than assumed --
-    # if it ever fires, treat the message as untrustworthy input, not a
-    # contributor to conversation state.
+    # Inbound client messages should never match one of our own
+    # system-notification title prefixes (a human never types one of
+    # those verbatim, and this is the inbound path -- bridge_poller's own
+    # guard is for the OUTGOING scan). Checked anyway, explicitly, rather
+    # than assumed -- if it ever fires, treat the message as
+    # untrustworthy input, not a contributor to conversation state.
     if _is_system_generated_notification(text):
         log.warning("[shadow] inbound text unexpectedly carries a system-generated marker, refusing to observe: sender=%s", sender_phone)
         if track_metrics:

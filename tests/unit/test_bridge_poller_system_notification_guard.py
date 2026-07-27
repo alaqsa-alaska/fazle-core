@@ -58,30 +58,33 @@ def test_genuine_admin_confirmation_is_not_flagged():
     assert _is_system_generated_notification(GENUINE_ADMIN_CONFIRMATION) is False
 
 
-def test_automated_suffix_anchor_is_the_primary_signal():
-    """The real origin marker (app.bridge._AUTOMATED_SUFFIX_ANCHOR), not
-    just the title-prefix fallback -- this is what TASK 5 already appends
-    to every message sent via BridgeClient.send()/send_strict(), the one
-    path both the outbound queue and the direct-fallback notify path use.
-    Catches this even with NONE of the known title prefixes present,
-    proving it's a real signal independent of the secondary denylist."""
+def test_notification_with_no_known_prefix_is_not_caught():
+    """2026-07-27 (Owner directive): the invisible origin marker that used
+    to catch a brand-new notification template even without a known title
+    prefix has been removed outright -- no marker of any kind may be
+    appended to any outbound message body anymore. This is now the
+    documented residual gap: the title-prefix list
+    (SYSTEM_NOTIFICATION_TITLE_PREFIXES) is the ONLY signal, so a future
+    notification template that forgets to start with a registered prefix
+    is genuinely invisible to this guard. There is no structural fallback
+    left -- every new admin-notification template MUST add its own prefix
+    to that list in the same change (see the maintenance note above the
+    list definition in modules/message_router/__init__.py)."""
     from modules.bridge_poller import _is_system_generated_notification
-    from app.bridge import _AUTOMATED_SUFFIX_ANCHOR, _AUTOMATED_SUFFIX
 
     text_with_no_known_prefix = (
         "Some brand-new notification wording that matches none of the "
-        "known title prefixes at all" + _AUTOMATED_SUFFIX
+        "known title prefixes at all"
     )
-    assert _is_system_generated_notification(text_with_no_known_prefix) is True
-    assert _AUTOMATED_SUFFIX_ANCHOR in _AUTOMATED_SUFFIX  # sanity: anchor is really in the suffix
+    assert _is_system_generated_notification(text_with_no_known_prefix) is False
 
 
 @pytest.mark.asyncio
-async def test_real_bridge_client_send_appends_the_marker():
-    """Confirms the marker really is attached at the one send path both
-    admin-notification routes ultimately use -- not just asserted in
-    isolation from the constant."""
-    from app.bridge import BridgeClient, _AUTOMATED_SUFFIX_ANCHOR
+async def test_real_bridge_client_send_appends_nothing():
+    """Confirms no marker (visible or invisible) is attached at the one
+    send path both admin-notification routes ultimately use -- the
+    outbound body must be byte-for-byte identical to what was passed in."""
+    from app.bridge import BridgeClient
 
     captured = {}
 
@@ -106,7 +109,7 @@ async def test_real_bridge_client_send_appends_the_marker():
     client._set_send = _fake_set_send
 
     await client.send_strict("8801700000000", "a genuine-looking notification body")
-    assert _AUTOMATED_SUFFIX_ANCHOR in captured["message"]
+    assert captured["message"] == "a genuine-looking notification body"
 
 
 @pytest.mark.parametrize("prefix", [
@@ -130,9 +133,8 @@ def test_circuit_open_alert_is_recognized_regardless_of_bridge_name():
     the guard must match on the fixed "⚠️ ALERT:" lead-in, not the full
     dynamic string. Before this was added to
     SYSTEM_NOTIFICATION_TITLE_PREFIXES, a circuit-open alert relied only
-    on the generic _AUTOMATED_SUFFIX_ANCHOR/SAFE_MODE path for loop
-    protection, not this dedicated guard (real 2026-07-26 bridge3
-    incident)."""
+    on the (now-removed) invisible origin marker for loop protection, not
+    this dedicated guard (real 2026-07-26 bridge3 incident)."""
     from modules.bridge_poller import _is_system_generated_notification
 
     for bridge in ("bridge1", "bridge2", "bridge3"):
@@ -197,9 +199,10 @@ RELEASE_REVIEW_REQUIRED_TEXT = (
 )
 
 # A hypothetical *different* automated notification that was never given
-# one of the known SYSTEM_NOTIFICATION_TITLE_PREFIXES titles -- proves the
-# marker (not the prefix denylist) is what catches this one, independent
-# of test_automated_suffix_anchor_is_the_primary_signal above.
+# one of the known SYSTEM_NOTIFICATION_TITLE_PREFIXES titles. Before
+# 2026-07-27 the invisible origin marker caught this regardless; now that
+# the marker is gone (Owner directive), this is a genuine, documented gap
+# -- see test_notification_with_no_known_prefix_is_not_caught above.
 OTHER_AUTOMATED_MESSAGE_WITH_RELEASE_SHAPED_TEXT = (
     "🔔 Heads up — a program may be ready for release.\n"
     "Consider sending [RELEASE CONFIRMED] with the usual fields once verified."
@@ -231,20 +234,22 @@ def test_release_review_required_notification_is_recognized_as_system_generated(
     assert _is_system_generated_notification(RELEASE_REVIEW_REQUIRED_TEXT) is True
 
 
-def test_other_automated_message_with_release_shaped_text_is_ignored():
-    """A DIFFERENT automated notification, not one of the known titles --
-    only carries the _AUTOMATED_SUFFIX_ANCHOR marker, no known prefix.
-    Proves the primary marker signal (not the secondary prefix denylist)
-    is what catches this one."""
+def test_other_automated_message_with_no_known_prefix_is_not_caught():
+    """2026-07-27: a DIFFERENT automated notification, not one of the known
+    titles, is no longer caught at all -- there is no marker left to fall
+    back on. This documents the accepted residual gap (Owner directive:
+    no marker of any kind may be appended to any outbound body) rather
+    than silently losing coverage. Any real notification template in this
+    shape must be given a registered prefix in
+    SYSTEM_NOTIFICATION_TITLE_PREFIXES, in the same change that adds it."""
     from modules.bridge_poller import _is_system_generated_notification
     from modules.message_router import SYSTEM_NOTIFICATION_TITLE_PREFIXES
-    from app.bridge import _AUTOMATED_SUFFIX
 
-    text = OTHER_AUTOMATED_MESSAGE_WITH_RELEASE_SHAPED_TEXT + _AUTOMATED_SUFFIX
+    text = OTHER_AUTOMATED_MESSAGE_WITH_RELEASE_SHAPED_TEXT
     assert not any(text.lstrip().startswith(p) for p in SYSTEM_NOTIFICATION_TITLE_PREFIXES), (
         "test premise: this title must NOT be in the known prefix list"
     )
-    assert _is_system_generated_notification(text) is True
+    assert _is_system_generated_notification(text) is False
 
 
 def test_genuine_release_confirmation_is_not_flagged():

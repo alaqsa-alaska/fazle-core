@@ -110,12 +110,16 @@ async def test_unauthorized_sender_never_reaches_thread_creation(monkeypatch):
 @pytest.mark.asyncio
 async def test_system_generated_marker_on_inbound_text_is_refused(monkeypatch):
     """Pre-flag-enable check #2: even though a genuine human would never
-    type the _AUTOMATED_SUFFIX_ANCHOR marker, this is checked explicitly
-    on the inbound path too, not just assumed impossible."""
+    type one of our known system-notification title prefixes verbatim,
+    this is checked explicitly on the inbound path too, not just assumed
+    impossible.
+
+    2026-07-27: no marker is appended to outbound text anymore (Owner
+    directive) -- system-generated text is now recognized by a known
+    title prefix (SYSTEM_NOTIFICATION_TITLE_PREFIXES) instead."""
     from app.config import get_settings
     import modules.conversation_memory as cm
     from modules.conversation_memory import thread_reconstruction as tr
-    from app.bridge import _AUTOMATED_SUFFIX
 
     get_settings.cache_clear()
     monkeypatch.setenv("CONVERSATION_MEMORY_ENABLED", "true")
@@ -131,7 +135,7 @@ async def test_system_generated_marker_on_inbound_text_is_refused(monkeypatch):
 
     try:
         await tr.shadow_observe_escort_client_message(
-            text=REAL_MSG_1 + _AUTOMATED_SUFFIX, sender_phone="01670535255",
+            text="⚠️ RELEASE REVIEW REQUIRED\n" + REAL_MSG_1, sender_phone="01670535255",
             source="bridge2", message_id="MSG-SYSGEN", sender_role="client_escort_buyer",
         )
     finally:

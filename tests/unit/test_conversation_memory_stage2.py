@@ -110,15 +110,18 @@ async def test_unauthorized_employee_contributes_nothing_stage2(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_system_generated_wrapper_contributes_nothing_stage2(monkeypatch):
-    """#7: same guarantee for the system-generated-marker check."""
+    """#7: same guarantee for the system-generated-notification check.
+
+    2026-07-27: no marker is appended to outbound text anymore (Owner
+    directive) -- system-generated text is now recognized by a known
+    title prefix (SYSTEM_NOTIFICATION_TITLE_PREFIXES) instead."""
     from modules.conversation_memory import thread_reconstruction as tr
     import modules.conversation_memory as cm
-    from app.bridge import _AUTOMATED_SUFFIX
 
     _enable_stage2(monkeypatch, escort_client_phones="01670535255")
 
     async def _boom(*a, **kw):
-        raise AssertionError("must never be reached when the text carries the automated marker")
+        raise AssertionError("must never be reached when the text is system-generated")
 
     recorded = {}
 
@@ -131,7 +134,7 @@ async def test_system_generated_wrapper_contributes_nothing_stage2(monkeypatch):
 
     try:
         await tr.shadow_observe_escort_client_message(
-            text=MSG_LIGHTER_1 + _AUTOMATED_SUFFIX, sender_phone="01670535255",
+            text="⚠️ RELEASE REVIEW REQUIRED\n" + MSG_LIGHTER_1, sender_phone="01670535255",
             source="bridge2", message_id="STAGE2-SYSGEN-1", sender_role="client_escort_buyer",
         )
         assert recorded["exclusion_kind"] == "system_generated_excluded"

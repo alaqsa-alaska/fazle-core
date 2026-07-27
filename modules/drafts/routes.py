@@ -212,11 +212,17 @@ async def approve_draft(
 # ── POST /api/drafts/{id}/edit ─────────────────────────────────────────────
 @router.post("/api/drafts/{draft_id}/edit")
 async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require_api_key)):
-    """Edit draft reply_text — status becomes edited."""
+    """Edit draft reply_text — status becomes edited, then send to recipient.
+
+    2026-07-27: Now completes the full edit flow — updates the draft text AND
+    enqueues the edited text for sending to the original recipient via the
+    SAME inbound bridge (stored in fazle_draft_replies.source), mirroring the
+    approve endpoint's delivery mechanism.
+    """
     if not req.new_body or len(req.new_body.strip()) < 2:
         raise HTTPException(status_code=400, detail="new_body too short")
     draft = await fetch_one(
-        "SELECT id, status, recipient FROM fazle_draft_replies WHERE id = $1",
+        "SELECT id, status, recipient, source FROM fazle_draft_replies WHERE id = $1",
         draft_id,
     )
     if not draft:
@@ -237,7 +243,40 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
         draft_id,
     )
     log.info("Draft %d edited for %s", draft_id, draft["recipient"])
-    return {"ok": True, "draft_id": draft_id, "status": "edited"}
+
+    # Enqueue the edited text for sending via the SAME bridge
+    source = draft.get("source") or "bridge1"
+    source_bridge = "bridge1" if source in ("bridge1", "meta") else "bridge2"
+    queued = False
+    try:
+        from modules.outbound import enqueue as _enqueue
+        qid = await _enqueue(
+            recipient=draft["recipient"],
+            body=req.new_body.strip(),
+            source_bridge=source_bridge,
+            purpose="admin_edit",
+            idempotency_key=f"draft-edit-{draft_id}",
+        )
+        if qid:
+            await execute(
+                "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
+                draft_id,
+            )
+            queued = True
+            log.info("Edited draft %d queued (outbound id=%s) for %s", draft_id, qid, draft["recipient"])
+        else:
+            log.warning("Edited draft %d enqueue dedup'd — already queued", draft_id)
+            queued = True
+    except Exception as _err:
+        log.error("Edited draft %d enqueue failed: %s", draft_id, _err)
+
+    return {
+        "ok": True,
+        "draft_id": draft_id,
+        "status": "sent" if queued else "edited",
+        "queued": queued,
+        "recipient": draft["recipient"],
+    }
 
 
 # ── POST /api/drafts/{id}/delete ───────────────────────────────────────────

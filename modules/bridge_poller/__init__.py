@@ -43,7 +43,6 @@ from modules.message_router import (
     _is_safe_autosend_intent,
     SYSTEM_NOTIFICATION_TITLE_PREFIXES,
 )
-from app.bridge import _AUTOMATED_SUFFIX_ANCHOR
 from modules.intent import classify as classify_intent
 from modules.recruitment_flow import recruitment_eligibility
 
@@ -188,26 +187,23 @@ def _is_system_generated_notification(text: str) -> bool:
     outgoing message this app generated itself before treating it as a
     candidate admin confirmation.
 
-    Primary signal: app.bridge._AUTOMATED_SUFFIX_ANCHOR ("🤖 Automated
-    Reply System"). TASK 5 already appends this to every message sent
-    through BridgeClient.send()/send_strict() -- the one and only path
-    both the outbound queue (modules.outbound._send_with_channel) and
-    app.main._notify_admin()'s direct-fallback path use to actually put
-    text on the wire. A human admin typing directly into their own
-    WhatsApp client never produces this marker; it is written by our own
-    Python code at send time, not something a human types. This is a
-    real origin marker, not a text-shape guess -- it doesn't care what
-    the notification says, only whether *we* sent it.
-
-    Secondary signal (defense-in-depth): known system-notification title
-    prefixes (SYSTEM_NOTIFICATION_TITLE_PREFIXES) -- kept as a second
-    layer in case some future notification path is ever added that
-    doesn't route through BridgeClient.send()/send_strict() and so
-    wouldn't carry the marker."""
+    2026-07-27 (Owner directive): the previous origin marker -- an
+    invisible zero-width-space appended to every outbound message body by
+    app.bridge.BridgeClient.send()/send_strict() -- has been removed
+    outright. No footer, marker, or hidden character may be appended to
+    any outbound message body, full stop. This function now relies solely
+    on known system-notification title prefixes
+    (SYSTEM_NOTIFICATION_TITLE_PREFIXES): every template this app uses to
+    notify the admin (draft-review messages, release-slip review, OCR
+    alerts, safety-filter blocks, the pending-drafts list, Route B
+    Ollama-failure alerts, etc.) starts with a fixed, recognizable prefix
+    a human would never type verbatim. A message this app auto-sends is
+    recognized by its known shape, not by an invisible marker planted in
+    the body. Any new admin-notification template MUST add its own prefix
+    to that list in the same change, or it becomes invisible to this
+    guard -- see the maintenance note above the list definition."""
     if not text:
         return False
-    if _AUTOMATED_SUFFIX_ANCHOR in text:
-        return True
     stripped = text.lstrip()
     return any(stripped.startswith(prefix) for prefix in SYSTEM_NOTIFICATION_TITLE_PREFIXES)
 
@@ -1377,8 +1373,51 @@ async def start_pollers():
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-async def _save_draft(source: str, recipient: str, reply_text: str, intent: str):
+def _build_admin_review_draft(
+    *, sender_name: str, sender_mobile: str, sender_message: str,
+    ai_reply: str, draft_no: str = "(pending)",
+) -> str:
+    """Build the 5-part admin draft-review message.
+
+    Required parts (Owner spec, 2026-07-27):
+      1. Sender Name + Mobile
+      2. Draft No
+      3. Sender's Message
+      4. AI Generated Reply
+      5. Options: 1. Approved  2. Edit  3. Reject
+    """
+    name_display = sender_name or "(unknown)"
+    mobile_display = sender_mobile or "(unknown)"
+    msg_display = (sender_message or "").strip() or "(empty)"
+    reply_display = (ai_reply or "").strip() or "(no AI reply generated)"
+    return (
+        f"📋 ADMIN REVIEW DRAFT\n"
+        f"─────────────────\n"
+        f"Sender: {name_display} | {mobile_display}\n"
+        f"Draft No: {draft_no}\n"
+        f"─────────────────\n"
+        f"Sender's Message:\n{msg_display}\n"
+        f"─────────────────\n"
+        f"AI Generated Reply:\n{reply_display}\n"
+        f"─────────────────\n"
+        f"Options:\n"
+        f"  1. Approved  2. Edit  3. Reject\n"
+        f"Reply: APPROVE <draft_no> | EDIT <draft_no> <text> | REJECT <draft_no>"
+    )
+
+
+async def _save_draft(
+    source: str, recipient: str, reply_text: str, intent: str,
+    *,
+    sender_name: str = "",
+    sender_message: str = "",
+):
     """Store a suppressed reply as a draft (safe mode).
+
+    2026-07-27: When sender_name and sender_message are provided, the draft
+    text is enriched to the 5-part admin review format (Sender Name+Mobile,
+    Draft No, Sender's Message, AI Reply, Options). The raw AI reply is still
+    stored separately in meta for the approve/edit flow to send.
 
     B25 hotfix: passes through draft_quality gate first. Bad drafts are still
     persisted (for audit) but with status='rejected_quality'/'rejected_fallback'
@@ -1388,6 +1427,59 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
     from modules import observability as _obs
     reply_text = strip_reply_emoji(reply_text) if reply_text else reply_text
     ok, reason = check_draft_quality(reply_text)
+
+    # Build enriched 5-part admin review draft when sender context is available
+    use_enriched = bool(sender_name or sender_message)
+    if use_enriched:
+        # For enriched drafts, the AI reply quality is checked but the draft
+        # is still created with the 5-part format even if AI reply is empty/
+        # fallback — admin needs to see the sender's message regardless.
+        # Insert with a placeholder draft_no, then UPDATE reply_text with
+        # the real ID so admin sees the actual draft number in WhatsApp.
+        draft_body_placeholder = _build_admin_review_draft(
+            sender_name=sender_name,
+            sender_mobile=recipient,
+            sender_message=sender_message,
+            ai_reply=reply_text if ok else "(AI generation failed/unavailable)",
+            draft_no="__DRAFT_NO_PLACEHOLDER__",
+        )
+        meta_ctx = json.dumps({
+            "ai_reply_raw": reply_text or "",
+            "sender_message": sender_message,
+            "sender_name": sender_name,
+            "ai_failed": not ok,
+            "quality_reason": reason or "",
+        })
+        draft_id = await create_draft_reply(
+            sender=recipient,
+            bridge=source,
+            draft_text=draft_body_placeholder,
+            role="unknown",
+            intent=intent,
+            context=meta_ctx,
+            source_module="bridge_poller",
+        )
+        # Replace placeholder with the real draft ID so admin sees the
+        # actual draft number they need to reply with.
+        if draft_id:
+            final_body = draft_body_placeholder.replace(
+                "__DRAFT_NO_PLACEHOLDER__", str(draft_id)
+            )
+            try:
+                await execute(
+                    "UPDATE fazle_draft_replies SET reply_text = $1 WHERE id = $2",
+                    final_body, draft_id,
+                )
+            except Exception as _upd_err:
+                log.warning("[draft_reply] draft_no post-update failed id=%s: %s", draft_id, _upd_err)
+            if not ok:
+                await execute(
+                    "UPDATE fazle_draft_replies SET status = $1 WHERE id = $2",
+                    "rejected_fallback" if reason == "llm_fallback" else "rejected_quality",
+                    draft_id,
+                )
+        return
+
     if not ok:
         _obs.inc("drafts_rejected_total", labels={"reason": reason or "unknown", "source": source})
         log.warning(f"[draft_quality] rejected source={source} recipient={recipient} reason={reason}")
@@ -1759,6 +1851,8 @@ async def process_bridge_inbound(
             bridge_name, phone,
             f"⛔ Quarantined (prompt injection detected).\nPattern: {_inj!r}\nOriginal: {text[:200]!r}",
             msg_intent,
+            sender_name=id_name,
+            sender_message=text,
         )
         return
 
@@ -1814,14 +1908,16 @@ async def process_bridge_inbound(
             # Phase 4.5: advance request phrase guard
             if any(phrase in text.lower() for phrase in _ADVANCE_REQUEST_PHRASES):
                 log.info("[ADVANCE_REQUEST_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
-                await _save_draft(bridge_name, phone, reply, msg_intent)
+                await _save_draft(bridge_name, phone, reply, msg_intent,
+                                  sender_name=id_name, sender_message=text)
                 return
 
             # Part H: financial intent draft gate
             _financial_hit = any(fi in msg_intent.lower() for fi in _FINANCIAL_DRAFT_INTENTS)
             if _financial_hit and not _is_safe_autosend_intent(msg_intent, id_role):
                 log.info("[FINANCIAL_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
-                await _save_draft(bridge_name, phone, reply, msg_intent)
+                await _save_draft(bridge_name, phone, reply, msg_intent,
+                                  sender_name=id_name, sender_message=text)
                 return
 
             # Phase 4.5: complaint-phrase override
@@ -1830,7 +1926,8 @@ async def process_bridge_inbound(
                     "[COMPLAINT_DRAFT] phone=%s intent=%r → complaint phrase → forced draft",
                     phone, msg_intent,
                 )
-                await _save_draft(bridge_name, phone, reply, msg_intent)
+                await _save_draft(bridge_name, phone, reply, msg_intent,
+                                  sender_name=id_name, sender_message=text)
                 return
 
             if _financial_hit:
@@ -1855,12 +1952,14 @@ async def process_bridge_inbound(
 
             if draft_gate:
                 log.info("[DRAFT-GATE] %s name=%r role=%s → draft", phone, id_name, id_role)
-                await _save_draft(bridge_name, phone, reply, msg_intent)
+                await _save_draft(bridge_name, phone, reply, msg_intent,
+                                  sender_name=id_name, sender_message=text)
             else:
                 # STEP 7: loop detection
                 if _check_loop_detect(phone):
                     log.warning("[LOOP_DETECT] autoreply paused for %s bridge=%s", phone, bridge_name)
-                    await _save_draft(bridge_name, phone, reply, msg_intent)
+                    await _save_draft(bridge_name, phone, reply, msg_intent,
+                                      sender_name=id_name, sender_message=text)
                     return
 
                 # Outbound poison block
@@ -1871,7 +1970,8 @@ async def process_bridge_inbound(
                         "[OUTBOUND_SANITIZER_BLOCK] bridge=%s phone=%s pattern=%r",
                         bridge_name, phone, _poison_hit,
                     )
-                    await _save_draft(bridge_name, phone, reply, msg_intent)
+                    await _save_draft(bridge_name, phone, reply, msg_intent,
+                                      sender_name=id_name, sender_message=text)
                     await _record_safety_incident(bridge_name, phone, _block_reason, reply)
                     await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
                     return
@@ -1887,7 +1987,8 @@ async def process_bridge_inbound(
                         "[OUTBOUND_LENGTH_GUARD] bridge=%s phone=%s len=%d table=%s headings=%s",
                         bridge_name, phone, _reply_len, _has_table, _has_headings,
                     )
-                    await _save_draft(bridge_name, phone, reply, msg_intent)
+                    await _save_draft(bridge_name, phone, reply, msg_intent,
+                                      sender_name=id_name, sender_message=text)
                     await _record_safety_incident(bridge_name, phone, _block_reason, reply)
                     await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
                     return
@@ -1903,7 +2004,8 @@ async def process_bridge_inbound(
                         _safe_reason = f"SAFE_MODE:UNCERTAIN_INTENT({msg_intent!r})"
                     if _safe_reason:
                         log.warning("[AI_SAFE_MODE] %s bridge=%s phone=%s", _safe_reason, bridge_name, phone)
-                        await _save_draft(bridge_name, phone, reply, msg_intent)
+                        await _save_draft(bridge_name, phone, reply, msg_intent,
+                                          sender_name=id_name, sender_message=text)
                         return
 
                 # Send
@@ -1931,7 +2033,8 @@ async def process_bridge_inbound(
                     log.warning("[%s] Reply enqueue failed/deduped for %s", bridge_name, phone)
         else:
             log.warning("SAFE MODE: reply suppressed for %s (%s). Saving draft.", phone, bridge_name)
-            await _save_draft(bridge_name, phone, reply, msg_intent)
+            await _save_draft(bridge_name, phone, reply, msg_intent,
+                              sender_name=id_name, sender_message=text)
 
     if admin_note:
         if admin_note.get("purpose") == "draft-only-contact-review":
@@ -1940,6 +2043,8 @@ async def process_bridge_inbound(
                 phone,
                 admin_note.get("text") or text,
                 msg_intent or "draft_only_contact",
+                sender_name=id_name,
+                sender_message=text,
             )
         if _settings.internal_notifications_enabled:
             await _notify_admin_bridge(admin_note)

@@ -10,14 +10,13 @@ from app.config import get_settings
 
 log = logging.getLogger("fazle.bridge")
 
-# TASK 5: Suffix appended to every outbound auto-generated message.
-# Checked before appending to prevent double-append on manual retries.
-_AUTOMATED_SUFFIX = (
-    "\n\n─────────────────\n"
-    "🤖 Automated Reply System\n"
-    "এই বার্তাটি স্বয়ংক্রিয়ভাবে তৈরি হয়েছে। ভুল হতে পারে।"
-)
-_AUTOMATED_SUFFIX_ANCHOR = "🤖 Automated Reply System"
+# 2026-07-27: Owner directive \u2014 no footer, marker, or any other character
+# (visible or invisible) may be appended to an outbound message body. The
+# previous invisible zero-width-space marker (also named _AUTOMATED_SUFFIX)
+# has been removed outright; outbound text is sent byte-for-byte as given.
+# bridge_poller._is_system_generated_notification() no longer depends on a
+# body marker \u2014 it now identifies our own notifications solely by their
+# known title prefixes (modules.message_router.SYSTEM_NOTIFICATION_TITLE_PREFIXES).
 
 
 class BridgeSendError(Exception):
@@ -112,12 +111,6 @@ class BridgeClient:
         """Strict send: raises BridgeSendError on any failure. Used by outbound queue."""
         if not jid.endswith("@s.whatsapp.net") and not jid.endswith("@g.us"):
             jid = jid + "@s.whatsapp.net"
-        # TASK 5: Append automated-reply marker (prevent double-append)
-        if _AUTOMATED_SUFFIX_ANCHOR not in text:
-            text = text + _AUTOMATED_SUFFIX
-            log.info("[BRIDGE_MARKER_APPENDED] label=%s jid=%s", self.label, jid)
-        else:
-            log.debug("[BRIDGE_MARKER_PRESENT] label=%s jid=%s", self.label, jid)
         log.info(f"[BRIDGE_SEND_START] label={self.label} jid={jid} body={text[:60]!r}")
         try:
             await self._set_send(True)
@@ -138,11 +131,6 @@ class BridgeClient:
     async def send_multi(self, jid: str, messages: list[str]) -> bool:
         if not jid.endswith("@s.whatsapp.net") and not jid.endswith("@g.us"):
             jid = jid + "@s.whatsapp.net"
-        # TASK 5: Append marker to last message only (avoid cluttering multi-part sends)
-        if messages and _AUTOMATED_SUFFIX_ANCHOR not in messages[-1]:
-            messages = list(messages)
-            messages[-1] = messages[-1] + _AUTOMATED_SUFFIX
-            log.info("[BRIDGE_MARKER_APPENDED_MULTI] label=%s jid=%s", self.label, jid)
         try:
             await self._set_send(True)
             for msg in messages:

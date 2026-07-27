@@ -32,9 +32,8 @@ class TestMergeFieldPolicy:
 
     def test_system_generated_content_never_applied(self):
         """The one rule this module treats as non-negotiable: system-
-        generated text (the _AUTOMATED_SUFFIX_ANCHOR / MV Horda incident
-        class) must never become authoritative conversation state, even
-        with maximum confidence."""
+        generated text (the MV Horda incident class) must never become
+        authoritative conversation state, even with maximum confidence."""
         from modules.conversation_memory import merge_field
         fields, result = merge_field(
             {}, "mother_vessel", value="MV Horda", source_message_id="M1",

@@ -317,18 +317,72 @@ async def _check_escort_operational_handoff(
 
 # ── Ollama-failure protection ───────────────────────────────────────────────────
 
-async def record_ollama_failure(sender: str, source: str, message_id: Optional[str]) -> Optional[dict]:
+async def record_ollama_failure(
+    sender: str, source: str, message_id: Optional[str],
+    *,
+    sender_name: str = "",
+    sender_message: str = "",
+) -> Optional[dict]:
     """Called by modules.route_b when Ollama's own reply equals
     app.ollama.FALLBACK_REPLY_TEXT (Ollama unreachable/non-200/exception --
     generate_reply() never raises, it degrades to this fixed string). The
     sender still gets that safe, non-empty fallback text either way -- this
     only additionally alerts an admin, once per cooldown window, so a
     prolonged Ollama outage doesn't silently leave real senders unanswered
-    with nobody aware. Never raises."""
+    with nobody aware. Never raises.
+
+    2026-07-27: In addition to the admin alert, creates a draft-review
+    artifact in fazle_draft_replies containing sender identity, sender's
+    original message, draft number, and a clear note that AI generation
+    failed — so admin can still review and act on the sender's message
+    even when AI is unavailable. Reuses the existing create_draft_reply
+    helper and the same bridge_poller._build_admin_review_draft format."""
     try:
         if await _on_cooldown(sender, "none"):
             return None
         from modules.message_router import get_primary_admin
+
+        # Create a draft-review artifact with sender identity + message
+        # even though AI generation failed. Reuses the existing draft path.
+        # Uses placeholder+update so the real draft ID appears in the text.
+        draft_id_created = None
+        try:
+            from modules.bridge_poller import _build_admin_review_draft
+            draft_body_placeholder = _build_admin_review_draft(
+                sender_name=sender_name or sender,
+                sender_mobile=sender,
+                sender_message=sender_message or "",
+                ai_reply="(AI generation failed/unavailable — Ollama unreachable)",
+                draft_no="__DRAFT_NO_PLACEHOLDER__",
+            )
+        except Exception as _bd_err:
+            log.debug("[route_b_handoff] enriched draft build failed: %s", _bd_err)
+            draft_body_placeholder = None
+
+        if draft_body_placeholder:
+            draft_id_created = await create_draft_reply(
+                sender=sender,
+                bridge=source,
+                draft_text=draft_body_placeholder,
+                role="unknown",
+                intent="route_b_ollama_failure",
+                context='{"ai_failed": true, "reason": "ollama_unavailable"}',
+                source_module="route_b_handoff",
+            )
+            # Replace placeholder with the real draft ID
+            if draft_id_created:
+                final_body = draft_body_placeholder.replace(
+                    "__DRAFT_NO_PLACEHOLDER__", str(draft_id_created)
+                )
+                try:
+                    from app.database import execute as _db_execute
+                    await _db_execute(
+                        "UPDATE fazle_draft_replies SET reply_text = $1 WHERE id = $2",
+                        final_body, draft_id_created,
+                    )
+                except Exception as _upd_err:
+                    log.warning("[route_b_handoff] draft_no post-update failed id=%s: %s", draft_id_created, _upd_err)
+
         admin_note = {
             "admin_phone": get_primary_admin(),
             "bridge": source,
@@ -336,8 +390,11 @@ async def record_ollama_failure(sender: str, source: str, message_id: Optional[s
             "text": (
                 "⚠️ ROUTE B: OLLAMA UNAVAILABLE\n"
                 f"Sender: {sender}\n"
+                f"Sender Name: {sender_name or '(unknown)'}\n"
+                f"Message: {sender_message or '(not captured)'}\n\n"
                 "The sender received the standard safe fallback reply; no AI "
-                "response was generated. Check Ollama health if this repeats."
+                "response was generated. A draft-review artifact has been "
+                "created. Check Ollama health if this repeats."
             ),
         }
         await _record_handoff(

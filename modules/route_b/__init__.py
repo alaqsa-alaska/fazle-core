@@ -317,7 +317,11 @@ async def handle_route_b_message(
         # an admin (once per cooldown) so an outage doesn't go unnoticed.
         try:
             from modules.route_b_handoff import record_ollama_failure
-            failure_note = await record_ollama_failure(sender, source, message_id)
+            failure_note = await record_ollama_failure(
+                sender, source, message_id,
+                sender_name=profile_name or (contact or {}).get("display_name") or "",
+                sender_message=text,
+            )
             if failure_note:
                 admin_notification = failure_note
         except Exception as e:

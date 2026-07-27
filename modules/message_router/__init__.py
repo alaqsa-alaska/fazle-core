@@ -223,14 +223,19 @@ def _looks_like_escort_buying_intent(text: str) -> bool:
 # notification that happens to quote/instruct escort- or release-shaped
 # text (e.g. "send an exact [RELEASE CONFIRMED] message...") can
 # false-positive match is_completed_escort_draft()/is_release_confirmation()
-# and be misread as the admin's own authoritative reply. This list is the
-# immediate defense-in-depth guard for that scan (see
-# _is_system_generated_notification() there) -- it is NOT a substitute for
-# a real origin marker (see the same audit's Root Cause 7 finding), just a
-# fast, cheap first layer. MUST be kept in sync with every title string
-# used below and in the two hardcoded notification dicts elsewhere in this
-# file (the release-review-required note in the release-intent branch, and
-# app/main.py's send_to_admin path shares this same exposure).
+# and be misread as the admin's own authoritative reply.
+#
+# 2026-07-27 (Owner directive: no marker/footer/hidden character may ever be
+# appended to an outbound message body): this list is now the SOLE signal
+# _is_system_generated_notification() uses -- the invisible zero-width-space
+# origin marker it used to fall back on (app.bridge._AUTOMATED_SUFFIX) has
+# been removed outright. MUST be kept in sync with every title string used
+# below, in modules/bridge_poller/__init__.py's own notification templates
+# (_build_admin_review_draft, release-slip review, OCR-unclear alert,
+# safety-filter-blocked alert, pending-drafts list, Route B Ollama-failure
+# alert), and app/main.py's send_to_admin path -- any new outbound
+# admin-notification template must add its own prefix here in the same
+# change, or it becomes invisible to this guard.
 SYSTEM_NOTIFICATION_TITLE_PREFIXES: tuple[str, ...] = (
     "⚠️ ESCORT REVIEW DRAFT",
     "⚠️ ESCORT COMPLAINT/ASSIGNMENT-LIKE MESSAGE",
@@ -239,6 +244,12 @@ SYSTEM_NOTIFICATION_TITLE_PREFIXES: tuple[str, ...] = (
     "⚠️ RELEASE REVIEW REQUIRED",
     "📩 DRAFT-ONLY CONTACT MESSAGE",
     "⚠️ ALERT:",  # modules.outbound._alert_circuit_open() circuit-open alert
+    "📋 ADMIN REVIEW DRAFT",  # bridge_poller._build_admin_review_draft() — 5-part draft-review message
+    "📋 Release Slip",  # bridge_poller release-slip-review admin notification
+    "⚠️ অস্পষ্ট ছবি",  # bridge_poller OCR-unclear admin notification
+    "⚠️ AI outbound blocked by safety filter",  # bridge_poller._alert_admin_safety_block()
+    "📋 পেন্ডিং ড্রাফট",  # message_router pending-drafts list command reply
+    "⚠️ ROUTE B: OLLAMA UNAVAILABLE",  # route_b_handoff.record_ollama_failure() admin alert
 )
 
 
