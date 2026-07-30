@@ -3578,9 +3578,13 @@ async def chat_message(request: Request):
     ai_console_enabled = await _is_ai_console_chat_enabled()
 
     # Capability questions should not trigger stale employee search.
+    # Note: "ডাটাবেস"/"database"/"পড়তে পার"/"read data" deliberately removed
+    # (2026-07-30) -- these are ordinary words in real operational Bangla
+    # questions ("...ডাটাবেসে কতজন কর্মচারি আছে?") and were causing every
+    # such question to be misclassified as a meta-question about the AI's
+    # own capabilities instead of reaching the AI Console orchestrator.
     capability_question = any(token in q.lower() for token in (
         "তুমি কি", "পার", "can you", "able to", "capability", "ক্ষমতা",
-        "ডাটাবেস", "database", "পড়তে পার", "read data",
     ))
     if capability_question:
         app_context = False

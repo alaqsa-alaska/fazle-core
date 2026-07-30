@@ -513,6 +513,20 @@
   }
   .voice-actions[hidden]{display:none}
   .voice-actions .tiny-btn{width:auto;padding:8px 12px}
+  .voice-recording-active{
+    background:#dc2626 !important;
+    color:white !important;
+    font-weight:bold;
+    border-color:#dc2626 !important;
+  }
+  .voice-panel .cancel-secondary{
+    background:none;
+    border:none;
+    color:#6b7280;
+    font-size:0.8em;
+    cursor:pointer;
+    padding:4px 8px;
+  }
   .attachment-card{
     border:1px solid var(--line);
     border-radius:14px;
@@ -762,7 +776,7 @@
 </head>
 <body>
 <div class="shell">
-  <aside class="panel left" id="left-panel">
+  <aside class="panel left" id="left-panel" style="display:none">
     <div class="brand">
       <div class="brand-top">
         <div class="brand-mark">F</div>
@@ -824,11 +838,14 @@
   <main class="panel center">
     <header class="header">
       <div class="header-row">
+        <button id="left-panel-toggle"
+                onclick="document.getElementById('left-panel').style.display = document.getElementById('left-panel').style.display === 'none' ? '' : 'none'"
+                title="Toggle sidebar"
+                style="background:none;border:none;cursor:pointer;font-size:1.1em;padding:4px 8px;opacity:0.7">☰</button>
         <div>
           <div class="workspace-title">Owner AI Workspace</div>
           <div class="workspace-sub">
             ChatGPT-style assistant workspace for Bangla operations, runtime evidence, business search, and AI memory.
-            Production rollout is still controlled. Feature flag remains OFF until owner enables it.
           </div>
         </div>
         <div class="control-grid">
@@ -841,6 +858,10 @@
             <select id="model-select"></select>
           </div>
         </div>
+        <button id="right-panel-toggle"
+                onclick="document.getElementById('right-panel').style.display = document.getElementById('right-panel').style.display === 'none' ? '' : 'none'"
+                title="Toggle details panel"
+                style="background:none;border:none;cursor:pointer;font-size:0.85em;padding:4px 8px;opacity:0.7">Details ▶</button>
       </div>
       <div class="toggle-row">
         <div class="toggle-chip active" id="toggle-kb" onclick="toggleCtx('kb')">Knowledge</div>
@@ -853,7 +874,7 @@
       <div class="runtime-banner">
         <span class="pill info" id="provider-pill">Provider: -</span>
         <span class="pill" id="default-model-pill">Default Model: -</span>
-        <span class="pill warn" id="composer-status-pill">Voice: live transcription · Files: coming soon</span>
+        <span class="pill warn" id="composer-status-pill">Voice: live transcription · Files: OCR enabled</span>
       </div>
     </header>
 
@@ -893,7 +914,7 @@
           <span class="voice-indicator" id="voice-indicator" aria-hidden="true"></span>
           <span id="voice-status-text" aria-live="polite">Idle</span>
           <span id="voice-timer"></span>
-          <button class="tiny-btn" id="voice-cancel-btn" style="width:auto;padding:6px 10px" onclick="cancelVoiceRecording()" hidden>Cancel</button>
+          <button class="tiny-btn cancel-secondary" id="voice-cancel-btn" style="width:auto;padding:6px 10px" onclick="cancelVoiceRecording()" hidden>Cancel</button>
         </div>
         <textarea class="input-box voice-transcript-box" id="voice-transcript-box" rows="2" placeholder="Transcript will appear here for review..." hidden aria-label="Voice transcript (editable)"></textarea>
         <div class="voice-actions" id="voice-actions" hidden>
@@ -914,7 +935,7 @@
     </section>
   </main>
 
-  <aside class="panel right" id="right-panel">
+  <aside class="panel right" id="right-panel" style="display:none">
     <div class="tabs">
       <button class="tab-btn active" data-tab="response" onclick="setRightTab('response')">Response</button>
       <button class="tab-btn" data-tab="evidence" onclick="setRightTab('evidence')">Evidence</button>
@@ -1117,16 +1138,7 @@ function answerStatusBadgeType(status) {
 function buildBadges(res) {
   const badges = [];
   if (res.answer_status) badges.push(renderBadge(res.answer_status, answerStatusBadgeType(res.answer_status)));
-  if (res.feature_path) badges.push(renderBadge(`Path: ${res.feature_path}`));
-  if (getProviderLabel(res.provider)) badges.push(renderBadge(`Provider: ${getProviderLabel(res.provider)}`));
   if (res.model) badges.push(renderBadge(res.model));
-  if (res.confidence) badges.push(renderBadge(`Confidence: ${res.confidence}`, `confidence-${res.confidence}`));
-  if (res.rag_used) badges.push(renderBadge("Knowledge"));
-  if (res.business_used && res.business_used.length) badges.push(renderBadge(`Business ${res.business_used.length}`));
-  if (res.runtime_used && res.runtime_used.length) badges.push(renderBadge(`Runtime ${res.runtime_used.length}`));
-  if (res.memory_used && res.memory_used.length) badges.push(renderBadge(`Memory ${res.memory_used.length}`));
-  if (res.ai_console_enabled === false) badges.push(renderBadge("Flag OFF", "warn"));
-  if (res.ai_console_enabled === true) badges.push(renderBadge("Flag ON", "info"));
   return badges.join("");
 }
 
@@ -1364,10 +1376,6 @@ function speakText(text, buttonEl) {
   }
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = /[ঀ-৿]/.test(text) ? "bn-BD" : "en-US";
-  utterance.onstart = () => {
-    buttonEl.textContent = "⏹";
-    buttonEl.title = "থামান";
-  };
   utterance.onend = () => {
     buttonEl.textContent = "🔊";
     buttonEl.title = "পড়ুন";
@@ -1376,6 +1384,8 @@ function speakText(text, buttonEl) {
     buttonEl.textContent = "🔊";
     buttonEl.title = "পড়ুন";
   };
+  buttonEl.textContent = "⏹";
+  buttonEl.title = "থামান";
   window.speechSynthesis.speak(utterance);
 }
 
@@ -1583,6 +1593,7 @@ function setVoiceState(state, statusText) {
   const voiceBtn = document.getElementById("voice-btn");
   voiceBtn.disabled = state === "uploading_audio" || state === "transcribing";
   voiceBtn.textContent = state === "recording" ? "⏹ Stop & Transcribe" : "🎤 Record Voice";
+  voiceBtn.classList.toggle("voice-recording-active", state === "recording");
 
   refreshComposerAvailability();
 }

@@ -185,6 +185,8 @@ _BUS_TOOL_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("BUS-007", ("recruitment", "candidate", "নিয়োগ")),
     ("BUS-008", ("knowledge", "policy", "how to", "how do i", "rule")),
     ("BUS-009", ("conversation history", "message history", "past messages")),
+    ("BUS-017", ("payment", "পেমেন্ট", "transaction", "টাকা পাঠানো", "আজ কয়জন", "paid", "daily payment", "আজকে পেমেন্ট", "আজকের পেমেন্ট", "টাকা দেওয়া")),
+    ("BUS-018", ("roster", "escort list", "escort roster", "এসকর্ট রোস্টার", "roster summary", "escort status", "active escort", "রোস্টার", "escort count", "কতজন এসকর্ট", "escort program list")),
 ]
 
 
@@ -200,7 +202,7 @@ def select_business_tools_for_message(message: str) -> list[str]:
         if any(kw in q for kw in keywords):
             selected.append(tool_id)
     has_employee_signal = bool(_extract_phone_hint(q)) or any(
-        kw in q for kw in ("employee", "mobile", "phone", "name", "কর্মচারী", "মোবাইল")
+        kw in q for kw in ("employee", "mobile", "phone", "name", "কর্মচারী", "মোবাইল", "কর্মচারি", "কতজন", "নামে", "খুঁজে দাও", "search")
     )
     if has_employee_signal and "BUS-001" not in selected:
         selected.append("BUS-001")

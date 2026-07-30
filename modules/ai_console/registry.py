@@ -112,6 +112,13 @@ _BUS_MIN_ROLE: dict[str, str] = {
     # since it also needs non-uniform prohibited_behavior -- listed here
     # only for BUS-015, which does fit the uniform rows/loop shape)
     "BUS-015": "admin",
+    # admin: payroll page-truth adapter -- reads fpe_cash_transactions
+    # directly (the real ledger), not the empty/draft-only wbom_payroll_runs
+    # view BUS-003 uses -- kept at the same tier as other financial reads.
+    "BUS-017": "admin",
+    # admin: escort roster page-truth adapter -- reads escort_roster_entries
+    # directly (the same computed projection the roster page shows).
+    "BUS-018": "admin",
 }
 
 
@@ -132,6 +139,8 @@ def _business_entries() -> list[RegistryEntry]:
         ("BUS-013", "missing_end_date_programs", "List escort programs missing an end date (review signal, not a conflict)", "dispatch_readonly_service", "business", "Partially Verified", ["ORCH-002", "BUS-013"]),
         ("BUS-014", "employee_advances", "Summarize recorded payroll-run advances", "postgres_readonly_view", "business", "Verified", ["ORCH-002", "BUS-014"]),
         ("BUS-015", "admin_directive_read", "Read saved admin directives/instructions from memory. Filter by subject_key or category. Read-only.", "postgres_readonly_view", "business", "Verified", ["ORCH-002", "BUS-015"]),
+        ("BUS-017", "payroll_page_summary", "Read real payroll/payment data from the live transaction ledger (fpe_cash_transactions). This is the same source used by the payroll page. Read-only.", "fpe_readonly_view", "business", "Verified", ["ORCH-002", "BUS-017"]),
+        ("BUS-018", "escort_roster_page_summary", "Read live escort roster summary and active roster list data from escort_roster_entries. This is the same source used by the escort roster page. Read-only.", "escort_roster_readonly_view", "business", "Verified", ["ORCH-002", "BUS-018"]),
     ]
     entries: list[RegistryEntry] = []
     for rid, name, purpose, authority, mode, confidence, refs in rows:

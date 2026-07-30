@@ -133,14 +133,14 @@ def _extract_phone(text: str) -> str | None:
 def _extract_name_hint(text: str) -> str | None:
     # Normalize Bangla digits first so numbers are treated as ASCII digits and removed.
     text = _normalize_bangla_digits(text or "")
-    cleaned = re.sub(r"\\d+", " ", text)
+    cleaned = re.sub(r"\d+", " ", text)
     cleaned = re.sub(
-        r"(employee|mobile|phone|payroll|attendance|escort|ledger|cash|summary|record|details|search|find|name|number|salary|history|কর্মচারী|কর্মচারি|মোবাইল|নাম্বার|রেকর্ড|খুঁজে|বেতন|হাজিরা|অ্যাটেন্ডেন্স|এসকর্ট|লেজার|ক্যাশ|নিয়োগ)",
+        r"(employee|mobile|phone|payroll|attendance|escort|ledger|cash|summary|record|details|search|find|name|number|salary|history|কর্মচারী|কর্মচারি|মোবাইল|নাম্বার|রেকর্ড|খুঁজে|বেতন|হাজিরা|অ্যাটেন্ডেন্স|এসকর্ট|লেজার|ক্যাশ|নিয়োগ|নামে|কতজন|আছে|ডাটাবেসে|ডাটাবেস|কে|কত|দিন|মাসে|বছরে|তালিকা|দেখাও|বলো)",
         " ",
         cleaned,
         flags=re.IGNORECASE,
     )
-    cleaned = re.sub(r"\\s+", " ", cleaned).strip(" ,:;?।")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,:;?।")
     return cleaned or None
 
 
@@ -762,6 +762,8 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
             "BUS-014": self._employee_advances,
             "BUS-015": self._admin_directive_read,
             "BUS-016": self._admin_directive_write,
+            "BUS-017": self._payroll_page_summary,
+            "BUS-018": self._escort_roster_page_summary,
         }
         handler = handlers.get(tool_id)
         if handler is None:
@@ -1150,6 +1152,123 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
             status="ok",
             data=data,
             source="modules.admin_directives",
+        )
+
+    async def _payroll_page_summary(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        """Reads the same source payroll.html's Overview tab uses
+        (fpe_cash_transactions via modules.fazle_payroll_engine.routes),
+        not the empty/draft-only wbom_payroll_runs view BUS-003 reads.
+        Both imported functions are plain async functions with no
+        Request/Depends usage in their bodies -- safe to call directly,
+        provided every list_transactions() parameter is passed explicitly
+        by keyword (its defaults are FastAPI Query(...) sentinel objects,
+        not real values -- confirmed truthy even when "unset")."""
+        from modules.fazle_payroll_engine.routes import health as fpe_health
+        from modules.fazle_payroll_engine.routes import list_transactions as fpe_list_transactions
+
+        question = _normalize_question(payload)
+        month, year = _extract_month_year(payload, question)
+        period = f"{year:04d}-{month:02d}" if month and year else None
+
+        try:
+            health_result = await fpe_health()
+            rows: list[dict[str, Any]] = []
+            if period:
+                txn_result = await fpe_list_transactions(
+                    employee_id=None,
+                    period=period,
+                    method=None,
+                    txn_category=None,
+                    date_from=None,
+                    date_to=None,
+                    page=None,
+                    page_size=None,
+                    limit=20,
+                    offset=0,
+                )
+                rows = [
+                    {
+                        "employee_name": t.get("employee_display_name"),
+                        "amount": t.get("amount"),
+                        "txn_date": str(t.get("txn_date")),
+                        "payout_method": t.get("payout_method"),
+                        "txn_category": t.get("txn_category"),
+                    }
+                    for t in txn_result.get("transactions", [])
+                ]
+        except Exception as exc:
+            return _envelope(
+                entry=entry,
+                status="failed",
+                data={"period": period or "all", "source": "fpe_cash_transactions"},
+                source="modules.fazle_payroll_engine.routes",
+                errors=[_safe_error(exc)],
+                confidence="Unknown",
+            )
+
+        return _envelope(
+            entry=entry,
+            status="ok" if (rows or health_result.get("total_transactions")) else "partial",
+            data={
+                "total_transactions": health_result.get("total_transactions", 0),
+                "period": period or "all",
+                "rows": rows,
+                "source": "fpe_cash_transactions",
+            },
+            source="modules.fazle_payroll_engine.routes",
+        )
+
+    async def _escort_roster_page_summary(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        """Reads the same source escort-roster.html's summary widget uses
+        (escort_roster_entries via modules.escort_roster.db), not raw
+        wbom_escort_programs data BUS-005 reads. get_roster_summary() and
+        get_roster_list() both have plain Python defaults (no FastAPI
+        Query(...) sentinel objects -- confirmed by direct signature read,
+        unlike modules.fazle_payroll_engine.routes.list_transactions in
+        BUS-017), so no explicit-kwargs workaround is required here, but
+        every kwarg is still passed explicitly for clarity/consistency."""
+        from modules.escort_roster.db import get_roster_list, get_roster_summary
+
+        question = _normalize_question(payload)
+        hint = str(payload.get("search") or _extract_name_hint(question) or "").strip()
+
+        try:
+            summary = await get_roster_summary()
+            rows: list[dict[str, Any]] = []
+            if hint:
+                list_result = await get_roster_list(
+                    page=1,
+                    page_size=20,
+                    search=hint,
+                    status="active",
+                    start_from=None,
+                    start_to=None,
+                    sort_by="start_date",
+                    sort_dir="desc",
+                )
+                rows = list_result.get("items", [])
+        except Exception as exc:
+            return _envelope(
+                entry=entry,
+                status="failed",
+                data={"source": "escort_roster_entries"},
+                source="modules.escort_roster.db",
+                errors=[_safe_error(exc)],
+                confidence="Unknown",
+            )
+
+        return _envelope(
+            entry=entry,
+            status="ok" if (rows or summary.get("grand_total")) else "partial",
+            data={
+                "by_status": summary.get("by_status", {}),
+                "total_count": summary.get("grand_total", 0),
+                "total_amount": summary.get("grand_total_amount", 0),
+                "net_payable_total": summary.get("net_payable_total", 0),
+                "rows": rows,
+                "source": "escort_roster_entries",
+            },
+            source="modules.escort_roster.db",
         )
 
 
