@@ -2981,6 +2981,40 @@ async def b19_audit(limit: int = 50, command: Optional[str] = None):
     )
 
 
+# ── Admin Directives (Unified Admin AI Engine, Phase 3) ───────────────────────
+@app.get("/admin/directives", dependencies=[Depends(require_command("admin_directive_read"))])
+async def get_admin_directives(subject_key: Optional[str] = None, status: str = "active", limit: int = 50):
+    from modules import admin_directives
+    rows = await admin_directives.list_directives(subject_key=subject_key, status=status, limit=limit)
+    return {"rows": rows, "count": len(rows)}
+
+
+@app.post("/admin/directives", dependencies=[Depends(require_command("admin_directive_write"))])
+async def create_admin_directive(payload: dict, key: str = Depends(require_api_key)):
+    from modules import admin_directives
+    directive_text = (payload or {}).get("directive_text")
+    if not directive_text:
+        raise HTTPException(400, "directive_text required")
+    actor = await _rbac_actor_from_key(key)
+    directive_id = await admin_directives.save_directive(
+        directive_text,
+        created_by_phone=actor.get("phone") or "",
+        created_by_channel="web",
+        category=(payload or {}).get("category") or "general",
+        subject_type=(payload or {}).get("subject_type"),
+        subject_key=(payload or {}).get("subject_key"),
+    )
+    return {"id": directive_id}
+
+
+@app.post("/admin/directives/{directive_id}/revoke", dependencies=[Depends(require_command("admin_directive_write"))])
+async def revoke_admin_directive(directive_id: int, key: str = Depends(require_api_key)):
+    from modules import admin_directives
+    actor = await _rbac_actor_from_key(key)
+    revoked = await admin_directives.revoke_directive(directive_id, revoked_by_phone=actor.get("phone") or "")
+    return {"revoked": revoked}
+
+
 # ── Batch 20 — Admin Dashboard aggregate endpoint ─────────────────────────────
 @app.get("/admin/overview", dependencies=[Depends(require_api_key)])
 async def b20_overview():

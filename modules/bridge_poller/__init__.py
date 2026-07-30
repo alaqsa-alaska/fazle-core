@@ -747,15 +747,22 @@ async def _record_reply(phone: str):
     _record_loop_reply(phone)  # STEP 7: always track loop detection in-memory
 
 
-def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
+async def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
     """Return True when this contact must always be drafted, never auto-sent.
 
     Checks (in order):
+      0. Live DB flag phone_block.{phone} (set via /api/wa/contacts/{phone}/block)
       1. Phone is in DRAFT_ALWAYS_PHONES explicit list
       2. Identity role matches DRAFT_ALWAYS_ROLES (e.g. accountant, vip_client)
       3. Display name contains a DRAFT_ALWAYS_NAMES substring
       4. Display name starts with a DRAFT_NAME_PREFIXES prefix (client, escort, office…)
     """
+    try:
+        from modules.wa_chat_frontend import get_runtime_setting
+        if await get_runtime_setting(f"phone_block.{phone}", "false") == "true":
+            return True
+    except Exception:
+        pass
     s = _settings
     if phone in s.draft_always_phone_set:
         return True
@@ -1934,7 +1941,7 @@ async def process_bridge_inbound(
                 log.info("[SAFE_AUTOSEND] phone=%s intent=%r → bypassing financial draft gate", phone, msg_intent)
 
             # DRAFT_ALWAYS gate (phone, role, name, prefix)
-            draft_gate = _is_draft_always(phone, id_role, id_name)
+            draft_gate = await _is_draft_always(phone, id_role, id_name)
             if draft_gate:
                 log.info(
                     "[DRAFT_ALWAYS] phone=%s intent=%r role=%s name=%r → no direct auto-reply",

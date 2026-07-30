@@ -254,6 +254,7 @@ class ReadonlyRuntimeAdapter(RuntimeAdapter):
             "RT-012": self._ollama_status,
             "RT-013": self._bridges_status,
             "RT-014": self._media_processor_status,
+            "RT-015": self._error_log_lookup,
         }
         handler = handlers.get(tool_id)
         if handler is None:
@@ -693,6 +694,31 @@ class ReadonlyRuntimeAdapter(RuntimeAdapter):
             confidence=confidence,
         )
 
+    async def _error_log_lookup(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        from modules.observability.db_queries import get_recent_errors
+
+        try:
+            limit = int(payload.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            rows = await get_recent_errors(limit=limit)
+        except Exception as exc:
+            return _envelope(
+                entry=entry,
+                status="failed",
+                data={"rows": []},
+                source="modules.observability.db_queries",
+                errors=[_safe_error(exc)],
+                confidence="Unknown",
+            )
+        return _envelope(
+            entry=entry,
+            status="ok" if rows else "partial",
+            data={"rows": rows, "count": len(rows)},
+            source="modules.observability.db_queries",
+        )
+
 
 class ReadonlyBusinessAdapter(BusinessAdapter):
     """Readonly business adapters backed by approved business read modules."""
@@ -734,6 +760,8 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
             "BUS-012": self._dispatch_suggestions,
             "BUS-013": self._missing_end_date_programs,
             "BUS-014": self._employee_advances,
+            "BUS-015": self._admin_directive_read,
+            "BUS-016": self._admin_directive_write,
         }
         handler = handlers.get(tool_id)
         if handler is None:
@@ -1047,6 +1075,81 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
             data={"rows": rows, "count": len(rows)},
             source="modules.ai_readonly_tools",
             confidence=confidence,
+        )
+
+    async def _admin_directive_read(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        from modules.admin_directives import list_directives
+
+        subject_key = payload.get("subject_key")
+        category = payload.get("category")
+        status_filter = str(payload.get("status") or "active")
+        limit = min(int(payload.get("limit") or 50), 200)
+        try:
+            rows = await list_directives(subject_key=subject_key, status=status_filter, limit=limit)
+            # list_directives() itself has no category filter (Step 2's
+            # signature is subject_key/status/limit only) -- filtered here
+            # in-handler instead of extending that already-verified module,
+            # since this is additive-only to live_adapters.py in this step.
+            if category:
+                rows = [row for row in rows if row.get("category") == category]
+        except Exception as exc:
+            return _envelope(
+                entry=entry,
+                status="failed",
+                data={"rows": []},
+                source="modules.admin_directives",
+                errors=[_safe_error(exc)],
+                confidence="Unknown",
+            )
+        return _envelope(
+            entry=entry,
+            status="ok" if rows else "partial",
+            data={"rows": rows, "count": len(rows)},
+            source="modules.admin_directives",
+        )
+
+    async def _admin_directive_write(self, entry, payload: dict[str, Any]) -> ToolResultEnvelope:
+        from modules.admin_directives import revoke_directive, save_directive
+
+        # First check, unguarded -- must raise immediately, before any DB
+        # call or try/except, so an invalid action is never silently
+        # swallowed into a "failed" envelope.
+        action = str(payload.get("action") or "")
+        if action not in ("save", "revoke"):
+            raise ValueError(f"Invalid action: {action!r}")
+
+        try:
+            if action == "save":
+                directive_id = await save_directive(
+                    str(payload.get("directive_text") or ""),
+                    created_by_phone=str(payload.get("created_by_phone") or ""),
+                    created_by_channel=str(payload.get("created_by_channel") or ""),
+                    category=str(payload.get("category") or "general"),
+                    subject_type=payload.get("subject_type"),
+                    subject_key=payload.get("subject_key"),
+                    source_ref=payload.get("source_ref"),
+                )
+                data: dict[str, Any] = {"action": "save", "id": directive_id}
+            else:
+                directive_id = int(payload.get("directive_id") or 0)
+                revoked = await revoke_directive(
+                    directive_id, revoked_by_phone=str(payload.get("revoked_by_phone") or "")
+                )
+                data = {"action": "revoke", "id": directive_id, "revoked": revoked}
+        except Exception as exc:
+            return _envelope(
+                entry=entry,
+                status="failed",
+                data={"action": action},
+                source="modules.admin_directives",
+                errors=[_safe_error(exc)],
+                confidence="Unknown",
+            )
+        return _envelope(
+            entry=entry,
+            status="ok",
+            data=data,
+            source="modules.admin_directives",
         )
 
 

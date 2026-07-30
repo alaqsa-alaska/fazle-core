@@ -363,6 +363,18 @@
     background:linear-gradient(180deg,#22466f,#1e3d60);
     border-color:rgba(92,178,255,.24);
   }
+  .tts-btn{
+    background:none;
+    border:none;
+    cursor:pointer;
+    font-size:0.85em;
+    opacity:0.6;
+    margin-left:6px;
+    vertical-align:middle;
+  }
+  .tts-btn:hover{
+    opacity:1.0;
+  }
   .msg-meta{
     display:flex;
     gap:6px;
@@ -1336,7 +1348,45 @@ function appendMessage(role, text, responseMeta = null, attachments = []) {
     </div>
   `;
   messages.appendChild(wrapper);
+  if (role !== "user") {
+    renderTTSButton(wrapper.querySelector(".msg-bubble"), text);
+  }
   messages.scrollTop = messages.scrollHeight;
+}
+
+function speakText(text, buttonEl) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  if (buttonEl.textContent === "⏹") {
+    buttonEl.textContent = "🔊";
+    buttonEl.title = "পড়ুন";
+    return;
+  }
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = /[ঀ-৿]/.test(text) ? "bn-BD" : "en-US";
+  utterance.onstart = () => {
+    buttonEl.textContent = "⏹";
+    buttonEl.title = "থামান";
+  };
+  utterance.onend = () => {
+    buttonEl.textContent = "🔊";
+    buttonEl.title = "পড়ুন";
+  };
+  utterance.onerror = () => {
+    buttonEl.textContent = "🔊";
+    buttonEl.title = "পড়ুন";
+  };
+  window.speechSynthesis.speak(utterance);
+}
+
+function renderTTSButton(bubbleEl, text) {
+  if (!bubbleEl) return;
+  const btn = document.createElement("button");
+  btn.className = "tts-btn";
+  btn.title = "পড়ুন";
+  btn.textContent = "🔊";
+  btn.onclick = function () { speakText(text, this); };
+  bubbleEl.appendChild(btn);
 }
 
 function showTyping() {

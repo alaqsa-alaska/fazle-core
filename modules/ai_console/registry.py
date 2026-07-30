@@ -60,6 +60,32 @@ def _runtime_entries() -> list[RegistryEntry]:
                 traceability_refs=refs + ["STD-008", "EVID-011"],
             )
         )
+    # RT-015 is added directly (not via the rows/loop above) because it needs
+    # a per-entry `metadata={"min_role": ...}` the shared loop does not set
+    # for RT-001..014 -- see Phase 2 Step 4 notes: min_role is descriptive
+    # only until ReadonlyRuntimeAdapter.fetch() gains an RBAC check to match
+    # ReadonlyBusinessAdapter's (not part of this additive-only change).
+    entries.append(
+        RegistryEntry(
+            id="RT-015",
+            name="error_log",
+            family="runtime",
+            purpose="Read recent application error log entries for diagnostics. Read-only.",
+            authority="runtime_tool",
+            allowed_mode="runtime",
+            output_schema_ref="PHASE_2B_6_PER_TOOL_OUTPUT_SCHEMA_MATRIX",
+            confidence_default="Verified",
+            prohibited_behavior=[
+                "unrestricted_shell",
+                "automatic_restart",
+                "file_deletion",
+                "firewall_change",
+                "secret_exposure",
+            ],
+            traceability_refs=["ORCH-001", "RT-015", "STD-008", "EVID-011"],
+            metadata={"min_role": "office_assistant"},
+        )
+    )
     return entries
 
 
@@ -81,6 +107,11 @@ _BUS_MIN_ROLE: dict[str, str] = {
     "BUS-003": "accountant",
     "BUS-006": "accountant",
     "BUS-014": "accountant",
+    # admin: admin directive/action memory (BUS-016's own min_role is set
+    # directly on its standalone RegistryEntry below, not via this dict,
+    # since it also needs non-uniform prohibited_behavior -- listed here
+    # only for BUS-015, which does fit the uniform rows/loop shape)
+    "BUS-015": "admin",
 }
 
 
@@ -100,6 +131,7 @@ def _business_entries() -> list[RegistryEntry]:
         ("BUS-012", "dispatch_suggestions", "Rank available escorts for a proposed window", "dispatch_readonly_service", "business", "Verified", ["ORCH-002", "BUS-012"]),
         ("BUS-013", "missing_end_date_programs", "List escort programs missing an end date (review signal, not a conflict)", "dispatch_readonly_service", "business", "Partially Verified", ["ORCH-002", "BUS-013"]),
         ("BUS-014", "employee_advances", "Summarize recorded payroll-run advances", "postgres_readonly_view", "business", "Verified", ["ORCH-002", "BUS-014"]),
+        ("BUS-015", "admin_directive_read", "Read saved admin directives/instructions from memory. Filter by subject_key or category. Read-only.", "postgres_readonly_view", "business", "Verified", ["ORCH-002", "BUS-015"]),
     ]
     entries: list[RegistryEntry] = []
     for rid, name, purpose, authority, mode, confidence, refs in rows:
@@ -122,6 +154,34 @@ def _business_entries() -> list[RegistryEntry]:
                 metadata={"min_role": _BUS_MIN_ROLE.get(rid, "admin")},
             )
         )
+    # BUS-016 is added directly (not via the rows/loop above) because it is
+    # the first business-family tool that performs a write (to the narrow,
+    # non-Critical fazle_admin_directives table only -- never to any table
+    # ReadonlyBusinessAdapter's other tools touch). It needs a non-uniform
+    # prohibited_behavior list and an authority string that honestly says
+    # "write service", not the "*_readonly_*" naming every other BUS-*
+    # entry uses -- reusing that naming here would misrepresent it.
+    entries.append(
+        RegistryEntry(
+            id="BUS-016",
+            name="admin_directive_write",
+            family="business",
+            purpose="Save or revoke an admin directive/instruction in memory. Write operation — requires admin role.",
+            authority="admin_directive_service",
+            allowed_mode="business",
+            output_schema_ref="PHASE_2B_6_PER_TOOL_OUTPUT_SCHEMA_MATRIX",
+            confidence_default="Verified",
+            prohibited_behavior=[
+                "business_write",
+                "unrestricted_sql",
+                "secret_exposure",
+                "direct_whatsapp_send",
+                "unrestricted_sql_write",
+            ],
+            traceability_refs=["ORCH-002", "BUS-016", "STD-008", "EVID-011"],
+            metadata={"min_role": "admin"},
+        )
+    )
     return entries
 
 

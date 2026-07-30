@@ -47,6 +47,7 @@ from modules.recruitment_flow import (
 )
 from modules.admin_commands import is_admin_command, process_admin_command, list_payment_drafts
 from modules.admin_commands.nl_router import is_nl_admin_query, process_nl_admin_query
+from modules.admin_directives.router import is_admin_ai_command, process_admin_ai_command
 from modules.payment_workflow import is_advance_request
 from modules.attendance import handle_attendance_message, is_attendance_message, get_attendance_summary
 from modules.attendance_parser import (
@@ -517,6 +518,19 @@ async def process_message(
             reply = await process_nl_admin_query(text, sender)
             if reply:
                 return reply, None
+
+        # Phase 3 Step 6: explicit-trigger WhatsApp admin AI.
+        # Checked AFTER is_admin_command/is_nl_admin_query so
+        # those always win. Checked BEFORE hardcoded-help so
+        # unmatched text still falls through to help (B25 fix
+        # preserved by construction — only explicit keywords
+        # reach this branch, never unmatched free text).
+        if is_admin_ai_command(text):
+            ai_reply = await process_admin_ai_command(
+                text, sender_phone=sender
+            )
+            if ai_reply is not None:
+                return ai_reply, None
 
         lower = text.lower()
         if "draft" in lower or "পেন্ডিং" in lower or "list" in lower:

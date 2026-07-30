@@ -128,7 +128,7 @@ async def _is_draft_always_sender(target_id: str, latest_event: dict) -> bool:
     identity = await detect_identity(target_id, text)
     role = identity.get("role") or "unknown"
     display_name = (identity.get("display_name") or "").strip()
-    return _is_draft_always(target_id, role, display_name)
+    return await _is_draft_always(target_id, role, display_name)
 
 
 def _primary_admin_number() -> str:

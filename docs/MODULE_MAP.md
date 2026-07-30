@@ -12,9 +12,10 @@
 - **Key files:** `__init__.py` (1029 lines) — only file in the module.
 - **Main APIs (no HTTP routes):** `process_message(...)` (`:387`), `route_message_with_timeout(...)` (`:1008`), `get_primary_admin()` (`:868`), `get_recent_history(phone, limit)` (`:892`), `get_contact_context(phone)` (`:908`), `normalize_incoming_message(body)` (`:979`).
 - **DB tables used:** `fazle_contact_roles`, `fazle_draft_replies`, `fpe_employees`, `wbom_contacts`, `wbom_employees`, `wbom_relation_types`, `wbom_whatsapp_messages`.
-- **Critical dependencies:** `app.database`, `shared.draft_reply`, `shared.reply_policy`, `modules.identity_brain`, `modules.admin_commands` (+`nl_router`, `nl_advance_record`), `modules.escort`, `modules.escort_lifecycle`, `modules.payment_workflow`, `modules.payment_ingest`, `modules.attendance`, `modules.attendance_parser`, `modules.recruitment_flow`, `modules.rag`, `modules.intent`, `modules.fazle_payroll_engine.employee/normalizer`.
+- **Critical dependencies:** `app.database`, `shared.draft_reply`, `shared.reply_policy`, `modules.identity_brain`, `modules.admin_commands` (+`nl_router`, `nl_advance_record`), `modules.admin_directives.router` (new, 2026-07-30), `modules.escort`, `modules.escort_lifecycle`, `modules.payment_workflow`, `modules.payment_ingest`, `modules.attendance`, `modules.attendance_parser`, `modules.recruitment_flow`, `modules.rag`, `modules.intent`, `modules.fazle_payroll_engine.employee/normalizer`.
 - **Risk level:** High — sits at the very top of the routing critical path; a bug here mis-routes every inbound message.
 - **Writes money / sends messages / read-only:** Read-only / decision-only — returns text and admin-notification dicts; actual send happens downstream.
+- **Update (2026-07-30, Unified Admin AI Engine):** admin branch gained one new check, `is_admin_ai_command(text)` (`modules.admin_directives.router`), inserted after `is_nl_admin_query()` and before the hardcoded-help fallback — additive only, every existing branch above and below it is unchanged. See `docs/ADMIN_AI_ENGINE.md`.
 
 ### `modules.admin_commands`
 - **Purpose:** Parses and executes admin WhatsApp commands (`APPROVE`, `REJECT`, `EDIT`, `PAID`, `ADVANCE`, `APPROVED`, `DREDIT`, `DREJECT`, `STATUS`, `DRAFTS`, plus NL payroll/report/schedule commands). `APPROVE`/`PAID`/`ESCORTCONFIRM` complete the loop by delivering messages directly via the bridge.
@@ -188,6 +189,7 @@
 - **Critical dependencies:** `app.bridge`, `app.config`, `app.database`, `modules.message_router`, `modules.identity_brain`, `modules.escort`, `modules.escort_lifecycle`, `modules.escort_slip_extractor`, `modules.intent`, `modules.ocr_processor`, `modules.voice_processor`, `modules.outbound`, `modules.recruitment_flow`, `modules.social_auto_reply`, `modules.draft_quality`, `shared.draft_reply`, `shared.queue`.
 - **Risk level:** Critical — deny-listed as protected path in `preflight_guard`; the entry point that persists every real inbound WhatsApp DM and (via drafts/outbound) can result in real outbound sends.
 - **Writes money / sends messages / read-only:** Reads bridge SQLite (never writes to it) and writes/sends via Postgres + downstream outbound queue; no direct cash-ledger writes.
+- **Update (2026-07-30):** `_is_draft_always(phone, role, display_name)` is now `async def` (was sync) — it checks a live DB flag (`fazle_runtime_settings` key `phone_block.{phone}`, via `modules.wa_chat_frontend.get_runtime_setting()`) before its pre-existing static `DRAFT_ALWAYS_PHONES`/role/name-prefix checks, so the per-number auto-reply block button (`POST /api/wa/contacts/{phone}/block`) actually takes effect (previously wrote a flag nothing read). **Process note:** this function has a second caller outside this module — `modules.social_auto_reply.planner_worker._is_draft_always_sender()` — found only after a full-suite regression run caught it missing its `await`; see `docs/DEVELOPER_GUIDE.md` §L for the lesson (grep repo-wide, not file-local, before converting any function to async).
 
 ### `modules.social_auto_reply`
 - **Purpose:** Backend extension handling social-media (Meta/Messenger/comments) inbound events end-to-end — classification, employee lookup, risk flagging, reply generation, rate-limited send queue with retry, and a planner/daemon worker loop.
@@ -206,6 +208,10 @@
 - **Critical dependencies:** `app.config`, `app.database`, `app.main`, `shared.bridge_orchestrator`, `shared.runtime_gateway`.
 - **Risk level:** Medium — read/orchestration layer; no direct SQL writes or message sends found. `adapters.py` explicitly declares `prohibited_side_effects` per adapter class (business writes, unrestricted SQL, WhatsApp sends) — enforced by construction, live path only instantiates read-only adapter classes.
 - **Writes money / sends messages / read-only:** Read-only.
+- **Update (2026-07-30, Unified Admin AI Engine):** 3 new tools added, additive only (0 existing entries/methods modified — confirmed via diff, 0 deletions in either file):
+  - `RT-015` (`error_log`, `registry.py`) — reads `fazle_error_log` via the new `modules.observability.db_queries.get_recent_errors()`, handled by `ReadonlyRuntimeAdapter._error_log_lookup()`. **Its `min_role: office_assistant` metadata is descriptive only** — `ReadonlyRuntimeAdapter.fetch()` has no per-tool RBAC check at all (confirmed by signature: no `actor_role_level` param), unlike the business adapter below. All `RT-*` tools currently share this limitation, not something newly introduced.
+  - `BUS-015` (`admin_directive_read`, `min_role: admin`) and `BUS-016` (`admin_directive_write`, `min_role: admin`, `authority: admin_directive_service` — deliberately not the `*_readonly_*` naming every other `BUS-*` entry uses, since this one genuinely writes) — both on `ReadonlyBusinessAdapter`, calling `modules.admin_directives`. `BUS-016` is the **first** `ai_console` business-family tool that performs a write — scoped exclusively to the narrow, non-Critical `fazle_admin_directives` table, never any table another `BUS-*` tool touches, and RBAC-gated identically to every other business tool via the existing `fetch()` mechanism (no new enforcement code needed).
+  - See `docs/ADMIN_AI_ENGINE.md` and `knowledge_base/06_developer_system/admin_ai_engine.md` for full detail.
 
 ### `modules.ai_readonly_tools`
 - **Purpose:** Safe, named read-only tool functions letting Ollama/Chat Lab query production data — enforces SELECT-only access through approved `ai_read_*` views, row limits (max 100), and field redaction; uses a dedicated `fazle_ai_reader` DB role when configured.
@@ -215,6 +221,16 @@
 - **Critical dependencies:** `app.config`, `app.database`, `modules.admin_commands.date_parser` (a coupling into a Critical business module for a generic utility — minor, noted in the consolidation report).
 - **Risk level:** Low — hard-constrained to SELECT-only by its own docstring.
 - **Writes money / sends messages / read-only:** Read-only.
+
+### `modules.admin_directives` (new, 2026-07-30, Unified Admin AI Engine)
+- **Purpose:** Narrow admin directive/action memory — lets an admin explicitly save/revoke a standing instruction ("remember always confirm advances over 5000tk"), and dispatches the 5 new WhatsApp admin AI commands. Deliberately separate from `modules.ollama_memory` (the AI's own isolated self-memory) — this module stores admin-authored content, never AI-inferred content, and every write here is human-triggered.
+- **Key files:** `__init__.py` (132 lines — CRUD: `save_directive`/`list_directives`/`get_directive`/`revoke_directive`), `router.py` (327 lines — WhatsApp command dispatch: `is_admin_ai_command`/`process_admin_ai_command`, the AI-query rate limiter, output sanitizer, phone normalizer). Kept as two files, and kept out of `modules.admin_commands.nl_router`, because `nl_router`'s own docstring is a hard "NO LLM" contract and this module's `AI` command does call one.
+- **Main APIs (no HTTP routes of its own beyond `app/main.py`'s thin `/admin/directives*` wrappers — see below):** `save_directive(...)`, `list_directives(...)`, `get_directive(id)`, `revoke_directive(id, revoked_by_phone=...)` (`__init__.py`); `is_admin_ai_command(text)`, `process_admin_ai_command(text, sender_phone)` (`router.py`).
+- **DB tables used:** `fazle_admin_directives` (`db/migrations/059_admin_directives.sql`, CHECK-constrained `category`/`created_by_channel`/`status`).
+- **Critical dependencies:** `app.database`, `modules.rbac` (RBAC + audit on every WhatsApp command), `modules.wa_chat_frontend` (`get_runtime_setting`/`set_runtime_setting` for `AUTOREPLY`), `modules.ai_console.orchestrator` (`AI <question>` forwards into `orchestrate_console_request()`), `shared.draft_reply` (`SEND` creates a draft only).
+- **Risk level:** Medium — write-capable (unlike almost every other AI-Console-adjacent module), but every write is gated by `rbac.check_permission()` (fail-closed) and audited; `SEND` never sends directly, only drafts via the existing human-approval queue.
+- **Writes money / sends messages / read-only:** Neither money nor direct sends — writes only `fazle_admin_directives` and `fazle_runtime_settings`; `SEND` writes `fazle_draft_replies` (a draft, not a send).
+- **Related HTTP routes:** `GET /admin/directives`, `POST /admin/directives`, `POST /admin/directives/{id}/revoke` (`app/main.py`, `require_command("admin_directive_read"/"admin_directive_write")`).
 
 ### `modules.rag`
 - **Purpose:** Lightweight offline Retrieval-Augmented Generation layer — bilingual (Bangla/English) BM25 + optional vector hybrid search over `resources/*.txt` files and `fazle_knowledge_base` rows, no external network calls during query.
@@ -251,6 +267,15 @@
 - **Critical dependencies:** `app.database`, `modules.scheduler`.
 - **Risk level:** Medium — operationally important but doesn't touch cash tables or send messages. Confirmed actually running: 18+ consecutive daily dumps on disk as of the 2026-07-08 audit.
 - **Writes money / sends messages / read-only:** Read/write backup metadata only; no money, no sends (shells out to `pg_dump`).
+
+### `modules.observability`
+- **Purpose:** In-memory Prometheus-style metrics store (counters/gauges/histograms) — `obs.snapshot()`/`render_prometheus()` used by `app/main.py`'s `/observability/summary`/`/metrics` routes. Not previously listed in this document (one of the ~37 modules this file's own scope note defers to `SYSTEM_CONSOLIDATION_PLAN_2026-07-08.md` Report 2 for) — added here now only for its one new file below.
+- **Key files:** `__init__.py` (pre-existing, pure in-memory, no DB access at all — confirmed by import inspection); **`db_queries.py` (new, 2026-07-30, 51 lines)** — one function, `get_recent_errors(limit=50)`, a read-only `SELECT` against `fazle_error_log`. Deliberately a separate file, not added to `__init__.py`, since that module's whole design is DB-free in-memory counters and a DB query would be a scope mismatch there.
+- **Main APIs relevant here:** `get_recent_errors(limit=50)` (`db_queries.py`) — duplicates the same query `GET /observability/errors` (`app/main.py`) already ran inline in its route handler, so `modules.ai_console.live_adapters`'s new `RT-015` tool has something cleanly importable to call (a FastAPI route handler isn't reusable as a plain function).
+- **DB tables used:** `fazle_error_log` (read-only). Confirmed **not** in `modules.preflight_guard.PROTECTED_TABLES` or its prefix list.
+- **Critical dependencies:** `app.database` (new, `db_queries.py` only).
+- **Risk level:** Low — single read-only SELECT, capped and clamped (`max(1, min(limit, 500))`), no write path.
+- **Writes money / sends messages / read-only:** Read-only.
 
 ### `modules.preflight_guard`
 - **Purpose:** Safety-gate module — deny-lists protected file paths/tables from unreviewed changes, runs pre-release checks, manages feature-flag kill switches, and exposes release-gate + feature-flag + device-location admin endpoints.
