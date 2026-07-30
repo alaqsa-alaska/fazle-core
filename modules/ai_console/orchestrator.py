@@ -59,6 +59,7 @@ def classify_message(message: str) -> str:
         # Bengali business signals
         "কর্মচারী", "কর্মচারি", "মোবাইল", "নাম্বার", "রেকর্ড", "খুঁজে", "বেতন",
         "হাজিরা", "অ্যাটেন্ডেন্স", "এসকর্ট", "লেজার", "ক্যাশ", "নিয়োগ",
+        "পেমেন্ট", "টাকা", "লেনদেন", "পরিশোধ",
     )):
         return "business"
     if any(token in q for token in ("instruction", "note", "memory", "preference", "troubleshooting")):
@@ -166,7 +167,7 @@ def select_live_tools(mode: str) -> list[str]:
     if mode == "memory":
         return ["MEM-001", "MEM-004", "MEM-005", "MEM-007"]
     # general / unclassified: run a broad baseline covering key areas
-    return ["BUS-001", "BUS-003", "BUS-004", "MEM-001", "RT-001"]
+    return ["BUS-001", "BUS-003", "BUS-004", "BUS-017", "BUS-018", "MEM-001", "RT-001"]
 
 
 # Keyword groups for narrowing "business" mode to a relevant subset of tools
