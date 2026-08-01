@@ -213,11 +213,14 @@ def normalize_payout_method(raw: Optional[str]) -> str:
         return "unknown"
     m = raw.strip().lower()
     mapping = {
-        "b": "bkash", "bkash": "bkash",
+        "b": "bkash", "bkash": "bkash", "bikash": "bkash", "bk": "bkash",
+        "বিকাশ": "bkash",
         "n": "nagad",  "nagad": "nagad",
+        "নগদ": "nagad",
         "c": "cash",   "cash": "cash",
+        "ক্যাশ": "cash",
         "r": "rocket", "rocket": "rocket",
-        "bk": "bkash",
+        "রকেট": "rocket",
     }
     return mapping.get(m, "unknown")
 

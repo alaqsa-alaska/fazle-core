@@ -184,3 +184,111 @@ class TestNormalizer:
     def test_normalize_amount_comma(self):
         from modules.fazle_payroll_engine.normalizer import normalize_amount
         assert normalize_amount("12,500") == 12500.0
+
+
+# ── 2026-08-01: "ID: <Name>" name-deletion bug + format flexibility ─────────
+#
+# Root cause: a message like "ID: Runo 01773558211(N) 800/-" has no numeric
+# employee ID — the sender always wrote "ID:" followed directly by the
+# person's name. The old _extract_name() blindly stripped "ID:" plus
+# whatever single token followed it, assuming that token was always a
+# phone number — deleting the name along with the label. employee_name_raw
+# came out None, validate_for_accounting() (required_fields includes
+# employee_name_raw for message_type='payment') rejected it, and the
+# message was silently diverted to fpe_unmatched_messages instead of
+# fpe_cash_transactions. Confirmed against live production data: 4 prior
+# real transactions for this same contact have this exact shape.
+
+class TestNameNotDeletedWhenIdTokenIsNotAPhone:
+
+    def test_id_prefix_with_name_not_phone(self):
+        """The exact message that was silently skipped in production."""
+        r = parse("ID: Runo 01773558211(N) 800/-")
+        assert r["type"] == MessageType.payment
+        p = r["payment"]
+        assert p.employee_name_raw == "Runo"
+        assert p.payout_phone == "01773558211"
+        assert p.payout_method == PayoutMethod.nagad
+        assert p.amount == Decimal("800")
+        # "Runo" is not phone-shaped, so it must never be treated as the
+        # employee_id_phone either — only a real ID number should be.
+        assert p.employee_id_phone == "01773558211"  # falls back to payout phone
+
+    def test_id_prefix_with_name_regression_still_works(self):
+        """A real numeric ID prefix must still be stripped as before."""
+        r = parse("ID: 01818388630 Md. Mohiuddin 01724263999(N) 1800/-")
+        p = r["payment"]
+        assert p.employee_name_raw == "Md. Mohiuddin"
+        assert p.employee_id_phone == "01818388630"
+        assert p.payout_phone == "01724263999"
+
+
+class TestFlexibleNameOrdering:
+
+    def test_name_after_phone_no_parens(self):
+        r = parse("Runo 01773558211 Nagad 800 taka")
+        p = r["payment"]
+        assert p.employee_name_raw == "Runo"
+        assert p.payout_method == PayoutMethod.nagad
+        assert p.amount == Decimal("800")
+
+    def test_bracketed_id_name_after_phone(self):
+        r = parse("[ID: 01773558211] Runo (Bkash) 800/-")
+        p = r["payment"]
+        assert p.employee_name_raw == "Runo"
+        assert p.payout_method == PayoutMethod.bkash
+        assert p.amount == Decimal("800")
+
+    def test_phone_before_name_bare_bengali_method(self):
+        r = parse("01773558211 Runo 800/- নগদ")
+        p = r["payment"]
+        assert p.employee_name_raw == "Runo"
+        assert p.payout_method == PayoutMethod.nagad
+        assert p.amount == Decimal("800")
+
+    def test_multiline_name_phone_bengali_amount_and_method(self):
+        r = parse("Runo\n01773558211\n800 টাকা নগদ")
+        p = r["payment"]
+        assert p.employee_name_raw == "Runo"
+        assert p.payout_method == PayoutMethod.nagad
+        assert p.amount == Decimal("800")
+
+
+class TestFlexibleAmountAndMethodFormats:
+
+    def test_taka_word_suffix(self):
+        r = parse("Karim 01811111111(B) 800 taka")
+        assert r["payment"].amount == Decimal("800")
+
+    def test_tk_word_suffix(self):
+        r = parse("Karim 01811111111(B) 800 tk")
+        assert r["payment"].amount == Decimal("800")
+
+    def test_bengali_taka_word_suffix_bengali_digits(self):
+        r = parse("Karim 01811111111(B) ৮০০ টাকা")
+        assert r["payment"].amount == Decimal("800")
+
+    def test_bengali_method_word_in_parens(self):
+        r = parse("Karim 01811111111(নগদ) 800/-")
+        assert r["payment"].payout_method == PayoutMethod.nagad
+
+    def test_bengali_bkash_word_in_parens(self):
+        r = parse("Karim 01811111111(বিকাশ) 800/-")
+        assert r["payment"].payout_method == PayoutMethod.bkash
+
+
+class TestMissingNameStillQueuesNotFabricated:
+    """A message with no name anywhere must yield employee_name_raw=None —
+    never a garbage/leftover-label value — so it correctly lands in the
+    review queue instead of being silently wrong."""
+
+    def test_no_name_present_at_all(self):
+        r = parse("01773558211(N) 800/-")
+        p = r["payment"]
+        assert p.employee_name_raw is None
+        assert p.amount == Decimal("800")
+        assert p.payout_phone == "01773558211"
+
+    def test_non_payment_text_unaffected(self):
+        r = parse("Good morning sir, please check the schedule tomorrow.")
+        assert r["type"] == MessageType.other

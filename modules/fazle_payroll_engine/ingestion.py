@@ -202,8 +202,15 @@ async def store_unmatched(
     (amount, phone, name, method, date, confidence) so an operator can review
     and promote it to a real fpe_cash_transactions entry. The ledger itself is
     NEVER touched here — this row is review-queue only.
+
+    2026-08-01: when the row is a genuine near-miss cash instruction (a real
+    amount was detected — as opposed to routine chit-chat/balance-summary
+    skips, which never pass detected_amount), push an immediate WhatsApp
+    notification to the configured admin number(s) instead of leaving it to
+    be discovered only by someone proactively checking the Payroll →
+    Unmatched tab. Never blocks or fails the review-queue write itself.
     """
-    await execute(
+    res = await execute(
         """
         INSERT INTO fpe_unmatched_messages
             (fpe_wa_message_id, reason, raw_content,
@@ -216,3 +223,55 @@ async def store_unmatched(
         detected_amount, detected_payout_phone, detected_employee_name,
         detected_payout_method, detected_txn_date, parser_confidence,
     )
+    inserted = str(res).strip().endswith(" 1")
+    if inserted and detected_amount is not None:
+        await _notify_admin_unmatched(
+            fpe_wa_message_id=fpe_wa_message_id,
+            reason=reason,
+            raw_content=raw_content,
+            detected_amount=detected_amount,
+            detected_payout_phone=detected_payout_phone,
+            detected_employee_name=detected_employee_name,
+        )
+
+
+async def _notify_admin_unmatched(
+    *,
+    fpe_wa_message_id: int,
+    reason: str,
+    raw_content: Optional[str],
+    detected_amount: "Decimal",
+    detected_payout_phone: Optional[str],
+    detected_employee_name: Optional[str],
+) -> None:
+    """Push a WhatsApp alert for a cash-instruction-shaped message that
+    landed in the Unmatched review queue instead of the ledger."""
+    import os
+
+    admins = [a.strip() for a in os.getenv("ADMIN_NUMBERS", "").split(",") if a.strip()]
+    if not admins:
+        return
+
+    text = (
+        "⚠️ Cash instruction not posted to ledger\n"
+        f"Amount: {detected_amount}\n"
+        f"Name: {detected_employee_name or '(not detected)'}\n"
+        f"Phone: {detected_payout_phone or '(not detected)'}\n"
+        f"Reason: {reason}\n"
+        f"Text: {(raw_content or '').strip()[:200]}\n"
+        "Review at Payroll → Unmatched to correct and promote."
+    )
+
+    try:
+        from modules.outbound import enqueue
+        for admin in admins:
+            await enqueue(
+                admin, text,
+                source_bridge="bridge2",
+                fallback_channel="bridge1",
+                purpose="fpe-unmatched-review",
+                idempotency_key=f"fpe-unmatched-{fpe_wa_message_id}-{admin}",
+                meta={"fpe_wa_message_id": fpe_wa_message_id, "reason": reason},
+            )
+    except Exception as exc:
+        log.warning("[fpe.ingest] unmatched notification failed msg=%d: %s", fpe_wa_message_id, exc)

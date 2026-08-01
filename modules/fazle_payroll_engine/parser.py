@@ -53,28 +53,39 @@ _RE_ID_PREFIX = re.compile(
     re.MULTILINE,
 )
 
-# Payment method in parentheses: (B), (N), (cash), ( B ), (bkash), (Nagad)
+# Payment method in parentheses: (B), (N), (cash), ( B ), (bkash), (Nagad),
+# (নগদ), (বিকাশ), (ক্যাশ), (রকেট)
 _RE_METHOD = re.compile(
-    r"\(\s*([BbNnCcRr]|[Bb][Kk]|[Cc]ash|[Nn]agad|[Bb][Kk]ash|[Rr]ocket)\s*\)",
+    r"\(\s*([BbNnCcRr]|[Bb][Kk]|[Cc]ash|[Nn]agad|[Bb][Kk]ash|[Rr]ocket"
+    r"|নগদ|বিকাশ|ক্যাশ|রকেট)\s*\)",
 )
 
-# Amount: digits/commas followed by "/", "/-", or "/+"
-# Handles "2200/-", "2,200/-", "= 200 /-", "১,৫৩০/-", "3500/", "500/+"
+# Payment method as a bare word (no parentheses), e.g.
+# "01773558211 Runo 800/- নগদ" or "Runo 01773558211 Nagad 800 taka"
+# NOTE: uses (?<!\w)/(?!\w) lookarounds instead of \b — Python's `re` module
+# does not treat Bengali dependent vowel signs (e.g. the trailing া in
+# বিকাশ/টাকা) as \w, so a trailing \b fails to match after such words.
+_RE_METHOD_BARE = re.compile(
+    r"(?<!\w)(Nagad|Bkash|Bikash|Cash|Rocket|নগদ|বিকাশ|ক্যাশ|রকেট)(?!\w)",
+    re.IGNORECASE,
+)
+
+# Amount: digits/commas followed by "/", "/-", "/+", OR by a bare
+# "taka"/"tk"/"টাকা" word (no slash at all).
+# Handles "2200/-", "2,200/-", "= 200 /-", "১,৫৩০/-", "3500/", "500/+",
+# "800 taka", "800 tk", "৮০০ টাকা"
+# (see _RE_METHOD_BARE note above re: (?!\w) vs \b for Bengali words)
 _RE_AMOUNT = re.compile(
-    r"[=\s]*([০-৯\d][০-৯\d,\.]*)\s*/(?:[-–+])?",
+    r"[=\s]*([০-৯\d][০-৯\d,\.]*)"
+    r"(?:\s*/(?:[-–+])?"
+    r"|\s+(?:taka|tk|টাকা)(?!\w))",
+    re.IGNORECASE,
 )
 
 # Balance summary patterns (Bengali):  "31/3/26=টোটাল বাকি =75,468/-"
 _RE_BAL_DATE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{2,4})")
 _RE_BAL_DUE  = re.compile(r"বাকি\s*[=:\s]+([০-৯\d][০-৯\d,]*)\s*/[-–]")
 _RE_BAL_COLL = re.compile(r"জমা\s*[=:\s]+([০-৯\d][০-৯\d,]*)\s*/[-–]")
-
-# Name heuristic: 1-5 Bengali/Latin words, may include dots and hyphens
-# Appears BEFORE the phone number in the line
-_RE_NAME_BEFORE_PHONE = re.compile(
-    r"^([A-Za-z\u0980-\u09FF][A-Za-z\u0980-\u09FF\s\.\-]{1,50}?)"
-    r"(?=\s*[\-–]?\s*(?:\+?8{0,2}01|\())",
-)
 
 _BENGALI_DIGITS_TRANS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
@@ -384,9 +395,15 @@ def _parse_payment(text: str, msg_date: Optional[date]) -> ParseResult:
         confidence = max(confidence, 0.75)
 
     # ── Payout method ─────────────────────────────────────────────────────────
+    # Try the parenthesized form first — "(N)", "(Bkash)", "(নগদ)" — then fall
+    # back to a bare method word with no parentheses at all, e.g.
+    # "01773558211 Runo 800/- নগদ" or "Runo 01773558211 Nagad 800 taka".
     m_method = _RE_METHOD.search(text)
-    if m_method:
-        raw_method = m_method.group(1)
+    raw_method = m_method.group(1) if m_method else None
+    if not raw_method:
+        m_method_bare = _RE_METHOD_BARE.search(text)
+        raw_method = m_method_bare.group(1) if m_method_bare else None
+    if raw_method:
         p.payout_method = PayoutMethod(normalize_payout_method(raw_method))
         if p.payout_phone:
             confidence = max(confidence, 0.9)
@@ -403,7 +420,7 @@ def _parse_payment(text: str, msg_date: Optional[date]) -> ParseResult:
         p.employee_id_phone = p.payout_phone
 
     # ── Employee name ─────────────────────────────────────────────────────────
-    name = _extract_name(text, id_match)
+    name = _extract_name(text)
     if name:
         p.employee_name_raw = name
         if p.payout_phone and p.payout_method != PayoutMethod.unknown:
@@ -453,58 +470,57 @@ def _is_valid_human_name(name: Optional[str]) -> bool:
     return True
 
 
-def _extract_name(text: str, id_match: Optional[re.Match]) -> Optional[str]:
+def _extract_name(text: str) -> Optional[str]:
     """
-    Extract employee name from message.
-    Strategy:
-    1. If ID prefix present, STRIP it (don't drop the line) so single-line
-       "ID: 019... Max Day 017...(B) 1070/-" still yields "Max Day".
-    2. Try to find the name before the phone number.
+    Extract employee name from message text.
+
+    Strategy: for each line, remove every OTHER recognized field — the
+    "ID:"/"[ID:" label (with or without a following phone), any phone
+    number, any parenthesized or bare payment-method word, and the amount
+    (with its "/-", "/", or "taka"/"tk"/"টাকা" suffix) — then whatever text
+    remains on that line is the name candidate. This is robust to the name
+    appearing before, after, or between the phone/method/amount, unlike a
+    fixed "name must come before the phone" assumption.
+
+    2026-08-01 fix: the previous version had an ID-prefix stripper that
+    blindly deleted whatever single token followed "ID:", assuming it was
+    always the numeric employee ID — including when that token was actually
+    the name itself (e.g. "ID: Runo 01773558211(N) 800/-", where "Runo" has
+    no registered numeric ID and was always referred to this way). That
+    silently dropped the name and diverted the message to manual review
+    instead of the ledger. The new version only consumes the token after
+    "ID:" when it is itself phone-shaped.
     """
     lines = text.strip().splitlines()
 
-    # Strip the ID-prefix span from whichever line contains it (if any),
-    # but KEEP the rest of that line for name extraction.
-    working_lines = []
-    id_span_text = id_match.group(0) if id_match else None
-    id_stripped_line: Optional[str] = None
-    for l in lines:
-        if id_span_text and id_span_text in l:
-            l = l.replace(id_span_text, "", 1)
-            id_stripped_line = l
-        working_lines.append(l)
+    for line in lines:
+        working = line
 
-    # Search each remaining line for name before phone
-    for line in working_lines:
-        line = line.strip()
-        # Skip very short lines or lines that are just phones
-        if not line or len(line) < 3:
-            continue
+        # Strip a leading "ID:" / "[ID:" label. Only consume the token right
+        # after it when that token is itself phone-shaped — otherwise it IS
+        # the name, and must never be deleted.
+        m_label = re.match(r"^\s*\[?\s*[Ii][Dd]\s*[:：]\s*", working)
+        if m_label:
+            rest = working[m_label.end():]
+            m_id_phone = re.match(r"^(\+?8{0,2}01\d+)\s*\]?\s*", rest)
+            working = rest[m_id_phone.end():] if m_id_phone else rest
 
-        # Try name-before-phone pattern
-        m = _RE_NAME_BEFORE_PHONE.match(line)
-        if m:
-            name = m.group(1).strip().rstrip("-– ")
-            if _is_valid_human_name(name):
-                return name
+        # Remove every phone-shaped token, wherever it sits on the line.
+        working = re.sub(r"\+?8{0,2}01[\d\s\-]{8,12}\d", " ", working)
 
-        # Fallback: if line has a phone, take everything before the phone
-        phone_match = re.search(r"(?:\+?8{0,2}01\d{9})", line)
-        if phone_match:
-            candidate = line[:phone_match.start()].strip().rstrip("-– ")
-            # Remove residual "ID: XXXXXXXXX" prefix if any
-            candidate = re.sub(r"^[Ii][Dd]\s*[:：]\s*\S+\s*", "", candidate).strip()
-            if _is_valid_human_name(candidate):
-                return candidate
+        # Remove a parenthesized or bare payment-method word.
+        working = _RE_METHOD.sub(" ", working)
+        working = _RE_METHOD_BARE.sub(" ", working)
 
-    # Fallback: "ID:<phone> <Name>" written together on one line, with the
-    # payout phone/method/amount on a following line instead of the same one
-    # (e.g. "ID:01805668850 Junaid Islam Shami\n01773055387(B) 500/-").
-    # Once the ID phone is stripped, nothing else on that line is a phone —
-    # so whatever text remains, if it has no digits at all, is the name.
-    if id_stripped_line is not None:
-        candidate = id_stripped_line.strip().rstrip("-– ")
-        if candidate and not re.search(r"\d", candidate) and _is_valid_human_name(candidate):
+        # Remove the amount and its "/-", "/", or "taka"/"tk"/"টাকা" suffix.
+        working = working.translate(_BENGALI_DIGITS_TRANS)
+        working = _RE_AMOUNT.sub(" ", working)
+
+        # Cleanup: drop stray brackets/equals signs, collapse whitespace.
+        candidate = re.sub(r"[\[\]=]", " ", working)
+        candidate = re.sub(r"\s+", " ", candidate).strip().strip("-–:： ")
+
+        if _is_valid_human_name(candidate):
             return candidate
 
     return None
