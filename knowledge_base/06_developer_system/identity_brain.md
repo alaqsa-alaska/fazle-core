@@ -65,6 +65,22 @@ When the primary phone lookup in `wbom_employees` fails, the system tries four s
 
 **CORRECTION — Step 10 (Candidate):** The table above cites `fazle_recruitment_sessions`. In the actual `identity_brain` module, candidate detection runs at Step 5 via `_is_candidate_text()` using `_CANDIDATE_KEYWORDS` on the message text. There is no `fazle_recruitment_sessions` lookup in `detect_identity()`. The session table is managed by `modules/recruitment_flow` — separate from identity detection.
 
+**CORRECTION — Step order between `client_escort_buyer` and `employee`'s "secondary evidence" (2026-08-01, real incident):** The 11-step table above predates the Phase 1B.2 escort-client-identity work (2026-07-17 onward) and does not reflect the actual current step order or a real bug found and fixed in it. As of 2026-08-01, `detect_identity()`'s real order between seed rules and `db_contact` is:
+
+1. `settings` (admin)
+2. `seed_rule` (`fazle_contact_roles`)
+3. `db_employee` (`wbom_employees` phone match — a *genuine* employee record)
+4. **`cash_payment` / `attendance`** (`fpe_cash_transactions` / `wbom_attendance` — incidental "operational evidence," NOT a genuine employee record) — **as of 2026-08-01, skipped entirely for any phone on the `ESCORT_CLIENT_PHONES` allowlist**, see fix below
+5. `escort_roster` (active `wbom_escort_programs` duty)
+6. `env_phone` (explicit `ESCORT_CLIENT_PHONES` match → `client_escort_buyer`)
+7. `db_contact` (`wbom_contacts` relation / contact-name "escort" marker)
+8. `text_hint` (candidate keywords, then unverified escort-content keywords)
+9. `unknown`
+
+**Real incident and fix:** a phone explicitly configured in `ESCORT_CLIENT_PHONES` received a single incidental cash payment months into an ongoing client relationship (`fpe_cash_transactions` auto-creates an employee stub for any WhatsApp-shorthand payout recipient regardless of their other roles — see `05_workflows/cash_workflow.md`'s missing-name-handling section). From that day forward `_lookup_cash_identity()` matched this phone on every message and returned role `employee` (source `cash_payment`, confidence 86) **before step 6 (`env_phone`) ever ran** — permanently overriding the explicit allowlist entry with no way to self-correct. Fixed by having steps 4's two lookups (`_lookup_cash_identity`, `_lookup_attendance_identity`) skip entirely when the phone matches `ESCORT_CLIENT_PHONES`; step 3's *genuine* `db_employee` record is intentionally still allowed to override, since that's a materially stronger signal than an incidental payment/attendance row.
+
+A second, independent bug compounded this and would have blocked the fix above on its own: `modules.escort._escort_client_phone_list()` returns canonical `01XXXXXXXXX` form (changed from `880`-form in commit `6aca81e`, 2026-07-20, to fix that function's *other* two callers), but `identity_brain._normalize_phone()` always produces `8801XXXXXXXXX` form — so step 6's direct string-equality check could never have matched any configured client from 2026-07-20 onward, regardless of step ordering. The 2026-07-20 commit's own audit explicitly claimed identity_brain "already compares self-consistently" — that claim was wrong for this one call site. Fixed by comparing against every canonical phone variant (`_phone_variants()`) instead of raw equality.
+
 ---
 
 ## Identity Brain Module Constants

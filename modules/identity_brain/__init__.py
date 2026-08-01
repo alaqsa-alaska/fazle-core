@@ -119,7 +119,19 @@ def _matches_env_escort_phone(norm_phone: str) -> bool:
     canonical, actually-used phone-list parser
     (modules.escort._escort_client_phone_list) rather than the dead,
     divergent shared/env.py implementation — see Session 21 Phase 1B.2 audit.
-    Function-local import to avoid a circular import with modules.escort."""
+    Function-local import to avoid a circular import with modules.escort.
+
+    2026-08-01 fix: modules.escort._escort_client_phone_list() returns
+    canonical 01XXXXXXXXX form (Owner Directive 2026-07-01, commit 6aca81e
+    2026-07-20 — that fix realigned the function's *other* two callers,
+    which compare 01-format, but this caller's `norm_phone` is always
+    8801XXXXXXXXX form, per this module's own _normalize_phone()). Direct
+    equality could therefore never match any configured client from that
+    commit onward — the 2026-07-20 audit's claim that identity_brain
+    "already compares self-consistently" was wrong for this one call site.
+    Confirmed live: a verified ESCORT_CLIENT_PHONES number was silently
+    resolving to the wrong role because of exactly this. Compare against
+    every canonical phone-variant instead of assuming a shared format."""
     if not norm_phone:
         return False
     try:
@@ -129,7 +141,7 @@ def _matches_env_escort_phone(norm_phone: str) -> bool:
     clients = _escort_client_phone_list()
     if not clients:
         return False
-    return norm_phone in clients
+    return any(variant in clients for variant in _phone_variants(norm_phone))
 
 
 def _normalize_phone(phone: str) -> Optional[str]:
@@ -192,21 +204,38 @@ async def detect_identity(phone: str, text: str = "") -> dict:
                           priority=_ROLE_PRIORITY[role], emp=emp, lifecycle=lifecycle)
 
         # ── Step 3.5: operational evidence lookups ─────────────────────────────
-        cash_emp = await _lookup_cash_identity(norm)
-        if cash_emp:
-            role = _designation_to_role(cash_emp.get("designation"))
-            lifecycle = await _lookup_lifecycle(norm, cash_emp)
-            log.info("[identity] %s → %s (cash_payment, lifecycle=%s)", norm, role, lifecycle)
-            return _build(_phone=norm, role=role, confidence=86, source="cash_payment",
-                          priority=_ROLE_PRIORITY[role], emp=cash_emp, lifecycle=lifecycle)
+        # 2026-08-01 fix: a one-off cash payment or attendance record must
+        # never override an explicit, Owner-configured ESCORT_CLIENT_PHONES
+        # entry. Confirmed live incident: a verified escort-client buyer
+        # received a single incidental cash payment months into their
+        # ongoing client relationship (fpe_cash_transactions auto-creates an
+        # employee stub for any payout recipient — see the 2026-08-01 FPE
+        # parser fix); every message from them was then misidentified as
+        # role="employee" (source=cash_payment) forever after, silently
+        # routing their real escort orders into the generic AI-reply/draft
+        # path instead of the escort-order pipeline. A genuine Step 3
+        # wbom_employees/fpe_employees record (above) is a materially
+        # stronger signal and is intentionally still allowed to override —
+        # only the weaker cash/attendance "operational evidence" signals are
+        # gated here.
+        _is_escort_client_phone = _matches_env_escort_phone(norm)
 
-        attendance_emp = await _lookup_attendance_identity(norm)
-        if attendance_emp:
-            role = _designation_to_role(attendance_emp.get("designation"))
-            lifecycle = await _lookup_lifecycle(norm, attendance_emp)
-            log.info("[identity] %s → %s (attendance, lifecycle=%s)", norm, role, lifecycle)
-            return _build(_phone=norm, role=role, confidence=86, source="attendance",
-                          priority=_ROLE_PRIORITY[role], emp=attendance_emp, lifecycle=lifecycle)
+        if not _is_escort_client_phone:
+            cash_emp = await _lookup_cash_identity(norm)
+            if cash_emp:
+                role = _designation_to_role(cash_emp.get("designation"))
+                lifecycle = await _lookup_lifecycle(norm, cash_emp)
+                log.info("[identity] %s → %s (cash_payment, lifecycle=%s)", norm, role, lifecycle)
+                return _build(_phone=norm, role=role, confidence=86, source="cash_payment",
+                              priority=_ROLE_PRIORITY[role], emp=cash_emp, lifecycle=lifecycle)
+
+            attendance_emp = await _lookup_attendance_identity(norm)
+            if attendance_emp:
+                role = _designation_to_role(attendance_emp.get("designation"))
+                lifecycle = await _lookup_lifecycle(norm, attendance_emp)
+                log.info("[identity] %s → %s (attendance, lifecycle=%s)", norm, role, lifecycle)
+                return _build(_phone=norm, role=role, confidence=86, source="attendance",
+                              priority=_ROLE_PRIORITY[role], emp=attendance_emp, lifecycle=lifecycle)
 
         escort_row = await _lookup_escort_roster(norm)
         if escort_row:
@@ -226,14 +255,16 @@ async def detect_identity(phone: str, text: str = "") -> dict:
             )
 
         # ── Step 3.7: explicit ESCORT_CLIENT_PHONES match (Phase 1B.2, source A) ──
-        # Runs only once no seed row, employee record, cash/attendance signal, or
-        # active escort-roster duty already matched above — an explicit .env
-        # allowlist entry is the highest-priority *escort-client* source, but
-        # must never shadow a real employee/admin/family/seed-role identity.
-        # Empty list = no match here (never "every phone matches") — that
-        # "open mode" semantics belongs solely to modules.escort's parser-stage
-        # gate (_is_allowed_escort_client), not to identity resolution.
-        if _matches_env_escort_phone(norm):
+        # Runs only once no seed row, employee record, or active escort-roster
+        # duty already matched above (cash/attendance operational evidence is
+        # now gated ahead of this, not a peer of it — see the 2026-08-01 fix
+        # note at Step 3.5) — an explicit .env allowlist entry is the
+        # highest-priority *escort-client* source, but must never shadow a
+        # real employee/admin/family/seed-role identity. Empty list = no
+        # match here (never "every phone matches") — that "open mode"
+        # semantics belongs solely to modules.escort's parser-stage gate
+        # (_is_allowed_escort_client), not to identity resolution.
+        if _is_escort_client_phone:
             log.info("[identity] %s → client_escort_buyer (env_phone)", norm)
             return _build(_phone=norm, role="client_escort_buyer", confidence=95, source="env_phone",
                           priority=_ROLE_PRIORITY["client_escort_buyer"])

@@ -141,6 +141,25 @@ Added in commit `41916b0` (2026-06-27) and unchanged since:
   `_is_authoritative_bridge_confirmation(ctx)` — sender must be one of
   `ADMIN_NUMBERS`/`ADMIN_META_NUMBER`/`ADMIN_BRIDGE1_NUMBER`/`ADMIN_BRIDGE2_NUMBER`, and
   if a recipient is given it must be a registered `ESCORT_CLIENT_PHONES` entry.
+- **Completed-draft detection gate** (`modules/escort/__init__.py`,
+  `is_completed_escort_draft()`, checked by `bridge_poller._poll_bridge()`
+  on every outgoing admin message *before* `handle_admin_escort_completion()`
+  is even called): requires Mother Vessel + Lighter Vessel + Escort Name +
+  Escort Mobile + a date, **and** a recognized company-name signature
+  somewhere in the text. **2026-08-01 incident:** the company-name check
+  (`_AL_AQSA_RE`) was a hardcoded regex listing only the pre-2026-07-21 name
+  ("Al-Aqsa") and the 2026-07-21 rebrand name ("Al-Manaratayn") — it was
+  never updated for the 2026-07-22 "Second Rebrand" to "Al-Rifa'i Integrated
+  Services" (`management_decisions.md`, `Settings.company_name`), even
+  though the *other* brand-name gate in this codebase (§14 of
+  `whatsapp_reply_workflow.md`, a different, contact-name-based check) was
+  correctly updated for it the same day. Every real, well-formed admin
+  confirmation signed with the current name silently failed this gate from
+  2026-07-22 onward — never confirming a program, never erroring, never
+  logging why. Fixed by additionally accepting any message that mentions
+  the live `Settings.company_name` (tolerant of punctuation/spacing), so a
+  future rebrand only requires updating `COMPANY_NAME` in `.env`, not this
+  file — see `_matches_company_name()`.
 - **Draft TTL**: unconfirmed drafts (`status='draft'`) are hard-**deleted**, not
   soft-expired, after `DRAFT_TTL_HOURS` (default 24) — `expire_stale_drafts()` in
   `modules/escort_roster/db.py`, added in commit `82f2b33` (2026-07-05), run on a

@@ -214,3 +214,71 @@ class TestEscortContentDetection:
         actual_role = result.get("identity_role") or result.get("role")
         # Should be escort-related or at least not 'candidate'
         assert actual_role != "candidate"
+
+
+# ── 2026-08-01: ESCORT_CLIENT_PHONES vs incidental cash/attendance evidence ──
+#
+# Real incident: 8801670535255 is an explicitly configured ESCORT_CLIENT_PHONES
+# entry. On 2026-07-25 a one-off cash payment ("Hridoy 01670-535255(N) 2000/-")
+# to the same person auto-created an fpe_employees stub (the same auto-create
+# mechanism as the 2026-08-01 FPE parser fix). From that day on, every message
+# from this number resolved to role="employee" (source=cash_payment) instead
+# of client_escort_buyer, because Step 3.5 (operational evidence) ran before
+# Step 3.7 (the explicit allowlist) and never deferred to it. A genuine
+# escort order from this verified client was misrouted into the generic
+# AI-reply/draft path, its intent misclassified as "greeting", instead of
+# reaching modules.escort.handle_escort_client_message().
+#
+# A second, independent bug compounded this: modules.escort.
+# _escort_client_phone_list() returns canonical 01XXXXXXXXX form (commit
+# 6aca81e, 2026-07-20), but identity_brain's own _normalize_phone() always
+# produces 8801XXXXXXXXX form — so even after reordering priority, the
+# direct-equality allowlist check could never have matched anything.
+
+class TestEscortClientPhonePriorityFix:
+
+    async def test_escort_client_phone_beats_cash_payment_evidence(self):
+        """The exact production incident: an explicit ESCORT_CLIENT_PHONES
+        entry must resolve as client_escort_buyer even though the same
+        phone also has an (incidental) cash-payment record on file."""
+        from modules.identity_brain import detect_identity
+
+        with patch("modules.identity_brain._lookup_seed", new=AsyncMock(return_value=None)), \
+             patch("modules.identity_brain._lookup_employee", new=AsyncMock(return_value=None)), \
+             patch("modules.identity_brain._lookup_escort_roster", new=AsyncMock(return_value=None)), \
+             patch("modules.identity_brain._matches_env_escort_phone", return_value=True), \
+             patch("modules.identity_brain._lookup_cash_identity", new=AsyncMock(
+                 return_value={"employee_id": 252, "employee_name": "Hridoy", "designation": "Staff"}
+             )) as mock_cash:
+            result = await detect_identity("8801670535255", "Mv.Elim inspire /Nabil /wheat")
+
+        actual_role = result.get("identity_role") or result.get("role")
+        assert actual_role == "client_escort_buyer"
+        mock_cash.assert_not_awaited()
+
+    async def test_non_escort_client_phone_still_uses_cash_payment_evidence(self):
+        """Regression guard: a phone NOT on the escort-client allowlist must
+        still resolve via cash-payment evidence exactly as before."""
+        from modules.identity_brain import detect_identity
+
+        with patch("modules.identity_brain._lookup_seed", new=AsyncMock(return_value=None)), \
+             patch("modules.identity_brain._lookup_employee", new=AsyncMock(return_value=None)), \
+             patch("modules.identity_brain._matches_env_escort_phone", return_value=False), \
+             patch("modules.identity_brain._lookup_cash_identity", new=AsyncMock(
+                 return_value={"employee_id": 99, "employee_name": "Someone", "designation": "Staff"}
+             )), \
+             patch("modules.identity_brain._lookup_lifecycle", new=AsyncMock(return_value="active")):
+            result = await detect_identity("8801900000000", "some text")
+
+        actual_role = result.get("identity_role") or result.get("role")
+        assert actual_role == "employee"
+
+    def test_matches_env_escort_phone_handles_format_mismatch(self):
+        """_escort_client_phone_list() returns 01XXXXXXXXX; the caller's
+        normalized phone is 8801XXXXXXXXX. The check must compare across
+        all canonical variants, not raw equality."""
+        from modules.identity_brain import _matches_env_escort_phone
+
+        with patch("modules.escort._escort_client_phone_list", return_value=["01670535255"]):
+            assert _matches_env_escort_phone("8801670535255") is True
+            assert _matches_env_escort_phone("8801900000000") is False

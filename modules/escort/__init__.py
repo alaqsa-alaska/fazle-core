@@ -164,6 +164,34 @@ _CD_DEST_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _AL_AQSA_RE = re.compile(r"al.?aqsa|আল.?আকসা|al.?manaratayn|আল.?মানারাতাইন", re.IGNORECASE)
+
+
+def _matches_company_name(text: str) -> bool:
+    """True if `text` mentions the currently-configured company name
+    (settings.company_name), tolerant of punctuation/spacing variation —
+    e.g. "Al-Rifa'i", "Al Rifa'i", "AlRifai" all match "Al-Rifa'i Integrated
+    Services".
+
+    2026-08-01: added because _AL_AQSA_RE (above) is a hardcoded, static
+    list of past brand names — it already missed a rebrand once (it lists
+    "al-aqsa" and "al-manaratayn" but not "Al-Rifa'i Integrated Services",
+    which is what admin's own message signature and the system's own
+    AI-generated greeting both actually use right now, per COMPANY_NAME in
+    .env) and silently broke every real escort-order confirmation until
+    this fix, with zero error or log signal. Deriving from the one
+    canonical settings value means the next rebrand only requires updating
+    COMPANY_NAME, not this file."""
+    settings = get_settings()
+    company = (getattr(settings, "company_name", "") or "").strip()
+    if not company:
+        return False
+    brand_token = company.split()[0]  # e.g. "Al-Rifa'i" from "Al-Rifa'i Integrated Services"
+
+    def _normalize(s: str) -> str:
+        return re.sub(r"[^a-z0-9ঀ-৿]", "", s.lower())
+
+    needle = _normalize(brand_token)
+    return bool(needle) and needle in _normalize(text)
 _TRAILING_MV_PAREN_RE = re.compile(r"\(\s*(mv\.?\s+[A-Za-z0-9][A-Za-z0-9\s.\-]{1,60})\s*\)$", re.IGNORECASE)
 
 # O/a to <destination> pattern for inbound messages
@@ -989,9 +1017,9 @@ def build_admin_message(order: EscortOrder, sender_phone: str) -> str:
 def is_completed_escort_draft(text: str) -> bool:
     """Return True if admin message is a filled-in escort draft."""
     draft = parse_completed_draft(text)
-    has_al_aqsa = bool(_AL_AQSA_RE.search(text))
+    has_company_signature = bool(_AL_AQSA_RE.search(text)) or _matches_company_name(text)
     return bool(
-        has_al_aqsa
+        has_company_signature
         and draft.get("mother_vessel")
         and draft.get("lighter_vessel")
         and draft.get("escort_name")

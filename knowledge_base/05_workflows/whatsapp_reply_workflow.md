@@ -378,6 +378,16 @@ Al-Aqsa / আল-আকসা · Al-Manaratayn / আল-মানারাতা
 All three brand-name generations kept simultaneously (augment-don't-replace
 rule) since older saved contacts may still carry an earlier name.
 
+**Not the only brand-name gate in this codebase — don't assume this one being
+current means all of them are:** `modules/escort/__init__.py`'s
+`is_completed_escort_draft()` has its own, separate, message-*body*-text
+brand check (`_AL_AQSA_RE`) gating admin escort-confirmation detection. It
+was missed during this same 2026-07-22 rebrand and silently broke every
+admin confirmation from that day until fixed 2026-08-01 — see
+`escort_source_of_truth_workflow.md`'s "Enforcement" section for the
+incident. When a future rebrand happens, grep for every hardcoded brand-name
+literal repo-wide, not just this one.
+
 Examples (all match): "Escort Masud WA", "Md Karim Escort", "Client Nizam
 Office", "Operation Murad", "Al Aqsa Accountant", "Rahim Office Chattogram".
 
