@@ -168,6 +168,17 @@ _ESCORTCONFIRM_RE = re.compile(
     r"^escortconfirm\s+(\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([DNdn])",
     re.IGNORECASE,
 )
+# Escort confirmation review (Step 5, 2026-08-01): admin replies to an
+# "Admin REMINDER <id>" push (see modules.escort._create_escort_confirmation_
+# review_draft) with "<id> Type: APPROVE|EDIT|REJECT [<corrected message>]".
+# Deliberately a separate command/handler from the generic APPROVE/EDIT/
+# REJECT above -- that EDIT sends the edited text to the original sender,
+# which is the wrong meaning for a confirmation correction (see
+# docs/PLAN_ESCORT_CONFIRMATION_MULTI_ENTRY_2026-08-01.md Step 5).
+_ESCORT_REVIEW_RE = re.compile(
+    r"^(\d+)\s+type\s*:\s*(approve|edit|reject)(?:\s+(.+))?$",
+    re.IGNORECASE | re.DOTALL,
+)
 # REVERSE <transaction_id> <reason…>
 _REVERSE_RE = re.compile(r"^reverse\s+\d+.*$", re.IGNORECASE)
 # ADJUST <draft_id> <amount> <method>
@@ -196,7 +207,9 @@ def is_admin_command(text: str) -> bool:
         _USER_APIKEY_RE.match(t) or
         _REVERSE_RE.match(t) or _ADJUST_RE.match(t) or
         # Sprint-3B
-        _APPROVED_RE.match(t) or _DREDIT_RE.match(t) or _DREJECT_RE.match(t)
+        _APPROVED_RE.match(t) or _DREDIT_RE.match(t) or _DREJECT_RE.match(t) or
+        # Step 5 (2026-08-01) escort confirmation review
+        _ESCORT_REVIEW_RE.match(t)
     )
 
 
@@ -234,6 +247,9 @@ def _classify_command(t: str) -> Optional[str]:
         (_APPROVED_RE, "paid"),
         (_DREDIT_RE, "edit"),
         (_DREJECT_RE, "reject"),
+        # Step 5 (2026-08-01) — same RBAC tier as escortconfirm (admin
+        # managing escort assignments)
+        (_ESCORT_REVIEW_RE, "escortconfirm"),
     )
     for rx, name in pairs:
         if rx.match(t):
@@ -465,6 +481,29 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
         date_str     = m.group(4).strip()
         shift        = m.group(5).upper()
         return await _cmd_escort_confirm(order_id, escort_name, escort_mobile, date_str, shift, admin_phone)
+
+    # Step 5 (2026-08-01): "<id> Type: APPROVE|EDIT|REJECT [<corrected message>]"
+    m = _ESCORT_REVIEW_RE.match(t)
+    if m:
+        review_id = int(m.group(1))
+        action = m.group(2).lower()
+        extra = (m.group(3) or "").strip()
+        from modules.escort import (
+            approve_escort_confirmation_review,
+            edit_escort_confirmation_review,
+            reject_escort_confirmation_review,
+        )
+        if action == "approve":
+            return await approve_escort_confirmation_review(review_id, admin_phone)
+        if action == "reject":
+            return await reject_escort_confirmation_review(review_id, admin_phone)
+        # edit
+        if not extra:
+            return (
+                f"❌ #{review_id} EDIT-এর জন্য সম্পূর্ণ সংশোধিত confirmation বার্তা দিতে হবে "
+                f"(শুধু '{review_id} Type: EDIT' যথেষ্ট নয়)।"
+            )
+        return await edit_escort_confirmation_review(review_id, extra, admin_phone)
 
     # ── user mgmt (B19) ──
     if _USER_LIST_RE.match(t):

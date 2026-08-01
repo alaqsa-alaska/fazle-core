@@ -2,7 +2,7 @@
 title: Escort Source Of Truth Workflow
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-27
+last_verified: 2026-08-01
 runtime_index: true
 ---
 
@@ -141,6 +141,37 @@ Added in commit `41916b0` (2026-06-27) and unchanged since:
   `_is_authoritative_bridge_confirmation(ctx)` — sender must be one of
   `ADMIN_NUMBERS`/`ADMIN_META_NUMBER`/`ADMIN_BRIDGE1_NUMBER`/`ADMIN_BRIDGE2_NUMBER`, and
   if a recipient is given it must be a registered `ESCORT_CLIENT_PHONES` entry.
+- **Multi-entry processing (2026-08-01)**: `handle_admin_escort_completion()`
+  parses the confirmation into one or more entries
+  (`parse_completed_draft_entries()` — splits on numbered lighter-vessel
+  blocks, one entry per lighter/escort pair, sharing the message's one
+  mother vessel/date/shift) and processes each independently through
+  `_process_one_confirmation_entry()`: matched → update+sync+reconcile as
+  before; no match → queue for review (unchanged 2026-07-19 rule, see
+  `04_business_rules/escort_business_rules.md`); a mobile number present
+  but malformed → `_create_escort_confirmation_review_draft()` pushes an
+  "Admin REMINDER `<id>`" to `ADMIN_NUMBERS`
+  (`fazle_draft_replies.intent='escort_confirmation_review'`), and admin
+  replies `<id> Type: APPROVE|EDIT|REJECT`
+  (`modules/admin_commands.py::approve_escort_confirmation_review` /
+  `edit_escort_confirmation_review` / `reject_escort_confirmation_review`
+  — a dedicated command set, not the generic `APPROVE`/`EDIT`/`REJECT`,
+  whose `EDIT` sends text to the original sender instead of re-saving a
+  correction). One bad entry never blocks the other entries in the same
+  message. Root incident: a real two-lighter confirmation was silently
+  processing only its first entry (every field regex in the pre-2026-08-01
+  parser used `.search()`, never `.finditer()`).
+- **Exact master-mobile fallback (2026-08-01)**: `_find_pending_program()`
+  runs the normal fuzzy-score match first; only if that's inconclusive does
+  it check for an exact match on the lighter's master mobile among drafts
+  from the last 7 days — if exactly one draft has that exact mobile, it's
+  used (proof, not just a scoring signal); two or more sharing that mobile
+  stays ambiguous.
+- **Vessel-prefix normalization (2026-08-01)**: `_strip_vessel_prefix()`
+  recognizes `MV`/`M.V.`/`M.v.`/`M V`/`M v` (any casing/spacing) as the
+  same label — previously only `MV`/`MV.` were recognized, so `"M.V.
+  Elim"` passed through unstripped and then got a second `"MV "` prepended
+  (`"MV M.V. ELIM"`).
 - **Completed-draft detection gate** (`modules/escort/__init__.py`,
   `is_completed_escort_draft()`, checked by `bridge_poller._poll_bridge()`
   on every outgoing admin message *before* `handle_admin_escort_completion()`

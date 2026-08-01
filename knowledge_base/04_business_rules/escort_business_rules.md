@@ -2,7 +2,7 @@
 title: Escort Business Rules
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-07-05
+last_verified: 2026-08-01
 runtime_index: true
 ---
 
@@ -69,18 +69,51 @@ Required confirmation fields:
 - Lighter Vessel
 - Escort Name
 - Escort Mobile
-- Start Date
+- Start Date (Shift D/N also expected when present)
 
-If any required confirmation field is missing:
-- Ignore the message as escort confirmation
-- Do not update a draft
-- Do not create a confirmed row
+**Multi-entry confirmations (2026-08-01):** one confirmation message has
+exactly one Mother Vessel, but may assign multiple escorts across multiple
+numbered lighter-vessel blocks ("1. Lighter Vessel: ...", "2. Lighter
+Vessel: ...") — one escort per lighter. Every numbered block is its own
+independent entry: matched, updated, and synced to the roster separately.
+One entry failing (see below) never blocks the others in the same message.
+`modules/escort/parse_completed_draft_entries()` is the parser; a message
+with no numbered blocks (the normal single-lighter case) is unaffected.
 
-If all required confirmation fields are present:
+Vessel-name prefixes — `MV`, `M.V.`, `M.v.`, `M V`, `M v` (any casing,
+periods, spacing) — all normalize to the same canonical form before
+matching or storage.
+
+If a required field is missing entirely for a given entry:
+- Ignore that entry as an escort confirmation (unaffected — unchanged rule)
+- Do not update a draft for that entry, do not create a confirmed row
+
+**If a mobile number (Master Mobile or Escort Mobile) is present but
+malformed** (digits found, but not a valid 11-digit BD number) for a given
+entry — as opposed to genuinely absent — that entry is **not** silently
+ignored and not silently guessed: an "Admin REMINDER" is pushed to
+`ADMIN_NUMBERS` immediately with the entry's full text, and the admin
+replies `<id> Type: APPROVE` (save exactly as sent), `<id> Type: REJECT`
+(discard), or `<id> Type: EDIT <complete corrected message>` (re-parsed and
+saved). See `05_workflows/escort_source_of_truth_workflow.md` "Enforcement"
+section for the exact mechanism.
+
+If all required fields are present for a given entry:
 - Match an existing draft by client phone, master mobile, mother vessel, and start date
-- Update the existing row when matched
-- Overwrite incorrect draft values with confirmation values
-- Create one confirmed row only when no draft exists
+- An **exact match on the lighter's master mobile number alone** is treated
+  as proof of the same order (not just a fuzzy-scoring signal) when the
+  normal match score is inconclusive — but only as a fallback (the normal
+  scoring path always runs first) and only among drafts from the last 7
+  days; two or more drafts sharing that same master mobile stays genuinely
+  ambiguous and is not auto-resolved.
+- Update the existing row when matched; overwrite incorrect draft values
+  with confirmation values
+- **When no draft matches at all: queue for admin review, never
+  auto-create a confirmed row from the confirmation alone** (Owner
+  decision, reaffirmed 2026-08-01 — see "Source Of Truth Policy" below for
+  why). A missed *order* that never produced a draft in the first place is
+  instead caught by a separate daily gap-scan job, not by auto-creating
+  here.
 - Never create duplicate rows
 
 ## Source Of Truth Policy
@@ -95,6 +128,18 @@ Source of truth:
 
 Conflict rule:
 - If draft data conflicts with confirmation data, confirmation always wins
+
+**History note (this doc was stale on this exact point from 2026-07-19 to
+2026-08-01):** this doc previously said "create one confirmed row only
+when no draft exists," matching the *original* design. Commit for
+Workstream 2 Stage 2 (2026-07-19) deliberately removed that behavior after
+finding it silently created a second, unlinked confirmed row whenever a
+confirmation's fuzzy match missed an *existing-but-different* draft — a
+real, confirmed bug, not a hypothetical one. This doc was never updated to
+match at the time. Reconciled 2026-08-01: the no-draft-match case now
+always queues for review (2026-07-19's fix, kept), and a *separate* daily
+gap-scan job (not confirmation-time auto-create) catches genuinely missed
+orders instead — see `05_workflows/escort_source_of_truth_workflow.md`.
 
 ## Parsing Rules
 

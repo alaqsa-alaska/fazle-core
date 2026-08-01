@@ -28,7 +28,7 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Optional, TypedDict
 
@@ -154,6 +154,37 @@ _CD_MASTER_MOB_RE = re.compile(
     r"(?:master(?:'?s)?\s*(?:number|mobile|mob)?|mob)\s*:\s*(\b(?:880|0)1[3-9]\d{8}\b)",
     re.IGNORECASE,
 )
+# Loose variants of the two mobile-field regexes above -- deliberately
+# permissive (any digit-ish run, no BD-format validation) so a malformed
+# number (wrong digit count, wrong operator prefix) can still be *detected*
+# even though it fails the strict regex, distinguishing "field present but
+# wrong" from "field genuinely absent" for the 2026-08-01 admin-reminder
+# flow (Step 5) -- a missing field is silently ignored per business rules,
+# a malformed one asks the admin what to do instead of silently dropping it.
+_CD_ESCORT_MOB_LOOSE_RE = re.compile(
+    r"escort\s*(?:mobile|mob|number)?\s*:\s*([+\d][\d\s\-]{3,15}\d)",
+    re.IGNORECASE,
+)
+_CD_MASTER_MOB_LOOSE_RE = re.compile(
+    r"(?:master(?:'?s)?\s*(?:number|mobile|mob)?|mob)\s*:\s*([+\d][\d\s\-]{3,15}\d)",
+    re.IGNORECASE,
+)
+
+
+def _malformed_mobile_raw(text: str, *, field: str) -> Optional[str]:
+    """Return the raw digit-ish string found after an Escort/Master mobile
+    label when it looks like a phone number but fails strict BD validation
+    -- None when the field is genuinely absent, or when it's present and
+    valid (the caller should only call this when the strict extraction
+    already came back empty)."""
+    loose_re = _CD_ESCORT_MOB_LOOSE_RE if field == "escort" else _CD_MASTER_MOB_LOOSE_RE
+    m = loose_re.search(text or "")
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    if _extract_mobile(raw) is not None:
+        return None  # actually valid -- strict regex just didn't match this exact spacing
+    return raw
 _CD_DEST_RE = re.compile(
     # [ \t]* (not \s*) around the colon and in the lookahead so this can never
     # cross a newline into the following line -- \s* previously let a blank
@@ -193,6 +224,21 @@ def _matches_company_name(text: str) -> bool:
     needle = _normalize(brand_token)
     return bool(needle) and needle in _normalize(text)
 _TRAILING_MV_PAREN_RE = re.compile(r"\(\s*(mv\.?\s+[A-Za-z0-9][A-Za-z0-9\s.\-]{1,60})\s*\)$", re.IGNORECASE)
+
+# Vessel-name prefix, any of: MV / M.V. / M.v. / M V / M v (any casing,
+# with or without periods/spaces between the two letters). 2026-08-01 fix:
+# the previous r"^MV\.?\s+" only matched "MV"/"MV." (no period between the
+# letters) -- "M.V. Elim" passed through unstripped, then failed the
+# subsequent "already starts with MV" check and got a second "MV " prepended
+# ("MV M.V. ELIM"). Confirmed against a real admin confirmation message.
+_VESSEL_PREFIX_RE = re.compile(r"^\s*M\.?\s*V\.?\s+", re.IGNORECASE)
+
+
+def _strip_vessel_prefix(name: str) -> str:
+    """Strip a leading MV/M.V./M.v./M V/M v label so it can be re-applied
+    exactly once in canonical form. Safe to call on a name with no prefix
+    at all (no-op)."""
+    return _VESSEL_PREFIX_RE.sub("", name or "").strip()
 
 # O/a to <destination> pattern for inbound messages
 _OA_DEST_RE = re.compile(
@@ -622,15 +668,15 @@ def _extract_mother_vessel(text: str) -> Optional[str]:
     at_oa = _AT_OA_MV_RE.search(text)
     if at_oa:
         name = at_oa.group(1).strip().rstrip(".,- ")
-        name = re.sub(r"^MV\.?\s*", "", name, flags=re.IGNORECASE).strip()
+        name = _strip_vessel_prefix(name)
         return f"MV {name.upper()}"
 
     m = _MV_LABEL_RE.search(text)
     if not m:
         return None
     name = m.group(1).strip().rstrip(".,- ")
-    # Strip double MV/MV. prefix (e.g. 'MV. EVA PARIS' → 'MV EVA PARIS')
-    name = re.sub(r"^MV\.?\s+", "", name, flags=re.IGNORECASE).strip() or name
+    # Strip any MV/M.V./M.v./M V/M v prefix (e.g. 'M.V. EVA PARIS' → 'EVA PARIS')
+    name = _strip_vessel_prefix(name) or name
     return f"MV {name.upper()}"
 
 
@@ -1015,16 +1061,21 @@ def build_admin_message(order: EscortOrder, sender_phone: str) -> str:
 # ── Completed draft detection & parsing ───────────────────────────────────────
 
 def is_completed_escort_draft(text: str) -> bool:
-    """Return True if admin message is a filled-in escort draft."""
-    draft = parse_completed_draft(text)
+    """Return True if admin message is a filled-in escort draft.
+
+    2026-08-01: now checks every entry (parse_completed_draft_entries()),
+    not just the first -- a multi-lighter confirmation is "complete" as
+    long as at least one lighter/escort entry is fully filled in, even if
+    another entry in the same message has e.g. a malformed mobile number
+    (that one entry is handled separately, see Step 5's admin-reminder
+    flow). Behavior for a single-entry message is unchanged."""
+    entries = parse_completed_draft_entries(text)
     has_company_signature = bool(_AL_AQSA_RE.search(text)) or _matches_company_name(text)
-    return bool(
-        has_company_signature
-        and draft.get("mother_vessel")
-        and draft.get("lighter_vessel")
-        and draft.get("escort_name")
-        and draft.get("escort_mobile")
-        and draft.get("date_str")
+    if not has_company_signature or not entries or not entries[0].get("mother_vessel"):
+        return False
+    return any(
+        e.get("lighter_vessel") and e.get("escort_name") and e.get("escort_mobile") and e.get("date_str")
+        for e in entries
     )
 
 
@@ -1059,8 +1110,8 @@ def parse_completed_draft(text: str) -> CompletedDraft:
     mv_raw = mother_label or (mv_m.group(1).strip() if mv_m else None)
     mv = mv_raw
     if mv:
-        # Strip double MV/MV. prefix (e.g. 'MV. EVA PARIS' → 'MV EVA PARIS')
-        mv = re.sub(r"^MV\.?\s+", "", mv, flags=re.IGNORECASE).strip()
+        # Strip any MV/M.V./M.v./M V/M v prefix (e.g. 'M.V. EVA PARIS' → 'EVA PARIS')
+        mv = _strip_vessel_prefix(mv)
         if not mv.upper().startswith("MV"):
             mv = f"MV {mv.upper()}"
         else:
@@ -1111,6 +1162,135 @@ def parse_completed_draft(text: str) -> CompletedDraft:
         shift=shift,
         destination=destination,
     )
+
+
+# Numbered lighter-vessel block marker: "1. Lighter Vessel: ...", "2. ..."
+_NUMBERED_BLOCK_RE = re.compile(r"^\s*(\d{1,2})\s*\.\s*", re.MULTILINE)
+
+
+def _split_confirmation_blocks(text: str) -> list[str]:
+    """Split a multi-lighter admin confirmation into per-lighter blocks on
+    numbered-line markers. Returns [] when fewer than 2 such markers exist
+    -- callers treat that as "not multi-entry, use the single-entry parser
+    instead," so a normal single-lighter confirmation is never affected."""
+    matches = list(_NUMBERED_BLOCK_RE.finditer(text or ""))
+    if len(matches) < 2:
+        return []
+    blocks = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        blocks.append(text[start:end])
+    return blocks
+
+
+def parse_completed_draft_entries(text: str) -> list[CompletedDraft]:
+    """Extract one CompletedDraft per lighter/escort entry in an admin
+    confirmation message.
+
+    2026-08-01: added because parse_completed_draft() only ever extracts
+    the FIRST lighter/escort pair (every field regex uses .search(), never
+    .finditer()) -- a real confirmation with two numbered lighter-vessel
+    blocks (one escort assigned per lighter) silently dropped its second
+    entry, with no error or log signal. Confirmed against a real production
+    confirmation this session.
+
+    A confirmation has ONE mother vessel + ONE date/shift + ONE company
+    signature shared across every lighter, but its own lighter_vessel/
+    master_mobile/destination/escort_name/escort_mobile per numbered block
+    -- matches modules.escort.parse_escort_message()'s existing multi-
+    lighter order-side model (EscortOrder{mother_vessel: <single>,
+    lighters: [<list>]}), just for the confirmation side.
+
+    A message with fewer than 2 numbered blocks (the normal, single-lighter
+    case) delegates entirely to parse_completed_draft() -- zero behavior
+    change, zero risk to any existing single-entry caller/test.
+    """
+    blocks = _split_confirmation_blocks(text)
+    if not blocks:
+        return [parse_completed_draft(text)]
+
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+    def _extract_labeled_line_value(pattern: str) -> Optional[str]:
+        rx = re.compile(pattern, re.IGNORECASE)
+        for ln in lines:
+            m = rx.match(ln)
+            if m:
+                return (m.group(1) or "").strip()
+        return None
+
+    # ── Shared fields: extracted once from the whole message ───────────────
+    mother_label = _extract_labeled_line_value(r"^\s*mother\s*vessel\s*:\s*(.+)$")
+    mv_m = _CD_MV_RE.search(text)
+    mv = mother_label or (mv_m.group(1).strip() if mv_m else None)
+    if mv:
+        mv = _strip_vessel_prefix(mv)
+        mv = mv.upper() if mv.upper().startswith("MV") else f"MV {mv.upper()}"
+
+    date_m = _DATE_RE.search(text)
+    date_str = date_m.group(1) if date_m else _TODAY()
+
+    shift_m = _CD_SHIFT_RE.search(text)
+    shift = None
+    if shift_m:
+        if shift_m.group(1):
+            shift = shift_m.group(1).upper()
+        elif shift_m.group(2):
+            shift = "D" if shift_m.group(2).lower() == "day" else "N"
+
+    # ── Per-block fields ─────────────────────────────────────────────────────
+    entries: list[CompletedDraft] = []
+    for block in blocks:
+        block_lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+
+        def _block_labeled(pattern: str, _lines=block_lines) -> Optional[str]:
+            rx = re.compile(pattern, re.IGNORECASE)
+            for ln in _lines:
+                m = rx.match(ln)
+                if m:
+                    return (m.group(1) or "").strip()
+            return None
+
+        # Tolerate the leading "1. "/"2. " marker directly on the Lighter
+        # Vessel line, the one line the numbered marker actually shares
+        # with a field label in real messages.
+        lighter_label = _block_labeled(
+            r"^\s*(?:\d{1,2}\s*\.\s*)?"
+            r"(?:lighter\s*(?:vessel|name)(?:\s*/\s*lighter\s*(?:vessel|name))?|lv)\s*:\s*(.+)$"
+        )
+        lv_m = _CD_LV_RE.search(block)
+        lv_raw = lighter_label or (lv_m.group(1).strip() if lv_m else None)
+        if lv_raw and re.match(r"(?i)^mother\s*vessel\s*:", lv_raw.strip()):
+            lv_raw = None
+
+        master_label = _block_labeled(r"^\s*master\s*(?:mobile|number|mob|no)?\s*:\s*(.+)$")
+        master_mob_m = _CD_MASTER_MOB_RE.search(block)
+        master_mobile = _extract_mobile(master_label or "") or (master_mob_m.group(1) if master_mob_m else None)
+
+        destination_label = _block_labeled(r"^\s*destination\s*:\s*(.+)$")
+        dest_m = _CD_DEST_RE.search(block)
+        raw_destination = destination_label or (dest_m.group(1).strip() if dest_m else None)
+        destination = _normalize_destination(raw_destination or "") or raw_destination
+
+        escort_name_m = _CD_ESCORT_NAME_RE.search(block)
+        escort_mob_m = _CD_ESCORT_MOB_RE.search(block)
+
+        entries.append(CompletedDraft(
+            mother_vessel=mv,
+            lighter_vessel=lv_raw,
+            master_mobile=master_mobile,
+            cargo_type=_normalize_cargo(block) or _normalize_cargo(text),
+            importer=_extract_importer(block) or _extract_importer(text),
+            capacity=_normalize_capacity(block),
+            escort_name=escort_name_m.group(1).strip() if escort_name_m else None,
+            escort_mobile=escort_mob_m.group(1) if escort_mob_m else None,
+            date_str=date_str,
+            shift=shift,
+            destination=destination,
+        ))
+
+    return entries
 
 
 def build_final_slip(draft: CompletedDraft, db_destination: Optional[str] = None) -> str:
@@ -1254,7 +1434,7 @@ async def save_escort_programs(
     if not lighters_to_save:
         return program_ids
 
-    mv_clean = mv.upper().replace("MV ", "").strip()
+    mv_clean = _strip_vessel_prefix(mv).upper()
     order_shift = order.get("shift") or "D"
 
     for lighter in lighters_to_save:
@@ -1368,14 +1548,14 @@ async def _score_pending_program_candidates(
     similarity ratio *3, lighter_vessel similarity ratio *1) -- this
     function only adds visibility into the score, it does not change it.
     """
-    mv_clean = (mv or "").upper().replace("MV.", "").replace("MV ", "").strip()
+    mv_clean = _strip_vessel_prefix(mv or "").upper()
     lv_clean = (lv or "").strip()
     master_norm = _normalize_mobile(master_mobile or "") if master_mobile else None
 
     try:
         candidates = await fetch_all(
             """SELECT program_id, remarks, mother_vessel, lighter_vessel,
-                      destination, master_mobile, program_date
+                      destination, master_mobile, program_date, assignment_time
                FROM wbom_escort_programs
                WHERE status = 'draft'
                  AND ($1::text IS NULL OR COALESCE(master_mobile, '') = $1)
@@ -1388,7 +1568,7 @@ async def _score_pending_program_candidates(
         if not candidates and mv_clean:
             candidates = await fetch_all(
                 """SELECT program_id, remarks, mother_vessel, lighter_vessel,
-                          destination, master_mobile, program_date
+                          destination, master_mobile, program_date, assignment_time
                    FROM wbom_escort_programs
                    WHERE status = 'draft'
                      AND UPPER(REPLACE(REPLACE(mother_vessel, 'MV. ', ''), 'MV ', '')) = $1
@@ -1416,7 +1596,7 @@ async def _score_pending_program_candidates(
                 matched_fields.append("program_date")
             elif program_date and not row["program_date"]:
                 warnings.append("candidate_program_date_missing")
-            row_mv = (row["mother_vessel"] or "").upper().replace("MV.", "").replace("MV ", "").strip()
+            row_mv = _strip_vessel_prefix(row["mother_vessel"] or "").upper()
             if mv_clean:
                 mv_ratio = SequenceMatcher(None, mv_clean, row_mv).ratio()
                 score += mv_ratio * 3.0
@@ -1436,6 +1616,7 @@ async def _score_pending_program_candidates(
                 "score": round(score, 2),
                 "matched_fields": matched_fields,
                 "warnings": warnings,
+                "assignment_time": row["assignment_time"],
             })
         scored.sort(key=lambda c: c["score"], reverse=True)
         return scored
@@ -1457,18 +1638,45 @@ async def _find_pending_program(
     Thin wrapper over _score_pending_program_candidates(): same threshold,
     same winner-selection behavior as before this function was split --
     only the scoring internals moved, not the matching semantics.
+
+    2026-08-01: when the normal fuzzy score falls short (system "confused"),
+    fall back to an exact master-mobile match — the same lighter master's
+    mobile appearing on both the draft and the confirmation is treated as
+    proof of the same order on its own, per Owner instruction. This is
+    strictly a fallback (only consulted after the normal threshold check
+    fails, never instead of it) and only considers drafts from the last 7
+    days, and only when exactly one candidate has that exact match --
+    two-or-more candidates sharing a master mobile is still genuinely
+    ambiguous and is left to the existing review-queue path.
     """
     scored = await _score_pending_program_candidates(
         mv, lv, master_mobile=master_mobile, program_date=program_date, client_phone=client_phone,
     )
-    if not scored or scored[0]["score"] < _PENDING_PROGRAM_MATCH_THRESHOLD:
+    winner_id: Optional[int] = None
+    if scored and scored[0]["score"] >= _PENDING_PROGRAM_MATCH_THRESHOLD:
+        winner_id = scored[0]["program_id"]
+    else:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        exact_mobile_matches = [
+            c for c in scored
+            if "master_mobile" in c["matched_fields"]
+            and c.get("assignment_time") and c["assignment_time"] >= cutoff
+        ]
+        if len(exact_mobile_matches) == 1:
+            log.info(
+                "[escort] exact master_mobile match used as fallback (normal score %.2f < %.2f): program_id=%s",
+                scored[0]["score"] if scored else -1.0, _PENDING_PROGRAM_MATCH_THRESHOLD,
+                exact_mobile_matches[0]["program_id"],
+            )
+            winner_id = exact_mobile_matches[0]["program_id"]
+    if winner_id is None:
         return None
     try:
         row = await fetch_one(
             """SELECT program_id, remarks, mother_vessel, lighter_vessel,
                       destination, master_mobile, program_date
                FROM wbom_escort_programs WHERE program_id = $1""",
-            scored[0]["program_id"],
+            winner_id,
         )
         return dict(row) if row else None
     except Exception as e:
@@ -1850,7 +2058,7 @@ async def _create_confirmed_from_admin(
             log.info(f"[escort] resolved escort_employee_id={emp_id} mobile={escort_mobile}")
 
         # Clean MV for comparison
-        mv_clean = re.sub(r"^MV\.?\s+", "", mv, flags=re.IGNORECASE).strip().upper()
+        mv_clean = _strip_vessel_prefix(mv).upper()
 
         # Strong dedupe key for assigned rows: date + mother + lighter + escort.
         # This blocks backfill/replay from creating exact duplicates.
@@ -2681,41 +2889,108 @@ async def defer_unmatched_confirmation(item_id: int, *, performed_by: str, reaso
     )
 
 
-async def handle_admin_escort_completion(
-    text: str,
-    admin_phone: str,
-    source: str,
-    recipient_phone: Optional[str] = None,
-    message_id: Optional[str] = None,
-) -> tuple[str, Optional[dict]]:
-    """
-    Entry point for admin's completed escort draft.
-    Finds original client, sends final slip to them, confirms to admin.
+async def _create_escort_confirmation_review_draft(
+    block_text: str, *, draft: CompletedDraft, recipient_phone: Optional[str], source: str,
+) -> Optional[int]:
+    """Create and immediately push the Step 5 (2026-08-01) admin-reminder
+    draft for a confirmation entry whose master/escort mobile is present
+    but malformed. Owner spec, exact wording -- admin replies with
+    "<id> Type: APPROVE/EDIT/REJECT" (modules.admin_commands, a dedicated
+    parser -- NOT the generic APPROVE/EDIT/REJECT verbs, whose EDIT sends
+    the edited text back to the original sender, the wrong meaning here;
+    see docs/PLAN_ESCORT_CONFIRMATION_MULTI_ENTRY_2026-08-01.md Step 5).
 
-    message_id: the bridge's own id for this specific confirmation message,
-    when the caller has one (bridge_poller's outgoing-scan omsg_id, or the
-    webhook path's event id threaded through process_bridge_inbound() ->
-    process_message()). Used only for wbom_unmatched_confirmations' dedup
-    identity (migration 052) on the no-match path -- not used on the
-    matched-draft path, which already updates idempotently by program_id.
-    """
-    draft = parse_completed_draft(text)
-    ctx: ConfirmationContext = {
-        "bridge_number": admin_phone,
-        "recipient_phone": recipient_phone or "",
-        "source": source,
-    }
-    if not _is_authoritative_bridge_confirmation(ctx):
-        log.info(
-            "[escort] ignore non-authoritative confirmation source=%s bridge=%s recipient=%s",
-            source, admin_phone, recipient_phone,
-        )
-        return "", None
-    log.info(
-        f"[escort] admin completion: mv={draft['mother_vessel']} "
-        f"lv={draft['lighter_vessel']} escort={draft['escort_name']}"
+    Stores the already-parsed `draft` (with the malformed number as-is)
+    plus recipient_phone/source in meta.context so APPROVE can save it
+    exactly as originally parsed without having to re-parse a lone block
+    (which lacks the shared mother-vessel/company-signature context a full
+    re-parse would need)."""
+    from shared.draft_reply import create_draft_reply
+
+    name = None
+    if recipient_phone:
+        try:
+            contact = await fetch_one(
+                "SELECT display_name FROM wbom_contacts WHERE whatsapp_number = ANY($1) "
+                "ORDER BY contact_id DESC LIMIT 1",
+                _phone_variants(recipient_phone),
+            )
+            name = contact["display_name"] if contact else None
+        except Exception:
+            name = None
+    who = f"{name} — {recipient_phone}" if name else (recipient_phone or "(unknown)")
+
+    placeholder = "__DRAFT_ID__"
+    body = (
+        f"Admin REMINDER {placeholder}\n"
+        f"{who}\n"
+        f"{block_text.strip()}\n"
+        f"Do you think to review this message?"
     )
+    review_context = json.dumps({
+        "draft": dict(draft),
+        "recipient_phone": recipient_phone,
+        "source": source,
+        "raw_block": block_text,
+    })
+    draft_id = await create_draft_reply(
+        sender=recipient_phone or "unknown",
+        bridge=source,
+        draft_text=body,
+        role="unknown",
+        intent="escort_confirmation_review",
+        context=review_context,
+        source_module="escort",
+    )
+    if not draft_id:
+        return None
+    final_body = body.replace(placeholder, str(draft_id))
+    try:
+        await execute(
+            "UPDATE fazle_draft_replies SET reply_text = $1 WHERE id = $2",
+            final_body, draft_id,
+        )
+    except Exception as exc:
+        log.warning(f"[escort] confirmation-review draft id-fill failed: {exc}")
 
+    import os
+    admins = [a.strip() for a in os.getenv("ADMIN_NUMBERS", "").split(",") if a.strip()]
+    if admins:
+        try:
+            from modules.outbound import enqueue as _enqueue_outbound
+            for admin in admins:
+                await _enqueue_outbound(
+                    admin, final_body,
+                    source_bridge="bridge2", fallback_channel="bridge1",
+                    purpose="escort-confirmation-review",
+                    idempotency_key=f"escort-review-{draft_id}-{admin}",
+                    meta={"draft_id": draft_id},
+                )
+        except Exception as exc:
+            log.warning(f"[escort] confirmation-review push failed: {exc}")
+    return draft_id
+
+
+async def _process_one_confirmation_entry(
+    draft: CompletedDraft,
+    *,
+    recipient_phone: Optional[str],
+    source: str,
+    admin_phone: str,
+    message_id: Optional[str],
+    text: str,
+) -> dict:
+    """Resolve, update, sync, and reconcile a single confirmation entry --
+    extracted 2026-08-01 from handle_admin_escort_completion()'s per-entry
+    loop body so the Step 5 APPROVE command handler
+    (modules.admin_commands) can reuse the exact same logic for a
+    previously-reviewed entry instead of re-implementing it. Behavior is
+    byte-for-byte the same as the inline version this replaced.
+
+    Returns {"status": "confirmed"|"queued"|"failed", "lighter_vessel",
+    and either "queue_id" or "final_slip"/"client_phone"/"client_bridge"}.
+    """
+    lighter_vessel = draft.get("lighter_vessel") or "(no lighter)"
     program_date = _parse_program_date(draft.get("date_str"))
     confirmation_destination = _normalize_destination(draft.get("destination") or "") or draft.get("destination")
     program = await _find_pending_program(
@@ -2730,14 +3005,13 @@ async def handle_admin_escort_completion(
         # Draft-Confirmation Invariant (Workstream 2 Stage 2, 2026-07-19):
         # this used to call _create_confirmed_from_admin() directly here
         # ("admin reply is the source of truth"), silently creating a
-        # second, unlinked confirmed program row on every fuzzy-match miss.
-        # Owner decision: no-match must never auto-create — it now queues
-        # for admin review instead (migration 052,
-        # wbom_unmatched_confirmations). No draft rows are touched or
-        # reconciled here anymore either, since no target draft has been
-        # confidently identified — the old post-hoc same-lighter-vessel
-        # cleanup pass only make sense once a human has actually linked
-        # this confirmation to something.
+        # second, unlinked confirmed program row on every fuzzy-match
+        # miss. Owner decision (reaffirmed 2026-08-01): no-match must
+        # never auto-create — it queues for admin review instead
+        # (migration 052, wbom_unmatched_confirmations). A daily gap-
+        # scan job independently catches missed *orders* (see
+        # docs/PLAN_ESCORT_CONFIRMATION_MULTI_ENTRY_2026-08-01.md Step 4)
+        # rather than auto-creating here.
         candidates = await _score_pending_program_candidates(
             draft["mother_vessel"],
             draft["lighter_vessel"],
@@ -2765,23 +3039,16 @@ async def handle_admin_escort_completion(
                 candidates=top_candidates,
                 best_score=best_score,
             )
+            return {"status": "queued", "lighter_vessel": lighter_vessel, "queue_id": queue_id}
         except Exception as _queue_err:
             log.error(f"[escort] unmatched-confirmation queue insert failed: {_queue_err}")
-            return ("Save failed (review queue error). Check logs.", None)
-
-        return (
-            f"Queued for review (#{queue_id}). No confident matching draft found — "
-            f"an admin must link this to an existing draft or confirm it is a new duty "
-            f"before a program is created.",
-            None,
-        )
+            return {"status": "failed", "lighter_vessel": lighter_vessel}
 
     log.info(
         f"[escort] matched program_id={program['program_id']} "
         f"mv={program['mother_vessel']} lv={program['lighter_vessel']} "
         f"→ escort={draft['escort_name']}"
     )
-    # Parse extras from remarks JSON
     try:
         remarks = json.loads(program.get("remarks") or "{}")
     except (json.JSONDecodeError, TypeError):
@@ -2790,7 +3057,6 @@ async def handle_admin_escort_completion(
     client_phone = remarks.get("sender_phone")
     client_bridge = remarks.get("source_bridge", source)
 
-    # Resolve escort_employee_id from mobile
     emp_id = await _resolve_escort_employee_id(
         draft["escort_mobile"] or "",
         draft.get("escort_name"),
@@ -2799,7 +3065,6 @@ async def handle_admin_escort_completion(
     if emp_id:
         log.info(f"[escort] resolved escort_employee_id={emp_id} mobile={draft['escort_mobile']}")
 
-    # Update DB — fill escort fields, lighter_vessel, shift, program_date, escort_employee_id
     await _update_program_confirmed(
         program["program_id"],
         draft["escort_name"] or "",
@@ -2816,10 +3081,8 @@ async def handle_admin_escort_completion(
         capacity=draft.get("capacity") or remarks.get("capacity"),
     )
 
-    # Auto-sync to roster after confirmation
     await _sync_roster_after_confirm(program["program_id"])
 
-    # Reconcile: delete any other orphaned draft rows for the same lighter vessel
     if draft.get("lighter_vessel"):
         try:
             from modules.escort_roster.db import reconcile_drafts_for_confirmation
@@ -2831,26 +3094,283 @@ async def handle_admin_escort_completion(
         except Exception as _rec_err:
             log.warning(f"[escort] reconcile after update failed: {_rec_err}")
 
-    # Destination: prefer admin's completed draft; fallback to DB record
     db_destination = program.get("destination") or None
     final_slip = build_final_slip(draft, db_destination=db_destination)
 
-    if not client_phone:
-        # No client phone stored — only confirm to admin
+    return {
+        "status": "confirmed",
+        "lighter_vessel": lighter_vessel,
+        "final_slip": final_slip,
+        "client_phone": client_phone,
+        "client_bridge": client_bridge,
+    }
+
+
+# ── Step 5 (2026-08-01): Admin REMINDER / APPROVE / EDIT / REJECT ──────────────
+# Handlers for the dedicated review queue created by
+# _create_escort_confirmation_review_draft() above. Called from
+# modules.admin_commands's own "<id> Type: APPROVE|EDIT|REJECT" parser --
+# deliberately NOT the generic APPROVE/EDIT/REJECT commands, whose EDIT
+# sends the edited text to the original sender (wrong meaning here).
+
+async def _load_escort_review_draft(draft_id: int) -> Optional[dict]:
+    row = await fetch_one(
+        "SELECT * FROM fazle_draft_replies WHERE id = $1 AND intent = 'escort_confirmation_review'",
+        draft_id,
+    )
+    if not row:
+        return None
+    row = dict(row)
+    try:
+        meta = json.loads(row.get("meta") or "{}")
+        row["_context"] = json.loads(meta.get("context") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        row["_context"] = {}
+    return row
+
+
+async def _deliver_confirmed_result(result: dict) -> None:
+    """Send the final slip to the client for a single _process_one_confirmation_entry() result."""
+    if result.get("status") != "confirmed" or not result.get("client_phone"):
+        return
+    try:
+        from modules.outbound import enqueue as _enqueue_outbound
+        await _enqueue_outbound(
+            result["client_phone"], result["final_slip"],
+            source_bridge=result.get("client_bridge") or "bridge2",
+            purpose="escort-confirmation-slip",
+        )
+    except Exception as exc:
+        log.error(f"[escort] review-approve client slip send failed: {exc}")
+
+
+async def approve_escort_confirmation_review(draft_id: int, admin_phone: str) -> str:
+    """APPROVE: save the entry exactly as originally parsed, malformed
+    number included as-is."""
+    row = await _load_escort_review_draft(draft_id)
+    if not row:
+        return f"❌ Review draft #{draft_id} পাওয়া যায়নি।"
+    if row["status"] != "pending":
+        return f"⚠️ Review draft #{draft_id} ইতিমধ্যে {row['status']}।"
+
+    ctx = row["_context"]
+    draft: Optional[CompletedDraft] = ctx.get("draft")
+    if not draft:
+        return f"❌ Review draft #{draft_id}: সংরক্ষিত তথ্য পাওয়া যায়নি।"
+
+    result = await _process_one_confirmation_entry(
+        draft, recipient_phone=ctx.get("recipient_phone"), source=ctx.get("source") or "bridge2",
+        admin_phone=admin_phone, message_id=None, text=ctx.get("raw_block") or "",
+    )
+    await _deliver_confirmed_result(result)
+    await execute(
+        "UPDATE fazle_draft_replies SET status='approved', admin_phone=$2, approved_at=NOW() WHERE id=$1",
+        draft_id, admin_phone,
+    )
+    if result["status"] == "confirmed":
+        return f"✅ #{draft_id} approved — {result['lighter_vessel']} saved as originally sent."
+    if result["status"] == "queued":
+        return f"❓ #{draft_id} approved but no matching draft found — queued for review (#{result['queue_id']})."
+    return f"❌ #{draft_id} approve failed — save error, check logs."
+
+
+async def reject_escort_confirmation_review(draft_id: int, admin_phone: str) -> str:
+    """REJECT: discard, nothing saved."""
+    row = await _load_escort_review_draft(draft_id)
+    if not row:
+        return f"❌ Review draft #{draft_id} পাওয়া যায়নি।"
+    if row["status"] != "pending":
+        return f"⚠️ Review draft #{draft_id} ইতিমধ্যে {row['status']}।"
+    await execute(
+        "UPDATE fazle_draft_replies SET status='rejected', admin_phone=$2 WHERE id=$1",
+        draft_id, admin_phone,
+    )
+    return f"🚫 #{draft_id} rejected — nothing saved."
+
+
+async def edit_escort_confirmation_review(draft_id: int, corrected_text: str, admin_phone: str) -> str:
+    """EDIT: `corrected_text` must be the complete corrected confirmation
+    message (not a partial patch) -- re-parsed through the normal
+    confirmation pipeline and that result is what gets saved."""
+    row = await _load_escort_review_draft(draft_id)
+    if not row:
+        return f"❌ Review draft #{draft_id} পাওয়া যায়নি।"
+    if row["status"] != "pending":
+        return f"⚠️ Review draft #{draft_id} ইতিমধ্যে {row['status']}।"
+
+    ctx = row["_context"]
+    entries = parse_completed_draft_entries(corrected_text)
+    if not entries or not entries[0].get("mother_vessel"):
         return (
-            f"DB updated. Client phone not found — send manually.\n\n{final_slip}",
-            None,
+            f"❌ #{draft_id}: সংশোধিত বার্তাটি সম্পূর্ণ escort confirmation বলে মনে হচ্ছে না। "
+            f"পুরো বার্তা (Mother Vessel, Lighter Vessel, Escort Name/Mobile, Date সহ) আবার পাঠান।"
         )
 
-    # Send final slip to original client via admin_note routing
-    admin_confirm = (
-        f"Sent to {client_phone}\n\nSlip:\n{final_slip}"
+    summary_lines = []
+    for entry in entries:
+        result = await _process_one_confirmation_entry(
+            entry, recipient_phone=ctx.get("recipient_phone"), source=ctx.get("source") or "bridge2",
+            admin_phone=admin_phone, message_id=None, text=corrected_text,
+        )
+        await _deliver_confirmed_result(result)
+        if result["status"] == "confirmed":
+            summary_lines.append(f"✅ {result['lighter_vessel']} — saved (edited)")
+        elif result["status"] == "queued":
+            summary_lines.append(f"❓ {result['lighter_vessel']} — queued for review (#{result['queue_id']})")
+        else:
+            summary_lines.append(f"❌ {result['lighter_vessel']} — save failed")
+
+    await execute(
+        "UPDATE fazle_draft_replies SET status='edited', reply_text=$2, admin_phone=$3, edited_at=NOW() WHERE id=$1",
+        draft_id, corrected_text, admin_phone,
     )
+    return f"✏️ #{draft_id} edited:\n" + "\n".join(summary_lines)
+
+
+async def handle_admin_escort_completion(
+    text: str,
+    admin_phone: str,
+    source: str,
+    recipient_phone: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> tuple[str, Optional[dict]]:
+    """
+    Entry point for admin's completed escort draft.
+    Finds original client, sends final slip to them, confirms to admin.
+
+    message_id: the bridge's own id for this specific confirmation message,
+    when the caller has one (bridge_poller's outgoing-scan omsg_id, or the
+    webhook path's event id threaded through process_bridge_inbound() ->
+    process_message()). Used only for wbom_unmatched_confirmations' dedup
+    identity (migration 052) on the no-match path -- not used on the
+    matched-draft path, which already updates idempotently by program_id.
+
+    2026-08-01: processes every entry in the confirmation
+    (parse_completed_draft_entries()), not just the first -- a multi-
+    lighter confirmation assigns one escort per lighter, and every one of
+    them must reach the database, not just the first. Each entry is
+    resolved/updated/synced/reconciled independently, exactly as the
+    previous single-entry code did for its one entry; a single-entry
+    message goes through this same loop with exactly one iteration, so
+    behavior there is unchanged. Per-entry final slips for the same client
+    are combined into one message; a second distinct client (rare -- all
+    entries in one confirmation normally belong to the one client the
+    admin is replying to) is sent its own combined message directly via
+    the outbound queue, since the (reply_text, admin_note) return shape
+    only carries one notification back to the caller.
+    """
+    entries = parse_completed_draft_entries(text)
+    ctx: ConfirmationContext = {
+        "bridge_number": admin_phone,
+        "recipient_phone": recipient_phone or "",
+        "source": source,
+    }
+    if not _is_authoritative_bridge_confirmation(ctx):
+        log.info(
+            "[escort] ignore non-authoritative confirmation source=%s bridge=%s recipient=%s",
+            source, admin_phone, recipient_phone,
+        )
+        return "", None
+
+    # client_phone -> (client_bridge, [final_slip, ...])
+    slips_by_client: dict[str, tuple[str, list[str]]] = {}
+    summary_lines: list[str] = []
+    no_client_slips: list[str] = []
+
+    # One "block" of raw text per entry, for the malformed-mobile check
+    # below (needs the original text, not just the parsed/validated
+    # fields) -- _split_confirmation_blocks() is a pure function already
+    # computed once inside parse_completed_draft_entries(); recomputing it
+    # here is cheap and keeps that function's return type unchanged.
+    blocks = _split_confirmation_blocks(text) or [text]
+
+    for draft, block in zip(entries, blocks):
+        log.info(
+            f"[escort] admin completion: mv={draft['mother_vessel']} "
+            f"lv={draft['lighter_vessel']} escort={draft['escort_name']}"
+        )
+
+        # 2026-08-01, Step 5: a mobile number that's present but malformed
+        # (wrong digit count/prefix) is not the same as one that's simply
+        # absent -- ask the admin what to do instead of silently treating
+        # this entry as incomplete (business rules `:74-77`) or silently
+        # guessing. A genuinely missing field (nothing at all after the
+        # label) is unaffected and keeps existing behavior.
+        malformed_field = None
+        malformed_raw = None
+        if not draft.get("escort_mobile"):
+            malformed_raw = _malformed_mobile_raw(block, field="escort")
+            if malformed_raw:
+                malformed_field = "Escort Mobile"
+        if not malformed_field and not draft.get("master_mobile"):
+            malformed_raw = _malformed_mobile_raw(block, field="master")
+            if malformed_raw:
+                malformed_field = "Master Mobile"
+        if malformed_field:
+            try:
+                review_id = await _create_escort_confirmation_review_draft(
+                    block, draft=draft, recipient_phone=recipient_phone, source=source,
+                )
+                summary_lines.append(
+                    f"⚠️ {draft.get('lighter_vessel') or '(no lighter)'} — {malformed_field} "
+                    f"{malformed_raw!r} looks incomplete, admin reminder sent (#{review_id})"
+                )
+            except Exception as _rev_err:
+                log.error(f"[escort] confirmation-review draft creation failed: {_rev_err}")
+                summary_lines.append(
+                    f"❌ {draft.get('lighter_vessel') or '(no lighter)'} — malformed {malformed_field}, "
+                    f"review-draft creation failed"
+                )
+            continue
+
+        result = await _process_one_confirmation_entry(
+            draft, recipient_phone=recipient_phone, source=source,
+            admin_phone=admin_phone, message_id=message_id, text=text,
+        )
+        if result["status"] == "queued":
+            summary_lines.append(f"❓ {result['lighter_vessel']} — Queued for review (#{result['queue_id']})")
+        elif result["status"] == "failed":
+            summary_lines.append(f"❌ {result['lighter_vessel']} — save failed (review queue error)")
+        else:
+            summary_lines.append(f"✅ {result['lighter_vessel']} — confirmed")
+            if not result["client_phone"]:
+                no_client_slips.append(result["final_slip"])
+            else:
+                bucket = slips_by_client.setdefault(result["client_phone"], (result["client_bridge"], []))
+                bucket[1].append(result["final_slip"])
+
+    admin_confirm = "\n".join(summary_lines) if len(entries) > 1 else (summary_lines[0] if summary_lines else "")
+
+    if no_client_slips:
+        admin_confirm += "\n\nClient phone not found for some entries — send manually.\n\n" + "\n\n".join(no_client_slips)
+
+    if not slips_by_client:
+        return (admin_confirm or "No entries processed.", None)
+
+    # First client group returns via the normal (reply, admin_note) shape --
+    # identical to the pre-2026-08-01 single-entry/single-client behavior.
+    # Any additional distinct client (multi-entry confirming different
+    # clients' orders in one message) is sent directly, since this return
+    # shape only carries one notification.
+    client_items = list(slips_by_client.items())
+    first_client, (first_bridge, first_slips) = client_items[0]
+    first_slip_text = "\n\n".join(first_slips)
+    admin_confirm = f"Sent to {first_client}\n\nSlip:\n{first_slip_text}\n\n" + admin_confirm
+
+    for client_phone, (client_bridge, slips) in client_items[1:]:
+        try:
+            from modules.outbound import enqueue as _enqueue_outbound
+            await _enqueue_outbound(
+                client_phone, "\n\n".join(slips),
+                source_bridge=client_bridge, purpose="escort-confirmation-slip",
+            )
+        except Exception as _extra_err:
+            log.error(f"[escort] extra-client slip send failed for {client_phone}: {_extra_err}")
 
     return admin_confirm, {
-        "admin_phone": client_phone,
-        "text": final_slip,
-        "bridge": client_bridge,
+        "admin_phone": first_client,
+        "text": first_slip_text,
+        "bridge": first_bridge,
     }
 
 
