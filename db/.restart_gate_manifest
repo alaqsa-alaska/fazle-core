@@ -22,3 +22,12 @@
 # decides (approved -> move back to db/migrations/ + commit + document;
 # rejected -> delete the draft file and this entry).
 db/migrations_drafts/
+
+# 2026-08-01: moonshot_test.py — found untracked and dirty (dated 2026-07-31)
+# while deploying an unrelated FPE payroll-parser fix; not created or
+# reviewed by this session, not part of the app module tree (no import
+# site), and not touched by this change. Left exactly as found rather than
+# guessed at, deleted, or committed. Owner: please review and either
+# commit it or remove it — remove this manifest entry once resolved either
+# way.
+moonshot_test.py
