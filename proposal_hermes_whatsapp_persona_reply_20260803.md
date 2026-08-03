@@ -1,13 +1,15 @@
 # Proposal: Persona-Based WhatsApp Reply Generation (Social + Recruitment)
 
-**Status:** Phases 0–2 IMPLEMENTED IN CODE, NOT YET RESTARTED. Owner
-approved proceeding with Phase 1-3 (2026-08-03). Code changes are real
-edits to fazle-core files (not just diffs on paper), verified against the
-existing test suite (41/41 pre-existing tests still pass) plus new
-standalone sanity checks (below) — but `fazle-core.service` has **not**
-been restarted, so none of this is live yet. Per this project's standing
-rule, the assistant session does not restart the service — see "Restart
-handoff" at the end of this document.
+**Status:** Phases 0–2 IMPLEMENTED, COMMITTED (`654c9ff`, local only, not
+pushed), NOT YET RESTARTED. Owner approved proceeding with Phase 1-3
+(2026-08-03). `scripts/restart_gate.sh --check-only` was run once before
+the commit and correctly BLOCKed on working-tree cleanliness (5 dirty
+files) — this is expected and by design, not a problem with the changes
+themselves (checks 2-7 all passed: secret scan, xfail count, targeted
+tests, migration inventory, `.env` flags, backup freshness). Committing
+resolves check 1; re-run the gate after this commit. Per this project's
+standing rule, the assistant session does not restart the service itself
+— see "Restart handoff" below.
 **Author:** Claude (assistant-platform session), 2026-08-03
 **Scope:** fazle-core's WhatsApp/social reply generation only. Does not touch
 assistant-platform's admin-facing Hermes (`/hermes` page), which is unrelated
