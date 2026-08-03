@@ -262,9 +262,30 @@ async def _polish_with_ai(
         "Fees: processing 350 taka; training/joining 3,500 taka; mess/food advance may be 1,000 taka.\n"
         f"Contacts: {rules.OFFICE_NUMBERS}\n"
     )
+    # 2026-08-03 (Phase 3, Owner-approved proposal): additive KB enrichment —
+    # same safe_search() call modules/message_router already uses for its
+    # own AI-fallback path (modules/message_router/__init__.py, "Phase 4 —
+    # Hybrid RAG enrichment"), not a new retrieval system. business_facts
+    # above stays as the floor; KB hits are appended on top, never replace
+    # it. safe_search() is timeout-wrapped and exception-safe (empty list
+    # on failure/timeout), so this can never block or crash reply
+    # generation — same defensive pattern as that existing call site.
+    kb_context = ""
+    try:
+        from modules.rag import safe_search
+        kb_hits = await safe_search(current_text, k=3, role=resolved_role)
+        kb_lines = [
+            f"- {h.get('title', '')}: {(h.get('text') or '').strip()[:300]}"
+            for h in kb_hits
+            if (h.get("text") or "").strip()
+        ]
+        if kb_lines:
+            kb_context = "\nKB Context:\n" + "\n".join(kb_lines) + "\n"
+    except Exception:
+        kb_context = ""
     persona_line = f"Persona (how to speak): {persona_text}\n" if persona_text else ""
     prompt_context = (
-        "Approved business facts only:\n" + business_facts +
+        "Approved business facts only:\n" + business_facts + kb_context +
         persona_line +
         "Communication guidance: answer all current questions together, avoid repeating full answers already given, be honest and positive, and never guarantee job/salary/promotion.\n"
         f"Detected intents: {', '.join(intents)}\n"

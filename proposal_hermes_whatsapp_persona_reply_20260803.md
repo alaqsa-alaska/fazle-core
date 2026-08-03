@@ -1,15 +1,13 @@
 # Proposal: Persona-Based WhatsApp Reply Generation (Social + Recruitment)
 
-**Status:** Phases 0–2 IMPLEMENTED, COMMITTED (`654c9ff`, local only, not
-pushed), NOT YET RESTARTED. Owner approved proceeding with Phase 1-3
-(2026-08-03). `scripts/restart_gate.sh --check-only` was run once before
-the commit and correctly BLOCKed on working-tree cleanliness (5 dirty
-files) — this is expected and by design, not a problem with the changes
-themselves (checks 2-7 all passed: secret scan, xfail count, targeted
-tests, migration inventory, `.env` flags, backup freshness). Committing
-resolves check 1; re-run the gate after this commit. Per this project's
-standing rule, the assistant session does not restart the service itself
-— see "Restart handoff" below.
+**Status:** Phases 0–3 IMPLEMENTED and COMMITTED (`654c9ff`, `619301d`,
+`25d83e5`, plus this Phase 3 commit — all local only, not pushed).
+**NOT YET RESTARTED** — a combined restart (covering the `_lookup_seed()`
+phone-matching fix and Phase 3 together) is pending Owner action. Phase 4
+(admin-page "full reply" toggle) remains a separate, not-yet-approved
+write-path decision — see §4 Phase 4 and the Open Questions at the end of
+this document. Per this project's standing rule, the assistant session
+does not restart the service itself — see "Restart handoff" below.
 **Author:** Claude (assistant-platform session), 2026-08-03
 **Scope:** fazle-core's WhatsApp/social reply generation only. Does not touch
 assistant-platform's admin-facing Hermes (`/hermes` page), which is unrelated
@@ -56,8 +54,12 @@ sender.** Confirmed live with a direct prompt-build test (see below).
 |---|---|
 | `shared/reply_policy.py` | Added the 9 missing `ROLE_PROMPTS` keys (real bug fix for `message_router`/bridge1/bridge2/meta) |
 | `modules/social_auto_reply/reply_rules.py` | New `SOCIAL_PERSONAS` dict (recruitment_officer, hr_admin_officer, client_relations, funny, lawyer) + `SOCIAL_ROLE_TO_PERSONA` mapping + `persona_for_role()` |
-| `modules/social_auto_reply/intelligent_generator.py` | `plan_reply()` now calls `identity_brain.detect_identity()` (Phase 1 — this channel was completely identity-blind before); `_polish_with_ai()` now takes the resolved persona text and a compatible `role=` value instead of the hardcoded `role="new_lead"` |
+| `modules/social_auto_reply/intelligent_generator.py` | `plan_reply()` now calls `identity_brain.detect_identity()` (Phase 1 — this channel was completely identity-blind before); `_polish_with_ai()` now takes the resolved persona text and a compatible `role=` value instead of the hardcoded `role="new_lead"`; **Phase 3 (2026-08-03): `_polish_with_ai()` now also calls `modules.rag.safe_search()` additively, same call `message_router` already uses — see below** |
 | `knowledge_base/06_developer_system/automation_pipeline.md` | Corrected the stale footer section (Phase 0) |
+| `modules/identity_brain/__init__.py` | **Real bug fix (2026-08-03, found via dry-run before shipping, not after): `_lookup_seed()` did an exact-match phone lookup that could never match either real `vip_client` row (stored raw `01XXXXXXXXX`, queried as canonical `8801XXXXXXXXX`) — fixed via `_phone_variants()`/`= ANY($1)`, same pattern as the 2026-07-20/08-01 `ESCORT_CLIENT_PHONES` incident already documented in `identity_brain.md`.** |
+| `knowledge_base/06_developer_system/identity_brain.md` | Documents the VIP phone-matching incident + a new standing rule: phone comparisons must normalize on both sides, not assume canonical storage. |
+
+**Related, found but not fixed (documented only):** `modules/contact_roles/routes.py`'s list/delete handlers have the same exact-match phone bug against the same table — a separate decision, not part of this work.
 
 **"funny" and "lawyer" personas exist but are deliberately not
 auto-assigned to any role** — this channel auto-sends to real people with
@@ -67,11 +69,11 @@ manual/admin-triggered path.
 
 ### Verification performed
 
-- `python3 -m py_compile` on all 4 changed files — clean.
+- `python3 -m py_compile` on every changed file — clean.
 - Existing test suite: `tests/unit/test_reply_policy.py` (18 tests) +
-  `tests/unit/test_identity_brain.py` (23 tests) — **41/41 still pass**,
-  confirming the additions didn't break existing behavior (only new dict
-  keys were added, nothing existing was modified).
+  `tests/unit/test_identity_brain.py` (23 tests) — **41/41 pass**, both
+  before and after the `_lookup_seed()` fix and Phase 3, confirming no
+  regressions across the whole sequence.
 - `tests/unit/test_message_router_no_reply_name_gate.py` — passes in
   isolation (10/10), both with and without these changes. It fails when
   run *together* with 3 other specific test files, but this was proven to
@@ -87,13 +89,27 @@ manual/admin-triggered path.
   `vip_client` role via `build_whatsapp_reply_policy(role='vip_client', ...)`
   — confirmed the assembled prompt now contains the correct VIP persona
   line instead of the generic `new_lead` fallback text.
+- **VIP dry-run, both real contacts, after the `_lookup_seed()` fix**:
+  `01537443173` and `01826532066` both now resolve
+  `role=vip_client, source=seed_rule, confidence=100` — confirmed live,
+  zero writes, zero messages sent.
+- **Phase 3 dry-run**: `modules.rag.safe_search()` confirmed returning
+  real, relevant KB chunks for both `"বেতন কত?"` and `"salary?"`
+  (salary_policy, payroll_module, salary_business_rules docs). Full
+  `_polish_with_ai()` pipeline run end-to-end twice with real KB context
+  included — see the "KNOWN GAP" note in §5 for the honest result (both
+  attempts were correctly rejected by the existing `_safe_polish()`
+  numeric-whitelist gate due to a real, pre-existing model hallucination
+  unrelated to this change — the guardrail worked as designed).
 
 ### Restart handoff (Owner action required — not done by this session)
 
-None of this is live until `fazle-core.service` restarts. Per fazle-core's
-own `.claude/CLAUDE.md`: *"Never restart the production service casually
-— use `scripts/restart_gate.sh --restart` (9 checks: migrations applied,
-tests green, no leaked secrets, env flags acknowledged, etc.)."*
+None of this is live until `fazle-core.service` restarts — combined for
+the `_lookup_seed()` fix and Phase 3 together, one restart for both. Per
+fazle-core's own `.claude/CLAUDE.md`: *"Never restart the production
+service casually — use `scripts/restart_gate.sh --restart` (9 checks:
+migrations applied, tests green, no leaked secrets, env flags
+acknowledged, etc.)."*
 
 ```bash
 cd /home/azim/core
@@ -102,9 +118,9 @@ scripts/restart_gate.sh --restart       # restart if checks pass
 curl -s localhost:8200/health           # sanity check after
 ```
 
-No new env flags, no migrations, no schema changes in this pass — the
-gate should pass cleanly, but running `--check-only` first is still the
-right move before `--restart`.
+No new env flags, no migrations, no schema changes across any of Phases
+0–3 — the gate should pass cleanly on working-tree cleanliness once
+committed, but running `--check-only` first is still the right move.
 
 ---
 
@@ -423,6 +439,42 @@ standing rule.
   real boundary change, not a routine feature — get it right before
   building, since reverting a write path that's already shipped is harder
   than not shipping one prematurely.
+
+**KNOWN GAP — social_auto_reply numeric whitelist vs KB content**
+(flagged 2026-08-03, decision: deferred, separate session — not bundled
+into Phase 3 per Owner instruction, to avoid scope creep into
+`_safe_polish()` without dedicated testing)
+
+If a KB article contains a number outside `_safe_polish()`'s existing
+numeric whitelist, the AI-polished reply using that KB content will be
+correctly rejected and fall back to the rule-based reply. This means some
+real KB-grounded answers may not reach the user. Fixing this requires a
+dedicated whitelist review session.
+
+**Live evidence from Phase 3's own dry-run testing (not hypothetical):**
+tested `_polish_with_ai()` end-to-end twice against the real local Ollama
+model with real KB context included (`"বেতন কত?"` and `"salary?"`) — both
+times the model hallucinated, stating the *training-period* salary as
+৳24,700 (should be "no salary during training" per both the hardcoded
+facts and the KB content it was given) by confusing it with the
+*permanent* salary figure. `_safe_polish()` correctly rejected both
+outputs (Bengali-numeral ৳24,700 not in the whitelist) and would have
+fallen back to the safe rule-based reply in both cases — the guardrail
+worked exactly as designed, on a real hallucination, not a synthetic one.
+Net effect observed: KB retrieval and prompt construction are confirmed
+working correctly, but in this specific pair of live tests the AI-polish
+step itself never actually produced a sendable KB-enriched reply — the
+existing model's real accuracy limitations, not a Phase 3 code defect.
+
+**Second, unrelated observation from the same dry run:** one of the 3 KB
+hits returned for `"বেতন কত?"` was `knowledge_base__06_developer_system__
+social_auto_reply_system` — developer-facing internal documentation
+(describes the intent classifier's category table), not customer-facing
+content. It passed RAG's file-level exclusion filter because its filename
+doesn't contain a blocked keyword like "intent" — even though its content
+does. Pre-existing RAG filter behavior, identical for `message_router`
+(same `safe_search()` call, unmodified) — not something Phase 3
+introduces. Flagged, not fixed here.
 
 ## 6. Rollback
 
