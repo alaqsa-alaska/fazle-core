@@ -2,7 +2,7 @@
 title: Management Decisions — Active Register
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-07-21
+last_verified: 2026-08-02
 runtime_index: true
 ---
 
@@ -5946,3 +5946,40 @@ Phased plan (Audit/Architecture/Implementation/Testing) explicitly approved at e
 ### Cross references
 
 `docs/ADMIN_AI_ENGINE.md`, `docs/DEVELOPER_GUIDE.md` §L, `docs/MODULE_MAP.md` (`modules.admin_directives`, `modules.observability`, updated `modules.bridge_poller`/`modules.message_router`/`modules.ai_console` entries), `knowledge_base/06_developer_system/admin_ai_engine.md`, `CANONICAL_BUSINESS_RULES.md` §Roles, `.claude/CLAUDE.md`.
+
+## Canonical Cash Ledger AI-Read Rule + ai_read_cash_transactions View (2026-08-02)
+
+**Status: KB documentation and assistant-platform application code done. `CREATE VIEW`/`GRANT` DDL not yet run — this entry documents an approved decision awaiting that one manual step, not a completed deployment.**
+
+### Origin
+
+assistant-platform (a separate app, `/home/azim/assistant-platform/`, reads fazle-core data read-only via the existing `fazle_ai_reader` role/`ai_read_*` view pattern — no fazle-core code was ever modified to support it) hit a real user-facing failure: an Owner question about cash transactions on a specific date got a hallucinating, self-contradicting AI answer instead of either real data or an honest "I don't have that." Root cause, on investigation: no `ai_read_*` view exposed cash-transaction data at all, and — separately — two candidate source tables existed with no documented answer as to which was canonical from assistant-platform's side.
+
+### What was found (audit, read-only — no fazle-core code or schema touched)
+
+1. **Two real, populated tables**: `fpe_cash_transactions` and `wbom_cash_transactions`. Confirmed directly via `\d` (schema only, no row data read) rather than guessed.
+2. **The canonical-table question was already answered in this codebase**, just not visible from assistant-platform's side: `modules/payment_ingest/wbom_fpe_sync.py`'s own docstring cites **Owner Directive (2026-06-29)** — `fpe_cash_transactions` is the sole canonical table, `wbom_cash_transactions` is legacy archive/reference only, never written to. `CANONICAL_BUSINESS_RULES.md`'s `## Cash Transaction` section already documented this write-path rule in full detail (including the `reverse_transaction()` direct-insert exception) — this was **not new information**, just not previously connected to assistant-platform's read-access question.
+3. **A genuine, pre-existing KB drift**, unrelated to the above but found while reading the same doc: `knowledge_base/06_developer_system/ai_readonly_data_access.md` said "9 views" and didn't list `ai_read_billing_outstanding`, which has existed in production as a 10th view for some time. Nobody had updated this doc when that view was added.
+4. **`CANONICAL_BUSINESS_RULES.md`'s own `## AI Console` section's "Canonical Database Tables" list was also stale** — named only 5 of the (then) 9/10 approved views, independent of anything in this entry.
+
+### What was decided (Owner-confirmed)
+
+- `fpe_cash_transactions` remains, and is reconfirmed, the sole canonical cash ledger — this entry does not change that rule, it extends it to the **AI-read** dimension specifically: no live financial AI answer (Chat, Hermes, `modules/ai_readonly_tools`, `modules/ai_console`, or any future AI tool) may read from `wbom_cash_transactions`, and none may mix/aggregate both tables — double-counting / wrong-ledger risk. `wbom_cash_transactions` may still be read for explicitly-labeled historical migration analysis, never presented as a current answer.
+- A new `ai_read_cash_transactions` view is approved, scoped to `fpe_cash_transactions` only, following the exact same curation pattern as the existing `ai_read_billing_outstanding` view (amounts/dates/status via a friendly `LEFT JOIN`, no raw audit columns, no phone numbers, no jsonb payload/metadata). Full proposal, 6-part KB-first structure, DDL, and the application-side code changes: `assistant-platform/proposal_ai_read_cash_transactions_20260802.md`.
+
+### What was actually changed (this entry)
+
+1. `knowledge_base/06_developer_system/ai_readonly_data_access.md` — view count corrected 9 → 11 (`ai_read_billing_outstanding` and `ai_read_cash_transactions` both now listed; the latter marked DDL-pending).
+2. `CANONICAL_BUSINESS_RULES.md` `## Cash Transaction` §Structural Rules — one new sentence: the AI-read-access rule above.
+3. `CANONICAL_BUSINESS_RULES.md` `## AI Console` §Canonical Database Tables — corrected to the full, current 11-view list (was stale independent of this decision).
+4. This entry.
+
+**Not changed by this entry**: no fazle-core application code, no database schema, no `.env`. The `CREATE VIEW`/`GRANT SELECT ON ai_read_cash_transactions TO fazle_ai_reader` DDL is written and ready (see the proposal doc) but was deliberately not executed by the AI that did this audit — per this KB's own hard constraint that production DB schema is not changed by AI — and is left for the Owner/fazle-core side to run.
+
+### Owner approval
+
+Explicit, this session: canonical-source confirmation, the AI-read/no-mixing rule, and the KB doc updates were all directly approved before this entry was written.
+
+### Cross references
+
+`assistant-platform/proposal_ai_read_cash_transactions_20260802.md`, `knowledge_base/06_developer_system/ai_readonly_data_access.md`, `CANONICAL_BUSINESS_RULES.md` §Cash Transaction, §AI Console, `modules/payment_ingest/wbom_fpe_sync.py`, `.claude/CLAUDE.md` (already stated this same canonical-table rule independently).

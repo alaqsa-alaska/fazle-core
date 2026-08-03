@@ -16,8 +16,10 @@ source_tables:
   - ai_read_recruitment_leads
   - ai_read_module_bridge_status
   - ai_read_kb_articles
+  - ai_read_billing_outstanding
+  - ai_read_cash_transactions
 runtime_index: true
-last_verified: 2026-06-24
+last_verified: 2026-08-02
 ---
 
 # AI Read-Only Data Access Layer
@@ -50,7 +52,14 @@ Formatted rows → context block → Ollama prompt
 | `fazle_ai_reader` | `postgres` (production) | SELECT on `ai_read_*` views only |
 | `ollama_memory_owner` | `fazle_ollama_memory` | Full DDL/DML on memory DB |
 
-## Approved Views (9 views)
+## Approved Views (11 views)
+
+Corrected 2026-08-02 — this table previously said "9 views" and was
+missing two that already existed/were being added. Found while an external
+system (assistant-platform, a separate app that reads fazle-core data via
+this same `fazle_ai_reader` role) was auditing why it had no cash-
+transaction data source — not a fazle-core code change, a documentation
+correction plus one new view.
 
 | View | Source Tables | What AI sees |
 |---|---|---|
@@ -63,6 +72,8 @@ Formatted rows → context block → Ollama prompt
 | `ai_read_recruitment_leads` | `fazle_recruitment_sessions` | last 30 days, no NID |
 | `ai_read_module_bridge_status` | `fazle_service_heartbeats` | service health |
 | `ai_read_kb_articles` | `fazle_knowledge_base` | active KB content |
+| `ai_read_billing_outstanding` | `wbom_billing_records` | bill number, client, date, amount, status, days outstanding — pending bills only |
+| `ai_read_cash_transactions` | `fpe_cash_transactions` **only** — never `wbom_cash_transactions` (legacy/archive, Owner Directive 2026-06-29, see `CANONICAL_BUSINESS_RULES.md` §Cash Transaction) | ref, date, amount, category, status, method, employee name — no phone numbers, no raw payload/metadata. **DDL pending as of this entry** — see `assistant-platform/proposal_ai_read_cash_transactions_20260802.md`. |
 
 ## Python Tool Functions
 
