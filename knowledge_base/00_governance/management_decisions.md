@@ -5983,3 +5983,27 @@ Explicit, this session: canonical-source confirmation, the AI-read/no-mixing rul
 ### Cross references
 
 `assistant-platform/proposal_ai_read_cash_transactions_20260802.md`, `knowledge_base/06_developer_system/ai_readonly_data_access.md`, `CANONICAL_BUSINESS_RULES.md` §Cash Transaction, §AI Console, `modules/payment_ingest/wbom_fpe_sync.py`, `.claude/CLAUDE.md` (already stated this same canonical-table rule independently).
+
+## Bridge3 (8801805529211 / REC2) — Current State & Decision (2026-08-03)
+
+### Status
+
+Bridge running and healthy since 2026-07-26. Application layer: zero integration in fazle-core today.
+
+### What was found
+
+- WhatsApp number 8801805529211 (label "REC2"), `whatsapp-bridge3.service` active/healthy since 2026-07-26 (confirmed via `systemctl status` and its log file, `/home/azim/bridges/mcp/logs/bridge3.log` — recent activity, normal keepalive/reconnect churn matching bridge1/bridge2's pattern).
+- Configured in `.env` (`BRIDGE3_URL`, `BRIDGE3_NUMBER`, `BRIDGE3_LABEL`, `BRIDGE3_DB_PATH`, listed in `AUTO_REPLY_SOURCES` and `ESCORT_TRUSTED_SOURCES`) but zero references to "bridge3" anywhere in fazle-core's actual application code (`app/*.py`, `modules/*.py`) — confirmed by direct repo-wide grep. The number is live and connected but fazle-core's business logic never reads from or writes to it.
+- No MCP server exists in `/home/azim/whatsapp-mcp/` (the source of the bridge3 binary) for WhatsApp itself — that directory only contains the Go bridge binary and an unrelated `media-processor` helper (shared OCR/STT service used elsewhere). Any future Hermes/bridge3 wiring needs new integration code either way; no ready-made shortcut exists there.
+
+### Decision
+
+Integration of bridge3 (to fazle-core's application layer, or to Hermes/assistant-platform as a "Jarvis"-style monitoring/reply channel) is deferred to a dedicated planning session — this is a significant new integration, not a small fix. Any future wiring of bridge3 to Hermes or fazle-core requires explicit Owner instruction to begin.
+
+### Owner approval
+
+Explicit, this session (2026-08-03).
+
+### Cross references
+
+`/home/azim/assistant-platform/proposal_hermes_whatsapp_persona_reply_20260803.md` (separate, related persona-reply proposal for bridge1/bridge2/social_auto_reply — bridge3 explicitly out of scope there too).
