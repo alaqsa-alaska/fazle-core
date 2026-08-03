@@ -75,11 +75,18 @@ async def list_contact_roles(
 ):
     """List contact role entries with pagination, optionally filtered by phone."""
     if phone:
-        from modules.phone_normalizer import normalize_phone as _normalize_phone
-        norm = _normalize_phone(phone) or phone  # fall back to raw input if unparseable
+        # 2026-08-03: matches all phone variants (01XXXXXXXXX, 8801XXXXXXXXX,
+        # +8801XXXXXXXXX) instead of an exact match against one normalized
+        # form — fazle_contact_roles.phone is not guaranteed to be stored
+        # canonically (confirmed live: real vip_client rows are stored raw
+        # 01XXXXXXXXX). Same class of bug as identity_brain._lookup_seed(),
+        # same table, fixed the same way — see identity_brain.md's standing
+        # rule on phone normalization.
+        from modules.number_identity import normalize_phone as _phone_variants
+        variants = _phone_variants(phone) or [phone]
         rows = await fetch_all(
-            "SELECT * FROM fazle_contact_roles WHERE phone = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            norm, limit, offset,
+            "SELECT * FROM fazle_contact_roles WHERE phone = ANY($1) ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            variants, limit, offset,
         )
     else:
         rows = await fetch_all(
@@ -184,17 +191,20 @@ async def delete_contact_role(
 ):
     """Remove a contact role. If platform is given, removes only that platform row;
     otherwise removes all rows for the phone."""
-    from modules.phone_normalizer import normalize_phone as _normalize_phone
-    phone = _normalize_phone(phone) or phone
+    # 2026-08-03: same fix as list_contact_roles above — match all phone
+    # variants, not one exact normalized form, since the stored column
+    # isn't guaranteed canonical.
+    from modules.number_identity import normalize_phone as _phone_variants
+    variants = _phone_variants(phone) or [phone]
     if platform:
         await execute(
-            "DELETE FROM fazle_contact_roles WHERE phone = $1 AND platform = $2",
-            phone, platform,
+            "DELETE FROM fazle_contact_roles WHERE phone = ANY($1) AND platform = $2",
+            variants, platform,
         )
     else:
         await execute(
-            "DELETE FROM fazle_contact_roles WHERE phone = $1",
-            phone,
+            "DELETE FROM fazle_contact_roles WHERE phone = ANY($1)",
+            variants,
         )
     log.info("contact_role deleted phone=%s platform=%s", phone, platform or "all")
     return {"ok": True, "phone": phone, "platform": platform or "all"}

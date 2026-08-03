@@ -1,13 +1,60 @@
 ---
 title: Phase 4 Admin Decision Draft — Full Reply Permission Toggle
 owner: Fazle Core Admin
-status: awaiting-owner-decision
+status: decided-and-implemented
 last_verified: 2026-08-03
 runtime_index: false
 ---
 
+OWNER DECISION — RECORDED 2026-08-03
+=====================================
+
+**Decision: the narrow recommendation, approved as-is.** Rule-based-fallback
+replies keep auto-sending exactly as today (no new risk there). Every
+AI-polished reply that passes `_safe_polish()` now requires explicit human
+approval before sending — no exceptions, no auto-approve timer.
+
+1. **Option chosen:** narrow recommendation (rule-based fallback stays
+   auto-send; AI-polished + `_safe_polish()`-passed replies always require
+   review).
+2. **Review-queue interface:** the existing `fazle_draft_replies` +
+   `APPROVE <id>` / `REJECT <id>` admin WhatsApp commands — already built,
+   already used for `DRAFT_ALWAYS_*` senders, reused unchanged. No new
+   table, no new endpoint, no new frontend.
+3. **Auto-approve timer:** none. `fazle_draft_replies`' existing 24h TTL
+   (`combined_draft_cleanup` scheduler job) means an unreviewed draft
+   *expires* (discarded, never sent) — it does not auto-send on timeout.
+4. **Never-auto-send topics (beyond existing risky/escalation intents):**
+   Salary/Compensation → mapped to real intents `salary`, `salary_objection`.
+   Cash transactions/Financials → mapped to `fees` (`payment_issue` was
+   already never auto-sent). These skip the AI-polish attempt entirely and
+   always use the pre-approved rule-based text (the Owner-permitted
+   "fallback to safe-rules" option) — not queued, since the rule-based text
+   for these was already safe before this session's changes.
+   **"Final hiring decisions / job offers" has no current matching intent**
+   in this classifier's 30+ categories — checked directly, not assumed;
+   this recruitment flow only ever informs/collects info, never announces a
+   hiring decision. Flagged as a gap, not silently dropped — add an
+   explicit gate here if/when such an intent is ever built.
+5. **Per-channel toggle:** implemented for `social_auto_reply`
+   (`SOCIAL_AI_POLISH_REVIEW_REQUIRED`, default `true`). `message_router`
+   has **no equivalent mechanism to toggle** — its AI-fallback path
+   generates and sends directly, with no separate "rule-reply then AI
+   polish" step to gate the way `social_auto_reply` has. Building an
+   equivalent review gate there would mean restructuring the live primary
+   WhatsApp channel's send path, not a config flag — a materially larger,
+   separate change, not attempted here without dedicated review. Documented
+   honestly as a gap rather than a fake no-op toggle.
+
+**Implementation status: DONE**, see the "What was actually changed"
+section below. Committed, not yet restarted at time of writing — see the
+session's final restart handoff.
+
+---
+
 ADMIN DECISION REQUIRED — Phase 4: Full Reply Permission Toggle
 ================================================================
+*(original draft preserved below for context)*
 Prepared by: Claude (assistant-platform session)
 Date: 2026-08-03
 Related system: fazle-core / social_auto_reply (Facebook + Meta WhatsApp
@@ -202,3 +249,19 @@ Reply with:
   Auto-approve timer (if applicable): [X minutes or "never"]
   Never-auto-send topics: [list or "none beyond existing risky/escalation intents"]
   Per-channel toggle: [yes / no]
+
+---
+
+## What was actually changed (implementation, 2026-08-03)
+
+| File | Change |
+|---|---|
+| `modules/social_auto_reply/intelligent_generator.py` | `ReplyPlan` gets a new `needs_review: bool` field. `plan_reply()`: skips AI-polish entirely for `salary`/`salary_objection`/`fees`/`payment_issue` intents (always uses the safe rule-based text). For all other intents, if AI-polish succeeds and passes `_safe_polish()`, `needs_review` is set from `SOCIAL_AI_POLISH_REVIEW_REQUIRED` (default `true`) instead of unconditionally auto-sending. |
+| `modules/social_auto_reply/planner_worker.py` | `process_due_threads()` now routes `plan.needs_review` to the exact same existing draft path as `DRAFT_ALWAYS_*` senders (`_draft_instead_of_send()`), not a new mechanism. `_draft_instead_of_send()` gets a new `ai_polished` parameter that labels the admin WhatsApp notification distinctly ("🤖 AI-Polished Reply Pending Approval" vs. the existing "📋 Social Auto-Reply Draft Pending Approval") and includes the `APPROVE <id>`/`REJECT <id>` instruction inline. |
+| `modules/contact_roles/routes.py` | `list_contact_roles()` and `delete_contact_role()` — same phone-matching bug as the VIP fix, same table (`fazle_contact_roles`), same fix (`_phone_variants()`/`= ANY($1)` instead of exact match). Owner-approved, implemented this session. |
+
+**Verified:**
+- `python3 -m py_compile` on all 3 changed files — clean.
+- Dry run: `salary` intent correctly skips AI-polish (`needs_review=False`, safe rule-based text, unchanged fast path). `location` intent correctly sets `needs_review=True` when AI-polish succeeds.
+- Full test suite: `test_reply_policy.py` + `test_identity_brain.py` + `test_social_planner_draft_routing.py` — **47/47 pass** (41 + 6, no regressions).
+- `test_contact_roles.py` requires a real test-Postgres instance (`TEST_DB_PASSWORD`), unavailable in this environment — confirmed via `git stash` that this is a pre-existing environmental gap, not caused by this change (identical errors with and without it).

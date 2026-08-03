@@ -49,6 +49,14 @@ class ReplyPlan:
     event_ids: list[int]
     target_id: str
     reply_to_comment_id: str | None = None
+    # 2026-08-03 (Owner decision, Phase 4): True when reply_text came from
+    # the AI-polish step (not the rule-based fallback) — the caller
+    # (planner_worker.py) must route this to the existing draft/admin-
+    # approval mechanism instead of a real auto-send, same as it already
+    # does for DRAFT_ALWAYS_* senders. auto_send stays True either way —
+    # auto_send=False means "skip/ignore entirely" (a different, existing
+    # meaning), not "needs review."
+    needs_review: bool = False
 
 
 _INTENT_PRIORITY = [
@@ -115,10 +123,40 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
     except Exception:
         resolved_role = "unknown"
     persona_text = rules.persona_for_role(resolved_role)
+
+    # 2026-08-03 (Owner decision, Phase 4): topics that must never be sent
+    # as AI-polished text, regardless of _safe_polish() outcome — skip the
+    # AI-polish attempt entirely and use the pre-approved rule-based reply
+    # directly (Owner's explicit "fallback to safe-rules" option). Mapped
+    # from the Owner's 3 named categories to real classifier intents:
+    # Salary/Compensation -> salary, salary_objection; Cash transactions/
+    # Financials -> fees, payment_issue (payment_issue already never
+    # reaches this function auto-send-wise, listed for completeness).
+    # "Final hiring decisions / job offers" has NO current matching intent
+    # in this classifier's 30+ categories (checked directly, not assumed)
+    # — this recruitment flow only ever informs/collects info, never
+    # announces a hiring decision, so there's nothing to gate here yet.
+    # Flagged, not silently ignored.
+    never_ai_polish = {"salary", "salary_objection", "fees", "payment_issue"}
+    if never_ai_polish.intersection(intents):
+        await _update_thread_state(platform, target_id, intents, reply)
+        return ReplyPlan(reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events), needs_review=False)
+
     polished = await _polish_with_ai(reply, combined_text, history, intents, persona_text, resolved_role)
-    final_reply = polished if _safe_polish(polished) else reply
+    if _safe_polish(polished):
+        final_reply = polished
+        # 2026-08-03 (Owner decision, Phase 4): AI-polished text must go to
+        # the existing admin draft/approval queue, never straight to a real
+        # send — SOCIAL_AI_POLISH_REVIEW_REQUIRED (default true) is the
+        # per-channel toggle; message_router is a separate, unrelated flag
+        # (see shared/reply_policy.py's module docstring) with no
+        # equivalent polish/validate step to gate today.
+        needs_review = os.getenv("SOCIAL_AI_POLISH_REVIEW_REQUIRED", "true").lower() in {"1", "true", "yes"}
+    else:
+        final_reply = reply
+        needs_review = False
     await _update_thread_state(platform, target_id, intents, final_reply)
-    return ReplyPlan(final_reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events))
+    return ReplyPlan(final_reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events), needs_review=needs_review)
 
 
 def _classify(platform: str, text: str, media_flag: bool) -> Classification:

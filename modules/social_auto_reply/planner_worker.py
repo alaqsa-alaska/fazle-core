@@ -79,13 +79,18 @@ async def process_due_threads(limit: int = 10) -> dict:
         # legacy bridge_poller path already uses) get routed to an admin-
         # approval draft. Everyone else gets a real auto-send, matching
         # pre-2026-06-23 behavior, once the underlying send-worker bug is fixed.
-        if await _is_draft_always_sender(target_id, events[-1]):
+        # 2026-08-03 (Owner decision, Phase 4): AI-polished replies
+        # (plan.needs_review) are routed here too, reusing this exact same
+        # existing draft/admin-approval mechanism — no new queue, no new
+        # UI, no new WhatsApp command. Admin already has APPROVE/REJECT.
+        if await _is_draft_always_sender(target_id, events[-1]) or plan.needs_review:
             draft_id = await _draft_instead_of_send(
                 platform=platform,
                 target_id=target_id,
                 reply_text=plan.reply_text,
                 intent=plan.intent,
                 sender_role=sender_role,
+                ai_polished=plan.needs_review,
             )
             if draft_id:
                 await execute("UPDATE social_inbox_events SET reply_status='drafted' WHERE id = ANY($1::bigint[])", plan.event_ids)
@@ -138,20 +143,33 @@ def _primary_admin_number() -> str:
 
 
 async def _draft_instead_of_send(
-    *, platform: str, target_id: str, reply_text: str, intent: str, sender_role: str
+    *, platform: str, target_id: str, reply_text: str, intent: str, sender_role: str,
+    ai_polished: bool = False,
 ) -> int | None:
     """Create a fazle_draft_replies row instead of enqueueing a real send,
     and notify the admin that a draft is waiting. Reuses the same shared
     draft mechanism modules/bridge_poller._save_draft() uses, so this is a
     routing change only -- no new draft/notification infrastructure.
+
+    ai_polished=True (2026-08-03, Owner decision, Phase 4): this draft came
+    from the AI-polish step (identity/persona/KB-enriched text), not from
+    a DRAFT_ALWAYS_* sender match — labelled distinctly in the admin
+    notification so reviewers know why this one needs review (AI-generated
+    text, not a policy-based routing).
     """
+    context = (
+        f"social_auto_reply planner — AI-polished reply pending review — "
+        f"platform={platform} sender_role={sender_role}"
+        if ai_polished else
+        f"social_auto_reply planner — platform={platform} sender_role={sender_role}"
+    )
     draft_id = await create_draft_reply(
         sender=target_id,
         bridge=platform,
         draft_text=reply_text,
         role="social_lead",
         intent=intent,
-        context=f"social_auto_reply planner — platform={platform} sender_role={sender_role}",
+        context=context,
         source_module="social_auto_reply.planner_worker",
     )
     if not draft_id:
@@ -159,21 +177,27 @@ async def _draft_instead_of_send(
     admin_phone = _primary_admin_number()
     if admin_phone:
         preview = reply_text if len(reply_text) <= 300 else reply_text[:300] + "…"
+        title = (
+            "🤖 AI-Polished Reply Pending Approval"
+            if ai_polished else
+            "📋 Social Auto-Reply Draft Pending Approval"
+        )
         await enqueue_outbound(
             admin_phone,
             (
-                "📋 Social Auto-Reply Draft Pending Approval\n"
+                f"{title}\n"
                 f"Platform: {platform}\n"
                 f"Sender: {target_id}\n"
                 f"Intent: {intent}\n"
                 f"Draft ID: {draft_id}\n\n"
-                f"{preview}"
+                f"{preview}\n\n"
+                f"Reply APPROVE {draft_id} to send, REJECT {draft_id} to discard."
             ),
             source_bridge="bridge1",
             fallback_channel="bridge2",
             purpose="social-draft-pending",
             idempotency_key=f"social-draft-notify:{draft_id}",
-            meta={"draft_id": draft_id, "platform": platform, "target_id": target_id},
+            meta={"draft_id": draft_id, "platform": platform, "target_id": target_id, "ai_polished": ai_polished},
         )
     return draft_id
 
