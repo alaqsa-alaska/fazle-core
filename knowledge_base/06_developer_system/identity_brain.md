@@ -2,7 +2,7 @@
 title: Identity Brain
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-08-03
 runtime_index: true
 ---
 
@@ -80,6 +80,12 @@ When the primary phone lookup in `wbom_employees` fails, the system tries four s
 **Real incident and fix:** a phone explicitly configured in `ESCORT_CLIENT_PHONES` received a single incidental cash payment months into an ongoing client relationship (`fpe_cash_transactions` auto-creates an employee stub for any WhatsApp-shorthand payout recipient regardless of their other roles — see `05_workflows/cash_workflow.md`'s missing-name-handling section). From that day forward `_lookup_cash_identity()` matched this phone on every message and returned role `employee` (source `cash_payment`, confidence 86) **before step 6 (`env_phone`) ever ran** — permanently overriding the explicit allowlist entry with no way to self-correct. Fixed by having steps 4's two lookups (`_lookup_cash_identity`, `_lookup_attendance_identity`) skip entirely when the phone matches `ESCORT_CLIENT_PHONES`; step 3's *genuine* `db_employee` record is intentionally still allowed to override, since that's a materially stronger signal than an incidental payment/attendance row.
 
 A second, independent bug compounded this and would have blocked the fix above on its own: `modules.escort._escort_client_phone_list()` returns canonical `01XXXXXXXXX` form (changed from `880`-form in commit `6aca81e`, 2026-07-20, to fix that function's *other* two callers), but `identity_brain._normalize_phone()` always produces `8801XXXXXXXXX` form — so step 6's direct string-equality check could never have matched any configured client from 2026-07-20 onward, regardless of step ordering. The 2026-07-20 commit's own audit explicitly claimed identity_brain "already compares self-consistently" — that claim was wrong for this one call site. Fixed by comparing against every canonical phone variant (`_phone_variants()`) instead of raw equality.
+
+**Second real incident, same class, different call site (2026-08-03):** `_lookup_seed()` (step 2, `fazle_contact_roles`) did an exact `WHERE phone = $1` match against `_normalize_phone()`'s canonical `8801XXXXXXXXX` form, but both real `vip_client` rows in `fazle_contact_roles` are stored raw (`01XXXXXXXXX`) — confirmed directly against live data, not assumed. Neither VIP client could ever match the seed rule; both silently fell through to a lower-priority `db_contact` match and were misidentified as `repeat_client`. Found via a deliberate dry-run verification (identity resolution + reply-policy build against real contacts, zero writes, zero messages sent) before a persona-reply change went live — caught before it shipped, not after. Fixed the same way as the 2026-07-20 incident above: `_lookup_seed()` now matches via `_phone_variants()` / `= ANY($1)` instead of raw equality. Verified post-fix: both real VIP contacts now resolve `role=vip_client, source=seed_rule, confidence=100`; full test suite unaffected (41/41).
+
+**A related, unfixed instance of the same bug was found while investigating, not yet corrected:** `modules/contact_roles/routes.py`'s `list_contact_roles()` and its delete handler both query this same `fazle_contact_roles` table with a single normalized phone form via exact match, not `_phone_variants()` — an admin searching or deleting by a normalized number would silently get zero results for either VIP client today, for the same underlying reason. Documented here, not fixed — a separate decision.
+
+**Standing rule (now, not a one-off fix):** phone normalization must be applied at BOTH sides of any comparison — at write time if a value is stored, at query time if a stored value is queried against a normalized one. Any new code that compares phone numbers must normalize (or match all variants) before comparing; assuming "the DB already stores canonical form" is exactly the assumption that failed twice now, in two different tables. Cross-reference: the 2026-07-20/08-01 `ESCORT_CLIENT_PHONES` incident directly above — same class of bug, different call site, now two confirmed instances.
 
 ---
 

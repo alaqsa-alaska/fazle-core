@@ -340,16 +340,24 @@ def _check_admin_settings(phone: str) -> bool:
 
 
 async def _lookup_seed(phone: str) -> Optional[dict]:
-    """Lookup highest-priority seed rule for this phone."""
+    """Lookup highest-priority seed rule for this phone.
+    Matches against all phone variants (01XXXXXXXXX, 8801XXXXXXXXX,
+    +8801XXXXXXXXX) — fazle_contact_roles.phone is not guaranteed to be
+    stored in the canonical form the caller passes in. Same class of bug
+    as the 2026-08-01 env_phone incident documented above, a different
+    call site. See identity_brain.md's standing rule."""
+    variants = _phone_variants(phone)
+    if not variants:
+        return None
     row = await fetch_one(
         """SELECT role, confidence, source, priority, notes
            FROM fazle_contact_roles
-           WHERE phone = $1
+           WHERE phone = ANY($1)
              AND COALESCE((to_jsonb(fazle_contact_roles)->>'is_active')::boolean, true) = true
              AND LOWER(COALESCE(to_jsonb(fazle_contact_roles)->>'status', 'active')) = 'active'
            ORDER BY priority DESC
            LIMIT 1""",
-        phone,
+        variants,
     )
     return dict(row) if row else None
 
