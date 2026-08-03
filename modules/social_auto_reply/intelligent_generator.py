@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from app.database import execute
 
+from modules.identity_brain import detect_identity
+
 from . import reply_rules as rules
 from .classifier import Classification, classify_comment, classify_message
 from .conversation_history import recent_thread_history, thread_state
@@ -95,7 +97,25 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
     reply = _combined_rule_reply(platform, combined_text, intents, history, state)
     if not reply:
         return ReplyPlan("", "+".join(intents) or "manual_review", False, "no_safe_reply", event_ids, target_id, _comment_id(events))
-    polished = await _polish_with_ai(reply, combined_text, history, intents)
+    # 2026-08-03 (Owner-approved persona proposal): resolve sender identity
+    # for persona selection, reusing the same identity_brain.detect_identity()
+    # message_router already uses for bridge1/bridge2 — no new detection
+    # logic, just wiring this previously identity-blind path to it.
+    # target_id is a real phone for meta_whatsapp; for messenger/
+    # facebook_comment it's a PSID/comment id that won't match any
+    # phone-based evidence, so this safely resolves to role="unknown" for
+    # those rather than erroring — detect_identity() never raises for a
+    # non-phone input, but the try/except is defense-in-depth anyway since
+    # this is a new dependency added to a previously self-contained,
+    # safety-critical path (mirrors the fire-and-forget-safe pattern
+    # modules/memory_extractor already uses elsewhere in this codebase).
+    try:
+        identity = await detect_identity(target_id, combined_text)
+        resolved_role = identity.get("role", "unknown")
+    except Exception:
+        resolved_role = "unknown"
+    persona_text = rules.persona_for_role(resolved_role)
+    polished = await _polish_with_ai(reply, combined_text, history, intents, persona_text, resolved_role)
     final_reply = polished if _safe_polish(polished) else reply
     await _update_thread_state(platform, target_id, intents, final_reply)
     return ReplyPlan(final_reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events))
@@ -199,7 +219,38 @@ def _combined_rule_reply(platform: str, text: str, intents: list[str], history: 
     return reply
 
 
-async def _polish_with_ai(rule_reply: str, current_text: str, history: list[dict], intents: list[str]) -> str:
+# Maps an identity_brain role to a shared/reply_policy.py ROLE_PROMPTS key,
+# so the generic role_hint line that builder injects (its own
+# "## ভূমিকা (Role)" section) stays sensible rather than silently falling
+# back to its "new_lead" default for everything (same vocabulary-mismatch
+# bug fixed directly in reply_policy.py's own ROLE_PROMPTS — see the
+# 2026-08-03 proposal doc). Now mostly 1:1 since reply_policy.py's
+# ROLE_PROMPTS was expanded to cover identity_brain's full vocabulary, kept
+# as an explicit local dict (not imported from reply_policy.py, which this
+# module must not import per its own docstring boundary) so this module
+# doesn't silently break if that module's key set ever changes.
+_REPLY_POLICY_COMPAT_ROLE: dict[str, str] = {
+    "vip_client": "vip_client",
+    "client_escort_buyer": "client_escort_buyer",
+    "repeat_client": "repeat_client",
+    "vendor": "vendor",
+    "employee": "employee",
+    "supervisor": "supervisor",
+    "accountant": "accountant",
+    "internal_coordinator": "internal_coordinator",
+    "escort": "escort",
+    "security_guard": "security_guard",
+    "admin": "admin",
+    "candidate": "candidate",
+    "family": "known_contact",
+    "unknown": "new_lead",
+}
+
+
+async def _polish_with_ai(
+    rule_reply: str, current_text: str, history: list[dict], intents: list[str],
+    persona_text: str = "", resolved_role: str = "unknown",
+) -> str:
     if os.getenv("SOCIAL_AI_REPLY_ENABLED", "true").lower() not in {"1", "true", "yes"}:
         return ""
     history_text = "\n".join(f"{row.get('direction')}: {row.get('text')}" for row in reversed(history[-12:]))
@@ -211,9 +262,11 @@ async def _polish_with_ai(rule_reply: str, current_text: str, history: list[dict
         "Fees: processing 350 taka; training/joining 3,500 taka; mess/food advance may be 1,000 taka.\n"
         f"Contacts: {rules.OFFICE_NUMBERS}\n"
     )
+    persona_line = f"Persona (how to speak): {persona_text}\n" if persona_text else ""
     prompt_context = (
         "Approved business facts only:\n" + business_facts +
-        "Communication guidance: answer all current questions together, avoid repeating full answers already given, be respectful, honest, positive, and never guarantee job/salary/promotion.\n"
+        persona_line +
+        "Communication guidance: answer all current questions together, avoid repeating full answers already given, be honest and positive, and never guarantee job/salary/promotion.\n"
         f"Detected intents: {', '.join(intents)}\n"
         f"Thread history:\n{history_text}\n\n"
         f"Current messages:\n{current_text[:800]}\n\n"
@@ -226,7 +279,7 @@ async def _polish_with_ai(rule_reply: str, current_text: str, history: list[dict
             intent="recruitment",
             db_context=prompt_context,
             history=history_text,
-            role="new_lead",
+            role=_REPLY_POLICY_COMPAT_ROLE.get(resolved_role, "new_lead"),
         )
     except (RuntimeError, ValueError, OSError):
         return ""

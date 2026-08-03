@@ -2,7 +2,7 @@
 title: Automation Pipeline
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-08-03
 runtime_index: true
 ---
 
@@ -73,20 +73,22 @@ The platform uses one Ollama-first LLM chain. Local Ollama is preferred for runt
 **Source Module:** `app/llm.py`
 **PKCA Report:** 08_ai_behavior_coverage_report.md
 
-### Automated Reply Suffix
+### Automated Reply Suffix — REMOVED (Owner directive, 2026-07-27)
 
-Every auto-generated WhatsApp reply (non-draft, system-sent) has this suffix appended:
+**This section is corrected as of 2026-08-03 — it previously described
+behavior that no longer exists.** Every auto-generated WhatsApp reply used
+to have a footer appended (`🤖 Automated Reply System` + a Bangla disclaimer
+line), plus an earlier invisible zero-width-space marker also called
+`_AUTOMATED_SUFFIX`. Per an explicit Owner directive dated 2026-07-27, **no
+footer, marker, or any other character (visible or invisible) may be
+appended to an outbound message body** — both were removed outright.
+Outbound text is now sent byte-for-byte as generated, with no anchor check
+needed since there is nothing to anchor against. Confirmed by reading
+`app/bridge.py` directly (2026-08-03) — the constants this section
+originally cited no longer exist in that file.
 
-```
-─────────────────
-🤖 Automated Reply System
-এই বার্তাটি স্বয়ংক্রিয়ভাবে তৈরি হয়েছে। ভুল হতে পারে।
-```
-
-**Business Rule:** The suffix is appended exactly once. The system checks `_AUTOMATED_SUFFIX_ANCHOR` before appending to prevent double-append on retry.
-
-**Source Module:** `app/bridge.py`
-**Source Function:** `_AUTOMATED_SUFFIX`, `_AUTOMATED_SUFFIX_ANCHOR`
+**Source Module:** `app/bridge.py` (see the file's own 2026-07-27 header
+comment recording the Owner directive verbatim)
 
 ---
 

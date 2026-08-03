@@ -18,6 +18,75 @@ ADM_WHATSAPP = "011004669"
 MIN_AGE = 18
 MAX_AGE = 55
 
+# ── Persona system (added 2026-08-03, Owner-approved proposal) ────────────────
+# Named personas for the AI-polish step (intelligent_generator.py::_polish_with_ai).
+# This module handles Facebook Messenger/Comments + Meta WhatsApp Business API
+# (recruitment-focused) — it must NOT import from shared/reply_policy.py (that
+# module's own docstring restricts it to the bridge1/bridge2/meta WhatsApp
+# family used by modules/message_router; this is a deliberate parallel set,
+# not a duplicate of the same problem — see the 2026-08-03 proposal doc for
+# why cross-importing was rejected).
+#
+# Selection is by identity_brain-resolved role (see intelligent_generator.py's
+# new detect_identity() call) via SOCIAL_ROLE_TO_PERSONA below. "funny" and
+# "lawyer" personas are defined but deliberately NOT auto-assigned to any role
+# — this channel auto-sends to real candidates/clients with no admin review
+# for safe-intent messages, so an unprofessional or legally-loaded tone
+# should not be picked automatically. They're here for a possible future
+# manual/admin-triggered use, not for this proposal's automatic path.
+SOCIAL_PERSONAS: dict[str, str] = {
+    "recruitment_officer": (
+        "তুমি একজন নিয়োগ কর্মকর্তা (Recruitment Officer)। উৎসাহব্যঞ্জক, স্পষ্ট ও "
+        "তথ্যপূর্ণ ভাষায় কথা বলো। চাকরিপ্রার্থীর প্রশ্নের সরাসরি উত্তর দাও।"
+    ),
+    "hr_admin_officer": (
+        "তুমি একজন HR ও প্রশাসনিক কর্মকর্তা (HR & Admin Officer)। অফিসিয়াল, সম্মানজনক ও "
+        "সহায়ক ভাষায় কথা বলো — এই ব্যক্তি প্রতিষ্ঠানের সাথে সরাসরি সংশ্লিষ্ট।"
+    ),
+    "client_relations": (
+        "তুমি প্রতিষ্ঠানের ব্যবস্থাপনার একজন প্রতিনিধি (Client Relations)। পেশাদার, "
+        "সম্মানজনক ও সমাধানমুখী ভাষায় কথা বলো। সেবা, বিলিং, বা মান নিয়ে প্রশ্ন হলে "
+        "দায়িত্বশীলতার সাথে উত্তর দাও; ভুল হলে বিনয়ের সাথে স্বীকার করো ও সমাধানের পথ দেখাও।"
+    ),
+    "funny": (
+        "তুমি একজন রসিক, বন্ধুত্বপূর্ণ সহকারী। হালকা রসিকতা মিশিয়ে কিন্তু তথ্যে ভুল না করে "
+        "কথা বলো।"
+    ),
+    "lawyer": (
+        "তুমি একজন সতর্ক, আইন-সচেতন প্রতিনিধি। কোনো আইনি প্রতিশ্রুতি বা স্বীকারোক্তি দিও না; "
+        "স্পষ্ট, সংযত ভাষায় কথা বলো এবং জটিল বিষয় অফিসে যোগাযোগ করতে বলো।"
+    ),
+}
+_DEFAULT_SOCIAL_PERSONA = "recruitment_officer"
+
+# identity_brain's actual role vocabulary (see knowledge_base/06_developer_system/
+# identity_brain.md, _ROLE_PRIORITY) mapped to a persona above. Anything not
+# listed here falls back to _DEFAULT_SOCIAL_PERSONA — this channel's primary
+# purpose is recruitment, so an unresolved/unknown sender defaults to the
+# recruitment officer tone, not a generic one.
+SOCIAL_ROLE_TO_PERSONA: dict[str, str] = {
+    "vip_client": "client_relations",
+    "client_escort_buyer": "client_relations",
+    "repeat_client": "client_relations",
+    "vendor": "client_relations",
+    "employee": "hr_admin_officer",
+    "supervisor": "hr_admin_officer",
+    "accountant": "hr_admin_officer",
+    "internal_coordinator": "hr_admin_officer",
+    "escort": "hr_admin_officer",
+    "security_guard": "hr_admin_officer",
+    "admin": "hr_admin_officer",
+    "candidate": "recruitment_officer",
+    "family": "hr_admin_officer",
+    "unknown": _DEFAULT_SOCIAL_PERSONA,
+}
+
+
+def persona_for_role(role: str) -> str:
+    """Resolve an identity_brain role string to persona instruction text."""
+    persona_key = SOCIAL_ROLE_TO_PERSONA.get(role, _DEFAULT_SOCIAL_PERSONA)
+    return SOCIAL_PERSONAS[persona_key]
+
 WELCOME_REPLY = f"""আসসালামু আলাইকুম।
 
 {COMPANY_NAME}-এ যোগাযোগ করার জন্য ধন্যবাদ।

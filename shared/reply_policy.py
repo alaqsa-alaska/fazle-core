@@ -55,6 +55,61 @@ ROLE_PROMPTS: dict[str, str] = {
     "vendor":        "এই ব্যক্তি আমাদের ভেন্ডর বা সরবরাহকারী। পেশাদার টোনে কথা বলো।",
     "partner":       "এই ব্যক্তি আমাদের ব্যবসায়িক অংশীদার। সম্মানজনক ও সহযোগিতামূলক টোনে কথা বলো।",
     "known_contact": "এই ব্যক্তি আমাদের পরিচিত যোগাযোগ। সৌজন্যমূলক টোনে কথা বলো।",
+    # ── Added 2026-08-03 (Owner-approved persona proposal) — real bug fix,
+    # not just new features: these are real modules/identity_brain role
+    # values (see knowledge_base/06_developer_system/identity_brain.md,
+    # confirmed live by reading modules/message_router/__init__.py directly:
+    # `role_str = identity["role"]` is passed straight into generate_reply()
+    # with NO mapping step). None of these matched any key above, so
+    # ROLE_PROMPTS.get(role, ROLE_PROMPTS["new_lead"]) silently gave every
+    # one of them the generic "new_lead" (new-stranger) tone — a VIP client
+    # got the same treatment as a random unknown sender. Fixed by adding
+    # each its own persona, not by aliasing to an existing key.
+    "vip_client": (
+        "এই ব্যক্তি একজন VIP ক্লায়েন্ট — প্রতিষ্ঠানের গুরুত্বপূর্ণ সম্পর্ক। অত্যন্ত "
+        "সম্মানজনক, পেশাদার ও অগ্রাধিকারমূলক ভাষায় কথা বলো। প্রয়োজনে দ্রুত সমাধানের "
+        "আশ্বাস দাও।"
+    ),
+    "client_escort_buyer": (
+        "এই ব্যক্তি একজন এসকর্ট সেবা ক্লায়েন্ট — ব্যবস্থাপনার একজন প্রতিনিধি হিসেবে কথা বলো। "
+        "পেশাদার ও সমাধানমুখী থাকো। মাদার ভেসেল, লাইটার ভেসেল, তারিখ ও লোকসংখ্যা নিশ্চিত করো।"
+    ),
+    "repeat_client": (
+        "এই ব্যক্তি একজন পুনরাবৃত্ত ক্লায়েন্ট — আগে থেকেই পরিচিত সম্পর্ক। পেশাদার ও "
+        "আন্তরিক ভাষায় কথা বলো, যেন আগের সম্পর্কের ধারাবাহিকতা বোঝা যায়।"
+    ),
+    "supervisor": (
+        "এই ব্যক্তি একজন সুপারভাইজার। অফিসিয়াল, সংক্ষিপ্ত ও কার্যকরভাবে তথ্য দাও — "
+        "একজন অপারেশন অফিসারের মতো।"
+    ),
+    "accountant": (
+        "এই ব্যক্তি হিসাব বিভাগের সাথে সংশ্লিষ্ট। সুনির্দিষ্ট, সতর্ক ও পেশাদার ভাষায় কথা বলো।"
+    ),
+    "candidate": (
+        "এই ব্যক্তি একজন চাকরিপ্রার্থী। উৎসাহব্যঞ্জক ও তথ্যপূর্ণ ভাষায় কথা বলো — একজন "
+        "নিয়োগ কর্মকর্তার (Recruitment Officer) মতো।"
+    ),
+    # 2026-08-03: same fix, three more identity_brain roles found by reading
+    # its current _ROLE_PRIORITY dict directly (newer than the KB doc's
+    # 11-role list — "internal_coordinator", "escort", "security_guard").
+    "internal_coordinator": (
+        "এই ব্যক্তি একজন অভ্যন্তরীণ সমন্বয়কারী (dispatch/payroll/কাগজপত্র)। "
+        "অফিসিয়াল ও কার্যকরভাবে তথ্য দাও — কর্মীর মতোই ব্যবহার করো।"
+    ),
+    "escort": (
+        "এই ব্যক্তি একজন এসকর্ট কর্মী। অফিসিয়াল ও সহায়ক ভাষায় কথা বলো, ভাই/বোনের মতো "
+        "আন্তরিকভাবে — কর্মীর মতোই ব্যবহার করো।"
+    ),
+    "security_guard": (
+        "এই ব্যক্তি একজন নিরাপত্তা কর্মী। অফিসিয়াল ও সহায়ক ভাষায় কথা বলো, ভাই/বোনের মতো "
+        "আন্তরিকভাবে — কর্মীর মতোই ব্যবহার করো।"
+    ),
+    # "family" is intentionally not listed here — message_router short-
+    # circuits role_str == "family" with a hardcoded reply before
+    # generate_reply() is ever called, confirmed by reading
+    # modules/message_router/__init__.py directly, so this key would never
+    # be looked up in production. Not added to avoid a misleading unused
+    # entry.
 }
 
 # ── Intent-specific workflow instructions ─────────────────────────────────────
