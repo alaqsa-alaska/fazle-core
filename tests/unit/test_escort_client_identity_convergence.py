@@ -290,6 +290,7 @@ class TestAuthorityIsolation:
                 mock_settings.return_value.admin_meta_number = ""
                 mock_settings.return_value.admin_bridge1_number = ""
                 mock_settings.return_value.admin_bridge2_number = ""
+                mock_settings.return_value.admin_bridge3_number = ""
                 result = await detect_identity("8801700000001", "")
 
         actual_role = result.get("identity_role") or result.get("role")

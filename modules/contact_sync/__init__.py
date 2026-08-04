@@ -633,6 +633,67 @@ async def upsert_contact_from_message(phone: str, push_name: str, bridge_number:
         log.debug(f"[contact_sync] upsert_from_message error {norm}: {e}")
 
 
+# ── CSV import (2026-08-04, Owner decision) ──────────────────────────────────
+# The uploaded contacts.csv is now the authoritative contact-book source
+# (see knowledge_base/00_governance/management_decisions.md). Distinct from
+# _upsert_contacts() above on purpose: this is INSERT-ONLY (ON CONFLICT DO
+# NOTHING), never overwrites an existing row's name/data, matching the
+# Owner's exact future-update policy ("keep all existing contacts, import
+# ONLY genuinely new phone numbers that do not already exist, never
+# auto-delete on a future CSV not containing a number"). Reuses the same two
+# target tables and the same alias-tracking helper as _upsert_contacts();
+# only the conflict behavior differs. Used by both the one-time CSV rebuild
+# and every future incremental CSV upload — same function, same semantics.
+
+async def import_from_csv_contacts(rows: list[dict]) -> dict:
+    """rows: [{"phone": <normalized 8801XXXXXXXXX>, "display_name": str}, ...]
+    Returns {"inserted": n, "already_existed": n}."""
+    inserted = 0
+    already_existed = 0
+    for r in rows:
+        phone = r["phone"]
+        name = r["display_name"]
+
+        try:
+            result = await fetch_val(
+                """
+                INSERT INTO wbom_contacts
+                    (whatsapp_number, display_name, platform, last_seen, updated_at)
+                VALUES ($1, $2, 'whatsapp', NOW(), NOW())
+                ON CONFLICT (whatsapp_number, platform) DO NOTHING
+                RETURNING contact_id
+                """,
+                phone, name,
+            )
+        except Exception as e:
+            log.debug(f"[contact_sync] csv import wbom_contacts error {phone}: {e}")
+            continue
+
+        if result is not None:
+            inserted += 1
+            # unified_contacts / alias are additive/dedup layers, not the
+            # authority — only write them for a genuinely new contact, so a
+            # pre-existing (protected/escort-linked/other) contact's alias
+            # history is never touched by a CSV import.
+            try:
+                await execute(
+                    """
+                    INSERT INTO fazle_unified_contacts (phone, display_name, source_bridge, last_updated)
+                    VALUES ($1, $2, 'csv_import', NOW())
+                    ON CONFLICT (phone) DO NOTHING
+                    """,
+                    phone, name,
+                )
+            except Exception as e:
+                log.debug(f"[contact_sync] csv import unified_contacts error {phone}: {e}")
+            if name:
+                await _upsert_alias(phone, name, "csv_import")
+        else:
+            already_existed += 1
+
+    return {"inserted": inserted, "already_existed": already_existed}
+
+
 async def get_display_name(phone: str) -> str:
     """Look up best known display name for a phone number."""
     norm = normalize_phone(phone)
@@ -650,11 +711,19 @@ async def get_display_name(phone: str) -> str:
 
 # ── Scheduled job (2026-07-22) ────────────────────────────────────────────────
 # Registered in modules.scheduler as "daily_contact_sync" — see start_scheduler().
-# This is the actual "at least once a day" mechanism the Owner asked for.
+# DEPRECATED 2026-08-04 (Owner decision): the automatic CronTrigger for this
+# job is now commented out in modules/scheduler/__init__.py — the uploaded CSV
+# is the authoritative contact-book source, and this job would silently
+# recreate deleted/CSV-not-present contacts from each bridge's own phone
+# address book. Still callable manually (`RUN JOB daily_contact_sync`) if ever
+# needed — not deleted, REMOVE_PENDING only if a future session confirms it's
+# fully obsolete. _upsert_contacts() below is still live, reused directly by
+# scripts/import_csv_contacts.py.
 
 async def job_daily_contact_sync() -> dict:
-    """Daily phone-contact-book <-> wbom_contacts sync, called by the
-    scheduler (CONTACT_SYNC_HOUR, default 04:00 Asia/Dhaka)."""
+    """Daily phone-contact-book <-> wbom_contacts sync. DEPRECATED 2026-08-04 —
+    no longer auto-scheduled (see modules/scheduler/__init__.py), CSV import is
+    now authoritative. Still directly callable, e.g. via an admin RUN JOB command."""
     results = await sync_all_contacts()
     log.info(f"[contact_sync] daily job done: {results}")
     return {"status": "ok", "results": results}

@@ -630,13 +630,21 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
                        CronTrigger(hour=rag_rebuild_hour, minute=0),
                        id="rag_rebuild", replace_existing=True)
 
-    # 2026-07-22 — daily contact-book sync (default 04:00, before the 09:00
-    # memory-review job and after the 02:00/03:00 payroll/backup jobs)
-    if "daily_contact_sync" in _job_registry:
-        from modules.contact_sync import DAILY_SYNC_HOUR as _contact_sync_hour
-        _scheduler.add_job(_wrap("daily_contact_sync", _job_registry["daily_contact_sync"]),
-                           CronTrigger(hour=_contact_sync_hour, minute=0),
-                           id="daily_contact_sync", replace_existing=True)
+    # DEPRECATED 2026-08-04 (Owner decision): the daily bridge-phone-book ->
+    # wbom_contacts sync is disabled. The uploaded CSV is now the authoritative
+    # contact-book source (see knowledge_base/00_governance/management_decisions.md);
+    # this scheduled job would silently recreate deleted/CSV-not-present contacts
+    # from each bridge's own phone address book on its next run. The job stays
+    # registered (register_job() above, REMOVE_PENDING not REMOVE_NOW — a manual
+    # `RUN JOB daily_contact_sync` admin command still works if ever needed) and
+    # modules.contact_sync's upsert/merge logic is directly reused by the new CSV
+    # importer (scripts/import_csv_contacts.py) — only this automatic schedule is
+    # off. Re-enable only with a fresh, explicit Owner decision.
+    # if "daily_contact_sync" in _job_registry:
+    #     from modules.contact_sync import DAILY_SYNC_HOUR as _contact_sync_hour
+    #     _scheduler.add_job(_wrap("daily_contact_sync", _job_registry["daily_contact_sync"]),
+    #                        CronTrigger(hour=_contact_sync_hour, minute=0),
+    #                        id="daily_contact_sync", replace_existing=True)
 
     # Shared processing-lock cleanup (Phase 1 unification)
     try:

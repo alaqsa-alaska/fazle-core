@@ -330,6 +330,10 @@ def _check_admin_settings(phone: str) -> bool:
         from app.config import get_settings
         s = get_settings()
         admin_phones = set(_normalize_phone(p) for p in s.admin_number_list if p)
+        # admin_bridge3_number deliberately excluded (Owner decision 2026-08-04):
+        # bridge3/REC2 is a technical WhatsApp bridge identity, not a human Admin —
+        # reversing the same-day earlier bridge3-admin change. Do not re-add without
+        # a fresh Owner decision. See knowledge_base/00_governance/management_decisions.md.
         for attr in ("admin_meta_number", "admin_bridge1_number", "admin_bridge2_number"):
             v = getattr(s, attr, "")
             if v:
