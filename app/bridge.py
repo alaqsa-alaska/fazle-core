@@ -175,6 +175,7 @@ class BridgeClient:
 # Singleton instances — created once at startup
 _bridge1: BridgeClient | None = None
 _bridge2: BridgeClient | None = None
+_bridge3: BridgeClient | None = None
 
 
 def get_bridge1() -> BridgeClient:
@@ -191,3 +192,11 @@ def get_bridge2() -> BridgeClient:
         s = get_settings()
         _bridge2 = BridgeClient(s.bridge2_url, "BR2")
     return _bridge2
+
+
+def get_bridge3() -> BridgeClient:
+    global _bridge3
+    if _bridge3 is None:
+        s = get_settings()
+        _bridge3 = BridgeClient(s.bridge3_url, "BR3")
+    return _bridge3

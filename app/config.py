@@ -72,12 +72,21 @@ class Settings(BaseSettings):
     bridge2_number: str = ""
     bridge2_label: str = "OPS"
 
+    # bridge3 (REC2) — Phase E: Admin-reply-only reachability, wired 2026-08-04.
+    # Not part of ADMIN_BRIDGE_NAME/BRIDGE_PRIORITY admin-notification failover;
+    # see shared/bridge_orchestrator.py docstring.
+    bridge3_url: str = "http://localhost:8083"
+    bridge3_number: str = ""
+    bridge3_label: str = "REC2"
+
     # Bridge SQLite store paths — override in .env if the store directory moves.
     # Defaults match the current production layout on this VPS.
     bridge1_db_path: str = "/home/azim/whatsapp1/store/messages.db"
     bridge1_whatsapp_db_path: str = "/home/azim/whatsapp1/store/whatsapp.db"
     bridge2_db_path: str = "/home/azim/whatsapp2/store/messages.db"
     bridge2_whatsapp_db_path: str = "/home/azim/whatsapp2/store/whatsapp.db"
+    bridge3_db_path: str = "/home/azim/whatsapp3/store/messages.db"
+    bridge3_whatsapp_db_path: str = "/home/azim/whatsapp3/store/whatsapp.db"
 
     # Meta WhatsApp
     meta_phone_number_id: str = ""

@@ -96,8 +96,13 @@ async def _send_with_channel(source_bridge: str, recipient: str, body: str) -> s
             return await _send_messenger(recipient, body)
         return await _send_comment(recipient, body)
 
-    from app.bridge import get_bridge1, get_bridge2, BridgeSendError
-    client = get_bridge2() if source_bridge == "bridge2" else get_bridge1()
+    from app.bridge import get_bridge1, get_bridge2, get_bridge3, BridgeSendError
+    if source_bridge == "bridge2":
+        client = get_bridge2()
+    elif source_bridge == "bridge3":
+        client = get_bridge3()
+    else:
+        client = get_bridge1()
 
     if not client.breaker.allow():
         log.warning(f"[OUTBOUND_SEND_FAIL] circuit_open bridge={source_bridge} recipient={recipient}")
