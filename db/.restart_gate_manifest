@@ -138,3 +138,18 @@ scripts/import_csv_contacts.py
 # against the live DB/schema.
 app/main.py
 modules/rbac/__init__.py
+
+# 2026-08-04 (same session, follow-up): structural fix for the 55-stuck-
+# WhatsApp-messages incident (2026-07-09..12), commit 2e4320c -- see
+# management_decisions.md "55 Stuck WhatsApp Messages" and its follow-up
+# entry. modules/bridge_poller/__init__.py: wraps detect_identity() + the
+# first _finalize_core_copy() call in try/except so any future exception
+# in that window finalizes the message to a terminal "failed" state
+# instead of permanently orphaning it (the historical trigger itself,
+# identity_brain._lookup_contact()'s wrong column names, was already fixed
+# separately in 47a9c8e -- this closes the structural gap that let ANY
+# exception there cause the same failure mode). 7 new tests (unit +
+# integration against real test-DB + failure-injection reproducing the
+# original asyncpg.UndefinedColumnError class) all passing pre-restart.
+modules/bridge_poller/__init__.py
+tests/unit/test_bridge_poller_orphan_message_fix.py
