@@ -6554,3 +6554,66 @@ identity entries above (this session's channel gate depends on that
 same-day reversal holding). Requires `scripts/restart_gate.sh --restart`
 (fazle-core) and a `systemctl --user restart hermes-runner.service`
 before Phases 1-4 are live.
+
+---
+
+## 55 Stuck WhatsApp Messages (2026-07-09 to 2026-07-12) — CLOSED, Historical Incident
+
+### Status
+CLOSED (2026-08-04). Owner decision: document and close, no business-wise
+follow-up (no outreach to the affected senders).
+
+### What was found
+Read-only investigation (see the "55 stuck WhatsApp messages" finding from
+this session's Phase 1-4 runtime verification, which surfaced this via the
+new `get_bridge_message_stats`/`audit_lookup_whatsapp_messages` tools).
+55 messages (bridge1: 18 image + 13 text + 2 audio = 33; bridge2: 20 text
++ 2 image = 22), all from 2026-07-09 to 2026-07-12, across 12 distinct
+sender phone numbers, permanently orphaned:
+`wbom_whatsapp_messages.is_processed=false`,
+`fazle_message_queue.status='processing'` with `attempts=0` (never
+retried), and already marked in `processed_bridge_messages` (permanently
+skipped by the poller's own dedup check — no self-healing possible).
+
+**Root cause (confirmed):** `modules/identity_brain._lookup_contact()`
+queried `wbom_contacts` with wrong column names
+(`contact_name`/`contact_type` instead of the real `display_name`/
+`relation`), raising an uncaught `asyncpg.UndefinedColumnError` for any
+sender whose phone existed in `wbom_contacts` but not the employee/escort
+tables (ordinary external clients/vendors/VIPs — matches all 12 affected
+senders). Fixed in commit `47a9c8e` ("fix: identity_brain._lookup_contact()
+wrong column names"), 2026-07-11 22:30:33. The ~16h tail of stuck messages
+past that commit (through 2026-07-12 14:58) is consistent with the fix
+sitting committed-but-undeployed until the next service restart.
+
+**Why permanently orphaned, not just delayed:** `modules.bridge_poller`
+calls `_mark_processed()` (permanent bridge-side dedup marker) *before*
+`detect_identity()` → `_lookup_contact()`. When that call threw, the
+exception propagated past the per-message `for` loop entirely to the poll
+loop's only enclosing handler (a generic `except Exception:
+log.exception(...)` at the very bottom of `_poll_bridge()`) — so
+Postgres-side bookkeeping was never finalized, but the dedup marker was
+already committed, permanently blocking any retry.
+
+**Current risk status (verified):** queried the entire message history for
+this exact orphan signature — zero occurrences outside 2026-07-09 to
+2026-07-12, before or since. The specific trigger has not recurred.
+
+### Decision
+The 55 messages are treated as closed history — real inbound content from
+12 real contacts during a ~4-day window nearly a month ago, with no
+evidence of ongoing business impact today. No manual outreach, no data
+correction, no replay.
+
+### Follow-up (separate, in progress)
+The *structural* gap that allowed this class of failure — no exception
+handling between `_mark_processed()` and the routing-critical
+`_finalize_core_copy()` call, so *any* future unhandled exception in that
+window (not just this specific trigger) reproduces the same permanent-
+orphan failure mode — is being closed separately (see the next entry,
+once implemented).
+
+### Cross references
+This session's Phase 1-4 completion report and commit `1dfd8f7` (the
+tooling that surfaced this finding). Commit `47a9c8e` (the original
+trigger fix, 2026-07-11, unrelated to this session).

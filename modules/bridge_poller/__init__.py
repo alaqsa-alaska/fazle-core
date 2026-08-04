@@ -1125,21 +1125,54 @@ async def _poll_bridge(config: dict):
 
                 log.info(f"[{bridge_name}] from={phone} text={text[:80]!r}")
 
-                # Detect identity before routing (for logging)
-                from modules.identity_brain import detect_identity
-                identity = await detect_identity(phone, text)
-                id_role = identity["identity_role"]
-                id_conf = identity["identity_confidence"]
-                id_name = (identity.get("display_name") or "").strip()
+                # Detect identity before routing (for logging).
+                #
+                # Wrapped (2026-08-04 -- closes a real incident, see
+                # knowledge_base/00_governance/management_decisions.md "55
+                # Stuck WhatsApp Messages"): _mark_processed() above already
+                # committed this message's bridge-side dedup marker, so
+                # before this fix, any unhandled exception in this window
+                # propagated past the entire per-message loop to
+                # _poll_bridge()'s single top-level `except Exception:
+                # log.exception(...)` -- leaving Postgres bookkeeping
+                # (wbom_whatsapp_messages.is_processed,
+                # fazle_message_queue.status) stuck at "processing" with
+                # attempts=0 forever, with no retry possible (the dedup
+                # marker permanently blocks re-fetch). This happened for
+                # real 2026-07-09..12 (identity_brain._lookup_contact() had
+                # wrong column names, fixed in 47a9c8e) and could recur for
+                # any different future cause in this same window. Now: any
+                # exception here finalizes the message to a terminal
+                # "failed" state (_finalize_core_copy already updates both
+                # tables and never itself raises) and skips routing for
+                # this message only -- the rest of the batch still
+                # processes normally.
+                try:
+                    from modules.identity_brain import detect_identity
+                    identity = await detect_identity(phone, text)
+                    id_role = identity["identity_role"]
+                    id_conf = identity["identity_confidence"]
+                    id_name = (identity.get("display_name") or "").strip()
 
-                # Update the raw core copy with identity metadata + extracted fields.
-                await _finalize_core_copy(
-                    core_message_id, bridge_name, msg, phone, text,
-                    identity_role=id_role, identity_confidence=id_conf,
-                    msg_type=msg.get("type") or "text",
-                    extracted_text=_extracted_text,
-                    status="processing",
-                )
+                    # Update the raw core copy with identity metadata + extracted fields.
+                    await _finalize_core_copy(
+                        core_message_id, bridge_name, msg, phone, text,
+                        identity_role=id_role, identity_confidence=id_conf,
+                        msg_type=msg.get("type") or "text",
+                        extracted_text=_extracted_text,
+                        status="processing",
+                    )
+                except Exception as _identity_err:
+                    log.error(
+                        "[%s] identity/finalize error msg_id=%s phone=%s: %s",
+                        bridge_name, msg_id, phone, _identity_err,
+                    )
+                    await _finalize_core_copy(
+                        core_message_id, bridge_name, msg, phone, text,
+                        msg_type=msg.get("type") or "text",
+                        status="failed", error=f"identity_or_finalize_error:{_identity_err}",
+                    )
+                    continue
                 inbound_saved += 1
                 try:
                     from modules import observability as _obs
