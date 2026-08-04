@@ -122,8 +122,7 @@ async def _b_daily_summary(date: Optional[date] = None) -> dict:  # noqa: A002
         },
         "rows": [
             {
-                "payment_method": r["payment_method"],
-                "transaction_type": r["transaction_type"],
+                "payment_method": r["payout_method"],
                 "count": r["cnt"],
                 "amount": float(r["amt"]),
             } for r in by_method
@@ -294,7 +293,7 @@ async def _b_cash_position(days: int = 30) -> dict:
         },
         "rows": [
             {
-                "payment_method": r["payment_method"],
+                "payment_method": r["payout_method"],
                 "in":  float(r["total_in"]),
                 "out": float(r["total_out"]),
                 "net": float(r["total_in"]) - float(r["total_out"]),
