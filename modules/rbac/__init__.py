@@ -70,6 +70,10 @@ COMMAND_ROLE: dict[str, str] = {
     "user_role":           "superadmin",
     "user_remove":         "superadmin",
     "user_apikey":         "superadmin",
+    # Phase 4 (2026-08-04): WhatsApp->Hermes relay -- superadmin only, on
+    # top of the bridge2-specific check in admin_directives/router.py
+    # (two independent gates: role AND channel, not either alone).
+    "hermes_relay":        "superadmin",
 }
 
 DEFAULT_REQUIRED_ROLE = "admin"  # unknown cmd defaults to admin

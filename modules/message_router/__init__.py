@@ -47,7 +47,7 @@ from modules.recruitment_flow import (
 )
 from modules.admin_commands import is_admin_command, process_admin_command, list_payment_drafts
 from modules.admin_commands.nl_router import is_nl_admin_query, process_nl_admin_query
-from modules.admin_directives.router import is_admin_ai_command, process_admin_ai_command
+from modules.admin_directives.router import is_admin_ai_command, process_admin_ai_command, process_admin_natural_query
 from modules.payment_workflow import is_advance_request
 from modules.attendance import handle_attendance_message, is_attendance_message, get_attendance_summary
 from modules.attendance_parser import (
@@ -540,9 +540,29 @@ async def process_message(
         if "attendance" in lower or "হাজিরা" in lower or "উপস্থিতি" in lower:
             return await get_attendance_summary(), None
 
-        # B25 (H4): Admin sent something unrecognised. Do NOT fall through to
-        # LLM — that produced garbage apologies that got queued as new drafts.
-        # Return inline help so admin sees the correct command syntax instead.
+        # Owner decision 2026-08-04 (bridge3 natural-language admin
+        # routing, supersedes the B25 (H4) hardcoded fallback below for the
+        # default case): admin text that matched no structured command/
+        # keyword above now goes to the same tool-grounded, RAG-grounded
+        # fazle-core AI console (orchestrate_console_request) used for
+        # explicit "AI <question>" commands, so the Admin can query it in
+        # natural Bangla/English/mixed text without an "AI " prefix. This
+        # is NOT the raw ungrounded LLM call B25 (H4) was hardened against
+        # (see process_admin_natural_query's docstring) — the static help
+        # text below is now only a last-resort safety net if the console
+        # itself returns nothing.
+        #
+        # NOTE (2026-08-04, corrected same day): earlier comments here
+        # called this engine "Hermes" — it is not. This is fazle-core's own
+        # AI console (read-only RT-*/BUS-*/MEM-* tool registry), a
+        # deliberately separate system from the real Hermes (assistant-
+        # platform's BUILD/RUN-capable agent, reached via a dedicated
+        # HERMES <request> command — see admin_directives/router.py). Do
+        # not reintroduce the naming conflation.
+        console_reply = await process_admin_natural_query(text, sender)
+        if console_reply:
+            return console_reply, None
+
         return (
             "❌ কমান্ড বুঝিনি।\n\n"
             "ব্যবহার:\n"

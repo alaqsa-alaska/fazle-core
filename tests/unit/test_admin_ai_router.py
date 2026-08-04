@@ -1,13 +1,15 @@
-"""Unit tests -- Unified Admin AI Engine, Phase 3 Step 5.
+"""Unit tests -- Unified Admin AI Engine, Phase 3 Step 5 (+ Phase 4
+Hermes relay, 2026-08-04).
 
 Covers modules.admin_directives.router: command pattern matching, RBAC
 enforcement (allow/deny/fail-closed), the AI-query rate limiter, output
-sanitization, and each of the 5 command handlers' dispatch behavior.
+sanitization, and each of the 6 command handlers' dispatch behavior.
 message_router.py is not wired to this module yet (Step 6) -- these tests
 call process_admin_ai_command()/is_admin_ai_command() directly.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from unittest.mock import AsyncMock, patch
@@ -20,6 +22,7 @@ from modules.admin_directives.router import (
     _sanitize_ai_reply,
     is_admin_ai_command,
     process_admin_ai_command,
+    process_admin_natural_query,
 )
 
 pytestmark = pytest.mark.unit
@@ -28,8 +31,10 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(autouse=True)
 def _reset_cooldown():
     router._ai_cooldown.clear()
+    router._hermes_cooldown.clear()
     yield
     router._ai_cooldown.clear()
+    router._hermes_cooldown.clear()
 
 
 def _allow_perm(admin_id: int = 1) -> dict:
@@ -63,8 +68,11 @@ class TestIsAdminAiCommand:
         "forget 42",
         "FORGET 7",
         "send 01712345678 | Hello, please confirm your shift",
+        "hermes: check bridge health",
+        "HERMES what's the DLQ depth right now?",
+        "hermes, investigate the stuck messages",
     ])
-    def test_positive_matches_all_five_commands(self, text):
+    def test_positive_matches_all_six_commands(self, text):
         assert is_admin_ai_command(text) is True
 
     @pytest.mark.parametrize("text", [
@@ -255,6 +263,156 @@ class TestSendHandler:
         assert "পেন্ডিং" in reply
 
 
+class _FakeSettings:
+    def __init__(self, admin_bridge2_number="8801880446111", hermes_runner_secret="test-secret", hermes_runner_url="http://127.0.0.1:8093"):
+        self.admin_bridge2_number = admin_bridge2_number
+        self.hermes_runner_secret = hermes_runner_secret
+        self.hermes_runner_url = hermes_runner_url
+
+
+class TestHermesRelayHandler:
+    """Phase 4 (2026-08-04): real Hermes relay, distinct from the AI
+    console (TestProcessAdminNaturalQuery below covers that engine)."""
+
+    async def _run(self, text="hermes: check bridge health", phone="8801880446111"):
+        reply = await process_admin_ai_command(text, phone)
+        await asyncio.sleep(0)  # let any scheduled background task start
+        return reply
+
+    async def test_rbac_denied_returns_denial_no_task_created(self):
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_deny_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await self._run()
+        assert reply == router._DENIAL_MSG
+        mock_deliver.assert_not_awaited()
+
+    async def test_rbac_allowed_but_wrong_channel_denied_and_audited(self):
+        # bridge1 is also bootstrapped as superadmin but is NOT the
+        # designated Hermes channel -- must be denied and separately
+        # audited (not silently reusing _authorize's "allowed" verdict).
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()) as mock_audit, \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await self._run(phone="8801958122300")  # bridge1, not bridge2
+        assert reply == router._DENIAL_MSG
+        mock_deliver.assert_not_awaited()
+        # Two audit calls: one from _authorize (RBAC allowed), one from the
+        # channel-mismatch denial recorded directly by the handler.
+        assert mock_audit.await_count == 2
+        _, channel_kwargs = mock_audit.await_args_list[-1]
+        assert channel_kwargs["allowed"] is False
+        assert "bridge2" in channel_kwargs["denied_reason"]
+
+    async def test_not_configured_returns_clear_error(self):
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings(hermes_runner_secret="")), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await self._run()
+        assert reply == router._HERMES_NOT_CONFIGURED_MSG
+        mock_deliver.assert_not_awaited()
+
+    async def test_empty_request_text_rejected(self):
+        # Calls the handler directly (not through the regex dispatch layer,
+        # which -- like _RE_REMEMBER's equivalent shape -- can't itself
+        # produce an empty captured group after the outer .strip()) to
+        # cover this defensive check in _handle_hermes_relay directly.
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await router._handle_hermes_relay("", "8801880446111")
+        assert "লিখুন" in reply
+        mock_deliver.assert_not_awaited()
+
+    async def test_allowed_bridge2_superadmin_gets_ack_and_schedules_background_task(self):
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await self._run(text="hermes: check bridge health", phone="8801880446111")
+        assert reply == router._HERMES_ACK_MSG
+        mock_deliver.assert_awaited_once_with("check bridge health", "8801880446111")
+
+    async def test_second_call_within_cooldown_blocked(self):
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            first = await self._run(text="hermes: first", phone="8801880446111")
+            second = await self._run(text="hermes: second", phone="8801880446111")
+        assert first == router._HERMES_ACK_MSG
+        assert "অপেক্ষা" in second
+        mock_deliver.assert_awaited_once()
+
+    async def test_allowed_again_after_cooldown_elapses(self):
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            router._hermes_cooldown["8801880446111"] = time.monotonic() - 20.0
+            reply = await self._run(text="hermes: after cooldown", phone="8801880446111")
+        assert reply == router._HERMES_ACK_MSG
+        mock_deliver.assert_awaited_once()
+
+
+class TestDeliverHermesReply:
+    """_deliver_hermes_reply is the background task itself -- verifies it
+    always enqueues *some* outbound reply and never raises, regardless of
+    how hermes-runner responds."""
+
+    async def test_success_enqueues_reply_text(self):
+        mock_resp = type("R", (), {"status_code": 200, "json": lambda self: {"reply": "all healthy"}})()
+        with patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("check bridge health", "8801880446111")
+        mock_enqueue.assert_awaited_once()
+        args, kwargs = mock_enqueue.call_args
+        assert args[0] == "8801880446111"
+        assert "all healthy" in args[1]
+        assert kwargs["source_bridge"] == "bridge2"
+        assert kwargs["purpose"] == "hermes_relay_reply"
+
+    async def test_hermes_error_status_enqueues_error_text(self):
+        mock_resp = type("R", (), {"status_code": 502, "json": lambda self: {"error": "Hermes runner unreachable"}})()
+        with patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("check bridge health", "8801880446111")
+        args, _ = mock_enqueue.call_args
+        assert "Hermes runner unreachable" in args[1]
+
+    async def test_timeout_enqueues_timeout_message_not_raise(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=router.httpx.TimeoutException("timed out"))
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("check bridge health", "8801880446111")
+        args, _ = mock_enqueue.call_args
+        assert "সময়মতো" in args[1]
+
+    async def test_enqueue_failure_does_not_raise(self):
+        mock_resp = type("R", (), {"status_code": 200, "json": lambda self: {"reply": "ok"}})()
+        with patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock(side_effect=RuntimeError("db down"))):
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("check bridge health", "8801880446111")  # must not raise
+
+
 class TestNormalizePhone:
     def test_local_zero_prefixed_to_880(self):
         assert _normalize_phone("01712345678") == "8801712345678"
@@ -264,3 +422,75 @@ class TestNormalizePhone:
 
     def test_spaces_and_dashes_stripped(self):
         assert _normalize_phone("017-1234 5678") == "8801712345678"
+
+
+class TestProcessAdminNaturalQuery:
+    """Owner decision 2026-08-04: admin free text with no 'AI '/structured-
+    command prefix routes to the same tool-grounded fazle-core AI console
+    as an explicit 'AI <question>' command (NOT the real Hermes -- see the
+    function's own docstring, corrected 2026-08-04) -- see the function's
+    own docstring for why this differs from the old B25(H4) raw-LLM
+    fallback."""
+
+    async def test_routes_plain_text_through_handle_ai_query(self):
+        with patch.object(router, "_handle_ai_query", new=AsyncMock(return_value="reply text")) as mock_handle:
+            reply = await process_admin_natural_query("Hi", "8801700000010")
+        assert reply == "reply text"
+        mock_handle.assert_awaited_once_with("Hi", "8801700000010")
+
+    async def test_mixed_bangla_english_text_routes_through(self):
+        with patch.object(router, "_handle_ai_query", new=AsyncMock(return_value="উত্তর")) as mock_handle:
+            reply = await process_admin_natural_query("গতকাল কত টাকা পেমেন্ট করা হয়?", "8801700000011")
+        assert reply == "উত্তর"
+        mock_handle.assert_awaited_once()
+
+    async def test_empty_text_returns_none_without_calling_handler(self):
+        with patch.object(router, "_handle_ai_query", new=AsyncMock()) as mock_handle:
+            reply = await process_admin_natural_query("   ", "8801700000012")
+        assert reply is None
+        mock_handle.assert_not_awaited()
+
+    async def test_exception_in_handler_returns_safe_message_not_raise(self):
+        with patch.object(router, "_handle_ai_query", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            reply = await process_admin_natural_query("kichu bolo", "8801700000013")
+        assert "সমস্যা" in reply
+
+    def test_does_not_use_the_old_ungrounded_llm_call(self):
+        """Structural guard against reintroducing the B25(H4) failure mode:
+        this function must go through _handle_ai_query (RAG+tool-grounded),
+        not a bare ai.generate_reply()-style call."""
+        source = inspect.getsource(router.process_admin_natural_query)
+        assert "_handle_ai_query" in source
+        assert "generate_reply" not in source
+
+
+class TestMessageRouterAdminDispatchOrder:
+    """Source-order regression guard (matches this repo's test_c0d_source_
+    bridge_fix.py convention) for modules.message_router's admin branch.
+    Structured commands, NL admin queries, explicit 'AI ' commands, and the
+    draft/payment/attendance keyword shortcuts must all still be checked
+    -- and win -- before the new process_admin_natural_query() fallback."""
+
+    def test_structured_and_keyword_checks_precede_natural_query_fallback(self):
+        import modules.message_router as mr
+        source = inspect.getsource(mr)
+
+        admin_branch = source[source.index('if role_str == "admin":'):]
+        i_structured = admin_branch.index("is_admin_command(text)")
+        i_nl = admin_branch.index("is_nl_admin_query(text)")
+        i_ai_prefix = admin_branch.index("is_admin_ai_command(text)")
+        i_keywords = admin_branch.index('"draft" in lower')
+        i_natural = admin_branch.index("process_admin_natural_query(text, sender)")
+        i_static_help = admin_branch.index("কমান্ড বুঝিনি")
+
+        assert i_structured < i_nl < i_ai_prefix < i_keywords < i_natural < i_static_help, (
+            "Admin dispatch order changed -- structured commands, NL admin "
+            "queries, the explicit 'AI ' prefix path, and the draft/payment/"
+            "attendance keyword shortcuts must all still be checked (and win) "
+            "before the natural-language AI-console fallback, which itself "
+            "must run before the static help text."
+        )
+
+    def test_natural_query_import_present(self):
+        import modules.message_router as mr
+        assert hasattr(mr, "process_admin_natural_query")

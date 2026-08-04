@@ -178,6 +178,17 @@ class Settings(BaseSettings):
     admin_meta_number: str = ""
     admin_bridge1_number: str = ""
     admin_bridge2_number: str = ""
+    admin_bridge3_number: str = ""
+
+    # Phase 4 (2026-08-04): WhatsApp->Hermes relay. HERMES <request> from
+    # bridge2 (Super Admin only, see modules/admin_directives/router.py)
+    # relays into hermes-runner.service's own /run endpoint (127.0.0.1,
+    # host-level, same box) with read_only=true — hard-locked to READ
+    # regardless of the interactive web UI's current mode. Empty by
+    # default (not configured) so the command fails closed with a clear
+    # error rather than silently doing nothing until these are set.
+    hermes_runner_url: str = "http://127.0.0.1:8093"
+    hermes_runner_secret: str = ""
 
     # Escort order configuration
     # Comma-separated phone numbers that are authorised to send escort client orders.

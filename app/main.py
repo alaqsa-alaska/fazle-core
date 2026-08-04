@@ -777,6 +777,24 @@ def _probe_mem() -> dict:
         return {"status": "critical", "error": str(e)[:200]}
 
 
+def _probe_cpu() -> dict:
+    """2026-08-04: no CPU probe existed in this health check at all before
+    this — stdlib os.getloadavg() only, no new dependency (no psutil).
+    1-minute load average normalized by core count, same
+    ok/degraded/critical shape and env-tunable thresholds as the disk/mem
+    probes above."""
+    try:
+        load1, _load5, _load15 = os.getloadavg()
+        cores = os.cpu_count() or 1
+        load_pct = round(load1 / cores * 100, 1)
+        warn = int(os.getenv("HEALTH_CPU_WARN_PCT", "80"))
+        crit = int(os.getenv("HEALTH_CPU_CRIT_PCT", "95"))
+        status = "ok" if load_pct < warn else ("degraded" if load_pct < crit else "critical")
+        return {"status": status, "load1": round(load1, 2), "cores": cores, "load_pct": load_pct}
+    except Exception as e:
+        return {"status": "critical", "error": str(e)[:200]}
+
+
 async def _build_health(deep: bool = False) -> dict:
     db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p = await asyncio.gather(
         _probe_db(),
@@ -800,6 +818,7 @@ async def _build_health(deep: bool = False) -> dict:
         bridge2_db["quiet_but_poller_healthy"] = True
     disk_p = _probe_disk()
     mem_p = _probe_mem()
+    cpu_p = _probe_cpu()
 
     probes = {
         "db": db_p,
@@ -810,6 +829,7 @@ async def _build_health(deep: bool = False) -> dict:
         "outbound": ob_p,
         "disk": disk_p,
         "mem": mem_p,
+        "cpu": cpu_p,
         "ollama": ollama_p,
         "qdrant": qdrant_p,
         "llm": llm_p,
@@ -1039,6 +1059,110 @@ async def frontend_sync_stats():
         log.warning("[sync] /api/frontend/sync-stats error: %s", exc)
         diag = {}
     return {**diag, "ts": time.time()}
+
+
+@app.get("/api/whatsapp/message-stats", dependencies=[Depends(require_api_key)])
+async def whatsapp_message_stats(hours: int = 24):
+    """
+    2026-08-04: per-bridge WhatsApp message counts, distinct from
+    /admin/overview's single aggregate total (that endpoint is the
+    dashboard SPA's broader overview; this is a narrower, purpose-built
+    diagnostic for "activity by bridge" + unprocessed/stuck counts, neither
+    of which /admin/overview computes). Reuses the same schema-aware
+    timestamp helper /admin/overview already uses. Read-only, no secrets.
+    """
+    try:
+        msg_time_expr, msg_time_column = await _whatsapp_message_time_expr()
+        rows = await fetch_all(
+            f"""
+            SELECT platform,
+                   COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE {msg_time_expr} > NOW() - INTERVAL '{int(hours)} hours') AS in_window,
+                   COUNT(*) FILTER (WHERE is_processed = false) AS unprocessed_total,
+                   COUNT(*) FILTER (
+                       WHERE is_processed = false
+                         AND {msg_time_expr} < NOW() - INTERVAL '1 hour'
+                   ) AS stuck_over_1h
+              FROM wbom_whatsapp_messages
+             GROUP BY platform
+             ORDER BY total DESC
+            """
+        )
+        return {
+            "hours": hours,
+            "timestamp_column": msg_time_column,
+            "by_platform": [dict(r) for r in rows],
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/message-stats error: %s", exc)
+        return {"hours": hours, "by_platform": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+@app.get("/api/whatsapp/messages/lookup", dependencies=[Depends(require_api_key)])
+async def whatsapp_messages_lookup(
+    phone: str = "",
+    platform: str = "",
+    is_processed: bool | None = None,
+    message_id: int | None = None,
+    limit: int = 20,
+):
+    """
+    2026-08-04: narrow, parameterized WhatsApp message lookup for incident
+    investigation — "trace this phone number's message history" / "why is
+    this specific message stuck" — which neither /api/whatsapp/message-stats
+    (aggregate counts only) nor assistant-backend's /api/fazle/messages
+    (unfiltered, most-recent-N only) can answer. All filters are bound
+    query parameters, not raw SQL — no arbitrary-query surface. phone is
+    matched via canonical_phone if normalization succeeds, else phone_last10
+    substring match on the raw input's trailing digits.
+    """
+    try:
+        limit = min(max(int(limit or 20), 1), 100)
+        conditions = []
+        params = []
+
+        if message_id is not None:
+            params.append(message_id)
+            conditions.append(f"message_id = ${len(params)}")
+
+        if phone:
+            from modules.phone_normalizer import normalize_phone
+            normalized = normalize_phone(phone)
+            digits = "".join(c for c in phone if c.isdigit())
+            if normalized:
+                params.append(normalized)
+                conditions.append(f"canonical_phone = ${len(params)}")
+            elif digits:
+                params.append(digits[-10:])
+                conditions.append(f"phone_last10 = ${len(params)}")
+
+        if platform:
+            params.append(platform)
+            conditions.append(f"platform = ${len(params)}")
+
+        if is_processed is not None:
+            params.append(is_processed)
+            conditions.append(f"is_processed = ${len(params)}")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        rows = await fetch_all(
+            f"""
+            SELECT message_id, sender_number, canonical_phone, platform, direction,
+                   message_type, is_processed, status, received_at, processed_at,
+                   classification, workflow_triggered
+              FROM wbom_whatsapp_messages
+              {where_clause}
+             ORDER BY received_at DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        return {"filters_applied": bool(conditions), "count": len(rows), "messages": [dict(r) for r in rows], "ts": time.time()}
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/messages/lookup error: %s", exc)
+        return {"count": 0, "messages": [], "error": str(exc)[:200], "ts": time.time()}
 
 
 # ── Phase 13D — Bridge orchestration diagnostics ──────────────────────────────

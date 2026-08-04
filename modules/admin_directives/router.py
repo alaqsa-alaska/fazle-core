@@ -17,11 +17,13 @@ Every command enforces RBAC via modules.rbac.check_permission() before
 doing anything else, fails closed on any check_permission() exception,
 and records an audit row on every attempt (allowed or denied) via
 modules.rbac.record_audit() -- same primitives every other admin command
-in this codebase already uses, no new RBAC mechanism introduced. None of
-the 5 new command names are registered in modules.rbac.COMMAND_ROLE --
-they fall back to DEFAULT_REQUIRED_ROLE ("admin"), which already matches
-every role requirement this step needs, so modules/rbac/__init__.py is
-untouched by this step.
+in this codebase already uses, no new RBAC mechanism introduced. Of the
+5 original command names, none are registered in modules.rbac.COMMAND_ROLE
+(they fall back to DEFAULT_REQUIRED_ROLE ("admin")). The 6th command added
+2026-08-04, HERMES <request> (real Hermes relay, not the AI console --
+see _handle_hermes_relay), IS registered there at "superadmin" and is
+additionally gated to the specific bridge2 channel, a stricter bar than
+every other command in this file.
 
 process_admin_ai_command() never raises to its caller -- every branch is
 exception-guarded and returns a user-facing Bangla string on failure,
@@ -30,12 +32,16 @@ never crash or silently misbehave.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 from typing import Optional
 
-from modules import rbac
+import httpx
+
+from app.config import get_settings
+from modules import outbound, rbac
 from modules.admin_directives import revoke_directive, save_directive
 from modules.ai_console.orchestrator import orchestrate_console_request
 from modules.wa_chat_frontend import get_runtime_setting, set_runtime_setting
@@ -49,10 +55,30 @@ _RE_AUTOREPLY = re.compile(r"^autoreply\s+(on|off|status)\s+(\+?[\d\s-]{7,15})$"
 _RE_REMEMBER = re.compile(r"^remember[:\s]\s*(.+)$", re.IGNORECASE | re.DOTALL)
 _RE_FORGET = re.compile(r"^forget[:\s]\s*(\d+)$", re.IGNORECASE | re.DOTALL)
 _RE_SEND = re.compile(r"^send\s+(\+?[\d\s-]{7,15})\s*\|\s*(.+)$", re.IGNORECASE | re.DOTALL)
+# Phase 4 (2026-08-04): real Hermes relay -- deliberately distinct keyword
+# from "AI " (that stays routed to fazle-core's own AI console, see
+# process_admin_natural_query's docstring for why the two must never be
+# conflated).
+_RE_HERMES = re.compile(r"^hermes[,:\s]\s*(.+)$", re.IGNORECASE | re.DOTALL)
 
 # ── Rate limiter (AI query only) ─────────────────────────────────────────────
 _ai_cooldown: dict[str, float] = {}
 _AI_COOLDOWN_SECONDS = 5.0
+
+# ── Rate limiter + in-flight tracking (Hermes relay only) ───────────────────
+# A real Hermes turn spawns a real subprocess with real LLM/tool cost and can
+# take up to hermes-runner's own ~170s budget -- far longer than this
+# codebase's MESSAGE_ROUTE_TIMEOUT (30s default), so it must run as a
+# fire-and-forget background task (see _handle_hermes_relay), not be awaited
+# inline. A longer cooldown than the AI-console query above is deliberate:
+# this gates a much more expensive, real-compute operation, one bridge2
+# Super Admin at a time.
+_hermes_cooldown: dict[str, float] = {}
+_HERMES_COOLDOWN_SECONDS = 15.0
+# Keeps a strong reference to in-flight background tasks so they aren't
+# garbage-collected mid-flight (a well-known asyncio footgun for
+# fire-and-forget create_task() calls) -- discarded via the done-callback.
+_hermes_relay_tasks: set = set()
 
 # ── Output sanitization ──────────────────────────────────────────────────────
 MAX_REPLY_CHARS = 3500
@@ -69,7 +95,7 @@ _DEFAULT_SEND_BRIDGE = "bridge2"
 
 
 def is_admin_ai_command(text: str) -> bool:
-    """Fast, synchronous, never raises. True if text matches any of the 5
+    """Fast, synchronous, never raises. True if text matches any of the 6
     command patterns; False otherwise (including on any error)."""
     try:
         stripped = (text or "").strip()
@@ -81,6 +107,7 @@ def is_admin_ai_command(text: str) -> bool:
             or _RE_REMEMBER.match(stripped)
             or _RE_FORGET.match(stripped)
             or _RE_SEND.match(stripped)
+            or _RE_HERMES.match(stripped)
         )
     except Exception:
         return False
@@ -291,9 +318,107 @@ async def _handle_send(raw_phone: str, message_text: str, sender_phone: str) -> 
     return f"📋 ড্রাফট তৈরি হয়েছে। অনুমোদনের জন্য অপেক্ষা করুন। ID: {draft_id}"
 
 
+_HERMES_ACK_MSG = "🔄 Hermes-কে (READ-only) পাঠানো হয়েছে। উত্তর প্রস্তুত হলে আলাদা বার্তায় পাঠানো হবে।"
+_HERMES_NOT_CONFIGURED_MSG = "⚠️ Hermes relay কনফিগার করা নেই (HERMES_RUNNER_SECRET সেট করা হয়নি)।"
+
+
+async def _deliver_hermes_reply(request_text: str, sender_phone: str) -> None:
+    """Background task: makes the actual (potentially ~170s) call to
+    hermes-runner and delivers the result as a separate outbound WhatsApp
+    message. Never awaited inline by _handle_hermes_relay -- see that
+    function's docstring for why (MESSAGE_ROUTE_TIMEOUT)."""
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=175.0) as client:
+            resp = await client.post(
+                f"{settings.hermes_runner_url}/run",
+                headers={"Authorization": f"Bearer {settings.hermes_runner_secret}"},
+                json={"message": request_text, "read_only": True},
+            )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if resp.status_code != 200:
+            reply_text = f"⚠️ Hermes ত্রুটি: {data.get('error', f'status {resp.status_code}')}"
+        else:
+            reply_text = data.get("reply") or "⚠️ Hermes থেকে কোনো উত্তর আসেনি।"
+    except httpx.TimeoutException:
+        reply_text = "⚠️ Hermes সময়মতো উত্তর দেয়নি।"
+    except Exception as exc:
+        log.error("[admin_ai_router] hermes relay call failed for %s: %s", sender_phone, exc)
+        reply_text = "⚠️ Hermes-এর সাথে যোগাযোগ করা যায়নি।"
+
+    try:
+        await outbound.enqueue(
+            sender_phone,
+            f"🤖 Hermes:\n{reply_text}",
+            source_bridge="bridge2",
+            purpose="hermes_relay_reply",
+        )
+    except Exception as exc:
+        log.error("[admin_ai_router] hermes relay reply enqueue failed for %s: %s", sender_phone, exc)
+
+
+async def _handle_hermes_relay(request_text: str, sender_phone: str) -> str:
+    """Phase 4 (2026-08-04): relays an admin's WhatsApp request to the real
+    Hermes (assistant-platform's BUILD/RUN-capable agent), hard-locked to
+    READ-only for every relayed call (read_only=true, enforced in
+    hermes-runner/server.py -- a relayed message can make Hermes
+    investigate and report, never build, run, or change its own mode).
+
+    Gated on two INDEPENDENT checks, both required: RBAC role (superadmin,
+    via _authorize below and COMMAND_ROLE['hermes_relay']) AND the specific
+    bridge2 channel (checked separately, after _authorize, so every attempt
+    -- including a channel-mismatch denial -- gets its own honest audit
+    row rather than silently reusing _authorize's RBAC-only verdict).
+    bridge1 is also bootstrapped as superadmin but is deliberately not the
+    designated Hermes channel.
+
+    Runs the actual Hermes call as a background task rather than awaiting
+    it inline: this codebase's message-routing pipeline wraps every inbound
+    message in MESSAGE_ROUTE_TIMEOUT (30s default), far shorter than a real
+    Hermes turn can take (~170s). Returns an immediate ack; the real reply
+    is delivered as a separate outbound WhatsApp message once Hermes
+    actually responds (see _deliver_hermes_reply)."""
+    admin = await _authorize(sender_phone, "hermes_relay")
+    if admin is None:
+        return _DENIAL_MSG
+
+    settings = get_settings()
+    if sender_phone != (settings.admin_bridge2_number or ""):
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command="hermes_relay", actor_phone=sender_phone,
+                actor_admin=admin, allowed=False,
+                denied_reason="RBAC allowed but sender is not the designated bridge2 Hermes channel",
+            )
+        except Exception:
+            log.error("[admin_ai_router] record_audit failed for hermes_relay channel-mismatch, phone=%s", sender_phone)
+        return _DENIAL_MSG
+
+    if not request_text:
+        return "⚠️ Hermes-কে কী জিজ্ঞেস করতে চান লিখুন।"
+
+    if not settings.hermes_runner_secret:
+        return _HERMES_NOT_CONFIGURED_MSG
+
+    now = time.monotonic()
+    last = _hermes_cooldown.get(sender_phone, 0.0)
+    if now - last < _HERMES_COOLDOWN_SECONDS:
+        return "⏳ একটু অপেক্ষা করুন। Hermes ইতিমধ্যে একটি অনুরোধ প্রক্রিয়া করছে।"
+    _hermes_cooldown[sender_phone] = now
+
+    task = asyncio.create_task(_deliver_hermes_reply(request_text, sender_phone))
+    _hermes_relay_tasks.add(task)
+    task.add_done_callback(_hermes_relay_tasks.discard)
+
+    return _HERMES_ACK_MSG
+
+
 async def process_admin_ai_command(text: str, sender_phone: str) -> Optional[str]:
     """Returns a plain-text WhatsApp reply, or None if text matches none of
-    the 5 patterns (caller falls through to its own next check). Never
+    the 6 patterns (caller falls through to its own next check). Never
     raises -- the outer try/except is a final safety net on top of every
     handler's own internal exception handling."""
     try:
@@ -321,7 +446,38 @@ async def process_admin_ai_command(text: str, sender_phone: str) -> Optional[str
         if m:
             return await _handle_send(m.group(1), m.group(2).strip(), sender_phone)
 
+        m = _RE_HERMES.match(stripped)
+        if m:
+            return await _handle_hermes_relay(m.group(1).strip(), sender_phone)
+
         return None
     except Exception as exc:
         log.error("[admin_ai_router] unhandled exception processing command from %s: %s", sender_phone, exc)
+        return "⚠️ একটি সমস্যা হয়েছে। আবার চেষ্টা করুন অথবা এডমিনকে জানান।"
+
+
+async def process_admin_natural_query(text: str, sender_phone: str) -> Optional[str]:
+    """Owner decision 2026-08-04 (bridge3 natural-language admin routing):
+    fallback path for admin text that matched none of the 5 explicit
+    command patterns above (and none of message_router's own
+    structured-command/keyword checks). Routes straight to the same
+    _handle_ai_query() -> orchestrate_console_request() engine used for
+    explicit 'AI <question>' commands -- tool-grounded and RAG-grounded,
+    NOT the raw ungrounded LLM call the B25(H4) fallback in message_router
+    was hardened against. Reuses the same rate-limit/RBAC/sanitization the
+    explicit-prefix path already has. Returns None only for empty text.
+
+    NOTE (2026-08-04, corrected same day): this is fazle-core's own AI
+    console, NOT the real Hermes (assistant-platform's BUILD/RUN-capable
+    agent) -- earlier comments in this file/message_router.py incorrectly
+    called this "Hermes"; fixed to avoid conflating the two systems, per
+    the same 2026-08-04 decision that keeps them deliberately separate.
+    The real Hermes is reached via the HERMES <request> command below."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    try:
+        return await _handle_ai_query(stripped, sender_phone)
+    except Exception as exc:
+        log.error("[admin_ai_router] natural-query fallback failed for %s: %s", sender_phone, exc)
         return "⚠️ একটি সমস্যা হয়েছে। আবার চেষ্টা করুন অথবা এডমিনকে জানান।"
