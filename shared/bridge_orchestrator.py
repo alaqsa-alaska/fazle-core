@@ -31,6 +31,17 @@ Admin authority
 * Admin communicates with system via self-number (sends to own JID)
 * System sends draft approvals to 8801880446111@s.whatsapp.net via bridge2
 * Failover order for admin messages: bridge2 → bridge1
+
+bridge3 (REC2, Phase E, wired 2026-08-04)
+------------------------------------------
+* bridge3 is health-tracked/probed/diagnosable (self._health, RT-013) exactly
+  like bridge1/bridge2, so Admin can inspect it via the existing AI console.
+* bridge3 is deliberately NOT added to BRIDGE_PRIORITY / ADMIN_BRIDGE_NAME /
+  send_with_failover / send_to_admin. Those exist to deliver a notification
+  TO the admin's bridge2 self-chat number via alternate bridges — bridge3 is
+  a different device (REC2) and must never silently receive a message meant
+  for bridge2's own number. bridge3 replies are sent back on bridge3 itself,
+  via modules.bridge_poller's same-bridge reply path + modules.outbound.
 """
 from __future__ import annotations
 
@@ -41,7 +52,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.bridge import get_bridge1, get_bridge2, BridgeSendError
+from app.bridge import get_bridge1, get_bridge2, get_bridge3, BridgeSendError
 from app.config import get_settings
 from shared.events import emit
 
@@ -54,11 +65,29 @@ ADMIN_BRIDGE_NAME: str = "bridge2"
 ADMIN_SELF_NUMBER: str = _settings.admin_bridge2_number
 ADMIN_SELF_JID: str = f"{_settings.admin_bridge2_number}@s.whatsapp.net"
 
-# Lower integer = higher priority (bridge2 is always preferred)
+# Lower integer = higher priority (bridge2 is always preferred).
+# bridge3 is intentionally absent — see "bridge3" docstring note above.
 BRIDGE_PRIORITY: dict[str, int] = {
     "bridge2": 0,
     "bridge1": 1,
 }
+
+# Health-tracked/probed bridges (superset of BRIDGE_PRIORITY — includes
+# bridge3 for diagnostics/RT-013 even though it's excluded from failover).
+_TRACKED_BRIDGES: tuple[str, ...] = ("bridge1", "bridge2", "bridge3")
+
+
+def _client_for(bridge_name: str):
+    """Resolve the BridgeClient singleton for a tracked bridge name.
+
+    Mirrors the pre-existing `get_bridge2() if x == "bridge2" else
+    get_bridge1()` fallback semantics (unknown/other names → bridge1).
+    """
+    if bridge_name == "bridge2":
+        return get_bridge2()
+    if bridge_name == "bridge3":
+        return get_bridge3()
+    return get_bridge1()
 
 DEDUP_TTL_S: int = 120          # 2-minute window for cross-bridge dedup
 HEALTH_PROBE_INTERVAL_S: int = 30  # how often we probe each bridge
@@ -121,8 +150,13 @@ class BridgeOrchestrator:
                 label="BR2",
                 number=settings.bridge2_number,
             ),
+            "bridge3": BridgeHealth(
+                name="bridge3",
+                label="BR3",
+                number=settings.bridge3_number,
+            ),
         }
-        self._lag_samples: dict[str, list[float]] = {"bridge1": [], "bridge2": []}
+        self._lag_samples: dict[str, list[float]] = {name: [] for name in _TRACKED_BRIDGES}
         # In-process dedup store: hash → expiry_epoch
         self._dedup_local: dict[str, float] = {}
         self._total_dedup_hits: int = 0
@@ -339,7 +373,7 @@ class BridgeOrchestrator:
                 log.debug("[orchestrator] skip outage bridge=%s", bridge_name)
                 continue
             try:
-                client = get_bridge2() if bridge_name == "bridge2" else get_bridge1()
+                client = _client_for(bridge_name)
                 await client.send_strict(jid, text)
                 if bridge_name != preferred_bridge:
                     await emit(
@@ -424,7 +458,7 @@ class BridgeOrchestrator:
         replayed = 0
         for item in due[:]:
             try:
-                client = get_bridge2() if bridge_name == "bridge2" else get_bridge1()
+                client = _client_for(bridge_name)
                 await client.send_strict(item.jid, item.text)
                 self._retry_queue.remove(item)
                 replayed += 1
@@ -447,7 +481,7 @@ class BridgeOrchestrator:
 
     async def _probe_bridge(self, bridge_name: str) -> None:
         """Probe a single bridge and update health state."""
-        client = get_bridge2() if bridge_name == "bridge2" else get_bridge1()
+        client = _client_for(bridge_name)
         prev_state = self._health[bridge_name].state if bridge_name in self._health else "healthy"
         t0 = time.monotonic()
         try:
@@ -467,8 +501,7 @@ class BridgeOrchestrator:
     async def probe_all(self) -> None:
         """Probe all tracked bridges (available as manual trigger)."""
         await asyncio.gather(
-            self._probe_bridge("bridge1"),
-            self._probe_bridge("bridge2"),
+            *(self._probe_bridge(name) for name in _TRACKED_BRIDGES)
         )
 
     # ── Background loops ──────────────────────────────────────────────────────
@@ -496,10 +529,7 @@ class BridgeOrchestrator:
                     self._retry_queue.remove(item)
                     continue
                 try:
-                    client = (
-                        get_bridge2() if item.bridge_name == "bridge2"
-                        else get_bridge1()
-                    )
+                    client = _client_for(item.bridge_name)
                     await client.send_strict(item.jid, item.text)
                     log.info(
                         "[orchestrator] retry succeeded bridge=%s attempt=%d jid=%s",

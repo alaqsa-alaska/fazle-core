@@ -1170,17 +1170,45 @@ class ReadonlyBusinessAdapter(BusinessAdapter):
         month, year = _extract_month_year(payload, question)
         period = f"{year:04d}-{month:02d}" if month and year else None
 
+        # Owner decision 2026-08-04 (Phase E Part 6 fix): when no explicit
+        # month/year is mentioned (e.g. "গতকাল কয়জনকে payment করা হয়েছে?"),
+        # this previously left `period=None` and skipped the transaction
+        # query entirely, silently returning an empty rows=[] that the
+        # exact_answer formatter then reported as "কোনো পেমেন্ট লেনদেন পাওয়া
+        # যায়নি" (no payments found) -- a confidently WRONG answer when
+        # relative-date payments genuinely existed (confirmed against real
+        # data: 9 transactions/৳2,000 for "yesterday" on the date this was
+        # found). Reuse the existing date_from/date_to params on
+        # list_transactions (already supported, previously always passed
+        # as None) via the same parse_date_range() helper get_daily_payments
+        # already relies on for relative-date phrases.
+        date_from = date_to = None
+        if not period:
+            from datetime import timedelta as _timedelta
+            from modules.admin_commands.date_parser import parse_date_range
+            # default_days=None: only act on a genuinely recognized date
+            # phrase (আজ/গতকাল/this week/etc.) -- a question with no date
+            # signal at all (e.g. "payroll status") must keep returning
+            # the unscoped total, not get silently narrowed to a default
+            # window.
+            rng = parse_date_range(question, default_days=None)
+            if rng is not None:
+                start_dt, end_dt, range_label = rng
+                date_from = start_dt.date()
+                date_to = end_dt.date() - _timedelta(days=1)  # list_transactions' date_to is inclusive
+                period = range_label
+
         try:
             health_result = await fpe_health()
             rows: list[dict[str, Any]] = []
-            if period:
+            if (month and year) or date_from or date_to:
                 txn_result = await fpe_list_transactions(
                     employee_id=None,
-                    period=period,
+                    period=period if (month and year) else None,
                     method=None,
                     txn_category=None,
-                    date_from=None,
-                    date_to=None,
+                    date_from=date_from,
+                    date_to=date_to,
                     page=None,
                     page_size=None,
                     limit=20,

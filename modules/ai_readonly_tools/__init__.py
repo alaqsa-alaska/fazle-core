@@ -297,7 +297,7 @@ def _daily_payments_answer(data: dict[str, Any]) -> str:
     payments = data.get("payments") or []
 
     if not payments:
-        return f"{label} কোনো পেমেন্ট রেকর্ড নেই।"
+        return f"{label} কোনো পেমেন্ট রেকর্ড নেই। (সোর্স: ai_read_cash_transactions)"
 
     lines = [
         f"{label} পেমেন্ট দেয়া হয়েছে {recipient_count} জনকে।",
@@ -305,12 +305,12 @@ def _daily_payments_answer(data: dict[str, Any]) -> str:
     ]
     for i, row in enumerate(payments[:15], 1):
         name = row.get("employee_name") or "Unknown"
-        mobile = row.get("payment_mobile") or row.get("employee_mobile") or "-"
         method = (row.get("payment_method") or "cash").title()
         amount = _fmt_bdt(float(row.get("amount") or 0))
-        lines.append(f"{i}. {name} - {amount} ({method}, {mobile})")
+        lines.append(f"{i}. {name} - {amount} ({method})")
     if len(payments) > 15:
         lines.append(f"... আরও {len(payments) - 15}টি রেকর্ড আছে।")
+    lines.append("(সোর্স: ai_read_cash_transactions)")
     return "\n".join(lines)
 
 
@@ -330,30 +330,34 @@ async def get_daily_payments(question: str) -> dict[str, Any]:
     start_date = start_dt.date()
     end_date = end_dt.date()
 
+    # Owner decision 2026-08-04 (Phase E Part 6 root-cause fix): reads
+    # through ai_read_cash_transactions, the only cash-data object the
+    # fazle_ai_reader role can actually SELECT from (has_table_privilege
+    # confirmed direct SELECT on fpe_cash_transactions is False for this
+    # role, True for the view). The prior query hit fpe_cash_transactions
+    # directly (plus had an unrelated bad column reference,
+    # fpe_employees.employee_id, which does not exist -- the real PK is
+    # fpe_employees.id) and always failed under the real production role;
+    # the failure was silently swallowed upstream in
+    # modules.ai_console.live_adapters, producing an empty/degraded tool
+    # result the LLM then had to answer around without real data. The view
+    # intentionally excludes phone numbers (PII).
     rows = await _fetch(
         """
-        SELECT t.id AS transaction_id, t.txn_date AS transaction_date, t.amount,
-               t.payout_method AS payment_method, t.payout_phone AS payment_mobile,
-               t.txn_category AS transaction_type, t.source,
-               COALESCE(e.full_name, '') AS employee_name,
-               COALESCE(e.primary_phone, '') AS employee_mobile,
-               t.employee_id
-          FROM fpe_cash_transactions t
-          LEFT JOIN fpe_employees e ON e.employee_id = t.employee_id
-         WHERE t.txn_date >= $1::date
-           AND t.txn_date <  $2::date
-           AND t.transaction_status = 'final'
-           AND t.deleted_at IS NULL
-         ORDER BY t.txn_date ASC, t.id ASC
+        SELECT transaction_ref, transaction_date, amount,
+               payout_method AS payment_method, category AS transaction_type,
+               employee_name
+          FROM ai_read_cash_transactions
+         WHERE transaction_date >= $1::date
+           AND transaction_date <  $2::date
+           AND transaction_status = 'final'
+         ORDER BY transaction_date ASC, transaction_ref ASC
         """,
         start_date, end_date, limit=100,
     )
 
     total = sum(float(r.get("amount") or 0) for r in rows)
-    recipients = {
-        r.get("employee_id") or r.get("payment_mobile") or r.get("employee_mobile") or r.get("transaction_id")
-        for r in rows
-    }
+    recipients = {r.get("employee_name") for r in rows if r.get("employee_name")}
     data: dict[str, Any] = {
         "label": label,
         "start_date": start_date.isoformat(),
@@ -456,68 +460,36 @@ async def get_employee_month_payments(question: str) -> dict[str, Any]:
     start = date(year, month, 1)
     end = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
 
-    emp_rows = await _fetch(
+    # Owner decision 2026-08-04 (Phase E Part 6 root-cause fix, same as
+    # get_daily_payments): reads through ai_read_cash_transactions, the
+    # only cash-data object the fazle_ai_reader role can actually SELECT
+    # from. The prior version's two branches both queried
+    # fpe_cash_transactions directly (one had the same bad
+    # fpe_employees.employee_id column reference as get_daily_payments;
+    # both always failed under the real production role). The view has no
+    # employee_id/phone columns, so this now matches purely by
+    # employee_name (ILIKE) against the view directly -- the preliminary
+    # wbom_employees ID lookup is no longer needed since the view already
+    # carries the resolved canonical name.
+    rows = await _fetch(
         """
-        SELECT employee_id, employee_name, employee_mobile
-          FROM wbom_employees
+        SELECT transaction_ref, transaction_date::text AS transaction_date,
+               amount, payout_method AS payment_method, category AS transaction_type,
+               employee_name
+          FROM ai_read_cash_transactions
          WHERE employee_name ILIKE $1
-         ORDER BY employee_id DESC
-         LIMIT 5
+           AND transaction_date >= $2::date
+           AND transaction_date <  $3::date
+           AND transaction_status = 'final'
+         ORDER BY transaction_date ASC, transaction_ref ASC
         """,
-        f"%{name}%", limit=5,
+        f"%{name}%", start, end, limit=100,
     )
-
-    rows: list[dict[str, Any]]
-    employee_name = name
-    employee_mobile = ""
-    if emp_rows:
-        employee_id = emp_rows[0]["employee_id"]
-        employee_name = emp_rows[0].get("employee_name") or name
-        employee_mobile = emp_rows[0].get("employee_mobile") or ""
-        rows = await _fetch(
-            """
-            SELECT t.id AS transaction_id, t.txn_date::text AS transaction_date,
-                   t.amount, t.payout_method AS payment_method, t.payout_phone AS payment_mobile,
-                   t.txn_category AS transaction_type,
-                   t.transaction_status AS status, t.source
-              FROM fpe_cash_transactions t
-             WHERE t.employee_id = $1
-               AND t.txn_date >= $2::date
-               AND t.txn_date <  $3::date
-               AND t.transaction_status = 'final'
-               AND t.deleted_at IS NULL
-             ORDER BY t.txn_date ASC, t.id ASC
-            """,
-            employee_id, start, end, limit=100,
-        )
-    else:
-        rows = await _fetch(
-            """
-            SELECT t.id AS transaction_id, t.txn_date::text AS transaction_date,
-                   t.amount, t.payout_method AS payment_method, t.payout_phone AS payment_mobile,
-                   t.txn_category AS transaction_type,
-                   t.transaction_status AS status, t.source,
-                   COALESCE(e.full_name, '') AS employee_name,
-                   COALESCE(e.primary_phone, '') AS employee_mobile
-              FROM fpe_cash_transactions t
-              LEFT JOIN fpe_employees e ON e.employee_id = t.employee_id
-             WHERE e.full_name ILIKE $1
-               AND t.txn_date >= $2::date
-               AND t.txn_date <  $3::date
-               AND t.transaction_status = 'final'
-               AND t.deleted_at IS NULL
-             ORDER BY t.txn_date ASC, t.id ASC
-            """,
-            f"%{name}%", start, end, limit=100,
-        )
-        if rows:
-            employee_name = rows[0].get("employee_name") or name
-            employee_mobile = rows[0].get("employee_mobile") or ""
+    employee_name = rows[0].get("employee_name") if rows else name
 
     data: dict[str, Any] = {
         "query_name": name,
         "employee_name": employee_name,
-        "employee_mobile": employee_mobile,
         "period_month": month,
         "period_year": year,
         "period_label": f"{month:02d}/{year}",

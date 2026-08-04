@@ -156,6 +156,17 @@ class LLMProviderAdapter(ProviderAdapter):
                     elif count == 0:
                         label = query or "প্রশ্নে উল্লেখিত তথ্যে"
                         exact_answer = f"{label} নামে/নম্বরে কোনো কর্মচারী রেকর্ড পাওয়া যায়নি। (সোর্স: employee database)"
+                elif tool_name == "cash_ledger_summary" and family == "business":
+                    # Owner decision 2026-08-04 (Phase E Part 6 fix): this
+                    # tool's own data already carries a deterministic,
+                    # source-grounded Bangla answer (_daily_payments_answer /
+                    # _employee_month_answer in modules.ai_readonly_tools) --
+                    # reuse it directly instead of falling through to
+                    # generate_chat_reply(), which was composing an answer
+                    # from raw dict text + unrelated RAG hits instead of the
+                    # tool's real (correctly date-range-parsed) result.
+                    if data.get("answer"):
+                        exact_answer = str(data["answer"])
                 elif tool_name == "payroll_page_summary" and family == "business":
                     rows = data.get("rows") or []
                     period = data.get("period", "all")

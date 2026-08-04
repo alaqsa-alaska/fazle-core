@@ -65,8 +65,8 @@ class TestPayrollPageSummaryStructuralSafety:
         function's own FastAPI-Query defaults."""
         source = inspect.getsource(ReadonlyBusinessAdapter._payroll_page_summary)
         required_kwargs = (
-            "employee_id=None", "period=period", "method=None", "txn_category=None",
-            "date_from=None", "date_to=None", "page=None", "page_size=None",
+            "employee_id=None", "method=None", "txn_category=None",
+            "date_from=date_from", "date_to=date_to", "page=None", "page_size=None",
             "limit=20", "offset=0",
         )
         for kw in required_kwargs:
@@ -112,7 +112,10 @@ class TestPayrollPageSummaryHandler:
         assert len(envelope.data["rows"]) == 2
         assert envelope.data["rows"][0]["employee_name"] == "Karim"
 
-    async def test_no_period_detected_skips_transactions_call(self, loader):
+    async def test_no_date_signal_at_all_skips_transactions_call(self, loader):
+        """A question with no month/year AND no relative-date phrase
+        (আজ/গতকাল/this week/etc.) must keep returning the unscoped total --
+        NOT get silently narrowed to a default window."""
         adapter = ReadonlyBusinessAdapter(loader)
         entry = loader.get("BUS-017")
         fake_health = {"status": "ok", "total_transactions": 10}
@@ -125,6 +128,34 @@ class TestPayrollPageSummaryHandler:
         assert envelope.data["period"] == "all"
         assert envelope.data["rows"] == []
         assert envelope.data["total_transactions"] == 10
+
+    async def test_relative_date_phrase_with_no_month_year_still_queries(self, loader):
+        """Owner decision 2026-08-04 (Phase E Part 6 fix): a relative-date
+        phrase like 'গতকাল' (yesterday) with no explicit month/year must
+        still trigger a real, date-scoped transactions query via
+        date_from/date_to -- this was the root cause of a confidently
+        WRONG '0 payments' answer for a real yesterday-payments question
+        (verified against real production data: 9 transactions/৳2,000)."""
+        adapter = ReadonlyBusinessAdapter(loader)
+        entry = loader.get("BUS-017")
+        fake_health = {"status": "ok", "total_transactions": 4000}
+        fake_transactions = {
+            "transactions": [
+                {"employee_display_name": "Karim", "amount": 200.0, "txn_date": "2026-08-03", "payout_method": "bkash", "txn_category": "salary"},
+            ],
+        }
+
+        with patch("modules.fazle_payroll_engine.routes.health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.fazle_payroll_engine.routes.list_transactions", new=AsyncMock(return_value=fake_transactions)) as mock_txns:
+            envelope = await adapter._payroll_page_summary(entry, {"question": "গতকাল কয়জনকে payment করা হয়েছে?"})
+
+        mock_txns.assert_awaited_once()
+        call_kwargs = mock_txns.await_args.kwargs
+        assert call_kwargs["date_from"] is not None
+        assert call_kwargs["date_to"] is not None
+        assert call_kwargs["period"] is None
+        assert envelope.data["period"] == "yesterday"
+        assert len(envelope.data["rows"]) == 1
 
     async def test_exception_returns_failed_status(self, loader):
         adapter = ReadonlyBusinessAdapter(loader)

@@ -36,7 +36,7 @@ from typing import Optional
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_all, fetch_val
 from shared.draft_reply import create_draft_reply
-from app.bridge import get_bridge1, get_bridge2
+from app.bridge import get_bridge1, get_bridge2, get_bridge3
 from modules.message_router import (
     process_message,
     get_primary_admin,
@@ -71,6 +71,12 @@ BRIDGE_CONFIGS = [
         "messages_db": _settings.bridge2_db_path,
         "whatsapp_db": _settings.bridge2_whatsapp_db_path,
         "get_bridge": get_bridge2,
+    },
+    {
+        "name": "bridge3",
+        "messages_db": _settings.bridge3_db_path,
+        "whatsapp_db": _settings.bridge3_whatsapp_db_path,
+        "get_bridge": get_bridge3,
     },
 ]
 
@@ -1370,12 +1376,13 @@ async def start_pollers():
     try:
         ok1 = await get_bridge1().ensure_enabled()
         ok2 = await get_bridge2().ensure_enabled()
-        log.info(f"[send-control] startup enable: bridge1={ok1} bridge2={ok2}")
+        ok3 = await get_bridge3().ensure_enabled()
+        log.info(f"[send-control] startup enable: bridge1={ok1} bridge2={ok2} bridge3={ok3}")
     except Exception as _sce:
         log.warning(f"[send-control] startup enable failed: {_sce}")
     for config in BRIDGE_CONFIGS:
         asyncio.create_task(_poll_bridge(config))
-    log.info("Bridge pollers running for bridge1 + bridge2")
+    log.info("Bridge pollers running for bridge1 + bridge2 + bridge3")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1734,6 +1741,7 @@ def _source_to_receiver(source: str) -> str:
         return {
             "bridge1": s.bridge1_number,
             "bridge2": s.bridge2_number,
+            "bridge3": s.bridge3_number,
             "meta":    s.admin_meta_number,
             "whatsapp": s.admin_meta_number,
         }.get(source, "")
@@ -1885,163 +1893,244 @@ async def process_bridge_inbound(
             log.debug("[intent_writeback] %s: %s", phone, _e)
 
     if reply:
-        # P17-FIX-2: recruit_gate — recruitment intake bypasses SAFE MODE
-        # Role-based auto-reply: read live from DB (via wa_chat_frontend) so the UI toggle takes effect immediately.
-        _recruit_gate = False
-        try:
-            from modules.wa_chat_frontend import get_effective_auto_reply as _get_ar, _id_role_to_setting_key
-            _role_key = _id_role_to_setting_key(id_role)
-            _auto_reply_on = await _get_ar(_role_key)
-            _recruit_autoreply_on = await _get_ar("recruitment")
-        except Exception:
-            _auto_reply_on = _settings.auto_reply_enabled
-            _recruit_autoreply_on = _settings.recruitment_autoreply_enabled
-
-        if not _auto_reply_on and _recruit_autoreply_on:
-            _admin_set = {
-                _settings.admin_meta_number,
-                _settings.admin_bridge1_number,
-                _settings.admin_bridge2_number,
-                *_settings.admin_number_list,
+        # Owner decision 2026-08-04 (Phase E Part 3, Admin<->Hermes safety-
+        # policy audit): everything in the `else` branch below is a
+        # CUSTOMER-facing safety cascade (AI_SAFE_MODE, DRAFT_ALWAYS,
+        # financial-intent draft gate, poison filter, length guard,
+        # recruit gate) -- it exists to protect against risky, unreviewed
+        # auto-sends to EXTERNAL numbers. It was incorrectly also applying
+        # to the Admin's own conversation with Hermes: the Admin is already
+        # the human who typed the question and is the approver of Hermes's
+        # own answers -- there is no external recipient to protect against
+        # here, and diverting the answer into a draft the Admin never
+        # proactively checks on WhatsApp made Hermes appear silently broken
+        # (see management_decisions.md, same-dated entry, for the incident
+        # this traces back to). Admin-role replies now send directly,
+        # bypassing that entire cascade. External/customer-facing replies
+        # (the `else` branch) are completely unchanged -- this is an
+        # additive `if` in front of the pre-existing logic, not a
+        # modification to it.
+        if id_role == "admin":
+            # Owner-approved incident fix (2026-08-04, same day as the
+            # direct-send change above): a real, active cross-bridge
+            # message loop was found live -- bridge2/bridge3 (and, via the
+            # same mechanism, bridge1) share overlapping WhatsApp account/
+            # LID identity, so a reply sent to another bridge's OWN number
+            # arrives there as a brand-new genuine inbound message, gets
+            # re-recognized as admin, and replies again, bouncing
+            # indefinitely. Before this session's direct-send change,
+            # every admin reply landed in a draft requiring manual
+            # APPROVE, which incidentally broke this loop; direct-send
+            # removed that brake. Guard: if the resolved recipient phone
+            # equals ANOTHER bridge's own number (not the one this reply
+            # is going out on), that's a strong signal this is a bounce,
+            # not a genuine human message -- divert to draft instead of
+            # auto-sending, same as the pre-existing customer cascade
+            # does. Replying to the Admin's own number via the SAME
+            # bridge (the established self-chat pattern, e.g. bridge2's
+            # existing "AI <question>" feature) is unaffected.
+            _other_bridge_numbers = {
+                name: num for name, num in (
+                    ("bridge1", _settings.bridge1_number),
+                    ("bridge2", _settings.bridge2_number),
+                    ("bridge3", _settings.bridge3_number),
+                )
+                if name != bridge_name and num
             }
-            if phone not in _admin_set and recruit_decision["autosend"]:
-                _recruit_gate = True
-                log.info(
-                    "[P17-RECRUIT] [%s] recruit_gate=%s phone=%s role=%s",
-                    bridge_name, recruit_decision["reason"], phone, id_role,
+            if phone in _other_bridge_numbers.values():
+                log.warning(
+                    "[%s] LOOP_GUARD: admin reply recipient=%s matches another "
+                    "bridge's own number -- likely cross-bridge bounce, "
+                    "diverting to draft instead of auto-sending",
+                    bridge_name, phone,
                 )
-
-        if _auto_reply_on or _recruit_gate:
-            # Phase 4.5: advance request phrase guard
-            if any(phrase in text.lower() for phrase in _ADVANCE_REQUEST_PHRASES):
-                log.info("[ADVANCE_REQUEST_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
-                await _save_draft(bridge_name, phone, reply, msg_intent,
-                                  sender_name=id_name, sender_message=text)
-                return
-
-            # Part H: financial intent draft gate
-            _financial_hit = any(fi in msg_intent.lower() for fi in _FINANCIAL_DRAFT_INTENTS)
-            if _financial_hit and not _is_safe_autosend_intent(msg_intent, id_role):
-                log.info("[FINANCIAL_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
-                await _save_draft(bridge_name, phone, reply, msg_intent,
-                                  sender_name=id_name, sender_message=text)
-                return
-
-            # Phase 4.5: complaint-phrase override
-            if _financial_hit and any(phrase in text.lower() for phrase in _COMPLAINT_PHRASES):
-                log.info(
-                    "[COMPLAINT_DRAFT] phone=%s intent=%r → complaint phrase → forced draft",
-                    phone, msg_intent,
-                )
-                await _save_draft(bridge_name, phone, reply, msg_intent,
-                                  sender_name=id_name, sender_message=text)
-                return
-
-            if _financial_hit:
-                log.info("[SAFE_AUTOSEND] phone=%s intent=%r → bypassing financial draft gate", phone, msg_intent)
-
-            # DRAFT_ALWAYS gate (phone, role, name, prefix)
-            draft_gate = await _is_draft_always(phone, id_role, id_name)
-            if draft_gate:
-                log.info(
-                    "[DRAFT_ALWAYS] phone=%s intent=%r role=%s name=%r → no direct auto-reply",
-                    phone, msg_intent, id_role, id_name,
-                )
-
-            # STEP 6: risk level gate
-            if not draft_gate:
-                _contact_risk = _settings.contact_risk_map.get(phone, "")
-                if _contact_risk == "admin_review_only":
-                    draft_gate = True
-                    log.info("[RISK_LEVEL] %s risk=admin_review_only → forced draft", phone)
-                elif _contact_risk == "monitored":
-                    log.info("[RISK_LEVEL] %s risk=monitored — reply allowed with extra logging", phone)
-
-            if draft_gate:
-                log.info("[DRAFT-GATE] %s name=%r role=%s → draft", phone, id_name, id_role)
                 await _save_draft(bridge_name, phone, reply, msg_intent,
                                   sender_name=id_name, sender_message=text)
             else:
-                # STEP 7: loop detection
-                if _check_loop_detect(phone):
-                    log.warning("[LOOP_DETECT] autoreply paused for %s bridge=%s", phone, bridge_name)
-                    await _save_draft(bridge_name, phone, reply, msg_intent,
-                                      sender_name=id_name, sender_message=text)
-                    return
-
-                # Outbound poison block
-                _poison_hit = next((p for p in _OUTBOUND_POISON if p in reply), None)
-                if _poison_hit:
-                    _block_reason = f"POISON:{_poison_hit!r}"
-                    log.error(
-                        "[OUTBOUND_SANITIZER_BLOCK] bridge=%s phone=%s pattern=%r",
-                        bridge_name, phone, _poison_hit,
-                    )
-                    await _save_draft(bridge_name, phone, reply, msg_intent,
-                                      sender_name=id_name, sender_message=text)
-                    await _record_safety_incident(bridge_name, phone, _block_reason, reply)
-                    await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
-                    return
-
-                # Length/structure guard
-                _reply_len = len(reply)
-                _has_table = reply.count(" | ") >= 2 or ":---" in reply
-                _is_long = _reply_len > 400
-                _has_headings = reply.count("\n#") >= 2
-                if _is_long or _has_table or _has_headings:
-                    _block_reason = f"STRUCT:len={_reply_len},table={_has_table},headings={_has_headings}"
-                    log.warning(
-                        "[OUTBOUND_LENGTH_GUARD] bridge=%s phone=%s len=%d table=%s headings=%s",
-                        bridge_name, phone, _reply_len, _has_table, _has_headings,
-                    )
-                    await _save_draft(bridge_name, phone, reply, msg_intent,
-                                      sender_name=id_name, sender_message=text)
-                    await _record_safety_incident(bridge_name, phone, _block_reason, reply)
-                    await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
-                    return
-
-                # AI_SAFE_MODE
-                if _settings.ai_safe_mode:
-                    _safe_reason = None
-                    if len(reply) > 200:
-                        _safe_reason = f"SAFE_MODE:LONG({len(reply)}chars)"
-                    elif (id_conf or 0) < 50:
-                        _safe_reason = f"SAFE_MODE:LOW_CONF({id_conf})"
-                    elif msg_intent in ("unknown", "unclear", ""):
-                        _safe_reason = f"SAFE_MODE:UNCERTAIN_INTENT({msg_intent!r})"
-                    if _safe_reason:
-                        log.warning("[AI_SAFE_MODE] %s bridge=%s phone=%s", _safe_reason, bridge_name, phone)
-                        await _save_draft(bridge_name, phone, reply, msg_intent,
-                                          sender_name=id_name, sender_message=text)
-                        return
-
-                # Send
                 from modules.outbound import enqueue as enqueue_outbound
-                fallback = None
-                if msg_intent != "recruitment":
-                    fallback = "bridge2" if bridge_name == "bridge1" else "bridge1"
                 qid = await enqueue_outbound(
                     phone,
                     reply,
                     source_bridge=bridge_name,
-                    fallback_channel=fallback,
-                    purpose=f"customer-reply:{msg_intent or 'unknown'}",
-                    idempotency_key=f"{bridge_name}-recruit:{hashlib.sha256(f'{phone}|{text}'.encode()).hexdigest()[:40]}"
-                    if msg_intent == "recruitment" else None,
-                    meta={"customer_reply": True, "intent": msg_intent},
+                    fallback_channel=None,
+                    purpose=f"admin-hermes-reply:{msg_intent or 'unknown'}",
+                    meta={"admin_reply": True, "intent": msg_intent},
                 )
                 if qid:
                     await _record_reply(phone)
                     await _save_message(bridge_name, phone, reply, "outbound",
                                         identity_role=id_role, identity_confidence=id_conf,
                                         workflow=msg_intent)
-                    log.info("[%s] Queued reply to %s qid=%s", bridge_name, phone, qid)
+                    log.info(
+                        "[%s] Admin-Hermes reply sent directly (customer safety "
+                        "cascade bypassed for admin role) to %s qid=%s",
+                        bridge_name, phone, qid,
+                    )
                 else:
-                    log.warning("[%s] Reply enqueue failed/deduped for %s", bridge_name, phone)
+                    log.warning("[%s] Admin-Hermes reply enqueue failed/deduped for %s", bridge_name, phone)
         else:
-            log.warning("SAFE MODE: reply suppressed for %s (%s). Saving draft.", phone, bridge_name)
-            await _save_draft(bridge_name, phone, reply, msg_intent,
-                              sender_name=id_name, sender_message=text)
+            # P17-FIX-2: recruit_gate — recruitment intake bypasses SAFE MODE
+            # Role-based auto-reply: read live from DB (via wa_chat_frontend) so the UI toggle takes effect immediately.
+            _recruit_gate = False
+            try:
+                from modules.wa_chat_frontend import get_effective_auto_reply as _get_ar, _id_role_to_setting_key
+                _role_key = _id_role_to_setting_key(id_role)
+                _auto_reply_on = await _get_ar(_role_key)
+                _recruit_autoreply_on = await _get_ar("recruitment")
+            except Exception:
+                _auto_reply_on = _settings.auto_reply_enabled
+                _recruit_autoreply_on = _settings.recruitment_autoreply_enabled
+
+            if not _auto_reply_on and _recruit_autoreply_on:
+                _admin_set = {
+                    _settings.admin_meta_number,
+                    _settings.admin_bridge1_number,
+                    _settings.admin_bridge2_number,
+                    *_settings.admin_number_list,
+                }
+                if phone not in _admin_set and recruit_decision["autosend"]:
+                    _recruit_gate = True
+                    log.info(
+                        "[P17-RECRUIT] [%s] recruit_gate=%s phone=%s role=%s",
+                        bridge_name, recruit_decision["reason"], phone, id_role,
+                    )
+
+            if _auto_reply_on or _recruit_gate:
+                # Phase 4.5: advance request phrase guard
+                if any(phrase in text.lower() for phrase in _ADVANCE_REQUEST_PHRASES):
+                    log.info("[ADVANCE_REQUEST_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
+                    await _save_draft(bridge_name, phone, reply, msg_intent,
+                                      sender_name=id_name, sender_message=text)
+                    return
+
+                # Part H: financial intent draft gate
+                _financial_hit = any(fi in msg_intent.lower() for fi in _FINANCIAL_DRAFT_INTENTS)
+                if _financial_hit and not _is_safe_autosend_intent(msg_intent, id_role):
+                    log.info("[FINANCIAL_DRAFT] phone=%s intent=%r → forced draft", phone, msg_intent)
+                    await _save_draft(bridge_name, phone, reply, msg_intent,
+                                      sender_name=id_name, sender_message=text)
+                    return
+
+                # Phase 4.5: complaint-phrase override
+                if _financial_hit and any(phrase in text.lower() for phrase in _COMPLAINT_PHRASES):
+                    log.info(
+                        "[COMPLAINT_DRAFT] phone=%s intent=%r → complaint phrase → forced draft",
+                        phone, msg_intent,
+                    )
+                    await _save_draft(bridge_name, phone, reply, msg_intent,
+                                      sender_name=id_name, sender_message=text)
+                    return
+
+                if _financial_hit:
+                    log.info("[SAFE_AUTOSEND] phone=%s intent=%r → bypassing financial draft gate", phone, msg_intent)
+
+                # DRAFT_ALWAYS gate (phone, role, name, prefix)
+                draft_gate = await _is_draft_always(phone, id_role, id_name)
+                if draft_gate:
+                    log.info(
+                        "[DRAFT_ALWAYS] phone=%s intent=%r role=%s name=%r → no direct auto-reply",
+                        phone, msg_intent, id_role, id_name,
+                    )
+
+                # STEP 6: risk level gate
+                if not draft_gate:
+                    _contact_risk = _settings.contact_risk_map.get(phone, "")
+                    if _contact_risk == "admin_review_only":
+                        draft_gate = True
+                        log.info("[RISK_LEVEL] %s risk=admin_review_only → forced draft", phone)
+                    elif _contact_risk == "monitored":
+                        log.info("[RISK_LEVEL] %s risk=monitored — reply allowed with extra logging", phone)
+
+                if draft_gate:
+                    log.info("[DRAFT-GATE] %s name=%r role=%s → draft", phone, id_name, id_role)
+                    await _save_draft(bridge_name, phone, reply, msg_intent,
+                                      sender_name=id_name, sender_message=text)
+                else:
+                    # STEP 7: loop detection
+                    if _check_loop_detect(phone):
+                        log.warning("[LOOP_DETECT] autoreply paused for %s bridge=%s", phone, bridge_name)
+                        await _save_draft(bridge_name, phone, reply, msg_intent,
+                                          sender_name=id_name, sender_message=text)
+                        return
+
+                    # Outbound poison block
+                    _poison_hit = next((p for p in _OUTBOUND_POISON if p in reply), None)
+                    if _poison_hit:
+                        _block_reason = f"POISON:{_poison_hit!r}"
+                        log.error(
+                            "[OUTBOUND_SANITIZER_BLOCK] bridge=%s phone=%s pattern=%r",
+                            bridge_name, phone, _poison_hit,
+                        )
+                        await _save_draft(bridge_name, phone, reply, msg_intent,
+                                          sender_name=id_name, sender_message=text)
+                        await _record_safety_incident(bridge_name, phone, _block_reason, reply)
+                        await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
+                        return
+
+                    # Length/structure guard
+                    _reply_len = len(reply)
+                    _has_table = reply.count(" | ") >= 2 or ":---" in reply
+                    _is_long = _reply_len > 400
+                    _has_headings = reply.count("\n#") >= 2
+                    if _is_long or _has_table or _has_headings:
+                        _block_reason = f"STRUCT:len={_reply_len},table={_has_table},headings={_has_headings}"
+                        log.warning(
+                            "[OUTBOUND_LENGTH_GUARD] bridge=%s phone=%s len=%d table=%s headings=%s",
+                            bridge_name, phone, _reply_len, _has_table, _has_headings,
+                        )
+                        await _save_draft(bridge_name, phone, reply, msg_intent,
+                                          sender_name=id_name, sender_message=text)
+                        await _record_safety_incident(bridge_name, phone, _block_reason, reply)
+                        await _alert_admin_safety_block(bridge_name, phone, _block_reason, reply)
+                        return
+
+                    # AI_SAFE_MODE
+                    if _settings.ai_safe_mode:
+                        _safe_reason = None
+                        if len(reply) > 200:
+                            _safe_reason = f"SAFE_MODE:LONG({len(reply)}chars)"
+                        elif (id_conf or 0) < 50:
+                            _safe_reason = f"SAFE_MODE:LOW_CONF({id_conf})"
+                        elif msg_intent in ("unknown", "unclear", ""):
+                            _safe_reason = f"SAFE_MODE:UNCERTAIN_INTENT({msg_intent!r})"
+                        if _safe_reason:
+                            log.warning("[AI_SAFE_MODE] %s bridge=%s phone=%s", _safe_reason, bridge_name, phone)
+                            await _save_draft(bridge_name, phone, reply, msg_intent,
+                                              sender_name=id_name, sender_message=text)
+                            return
+
+                    # Send
+                    from modules.outbound import enqueue as enqueue_outbound
+                    fallback = None
+                    if msg_intent != "recruitment":
+                        # bridge3 (Admin device) intentionally has no cross-bridge
+                        # fallback -- falling over to bridge1/bridge2 would send an
+                        # Admin-directed reply from a different WhatsApp number,
+                        # which is more surprising than a retry via the outbound
+                        # queue. See shared/bridge_orchestrator.py's bridge3 note.
+                        fallback = {"bridge1": "bridge2", "bridge2": "bridge1"}.get(bridge_name)
+                    qid = await enqueue_outbound(
+                        phone,
+                        reply,
+                        source_bridge=bridge_name,
+                        fallback_channel=fallback,
+                        purpose=f"customer-reply:{msg_intent or 'unknown'}",
+                        idempotency_key=f"{bridge_name}-recruit:{hashlib.sha256(f'{phone}|{text}'.encode()).hexdigest()[:40]}"
+                        if msg_intent == "recruitment" else None,
+                        meta={"customer_reply": True, "intent": msg_intent},
+                    )
+                    if qid:
+                        await _record_reply(phone)
+                        await _save_message(bridge_name, phone, reply, "outbound",
+                                            identity_role=id_role, identity_confidence=id_conf,
+                                            workflow=msg_intent)
+                        log.info("[%s] Queued reply to %s qid=%s", bridge_name, phone, qid)
+                    else:
+                        log.warning("[%s] Reply enqueue failed/deduped for %s", bridge_name, phone)
+            else:
+                log.warning("SAFE MODE: reply suppressed for %s (%s). Saving draft.", phone, bridge_name)
+                await _save_draft(bridge_name, phone, reply, msg_intent,
+                                  sender_name=id_name, sender_message=text)
 
     if admin_note:
         if admin_note.get("purpose") == "draft-only-contact-review":
