@@ -6007,3 +6007,550 @@ Explicit, this session (2026-08-03).
 ### Cross references
 
 `/home/azim/assistant-platform/proposal_hermes_whatsapp_persona_reply_20260803.md` (separate, related persona-reply proposal for bridge1/bridge2/social_auto_reply — bridge3 explicitly out of scope there too).
+
+## Bridge3 → Hermes Integration, Admin-Reply-Only Scope — Un-Deferred and Implemented (2026-08-04)
+
+### Status
+
+Un-defers the 2026-08-03 deferral above, scoped strictly to Hermes answering
+the Admin's own messages sent via bridge3 (8801805529211, the Admin's own
+device). Reply-to-others-as-Admin, the OpenCode tool-gap-generation loop,
+and cross-system draft consumption remain explicitly deferred — not part of
+this decision.
+
+### What was found (pre-implementation audit)
+
+- bridge3 was still fully unwired at the application layer as of this
+  session's start (matches 2026-08-03 finding): `Settings`' `extra = "ignore"`
+  silently dropped all `BRIDGE3_*`/`ADMIN_BRIDGE3_NUMBER` env keys; no
+  `get_bridge3()`; no `bridge_poller.BRIDGE_CONFIGS` entry; bridge3's number
+  absent from `ADMIN_NUMBERS`; `identity_brain._check_admin_settings()`
+  didn't check a bridge3 admin field.
+- `modules/outbound/__init__.py`'s `_send_with_channel()` did a **binary**
+  bridge2-or-bridge1 dispatch — any `source_bridge="bridge3"` row would have
+  silently sent via bridge1 (the HR number) instead. Same binary pattern
+  existed in `modules/bridge_poller/__init__.py`'s customer-reply fallback
+  selection. Both fixed as part of this change (see below) — required for
+  correctness, not scope creep, since bridge3 would otherwise misroute.
+- All five relevant tables (`wbom_whatsapp_messages`, `fazle_conversation_threads`,
+  `processed_conversation_messages`, `fazle_draft_replies`, `fazle_outbound_queue`)
+  already accept a `"bridge3"` value with no CHECK-constraint changes needed —
+  no migration required.
+- Loop prevention (Hermes's own reply must never re-enter as a new Admin
+  command) is already structural: `modules/bridge_poller._fetch_new_messages()`
+  filters `WHERE is_from_me = 0` and is the single shared, bridge-agnostic
+  function every `BRIDGE_CONFIGS` entry's poller calls — bridge3 inherits
+  this with zero new code, confirmed by a direct SQLite-backed unit test.
+
+### What was implemented
+
+Additive-only, mirrors the existing bridge1/bridge2 pattern exactly:
+`app/config.py` (bridge3 Settings fields), `app/bridge.py` (`get_bridge3()`),
+`shared/bridge_orchestrator.py` (bridge3 health-tracked/probed for the
+existing RT-013 `bridges` diagnostic tool — deliberately **excluded** from
+`BRIDGE_PRIORITY`/`ADMIN_BRIDGE_NAME`, which stays `"bridge2"` unchanged,
+since that pool exists to reach bridge2's own admin self-chat number via
+alternate bridges, a different concern from bridge3 reachability),
+`modules/bridge_poller/__init__.py` (bridge3 added to `BRIDGE_CONFIGS`,
+send-control startup enable, `_source_to_receiver` map; customer-reply
+fallback fixed to a 3-way map with bridge3 → no fallback, intentionally,
+to avoid an Admin-directed reply silently going out from a different
+WhatsApp number), `modules/identity_brain/__init__.py` (`admin_bridge3_number`
+added to `_check_admin_settings()`'s check list), `modules/outbound/__init__.py`
+(3-way dispatch fix), `.env` (`8801805529211` added to `ADMIN_NUMBERS`).
+No new application, message pipeline, conversation-memory system, intent
+taxonomy, tool registry, draft/review system, or Hermes runtime was created
+— `AI <question>` → `modules/admin_directives/router.py` →
+`orchestrate_console_request()` → the existing 18-tool `ai_console.registry`
+is reused unchanged; it required zero code changes since it's already
+gated purely on resolved identity role, not bridge source.
+
+New test file `tests/unit/test_bridge3_integration.py` (11 tests) plus a
+one-line mock-completeness fix to a pre-existing test
+(`tests/unit/test_escort_client_identity_convergence.py`) that a MagicMock
+gotcha exposed (an unset mock attribute isn't a real empty string, so the
+new `admin_bridge3_number` check in `_check_admin_settings()` hit an
+exception path in that one test only — production behavior unaffected,
+verified via git-stash A/B comparison). Full targeted regression run
+(bridge, outbound, identity, RBAC, admin-directives) confirmed identical
+pass/fail outcomes before/after except that one intentional fix.
+
+### Owner approval
+
+Explicit, this session (2026-08-04), scoped per the two-question gate
+answered before implementation began: (1) reply-to-Admin-only, not
+reply-to-others; (2) OpenCode tool-gap-generation loop split out to a
+future, separately-approved phase. 8801805529211 confirmed by Owner as
+their own directly-controlled Admin device before `ADMIN_NUMBERS` was
+touched.
+
+### Cross references
+
+Bridge3 (8801805529211 / REC2) — Current State & Decision (2026-08-03),
+above. `/home/azim/assistant-platform/HERMES_FULL_CAPABILITY_PLAN_20260803.md`
+§6 (the two-tier reply-to-Admin vs. reply-to-others model this decision
+follows).
+
+## Forensic Root-Cause Investigation: Real Admin↔Hermes Failures (2026-08-04)
+
+### Status
+
+Owner reported real WhatsApp messages (via bridge3, post-restart) getting
+no reply, plus two web-assistant (assistant.iamazim.com) failures. Owner
+directive: full read-only forensic trace first, then minimum fixes, no
+more superficial "please retest" cycles. All findings below verified
+against real production DB/logs/live requests, not mocks.
+
+### What was found (fazle-core)
+
+1. Live trace of 4 real Admin WhatsApp messages (`Hi`, `AI গতকাল কত টাকা
+   পেমেন্ট করা হয়?`, `এই মাসে মোট cash received কত?`, `গতকাল কয়জনের কাছে
+   টাকা পাঠানো হয়েছে...`) via `wbom_whatsapp_messages`/`fazle_message_queue`/
+   `fazle_draft_replies`/log correlation showed the full pipeline (identity
+   → RBAC → AI Console → tool → LLM) working correctly end-to-end, but
+   `AI_SAFE_MODE` (a customer-facing safety gate) was diverting every
+   Admin-Hermes reply to a draft the Admin never checks on WhatsApp, and a
+   5-minute duplicate-draft guard then silently dropped a second draft
+   when one was already open — net effect: real answers generated,
+   nothing delivered.
+2. Root cause: `AI_SAFE_MODE`/`DRAFT_ALWAYS`/financial-draft-gate/poison-
+   filter/length-guard in `modules/bridge_poller/__init__.py`'s `if reply:`
+   block exist to protect EXTERNAL/customer sends, not the Admin's own
+   conversation with Hermes (the Admin is already the approver). Fixed:
+   admin-role replies now send directly via a new `if id_role == "admin":`
+   branch before that entire cascade; the cascade itself is completely
+   unchanged for external replies (additive, regression-tested).
+3. Separately, `cash_ledger_summary` (BUS-006) had no `exact_answer`
+   template in `modules/ai_console/provider_registry.py`, so real tool
+   data fell through to a generic LLM chat-completion that used irrelevant
+   RAG text instead — fixed by reusing the tool's own pre-computed
+   `data["answer"]` field (same pattern already used for 3 other tools).
+4. Deeper cause found while verifying #3: `get_daily_payments()`/
+   `get_employee_month_payments()` in `modules/ai_readonly_tools/__init__.py`
+   queried `fpe_cash_transactions` directly with a bad column reference
+   (`fpe_employees.employee_id` doesn't exist — confirmed via the real FK
+   constraint, the actual PK is `.id`) AND the `fazle_ai_reader` role
+   production actually uses has **no SELECT grant on that raw table at
+   all** (confirmed via `has_table_privilege()`), only on the sanctioned
+   `ai_read_cash_transactions` view — meaning these functions could never
+   have worked in production even before this session. Rewritten to query
+   the view (privacy-safe: no phone numbers exposed).
+5. A related, separately-evidenced bug in `payroll_page_summary` (BUS-017,
+   `modules/ai_console/live_adapters.py`): silently skipped the
+   transactions query entirely for relative-date phrases ("গতকাল") with no
+   explicit month/year, producing a confidently WRONG "0 payments found"
+   answer for a real question (verified: actual answer was 9 transactions/
+   ৳2,000). Fixed to fall back to `date_from`/`date_to` via
+   `parse_date_range(question, default_days=None)` — the `None` default is
+   deliberate: only acts on a genuinely recognized date phrase, never
+   silently narrows a truly unscoped question.
+
+### What was found (assistant.iamazim.com / assistant-platform)
+
+`backend/src/routes/chat.js`'s `/api/chat/send` (the default landing chat
+page) built every LLM call with **zero system prompt and zero conversation
+history** — `const messages = [{ role: 'user', content: message }]`. This
+directly caused both reported failures: "who am I" got a generic LLM
+answer (no identity/context ever provided), and "can you get data from
+Al-Rifa'i's backend" hallucinated an unrelated real company (nothing ever
+told the model "Al-Rifa'i" = its own connected fazle-core backend, not an
+external company). Fixed: added `buildSystemPrompt({isAdmin})` (Hermes
+identity + Al-Rifa'i/fazle-core self-reference + Admin/Owner context when
+applicable) and bounded prior-turn history loading from the existing
+`chat_messages` table, both verified live against the real deployed
+container (real JWT, real admin user) — correct self-identification,
+correct Admin/Owner recognition, no hallucination, correct tool-grounded
+payment data (`গতকাল ৯ জনকে পেমেন্ট করা হয়েছে। মোট পরিমাণ ছিল ২০০০.০০`,
+exactly matching fazle-core's real ledger), and correct multi-turn recall,
+all confirmed via live HTTP requests post-rebuild/redeploy.
+
+### Owner approval
+
+This session's investigate-then-fix directive (2026-08-04) pre-authorized
+minimal fixes conditioned on root-cause proof, in a fixed priority order
+(Admin bridge3 reply delivery → natural-language routing → safety-cascade
+scope → tool/data grounding → web identity → web backend grounding →
+conversation history) — no separate per-fix approval round requested.
+OpenCode tool-generation loop, external auto-reply, and autonomous writes
+remain explicitly out of scope/deferred, unchanged.
+
+### Cross references
+
+Bridge3 → Hermes Integration, Admin-Reply-Only Scope entry above (same
+day, earlier in this session — the restart that surfaced these failures).
+`db/.restart_gate_manifest` carries the itemized file list and reasoning
+for the fazle-core fixes pending commit.
+
+## INCIDENT: Live Cross-Bridge Message Loop (2026-08-04, same session)
+
+### Status
+
+CONTAINED (guard deployed, restarted, verified via source/tests + manual
+trace against the captured incident data). Root cause (why bridge3
+inbound sender phone resolves to bridge2's own number) is NOT fixed —
+separate, deferred.
+
+### What was found
+
+Two of the Owner's real test messages, sent minutes apart, triggered a
+self-sustaining loop across bridge1/bridge2/bridge3 that ran ~28 minutes
+and generated ~15+ spurious message pairs (pending-draft lists, chat
+history dumps for an unrelated real contact, "no pending drafts" replies)
+before apparently pausing on its own. Root cause, confirmed via exact log/
+DB trace: bridge2 and bridge3 (and, via the same mechanism, bridge1) share
+overlapping WhatsApp account/LID identity — a reply sent to "the resolved
+sender" that happens to equal another bridge's own number arrives at that
+bridge as a brand-new genuine inbound message, gets re-recognized as
+admin (now true for all three numbers after this session's bridge3 work),
+and replies again, bouncing indefinitely. This session's earlier Part 3
+fix (admin replies bypass the customer-facing draft/safety cascade,
+sending directly) removed the brake that used to stop this incidentally —
+previously every admin reply landed in a draft requiring manual APPROVE,
+so a bounce never auto-sent past the first hop.
+
+One concrete example from the trace: the Owner's genuine question
+"গতকাল কতজনকে payment করা হয়েছে?" arrived on bridge3 with sender resolved
+as `8801880446111` (bridge2's own number, not the Owner's real
+`8801805529211`) — and, separately, got intercepted by a pre-existing
+keyword shortcut (`if "payment" in lower: return await
+list_payment_drafts(...)`, in `modules/message_router/__init__.py`, which
+runs before this session's natural-language Hermes fallback) instead of
+reaching real payment-count logic — flagged, not fixed (Owner directive:
+don't touch BUS-017 tool-selection/dispatch order further without a
+demonstrated correctness failure prompting it; this is a different,
+adjacent dispatch-order issue, noted for a future session).
+
+### What was changed (minimal, Owner-approved)
+
+`modules/bridge_poller/__init__.py`, inside the Part 3 admin-direct-send
+branch: before enqueueing, check whether the resolved recipient phone
+equals another bridge's own number (excluding the bridge the reply is
+going out on, so genuine same-bridge self-chat, e.g. bridge2's existing
+"AI <question>" pattern, is unaffected). If so, divert to a draft instead
+of auto-sending (log tag `LOOP_GUARD`). Regression-tested (dispatch order,
+same-bridge exclusion, all three bridge numbers checked) — 143/143
+targeted tests pass. Restarted via `scripts/restart_gate.sh --restart`,
+clean.
+
+### Root cause of the sender resolving to bridge2's number — RESOLVED, not an infra bug
+
+Correction to this entry's earlier framing: this is NOT a WhatsApp account-
+linking/LID misconfiguration. Confirmed via each bridge's own
+`whatsmeow_device` row (ground truth, `~/whatsapp{N}/store/whatsapp.db`):
+bridge2 is genuinely, independently registered as `8801880446111` (push
+name "Muradul Azim", own LID `93282931581172`); bridge3 is genuinely,
+independently registered as `8801805529211` (push name "iamazim", business
+name "Al-Rifa'i Integrated Services", own LID `156444871671906`) — two
+fully separate accounts, no companion/linked-device relationship. The LID
+map entries that looked like "wrong" resolution (bridge3's own
+`whatsmeow_lid_map` mapping LID `93282931581172` → `8801880446111`) are
+simply bridge3's cached knowledge of its **contact** 8801880446111 — i.e.
+bridge2's account. The loop-triggering messages were sent to bridge3 FROM
+the 8801880446111 (bridge2/"Muradul Azim") account, not from 8801805529211
+— identity resolution correctly reported the true sender each time. The
+practical implication: testing bridge3 requires actually sending from the
+device/SIM registered as 8801805529211, not from whichever phone happens
+to also be logged into 8801880446111 — this is a testing-methodology point
+for the Owner, not an application bug or infrastructure fix. The
+LOOP_GUARD fix deployed above remains correct and necessary regardless
+(the Owner does have genuine Admin identity on both numbers, so a
+cross-number bounce is a real, general risk this setup allows for, not
+just a one-off testing mistake) — it will not block genuine same-bridge
+self-chat replies (e.g., bridge3 replying to a message that really did
+come from 8801805529211).
+
+### Owner approval
+
+Explicit, this session — Owner authorized the minimal guard after seeing
+the exact loop evidence, with the understanding that no further
+architectural changes would be made without review beyond this targeted
+fix.
+
+### Cross references
+
+Forensic Root-Cause Investigation entry above (same session, same day —
+the Part 3 fix whose removal of the draft-gate brake is the proximate
+trigger for this incident).
+
+## Bridge3 Admin Reversal + Bridge2 Super Admin + CSV Contact-Book Rebuild — Owner Decision (2026-08-04, later session)
+
+### Status
+
+Reverses the "Bridge3 → Hermes Integration, Admin-Reply-Only Scope"
+decision above (same day, earlier session): bridge3/REC2 (8801805529211)
+is no longer a human Admin identity — it remains a live, tracked technical
+WhatsApp bridge only. Bridge2 (8801880446111) is confirmed the canonical
+Super Admin identity. Separately, the WhatsApp contact-book
+(`wbom_contacts`) was rebuilt from an Owner-provided CSV export, which is
+now the authoritative contact source going forward.
+
+### What was found (pre-implementation audit)
+
+- The earlier same-day bridge3-admin change was real, Owner-approved,
+  tested, and live — including a genuine ~28-minute cross-bridge message
+  loop incident (see "INCIDENT: Live Cross-Bridge Message Loop" above) that
+  happened as a direct consequence of bridge2 and bridge3 both being
+  admin-recognized numbers the Owner personally controls.
+- `admin_bridge3_number` was read in exactly one production location
+  (`modules/identity_brain/__init__.py`'s `_check_admin_settings()`); no
+  other production code depended on bridge3 having admin status.
+- Bridge2's `fazle_admins` row already held the `superadmin` RBAC role
+  (unchanged by any of this session's work) — "Bridge2 = Super Admin" was
+  already true at the RBAC layer; only `identity_brain`'s separate,
+  unrelated admin-recognition mechanism needed the bridge3 removal.
+  Bridge3's own `fazle_admins` row (created by the earlier same-day
+  bootstrap) also held `superadmin` — left as dormant/contradictory state
+  if not addressed, since `identity_brain` gates message-router access to
+  RBAC entirely and no other reachable path uses that row.
+- `wbom_contacts` (2,654 rows) had exactly 3 code-enforced `is_protected`
+  rows (Owner's own bridge2 number, the company's HR/bridge1 number, the
+  Magnus Marine business number) and 2 distinct `contact_id`s still
+  FK-referenced (`ON DELETE NO ACTION`) by 39 live `wbom_escort_programs`
+  rows — both categories were confirmed as the only real blockers to a
+  bulk clear.
+- The daily `daily_contact_sync` scheduler job (bridge-phone-book →
+  `wbom_contacts`) was live and next-scheduled within 24h; left running it
+  would have silently repopulated the just-cleared contact book from each
+  bridge's own phone address book, undermining "CSV is authoritative."
+
+### What was implemented
+
+1. **Identity**: `.env`'s `ADMIN_NUMBERS` no longer includes
+   `8801805529211`; `ADMIN_BRIDGE3_NUMBER` removed. `identity_brain._check_admin_settings()`
+   no longer checks `admin_bridge3_number`. Bridge3's `fazle_admins` row
+   (id=40) disabled via the existing `rbac.disable_admin()` (not deleted —
+   reversible, matches this repo's no-hard-delete-of-admin-history
+   convention). Bridge2's existing `superadmin` RBAC role and
+   `admin_meta_number`/`admin_number_list[0]` position (both already
+   bridge2 before this change) confirmed as the practical "Super Admin"
+   answer — no new parallel role concept created, per Owner instruction to
+   adapt the existing system.
+   `tests/unit/test_bridge3_integration.py` Test 9 rewritten (was asserting
+   bridge3 admin recognition, now asserts the opposite) plus a new test
+   confirming bridge2 recognition — 12/12 passing. All bridge3 *transport*
+   wiring (Settings, `app.bridge.get_bridge3()`, `BRIDGE_CONFIGS`, outbound
+   3-way dispatch, health tracking, the cross-bridge `LOOP_GUARD`) is
+   unchanged — bridge3 remains a fully live, tracked bridge, it simply
+   carries no admin privilege. Consequence, not separately coded: Hermes
+   via bridge3 self-chat (built in the earlier same-day session) no longer
+   functions as an admin command channel, since no phone resolving through
+   bridge3 is in the admin set anymore.
+2. **Contact book**: `modules/contact_sync/__init__.py` gained
+   `import_from_csv_contacts()` — insert-only (`ON CONFLICT DO NOTHING`),
+   deliberately distinct from the existing `_upsert_contacts()`'s
+   update-on-conflict behavior, matching the Owner's exact policy for
+   future incremental CSV uploads (keep all existing contacts, add only
+   genuinely new numbers, never auto-delete on a CSV that omits a number).
+   New `scripts/import_csv_contacts.py`: parses a Google-Contacts-style CSV
+   (name columns + `Phone 1 - Value`, handles `:::`-separated multi-number
+   cells), normalizes every number through the canonical
+   `modules.phone_normalizer.normalize_phone()`, and supports both a
+   one-time `--clear-first` rebuild (excludes `is_protected=true` and
+   escort-linked `contact_id`s from the clear) and the same insert-only
+   import for future runs. Real run, verified independently after (not
+   just trusting the script's own printed counts): 2,654 → 5 preserved
+   (3 protected + 2 escort-linked) → 576 after import (571 new + 4 CSV
+   numbers that already matched a preserved row, correctly left
+   untouched). 3 non-BD numbers (two real US/UK numbers, one the Owner's
+   own UK number) correctly rejected by the normalizer, not imported. All
+   39 escort-program FK references confirmed still resolving after the
+   clear — zero orphaned references.
+3. **Sync job disabled**: `daily_contact_sync`'s automatic `CronTrigger`
+   registration commented out in `modules/scheduler/__init__.py` (marked
+   `DEPRECATED`, not deleted — still manually triggerable via `RUN JOB
+   daily_contact_sync` if ever needed). `job_daily_contact_sync()`'s
+   docstring updated to match. The per-message `upsert_contact_from_message()`
+   hook (fires on every inbound WhatsApp message to ensure a minimal
+   contact stub exists) was deliberately left untouched — a different,
+   ongoing message-processing concern, not bulk contact-book "sync/import"
+   in the sense this decision addresses.
+4. **Google Contacts/Drive**: confirmed 100% greenfield (no existing
+   integration, dependency, or credential anywhere in the repo) — left as
+   deferred/future development per Owner instruction, nothing built.
+5. **Phone normalization**: no change to the existing dual-format split
+   (`modules.phone_normalizer`, 13-digit canonical, used throughout
+   identity/contact/routing code vs. `modules.fazle_payroll_engine.normalizer`,
+   11-digit, scoped to FPE/payroll employee lookups) — explicitly out of
+   scope per Owner instruction ("do not perform the protected payroll
+   phone-number migration in this task"). The CSV import and all
+   contact-book-adjacent code use the canonical 13-digit normalizer only.
+
+### Verification
+
+Independently re-queried the live DB after every write (never trusted a
+script's own printed summary alone) — protected rows intact, escort FK
+references intact, final counts reconciled exactly against parse stats.
+`tests/unit/test_bridge3_integration.py` (12/12) and the broader
+identity/RBAC/outbound/admin-directives regression set
+(`test_escort_client_identity_convergence.py`, `test_rbac.py`,
+`test_phase13d_bridge_orchestrator.py`, `test_identity_brain.py`,
+`test_message_router_identity_seed.py`, `test_admin_commands.py`,
+`test_admin_directives_routes.py`) all passing. One pre-existing,
+unrelated test-isolation issue found and root-caused (not fixed, out of
+scope): `test_message_router_no_reply_name_gate.py`'s 4 tests fail only
+when run in combination with certain other test files in one pytest
+invocation (confirmed via git-stash A/B testing this session's own change
+is not the cause — the same failure reproduces with this session's
+identity_brain edit fully reverted) — pre-existing fragility from the
+earlier same-day session's uncommitted work, unaffected by anything in
+this decision.
+
+### Owner approval
+
+Explicit, this session (2026-08-04, later session, following extensive
+back-and-forth clarification on each open question from the prior
+feasibility review) — bridge2 named as canonical Super Admin, bridge3
+explicitly confirmed as "not a human Admin identity," uploaded CSV
+confirmed as authoritative contact source, Google sync explicitly deferred,
+payroll phone migration explicitly out of scope.
+
+### Cross references
+
+"Bridge3 → Hermes Integration, Admin-Reply-Only Scope — Un-Deferred and
+Implemented (2026-08-04)" and "INCIDENT: Live Cross-Bridge Message Loop
+(2026-08-04, same session)" above (the decision this entry reverses, and
+the incident that motivated the reversal). `AI_ROLES_POLICY.md`/
+`HERMES_FULL_CAPABILITY_PLAN_20260803.md` in `/home/azim/assistant-platform/`
+(Hermes's own side of the bridge3 relationship — not updated as part of
+this fazle-core-side change; a follow-up note there may be warranted if
+Hermes's bridge3 self-chat capability is still assumed live anywhere in
+that documentation).
+
+---
+
+## Hermes Operational Capability Completion (Phases 1-4) — Owner Decision (2026-08-04, later session)
+
+### What was found
+
+1. Gap analysis (separate, earlier read-only audit this same session)
+   found: no operational visibility into main WhatsApp bridge message
+   volume/stuck-message counts (only the external Meta/social channel was
+   monitored), no CPU probe in `/health` (disk/mem existed), no structured
+   domain reports (recruitment/escort/payroll/whatsapp-ops/bridge-health/
+   system-health) reusing the existing curated data tools, no filtered
+   WhatsApp message lookup for incident investigation (only unfiltered
+   most-recent-N and aggregate stats existed), and no way for the real
+   Hermes (assistant-platform's BUILD/RUN-capable agent) to be reached from
+   WhatsApp at all.
+2. **Separately, a real naming defect was found and fixed** (Owner
+   confirmed via AskUserQuestion mid-session): `modules/message_router`'s
+   natural-language admin fallback (added earlier the same day, part of
+   the now-reversed bridge3-admin work but NOT itself reversed) called
+   fazle-core's own AI console (`orchestrate_console_request`,
+   read-only RT-*/BUS-*/MEM-* tools) "Hermes" in code comments and a local
+   variable name. It is not Hermes. Comments/variable name corrected in
+   `modules/admin_directives/router.py` and `modules/message_router/__init__.py`
+   (and `tests/unit/test_admin_ai_router.py`'s matching comments) — no
+   behavior change, naming only. The underlying feature (free-text admin
+   queries routed to the AI console) is unchanged and still live.
+
+### What was implemented
+
+- **Phase 1** (`fazle-mcp/operational_tools.py`, new): per-bridge WhatsApp
+  message stats (`GET /api/whatsapp/message-stats`, new fazle-core
+  endpoint), DLQ status, bridge diagnostics, system health — reusing two
+  pre-existing endpoints as-is and adding one new narrow endpoint + a new
+  `_probe_cpu()` in `/health` (stdlib `os.getloadavg()`, no new dependency).
+- **Phase 2** (`fazle-mcp/domain_reports.py`, new): six structured reports
+  (recruitment/escort/payroll/whatsapp-ops/bridge-health/system-health),
+  built on `report_schema.build_report()` (the existing Task 2 shape),
+  reusing existing curated `fazleBridge.js` routes and Phase 1's tools —
+  no new fazle-core routes for the three business-data reports, no raw SQL
+  exposed to Hermes.
+- **Phase 3**: `GET /api/whatsapp/messages/lookup` (new fazle-core
+  endpoint, bound/parameterized filters only — phone, platform,
+  is_processed, message_id — no arbitrary SQL) + `audit_lookup_whatsapp_messages`
+  tool, PII-masked per existing policy.
+- **Phase 4** (the WhatsApp→Hermes channel — the piece this session's own
+  plan flagged as needing a fresh, dedicated decision before implementing,
+  given the same-day bridge3 incident): presented 3 design options via
+  AskUserQuestion; Owner selected **"dumb relay, READ-only over WhatsApp."**
+  Implemented as:
+  - `hermes-runner/server.py`: `/run` accepts `read_only: true`, which
+    hard-locks the toolset to `READ` for that one call *without reading or
+    writing the persisted mode file* — cannot affect, or be affected by,
+    the interactive web UI's current mode. Rejects `read_only` combined
+    with a caller-supplied `hermes_session_id` (a relayed call can never
+    resume/piggyback an existing, possibly-elevated session). New
+    `_parse_run_request()` helper, unit-tested directly (not
+    reimplemented in tests).
+  - `modules/admin_directives/router.py`: new `HERMES <request>` WhatsApp
+    admin command (6th pattern, alongside the existing 5) — deliberately
+    distinct keyword from `AI ` (which still routes to the AI console).
+    Gated on **two independent checks**: RBAC role `superadmin` (new
+    `COMMAND_ROLE["hermes_relay"]` entry) AND the specific bridge2 number
+    (`settings.admin_bridge2_number`), checked separately so a
+    channel-mismatch denial (e.g. bridge1, also bootstrapped superadmin)
+    gets its own honest audit row rather than reusing `_authorize`'s
+    RBAC-only verdict. Runs the actual Hermes call
+    (`_deliver_hermes_reply`) as a background `asyncio.create_task`, not
+    awaited inline — a real Hermes turn can take up to ~170s, far longer
+    than this codebase's `MESSAGE_ROUTE_TIMEOUT` (30s default) — returns
+    an immediate ack, delivers the real reply via `modules.outbound.enqueue()`
+    once Hermes responds. 15s cooldown per sender (separate from the
+    existing 5s AI-query cooldown, given the much higher real cost per call).
+  - `app/config.py`: new `hermes_runner_url`/`hermes_runner_secret`
+    settings; `.env` updated with the real values (the secret is the same
+    shared value `hermes-runner.service` already trusts assistant-backend
+    with — fazle-core is host-level like hermes-runner, reaches it
+    directly on `127.0.0.1:8093`, no nginx hop needed).
+  - **Self-chat/loop safety** (verified, not assumed, given the same-day
+    cross-bridge loop incident): `_deliver_hermes_reply`'s reply is
+    delivered via `outbound.enqueue(sender_phone, ..., source_bridge="bridge2")`
+    where `sender_phone` is verified equal to bridge2's own number before
+    the background task is ever scheduled — structurally identical to the
+    "same-bridge self-chat" pattern `modules/bridge_poller/__init__.py`'s
+    own loop-guard comment already documents as established and safe
+    (the existing `AI <question>` feature's own pattern); the separate
+    cross-bridge loop guard only fires on a MISMATCH between recipient and
+    sending bridge, which this code path cannot construct.
+  - **Phase 5 (production-changing actions via WhatsApp) is explicitly
+    NOT implemented** — the approved design hard-locks every relayed call
+    to READ, by construction; elevating to BUILD/RUN still requires the
+    interactive web UI. This was the Owner's selected option, not a
+    partial implementation of a broader one.
+
+### Verification
+
+- fazle-mcp: 151 unit tests (was 108 before this session's Phase 1-3
+  work), all passing, live-verified against real production data (DLQ,
+  bridge diagnostics, recruitment/escort/payroll reports all returned real
+  current rows).
+- hermes-runner: 36 unit tests (was 27), all passing, including the new
+  `force_mode`/`_parse_run_request` logic.
+- fazle-core: `tests/unit/test_admin_ai_router.py` (62 tests, was ~30),
+  `tests/unit/test_rbac.py` (19), `tests/integration/test_api.py` (30/31 —
+  one pre-existing, unrelated `is_restricted_office_assistant` failure
+  confirmed via git-stash isolation to reproduce identically without this
+  session's changes), `tests/unit/test_message_router_identity_seed.py`,
+  `tests/unit/test_message_router_no_reply_name_gate.py` all passing.
+  assistant-backend: 36 tests passing.
+- The two new fazle-core HTTP endpoints (`/api/whatsapp/message-stats`,
+  `/api/whatsapp/messages/lookup`) and the `_probe_cpu()` addition are
+  syntax-checked and query-logic-verified directly against the live DB,
+  but **fazle-core.service has not been restarted** — they don't exist in
+  the currently-running process yet. Similarly, **hermes-runner.service
+  has not been restarted** — the `read_only` relay logic is not live in
+  the currently-running process yet. Neither service was restarted by
+  this session, per established production-safety practice (restart
+  handed back for the Owner to run explicitly).
+
+### Owner approval
+
+Explicit, this session (2026-08-04) — Phase 4 design selected via
+AskUserQuestion ("dumb relay, READ-only over WhatsApp"); the AI-console
+naming fix approved via AskUserQuestion ("rename only, keep the feature").
+Phases 1-3 executed under the original task's standing "implement
+end-to-end" instruction (safe, read-only extensions, no fresh approval
+gate triggered).
+
+### Cross references
+
+`HERMES_FULL_CAPABILITY_PLAN_20260803.md` and
+`HERMES_PHASE5_PROACTIVE_MONITORING_PROMPT_20260804.md` in
+`/home/azim/assistant-platform/` (Hermes's own side of this work — the
+6-capability foundation this session builds on). The bridge2/bridge3
+identity entries above (this session's channel gate depends on that
+same-day reversal holding). Requires `scripts/restart_gate.sh --restart`
+(fazle-core) and a `systemctl --user restart hermes-runner.service`
+before Phases 1-4 are live.

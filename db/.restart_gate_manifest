@@ -31,3 +31,110 @@ db/migrations_drafts/
 # commit it or remove it — remove this manifest entry once resolved either
 # way.
 moonshot_test.py
+
+# 2026-08-04: bridge3 -> Hermes/Admin integration (Phase E, Admin-reply-only
+# scope). Owner-approved this session per management_decisions.md ("Bridge3
+# -> Hermes Integration, Admin-Reply-Only Scope"). Read-only pre-live trace
+# completed (identity resolution, RBAC bootstrap path, bridge_orchestrator
+# health/priority separation, live probe of all 3 bridges, is_from_me loop
+# guard, stale-cursor backlog risk found and fixed) before this restart.
+# Owner explicitly asked not to commit until live E2E verification passes
+# post-restart -- remove this manifest block and commit together once that
+# happens.
+app/bridge.py
+app/config.py
+docs/MODULE_MAP.md
+knowledge_base/00_governance/management_decisions.md
+modules/bridge_poller/__init__.py
+modules/identity_brain/__init__.py
+modules/outbound/__init__.py
+shared/bridge_orchestrator.py
+tests/unit/test_bridge3_integration.py
+tests/unit/test_escort_client_identity_convergence.py
+db/.restart_gate_manifest
+
+# 2026-08-04 (same session, follow-up): live E2E test on bridge3 surfaced
+# that admin free text with no "AI " prefix (e.g. "Hi") hit the B25(H4)
+# hardcoded "command not understood" fallback in message_router instead of
+# reaching Hermes -- Owner-confirmed policy is natural/mixed-language admin
+# messaging, no required prefix. Owner-approved fix, scoped and reviewed:
+# modules/admin_directives/router.py (new process_admin_natural_query(),
+# routes through the same tool-grounded _handle_ai_query() the explicit
+# "AI " path already uses -- not the raw ungrounded LLM call B25(H4) was
+# hardened against) + modules/message_router/__init__.py (calls it as the
+# fallback before the static help text, after all structured commands/NL-
+# query/keyword checks -- dispatch order regression-tested). Applies to
+# all three bridges, not bridge3-specific.
+modules/admin_directives/router.py
+modules/message_router/__init__.py
+tests/unit/test_admin_ai_router.py
+
+# 2026-08-04 (same session, forensic root-cause investigation after the
+# Owner reported real WhatsApp/web failures post-restart): full read-only
+# trace of 4 real Admin WhatsApp messages plus DB/log forensics found three
+# distinct, evidenced root causes, fixed with Owner's directive to
+# investigate-then-fix-minimally (no separate approval round requested for
+# each -- directive pre-authorized fixes conditioned on root-cause proof):
+#   1. AI_SAFE_MODE (and the rest of the customer-facing draft/safety
+#      cascade) was incorrectly applying to Admin<->Hermes replies --
+#      modules/bridge_poller/__init__.py now sends admin-role replies
+#      directly, bypassing that cascade; the cascade itself is unchanged
+#      for external/customer replies (additive if-branch, verified via
+#      source-order regression test).
+#   2. cash_ledger_summary (BUS-006) had no exact_answer template, so real
+#      tool data fell through to a generic LLM chat-completion that ignored
+#      it in favor of irrelevant RAG text -- modules/ai_console/
+#      provider_registry.py now reuses the tool's own pre-computed
+#      data["answer"] field, matching the existing pattern for 3 other
+#      tools.
+#   3. get_daily_payments()/get_employee_month_payments() in
+#      modules/ai_readonly_tools/__init__.py queried fpe_cash_transactions
+#      directly with a bad column reference (fpe_employees.employee_id
+#      doesn't exist, real PK is .id -- confirmed via the actual FK
+#      constraint) AND the fazle_ai_reader role production actually uses
+#      has no SELECT grant on that raw table at all (confirmed via
+#      has_table_privilege()), only on the sanctioned
+#      ai_read_cash_transactions view -- rewritten to query the view.
+#      modules/ai_console/live_adapters.py's payroll_page_summary (BUS-017)
+#      had a related but separate bug: silently skipped the transactions
+#      query entirely for relative-date phrases ("গতকাল"/yesterday) with no
+#      explicit month/year, producing a confidently WRONG "0 payments"
+#      answer -- fixed to fall back to date_from/date_to via the same
+#      parse_date_range() helper, but ONLY when a real date phrase is
+#      recognized (default_days=None), not for genuinely unscoped questions.
+# All three verified against REAL production data (not just mocks) during
+# the investigation -- see management_decisions.md for the full trace and
+# exact before/after numbers. Remove this manifest block and commit
+# together with the rest once the Owner confirms the re-verified live test
+# passes.
+modules/ai_console/live_adapters.py
+modules/ai_console/provider_registry.py
+modules/ai_readonly_tools/__init__.py
+tests/unit/test_payroll_page_adapter.py
+tests/unit/test_phase_e_grounding_fixes.py
+
+# 2026-08-04 (same session): CSV contact-book rebuild + Bridge2 Super
+# Admin / Bridge3 not-admin identity reversal — Owner-approved (uploaded
+# contacts.csv, 578 rows; see management_decisions.md "Bridge3 Admin
+# Reversal + Bridge2 Super Admin + CSV Contact-Book Rebuild"). Owner said
+# "yes, commit now" for this work but it was never actually committed
+# (last real commit is 14addb7) nor added to this manifest until now —
+# bundled into this restart per Owner's explicit confirmation this session
+# to include it. import_from_csv_contacts() is insert-only (ON CONFLICT DO
+# NOTHING), daily_contact_sync's CronTrigger registration is commented out
+# (marked DEPRECATED, manual RUN JOB still works).
+modules/contact_sync/__init__.py
+modules/scheduler/__init__.py
+scripts/import_csv_contacts.py
+
+# 2026-08-04 (same session): Hermes Operational Capability Completion,
+# Phases 1-4 — see management_decisions.md "Hermes Operational Capability
+# Completion (Phases 1-4)" for full detail. app/main.py: new
+# /api/whatsapp/message-stats + /api/whatsapp/messages/lookup endpoints,
+# new _probe_cpu() in /health. modules/rbac/__init__.py: new
+# COMMAND_ROLE["hermes_relay"] = "superadmin" entry (Phase 4's WhatsApp->
+# Hermes relay gate). Both syntax-checked, tested (fazle-core unit suite
+# green), and (for the parts testable pre-restart) verified directly
+# against the live DB/schema.
+app/main.py
+modules/rbac/__init__.py
