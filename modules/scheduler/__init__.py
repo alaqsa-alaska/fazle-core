@@ -711,7 +711,8 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
                 log.warning(f"[watchdog] stale bridges: {', '.join(labels)}")
                 # Best-effort: try to send an alert via message_router if available
                 try:
-                    from modules.message_router import get_primary_admin, send_to_admin
+                    from modules.message_router import get_primary_admin
+                    from shared.bridge_orchestrator import send_to_admin
                     admin = get_primary_admin()
                     if admin:
                         msg = "Bridge alert - stale:\n" + "\n".join(

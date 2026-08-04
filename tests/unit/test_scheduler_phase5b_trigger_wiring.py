@@ -122,23 +122,21 @@ async def _run_bridge_watchdog_block(stale):
     mirrored; every call inside it is the real, patched production
     function.
 
-    PRE-EXISTING BUG found during Phase 5B's "fresh inspection" of this
-    trigger source (2026-08-04, not fixed here -- unrelated to Phase 5B,
-    out of scope per "no broad redesign"/"do not modify unrelated code"):
-    the real source imports `send_to_admin` FROM `modules.message_router`,
+    FIXED 2026-08-04 (isolated bugfix, separate from Phase 5B): the real
+    source used to import `send_to_admin` FROM `modules.message_router`,
     but that function doesn't exist there -- it's defined in
-    `shared/bridge_orchestrator.py`. This ImportError is silently caught
-    by the surrounding `except Exception: pass`, so bridge_watchdog's own
-    native admin alert has never actually fired. Mirrored faithfully here
-    (the import is left exactly as broken as production, not "fixed" in
-    the mirror) so this test reflects real behavior, not a hypothetical
-    working state. Phase 5B's own trigger call below is a separate
-    try/except and is unaffected by this bug."""
+    `shared/bridge_orchestrator.py`. The resulting ImportError was silently
+    caught by the surrounding `except Exception: pass`, so bridge_watchdog's
+    own native admin alert never actually fired. Now imports `send_to_admin`
+    from its real home, `shared.bridge_orchestrator`, matching the fixed
+    production source exactly. Phase 5B's own trigger call below is a
+    separate try/except and is unaffected either way."""
     from modules.admin_directives.router import trigger_admin_investigation
 
     if stale:
         try:
-            from modules.message_router import get_primary_admin, send_to_admin  # noqa: F401 -- see docstring, this import is broken in production today
+            from modules.message_router import get_primary_admin
+            from shared.bridge_orchestrator import send_to_admin
             admin = get_primary_admin()
             if admin:
                 msg = "Bridge alert - stale:\n" + "\n".join(
@@ -157,13 +155,13 @@ async def _run_bridge_watchdog_block(stale):
 
 class TestBridgeWatchdogPhase5bWiring:
     async def test_trigger_called_with_stale_bridge_context(self):
-        """Phase 5B's own trigger must fire correctly even though the
-        job's native alert import (send_to_admin) is currently broken
-        (see _run_bridge_watchdog_block's docstring) -- the two try/except
-        blocks are independent."""
+        """Phase 5B's own trigger must fire correctly regardless of whether
+        the job's native alert send succeeds (see _run_bridge_watchdog_block's
+        docstring) -- the two try/except blocks are independent."""
         stale = [{"bridge_id": "bridge1", "seconds_ago": 650}]
         mock_trigger = AsyncMock()
-        with patch("modules.admin_directives.router.trigger_admin_investigation", mock_trigger):
+        with patch("modules.admin_directives.router.trigger_admin_investigation", mock_trigger), \
+             patch("shared.bridge_orchestrator.send_to_admin", new=AsyncMock(return_value=True)):
             result = await _run_bridge_watchdog_block(stale)
 
         assert result["stale_count"] == 1
@@ -171,6 +169,26 @@ class TestBridgeWatchdogPhase5bWiring:
         args, _ = mock_trigger.call_args
         assert args[0] == "bridge_watchdog"
         assert "bridge1(650s)" in args[1]
+
+    async def test_native_alert_sends_through_intended_admin_path(self):
+        """Regression guard for the 2026-08-04 isolated bugfix: with a real
+        admin configured, the native alert must actually reach
+        shared.bridge_orchestrator.send_to_admin with the stale-bridge
+        message -- proving the import fix, not just that no exception is
+        raised (the old bug also raised no visible exception, since it was
+        swallowed by `except Exception: pass`)."""
+        stale = [{"bridge_id": "bridge1", "seconds_ago": 650}]
+        mock_send = AsyncMock(return_value=True)
+        with patch("modules.message_router.get_primary_admin", return_value="8801900000001"), \
+             patch("shared.bridge_orchestrator.send_to_admin", mock_send), \
+             patch("modules.admin_directives.router.trigger_admin_investigation", new=AsyncMock()):
+            result = await _run_bridge_watchdog_block(stale)
+
+        assert result["stale_count"] == 1
+        mock_send.assert_awaited_once()
+        (msg,), _ = mock_send.call_args
+        assert "bridge1" in msg
+        assert "10 min ago" in msg  # 650s // 60 == 10
 
     async def test_trigger_not_called_when_no_stale_bridges(self):
         mock_trigger = AsyncMock()
@@ -185,14 +203,16 @@ class TestBridgeWatchdogPhase5bWiring:
             result = await _run_bridge_watchdog_block(stale)
         assert result["stale_count"] == 1  # job return value unaffected by the Phase 5B failure
 
-    def test_native_send_to_admin_import_is_confirmed_broken(self):
-        """Documents, as a real regression-style guard, the pre-existing
-        bug found during Phase 5B's fresh inspection -- if this ever
-        starts passing (i.e. send_to_admin gets added to
-        modules.message_router), the mirror + this note should be
-        revisited, not silently left stale."""
+    def test_native_send_to_admin_import_resolves(self):
+        """Regression guard for the 2026-08-04 isolated bugfix: the native
+        alert path must import `send_to_admin` from its real home,
+        `shared.bridge_orchestrator` -- not `modules.message_router`, which
+        never defined it (that was the original bug; see git history /
+        management_decisions.md for the incident this test used to pin)."""
         import modules.message_router as mr
+        import shared.bridge_orchestrator as bo
         assert not hasattr(mr, "send_to_admin")
+        assert hasattr(bo, "send_to_admin")
 
     def test_mirrored_block_matches_real_source(self):
         """Structural guard: if the real job_bridge_watchdog changes shape,
