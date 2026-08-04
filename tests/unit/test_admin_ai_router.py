@@ -32,9 +32,11 @@ pytestmark = pytest.mark.unit
 def _reset_cooldown():
     router._ai_cooldown.clear()
     router._hermes_cooldown.clear()
+    router._investigation_cooldown.clear()
     yield
     router._ai_cooldown.clear()
     router._hermes_cooldown.clear()
+    router._investigation_cooldown.clear()
 
 
 def _allow_perm(admin_id: int = 1) -> dict:
@@ -264,10 +266,17 @@ class TestSendHandler:
 
 
 class _FakeSettings:
-    def __init__(self, admin_bridge2_number="8801880446111", hermes_runner_secret="test-secret", hermes_runner_url="http://127.0.0.1:8093"):
+    def __init__(
+        self, admin_bridge2_number="8801880446111", hermes_runner_secret="test-secret",
+        hermes_runner_url="http://127.0.0.1:8093",
+        hermes_alert_investigation_enabled=False,
+        hermes_alert_investigation_cooldown_seconds=3600,
+    ):
         self.admin_bridge2_number = admin_bridge2_number
         self.hermes_runner_secret = hermes_runner_secret
         self.hermes_runner_url = hermes_runner_url
+        self.hermes_alert_investigation_enabled = hermes_alert_investigation_enabled
+        self.hermes_alert_investigation_cooldown_seconds = hermes_alert_investigation_cooldown_seconds
 
 
 class TestHermesRelayHandler:
@@ -411,6 +420,122 @@ class TestDeliverHermesReply:
             mock_client.post = AsyncMock(return_value=mock_resp)
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             await router._deliver_hermes_reply("check bridge health", "8801880446111")  # must not raise
+
+
+class TestTriggerAdminInvestigation:
+    """Phase 5B (2026-08-04, Owner-approved option (b) only): proactive
+    alert-triggered investigation. Delivery always targets bridge2;
+    fail-closed on every missing-config/empty-context/cooldown case."""
+
+    async def test_disabled_by_default_no_send(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=False)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock()) as mock_call:
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")
+        mock_enqueue.assert_not_awaited()
+        mock_call.assert_not_awaited()
+
+    async def test_empty_context_skipped_without_calling_hermes(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock()) as mock_call:
+            await router.trigger_admin_investigation("dlq_alert", "   ")
+        mock_enqueue.assert_not_awaited()
+        mock_call.assert_not_awaited()
+
+    async def test_missing_hermes_secret_skipped(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True, hermes_runner_secret="")), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock()) as mock_call:
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")
+        mock_enqueue.assert_not_awaited()
+        mock_call.assert_not_awaited()
+
+    async def test_missing_bridge2_number_skipped(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True, admin_bridge2_number="")), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock()) as mock_call:
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")
+        mock_enqueue.assert_not_awaited()
+        mock_call.assert_not_awaited()
+
+    async def test_enabled_and_configured_sends_to_bridge2(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock(return_value="root cause: DLQ backlog from a bridge outage")):
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3, pending=1")
+        mock_enqueue.assert_awaited_once()
+        args, kwargs = mock_enqueue.call_args
+        assert args[0] == "8801880446111"  # bridge2, never bridge1/bridge3
+        assert "dlq_alert" in args[1]
+        assert "root cause: DLQ backlog" in args[1]
+        assert kwargs["source_bridge"] == "bridge2"
+        assert kwargs["purpose"] == "phase5b_alert_investigation"
+
+    async def test_request_text_includes_job_name_and_context(self):
+        captured = {}
+
+        async def _capture(request_text, *, log_label):
+            captured["request_text"] = request_text
+            return "ok"
+
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()), \
+             patch.object(router, "_call_hermes_readonly", new=_capture):
+            await router.trigger_admin_investigation("bridge_watchdog", "stale_bridges=bridge1(650s)")
+        assert "bridge_watchdog" in captured["request_text"]
+        assert "stale_bridges=bridge1(650s)" in captured["request_text"]
+
+    async def test_second_call_within_cooldown_skipped(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock(return_value="ok")):
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")
+            await router.trigger_admin_investigation("dlq_alert", "actionable=5")
+        mock_enqueue.assert_awaited_once()
+
+    async def test_different_job_names_have_independent_cooldowns(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock(return_value="ok")):
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")
+            await router.trigger_admin_investigation("bridge_watchdog", "stale_bridges=x")
+        assert mock_enqueue.await_count == 2
+
+    async def test_allowed_again_after_cooldown_elapses(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock(return_value="ok")):
+            router._investigation_cooldown["dlq_alert"] = time.monotonic() - 4000  # past default 3600s cooldown
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")
+        mock_enqueue.assert_awaited_once()
+
+    async def test_hermes_call_exception_still_sends_error_report_not_raise(self):
+        """_call_hermes_readonly itself never raises (returns an error
+        string) -- confirms trigger_admin_investigation doesn't need its
+        own duplicate exception guard around that call, and still delivers
+        a report (with the error text) rather than silently doing nothing."""
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock(return_value="⚠️ Hermes-এর সাথে যোগাযোগ করা যায়নি।")):
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")
+        mock_enqueue.assert_awaited_once()
+        args, _ = mock_enqueue.call_args
+        assert "যোগাযোগ করা যায়নি" in args[1]
+
+    async def test_enqueue_failure_does_not_raise(self):
+        with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
+             patch.object(router.outbound, "enqueue", new=AsyncMock(side_effect=RuntimeError("db down"))), \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock(return_value="ok")):
+            await router.trigger_admin_investigation("dlq_alert", "actionable=3")  # must not raise
+
+    async def test_never_uses_bridge1_or_bridge3(self):
+        """Structural guard: this function must never reference bridge1 or
+        bridge3 as a delivery target, only settings.admin_bridge2_number."""
+        source = inspect.getsource(router.trigger_admin_investigation)
+        assert "bridge1" not in source
+        assert "bridge3" not in source
+        assert 'source_bridge="bridge2"' in source
 
 
 class TestNormalizePhone:

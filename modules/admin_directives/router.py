@@ -36,6 +36,7 @@ import asyncio
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -322,11 +323,13 @@ _HERMES_ACK_MSG = "🔄 Hermes-কে (READ-only) পাঠানো হয়�
 _HERMES_NOT_CONFIGURED_MSG = "⚠️ Hermes relay কনফিগার করা নেই (HERMES_RUNNER_SECRET সেট করা হয়নি)।"
 
 
-async def _deliver_hermes_reply(request_text: str, sender_phone: str) -> None:
-    """Background task: makes the actual (potentially ~170s) call to
-    hermes-runner and delivers the result as a separate outbound WhatsApp
-    message. Never awaited inline by _handle_hermes_relay -- see that
-    function's docstring for why (MESSAGE_ROUTE_TIMEOUT)."""
+async def _call_hermes_readonly(request_text: str, *, log_label: str) -> str:
+    """Shared core of the read_only hermes-runner call -- extracted
+    (2026-08-04, Phase 5B) so both the WhatsApp-triggered relay
+    (_deliver_hermes_reply) and the alert-triggered investigation
+    (trigger_admin_investigation) use the exact same HTTP-call logic
+    rather than a second, drifting copy. Always returns a display-ready
+    string (a real reply or a Bangla error message) -- never raises."""
     settings = get_settings()
     try:
         async with httpx.AsyncClient(timeout=175.0) as client:
@@ -340,14 +343,21 @@ async def _deliver_hermes_reply(request_text: str, sender_phone: str) -> None:
         except ValueError:
             data = {}
         if resp.status_code != 200:
-            reply_text = f"⚠️ Hermes ত্রুটি: {data.get('error', f'status {resp.status_code}')}"
-        else:
-            reply_text = data.get("reply") or "⚠️ Hermes থেকে কোনো উত্তর আসেনি।"
+            return f"⚠️ Hermes ত্রুটি: {data.get('error', f'status {resp.status_code}')}"
+        return data.get("reply") or "⚠️ Hermes থেকে কোনো উত্তর আসেনি।"
     except httpx.TimeoutException:
-        reply_text = "⚠️ Hermes সময়মতো উত্তর দেয়নি।"
+        return "⚠️ Hermes সময়মতো উত্তর দেয়নি।"
     except Exception as exc:
-        log.error("[admin_ai_router] hermes relay call failed for %s: %s", sender_phone, exc)
-        reply_text = "⚠️ Hermes-এর সাথে যোগাযোগ করা যায়নি।"
+        log.error("[admin_ai_router] %s: hermes call failed: %s", log_label, exc)
+        return "⚠️ Hermes-এর সাথে যোগাযোগ করা যায়নি।"
+
+
+async def _deliver_hermes_reply(request_text: str, sender_phone: str) -> None:
+    """Background task: makes the actual (potentially ~170s) call to
+    hermes-runner and delivers the result as a separate outbound WhatsApp
+    message. Never awaited inline by _handle_hermes_relay -- see that
+    function's docstring for why (MESSAGE_ROUTE_TIMEOUT)."""
+    reply_text = await _call_hermes_readonly(request_text, log_label=f"hermes relay for {sender_phone}")
 
     try:
         await outbound.enqueue(
@@ -358,6 +368,89 @@ async def _deliver_hermes_reply(request_text: str, sender_phone: str) -> None:
         )
     except Exception as exc:
         log.error("[admin_ai_router] hermes relay reply enqueue failed for %s: %s", sender_phone, exc)
+
+
+# ── Phase 5B (2026-08-04): proactive alert-triggered investigation ──────────
+# Owner-approved option (b) ONLY (see management_decisions.md "Hermes Phase
+# 5B"): fazle-core's existing, already-proven alert jobs (dlq_alert,
+# health_summary, bridge_watchdog) are the trigger source -- no new
+# detection engine, no always-on LLM polling. Each job gains exactly one
+# additional call, inside its own existing "alert fired" branch, wrapped in
+# try/except at the CALL SITE too so a failure here can never regress the
+# job's own already-proven native alert delivery.
+#
+# Default-DISABLED via settings.hermes_alert_investigation_enabled -- a
+# fail-closed kill switch independent of code deployment; must be
+# explicitly turned on in .env. Delivery always targets
+# settings.admin_bridge2_number via source_bridge="bridge2", matching the
+# Phase 4 relay's own established convention -- deliberately distinct from
+# the underlying jobs' own native notification transport (bridge1,
+# unchanged, untouched by this phase).
+_investigation_cooldown: dict[str, float] = {}
+
+
+async def trigger_admin_investigation(job_name: str, alert_context: str) -> None:
+    """Fires a one-shot, read-only Hermes investigation for an already-
+    alerting job, and delivers the report to the canonical Super Admin
+    (bridge2) via the existing relay path. Fail-closed: any missing
+    config, empty context, or per-job cooldown hit means no send, with a
+    logged reason -- never a silent no-op. Never raises (matches every
+    other function in this file's contract) -- a caller in a scheduler
+    job's own alert branch must never have this break that job."""
+    settings = get_settings()
+
+    if not job_name or not (alert_context or "").strip():
+        log.warning("[phase5b_trigger] job=%s event=skipped reason=empty_context", job_name or "unknown")
+        return
+
+    if not settings.hermes_alert_investigation_enabled:
+        log.info("[phase5b_trigger] job=%s event=skipped reason=feature_disabled", job_name)
+        return
+
+    if not settings.hermes_runner_secret:
+        log.warning("[phase5b_trigger] job=%s event=skipped reason=hermes_not_configured", job_name)
+        return
+
+    bridge2_number = settings.admin_bridge2_number or ""
+    if not bridge2_number:
+        log.warning("[phase5b_trigger] job=%s event=skipped reason=bridge2_not_configured", job_name)
+        return
+
+    now = time.monotonic()
+    cooldown_s = max(int(settings.hermes_alert_investigation_cooldown_seconds or 3600), 60)
+    last = _investigation_cooldown.get(job_name, 0.0)
+    if now - last < cooldown_s:
+        log.info(
+            "[phase5b_trigger] job=%s event=skipped reason=cooldown remaining_s=%d",
+            job_name, int(cooldown_s - (now - last)),
+        )
+        return
+    _investigation_cooldown[job_name] = now
+
+    log.info("[phase5b_trigger] job=%s event=triggered", job_name)
+
+    request_text = (
+        f"The fazle-core scheduler job '{job_name}' just fired an alert. "
+        f"Alert context:\n{alert_context}\n\n"
+        "Investigate (read-only) and report: likely root cause if "
+        "determinable from available evidence, severity, and a recommended "
+        "next action. If there is insufficient evidence, say so explicitly "
+        "rather than guessing."
+    )
+    reply_text = await _call_hermes_readonly(request_text, log_label=f"phase5b investigation for job={job_name}")
+    log.info("[phase5b_trigger] job=%s event=investigation_complete", job_name)
+
+    try:
+        await outbound.enqueue(
+            bridge2_number,
+            f"🔍 Hermes investigation — {job_name}:\n{reply_text}",
+            source_bridge="bridge2",
+            purpose="phase5b_alert_investigation",
+            idempotency_key=f"phase5b-{job_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        )
+        log.info("[phase5b_trigger] job=%s event=report_sent", job_name)
+    except Exception as exc:
+        log.error("[phase5b_trigger] job=%s event=report_send_failed error=%s", job_name, exc)
 
 
 async def _handle_hermes_relay(request_text: str, sender_phone: str) -> str:

@@ -196,6 +196,16 @@ async def job_dlq_alert() -> dict:
         msg = f"⚠️ Outbound has {actionable} recent actionable DLQ message(s). Pending: {pend}. Investigate."
         await outbound.enqueue(admin, msg, source_bridge="bridge1",
                                purpose="dlq-alert", idempotency_key=key)
+        # Phase 5B (2026-08-04, Owner-approved option (b) only): one
+        # additional call, wrapped in its own try/except so a failure here
+        # can never regress this job's own alert delivery above.
+        try:
+            from modules.admin_directives.router import trigger_admin_investigation
+            await trigger_admin_investigation(
+                "dlq_alert", f"actionable={actionable}, pending={pend}, total_dlq={dlq}",
+            )
+        except Exception as _p5b_err:
+            log.warning(f"[scheduler] phase5b trigger failed for dlq_alert: {_p5b_err}")
     return {"status": "ok", "dlq": dlq, "actionable": actionable, "pending": pend, "alerted": True}
 
 
@@ -215,6 +225,16 @@ async def job_health_summary() -> dict:
         msg = f"🏥 System {h['status']}. Probes degraded: {', '.join(bad)}"
         await outbound.enqueue(admin, msg, source_bridge="bridge1", fallback_channel="bridge2",
                                purpose="health-summary", idempotency_key=key)
+        # Phase 5B (2026-08-04, Owner-approved option (b) only): one
+        # additional call, wrapped in its own try/except so a failure here
+        # can never regress this job's own alert delivery above.
+        try:
+            from modules.admin_directives.router import trigger_admin_investigation
+            await trigger_admin_investigation(
+                "health_summary", f"overall={h['status']}, degraded_probes={bad}",
+            )
+        except Exception as _p5b_err:
+            log.warning(f"[scheduler] phase5b trigger failed for health_summary: {_p5b_err}")
     return {"status": "ok", "overall": h["status"]}
 
 
@@ -701,6 +721,19 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
                         await send_to_admin(msg)
                 except Exception:
                     pass  # watchdog must not crash if router is unavailable
+                # Phase 5B (2026-08-04, Owner-approved option (b) only): one
+                # additional call, wrapped in its own try/except so a
+                # failure here can never regress this job's own alert
+                # delivery above. This job has no cooldown of its own
+                # (confirmed by inspection, unlike dlq_alert/health_summary)
+                # -- trigger_admin_investigation's own per-job cooldown is
+                # the only thing preventing repeat-fire spam here.
+                try:
+                    from modules.admin_directives.router import trigger_admin_investigation
+                    stale_desc = ", ".join(f"{b['bridge_id']}({b['seconds_ago']}s)" for b in stale)
+                    await trigger_admin_investigation("bridge_watchdog", f"stale_bridges={stale_desc}")
+                except Exception as _p5b_err:
+                    log.warning(f"[scheduler] phase5b trigger failed for bridge_watchdog: {_p5b_err}")
             return {"status": "ok", "stale_count": len(stale)}
 
         register_job("bridge_watchdog", job_bridge_watchdog)

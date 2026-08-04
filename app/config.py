@@ -190,6 +190,16 @@ class Settings(BaseSettings):
     hermes_runner_url: str = "http://127.0.0.1:8093"
     hermes_runner_secret: str = ""
 
+    # Phase 5B (2026-08-04): proactive alert-triggered Hermes investigation,
+    # Owner-approved option (b) only (see management_decisions.md "Hermes
+    # Phase 5B"). Default-DISABLED kill switch -- fail-closed even after
+    # this code is deployed; must be explicitly opted into via .env before
+    # it fires in production for the first time. Cooldown is per-job_name,
+    # independent of whatever cooldown (if any) the underlying alert job
+    # already has.
+    hermes_alert_investigation_enabled: bool = False
+    hermes_alert_investigation_cooldown_seconds: int = 3600
+
     # Escort order configuration
     # Comma-separated phone numbers that are authorised to send escort client orders.
     # When EMPTY (default), all inbound phones are accepted (open mode).

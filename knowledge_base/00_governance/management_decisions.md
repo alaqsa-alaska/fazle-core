@@ -6617,3 +6617,79 @@ once implemented).
 This session's Phase 1-4 completion report and commit `1dfd8f7` (the
 tooling that surfaced this finding). Commit `47a9c8e` (the original
 trigger fix, 2026-07-11, unrelated to this session).
+
+---
+
+## Hermes Phase 5B — Proactive Alert-Triggered Investigation, Option (b) Only — Owner Decision (2026-08-04)
+
+### Status
+APPROVED, implementation in progress. Owner selected **option (b) only**
+from the two options presented in `HERMES_FULL_CAPABILITY_PLAN_20260803.md`
+§5 / this session's roadmap review: reuse fazle-core's own existing,
+already-proven alert/scheduler jobs as the trigger source for a one-shot
+Hermes investigation, delivered to the Admin through the existing
+approved relay path. **Option (a)** (a new cron-like job periodically
+polling Hermes with a fixed prompt) and **"both"** were explicitly
+rejected. Hermes gains no new autonomy beyond this one, narrow,
+approved trigger path — it remains investigate/report-oriented, never
+self-directed.
+
+### Scope approved (verbatim constraints)
+1. **Admin audience only** — canonical Super Admin path only (bridge2,
+   `settings.admin_bridge2_number`); bridge3 carries no admin authority
+   and is not used here; never sent to non-admin users.
+2. **Read-only investigation only** — Hermes may inspect/analyze/
+   summarize/report; no production-changing action, no reply-to-others,
+   no autonomous outbound customer/staff action from this phase's work.
+   Delivery reuses the existing `read_only=true` hermes-runner relay
+   (Phase 4, commit `1dfd8f7`) — the same hard lock that prevents a
+   WhatsApp-triggered call from ever reaching BUILD/RUN applies
+   identically here; this is the same relay, a second caller of it.
+3. **Fail-closed safety** — incomplete/unsafe trigger context means no
+   send, not a silent guess. Dedupe/cooldown required so a repeatedly-
+   firing underlying alert (e.g. `bridge_watchdog`, which has no cooldown
+   of its own today, confirmed by fresh inspection) can't spam repeated
+   investigations. Every trigger/investigation/report event is logged,
+   including suppressed ones and why.
+4. **Reuse existing systems** — trigger source is the existing
+   `dlq_alert`/`health_summary`/`bridge_watchdog` scheduler jobs (fresh
+   inspection confirmed all three still fire correctly and already
+   notify admin via `outbound.enqueue()`); no new detection engine, no
+   new always-on LLM polling scheduler, no broad redesign. The new
+   trigger hooks into each job's *existing* "alert fired" branch as one
+   additional call, wrapped in its own try/except so a failure here can
+   never regress the job's own already-proven alert delivery.
+5. **No speculative expansion** — Phase 6 tier 2 (reply-to-others),
+   Chat audit-toolkit wiring, WhatsApp-relay conversational continuity,
+   the Meta-Business-number bot concept, and the `_safe_polish()` numeric
+   whitelist gap are all explicitly out of scope for this phase.
+
+### Design chosen
+New function `trigger_admin_investigation(job_name, alert_context)` in
+`modules/admin_directives/router.py` (co-located with the existing Phase
+4 `_deliver_hermes_reply()` since it reuses that exact hermes-runner
+HTTP-call pattern rather than duplicating it a third time). Delivery
+target is always `settings.admin_bridge2_number`, source_bridge always
+`"bridge2"` — matching the Phase 4 relay's own established convention,
+deliberately distinct from the underlying alert jobs' own native
+notification transport (which uses bridge1, unchanged, untouched).
+Gated behind a new, default-**disabled** kill switch,
+`HERMES_ALERT_INVESTIGATION_ENABLED` — fail-closed by default even after
+this code is deployed; the Owner must explicitly opt in via `.env`
+before this fires in production for the first time. Per-job_name
+cooldown (`HERMES_ALERT_INVESTIGATION_COOLDOWN_SECONDS`, default 3600s)
+prevents repeat-fire spam, independent of and in addition to whatever
+cooldown (if any) the underlying job already has.
+
+### Owner approval
+Explicit, this session (2026-08-04) — full verbatim scope and 5
+numbered constraints as specified by the Owner, reproduced above.
+
+### Cross references
+`HERMES_FULL_CAPABILITY_PLAN_20260803.md` §5 (Phase 5, the original
+option (a)/(b) framing) and this session's roadmap-review report
+(Phase 5B recommendation). Commit `1dfd8f7` (the Phase 4 relay this
+reuses). `modules/scheduler/__init__.py` (`job_dlq_alert`,
+`job_health_summary`, `job_bridge_watchdog` — the three existing trigger
+sources, unmodified in their own alert logic, each gaining one
+additional call).
