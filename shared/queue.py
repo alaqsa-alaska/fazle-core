@@ -210,9 +210,36 @@ async def record_heartbeat(
         return False
 
 
+# Per-bridge stale-threshold overrides, in minutes (2026-08-05, Owner
+# decision). Design mismatch this fixes: bridge1/bridge2/bridge3 heartbeat
+# on every successful POLL CYCLE (modules.bridge_poller -- a transport/
+# liveness signal, updated whether or not new messages exist), but "meta"
+# only heartbeats when a real inbound WhatsApp message actually arrives via
+# the Meta webhook (app.main._handle_meta_message -- a traffic signal, not
+# a liveness signal; there is no periodic "webhook endpoint is reachable"
+# check for it). meta is confirmed legitimately low/idle-traffic, so
+# sharing bridge1/2/3's short threshold produced a false-positive "stale"
+# alert every 5 minutes once meta crossed 10 minutes of no real messages --
+# which, given its normal traffic pattern, is effectively always. 30 days
+# chosen because meta's last real message was already >8 days old at
+# decision time (a 24h/7d threshold would not have stopped the existing
+# noise immediately). Any bridge_id not listed here keeps using the
+# `stale_minutes` argument passed in by its caller, unchanged.
+_STALE_THRESHOLD_OVERRIDES_MINUTES: dict[str, int] = {
+    "meta": 30 * 24 * 60,  # 43200 minutes = 30 days
+}
+
+
 async def get_stale_bridges(stale_minutes: int = 10) -> list[dict]:
     """
-    Return bridges whose last heartbeat is older than `stale_minutes`.
+    Return bridges whose last heartbeat is older than `stale_minutes` --
+    except any bridge_id in _STALE_THRESHOLD_OVERRIDES_MINUTES, which uses
+    its own threshold instead (see that dict's comment). Every caller
+    (modules.scheduler.job_bridge_watchdog -- both its native alert and its
+    Phase 5B Hermes-investigation trigger read the same returned list, so
+    both are corrected by this one change -- and
+    modules.fazle_payroll_engine.diagnostics._check_and_alert_stale_bridges)
+    is covered automatically, with no per-caller change needed.
     """
     try:
         rows = await fetch_all(
@@ -220,12 +247,16 @@ async def get_stale_bridges(stale_minutes: int = 10) -> list[dict]:
             SELECT bridge_id, bridge_label, last_seen_at, status,
                    EXTRACT(EPOCH FROM (NOW() - last_seen_at))::INT AS seconds_ago
             FROM   fazle_bridge_heartbeats
-            WHERE  last_seen_at < NOW() - ($1 || ' minutes')::INTERVAL
             ORDER BY last_seen_at
-            """,
-            str(stale_minutes),
+            """
         )
-        return [dict(r) for r in rows]
+        stale = []
+        for r in rows:
+            row = dict(r)
+            threshold_minutes = _STALE_THRESHOLD_OVERRIDES_MINUTES.get(row["bridge_id"], stale_minutes)
+            if row["seconds_ago"] >= threshold_minutes * 60:
+                stale.append(row)
+        return stale
     except Exception as e:
         log.error(f"[queue] get_stale_bridges error: {e}")
         return []

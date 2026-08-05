@@ -223,3 +223,75 @@ class TestBridgeWatchdogPhase5bWiring:
         src = inspect.getsource(scheduler_mod.start_scheduler)
         assert 'trigger_admin_investigation("bridge_watchdog"' in src
         assert "stale_bridges={stale_desc}" in src
+
+
+class TestGetStaleBridgesPerBridgeThreshold:
+    """2026-08-05 Owner decision: meta's heartbeat is inbound-message-
+    traffic-only (unlike bridge1/2/3's poll-cycle liveness heartbeat), so it
+    must not share their 10-minute stale threshold -- meta gets a 30-day
+    override instead. Both job_bridge_watchdog's native alert AND its Phase
+    5B Hermes-investigation trigger read get_stale_bridges()'s return value
+    directly (see test_bridge_watchdog_class above), so fixing this one
+    function covers both paths with no further change needed."""
+
+    def _row(self, bridge_id, seconds_ago):
+        return {
+            "bridge_id": bridge_id, "bridge_label": bridge_id, "last_seen_at": None,
+            "status": "ok", "seconds_ago": seconds_ago,
+        }
+
+    async def test_meta_stale_at_9_days_is_not_reported(self, monkeypatch):
+        """The exact real-world condition this fix addresses: meta idle for
+        >8 days (observed in production) must NOT be reported as stale --
+        30 days is required, not 10 minutes."""
+        import shared.queue as q
+
+        nine_days_s = 9 * 24 * 60 * 60
+        fake_rows = [self._row("meta", nine_days_s), self._row("bridge1", 60)]
+        monkeypatch.setattr(q, "fetch_all", AsyncMock(return_value=fake_rows))
+
+        result = await q.get_stale_bridges(stale_minutes=10)
+
+        bridge_ids = {r["bridge_id"] for r in result}
+        assert "meta" not in bridge_ids, "meta at 9 days idle must not be flagged stale (threshold is 30 days)"
+        assert "bridge1" not in bridge_ids, "bridge1 at 60s is well under its unchanged 10-minute threshold"
+
+    async def test_meta_stale_at_31_days_is_reported(self, monkeypatch):
+        import shared.queue as q
+
+        thirty_one_days_s = 31 * 24 * 60 * 60
+        fake_rows = [self._row("meta", thirty_one_days_s)]
+        monkeypatch.setattr(q, "fetch_all", AsyncMock(return_value=fake_rows))
+
+        result = await q.get_stale_bridges(stale_minutes=10)
+
+        assert [r["bridge_id"] for r in result] == ["meta"]
+
+    async def test_bridge1_threshold_is_unchanged_at_10_minutes(self, monkeypatch):
+        """Regression guard: the fix must be scoped to meta only -- bridge1/
+        2/3 must still trip at the caller-supplied stale_minutes (10 here),
+        not meta's 30-day override."""
+        import shared.queue as q
+
+        eleven_minutes_s = 11 * 60
+        fake_rows = [self._row("bridge1", eleven_minutes_s)]
+        monkeypatch.setattr(q, "fetch_all", AsyncMock(return_value=fake_rows))
+
+        result = await q.get_stale_bridges(stale_minutes=10)
+
+        assert [r["bridge_id"] for r in result] == ["bridge1"]
+
+    async def test_db_error_still_fails_safe_to_empty_list(self, monkeypatch):
+        import shared.queue as q
+
+        monkeypatch.setattr(q, "fetch_all", AsyncMock(side_effect=RuntimeError("db down")))
+        result = await q.get_stale_bridges(stale_minutes=10)
+        assert result == []
+
+    def test_only_meta_has_an_override_today(self):
+        """Scope guard: this fix is specifically for meta's documented
+        traffic-vs-liveness mismatch, not a general policy change -- no
+        other bridge_id should silently pick up an override."""
+        from shared.queue import _STALE_THRESHOLD_OVERRIDES_MINUTES
+        assert set(_STALE_THRESHOLD_OVERRIDES_MINUTES.keys()) == {"meta"}
+        assert _STALE_THRESHOLD_OVERRIDES_MINUTES["meta"] == 30 * 24 * 60
