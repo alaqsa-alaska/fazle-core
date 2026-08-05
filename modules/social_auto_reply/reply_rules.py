@@ -11,8 +11,44 @@ from app.config import get_settings
 COMPANY_NAME = get_settings().company_name
 OFFICE_ADDRESS = "আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, খোকনের বিল্ডিং (২য় তলা), পাহাড়তলী, চট্টগ্রাম"
 OFFICE_TIME = "সকাল ১০টা থেকে বিকেল ৫টা"
-OFFICE_NUMBERS = "01958-122300"
+
+# Office contact numbers (Owner Decision, 2026-08-04 — resolves the C-08 vs.
+# code conflict flagged in knowledge_base/06_developer_system/
+# production_knowledge_report.md and knowledge_base/05_workflows/
+# whatsapp_reply_workflow.md: three different sources disagreed on which
+# numbers were current). Owner-confirmed authoritative list: 01958-122300,
+# 01958-122301, 01958-122302, 01958-122303. Neither the old code value
+# (01958-122300 alone) nor salary_flow.py's old separate value
+# (01958-122311/122327) matched this — both are now corrected below.
+OFFICE_NUMBERS = "01958-122300\n01958-122301\n01958-122302\n01958-122303"
+_OFFICE_NUMBER_TOKENS = frozenset({"01958", "122300", "122301", "122302", "122303"})
+
 ADM_WHATSAPP = "011004669"
+
+
+async def get_effective_office_numbers() -> str:
+    """Dynamic office-numbers lookup — foundation for the planned Admin UI
+    at https://fazle.iamazim.com/escort-roster (Owner decision, 2026-08-04;
+    not built yet, this is the read-side groundwork for when it is).
+
+    Reads the latest active 'office_numbers' directive from the existing
+    fazle_admin_directives table (modules.admin_directives — already
+    writable today via POST /admin/directives with
+    {"category": "contact_note", "subject_type": "phone_group",
+    "subject_key": "office_numbers", "directive_text": "<numbers>"}, no new
+    endpoint needed) and falls back to the static, Owner-confirmed default
+    (OFFICE_NUMBERS) if no override exists or the lookup fails for any
+    reason. Never raises — reply generation must never break because of
+    this lookup.
+    """
+    try:
+        from modules.admin_directives import list_directives
+        rows = await list_directives(subject_key="office_numbers", status="active", limit=1)
+        if rows and rows[0].get("directive_text"):
+            return rows[0]["directive_text"].strip()
+    except Exception:
+        pass
+    return OFFICE_NUMBERS
 
 # BR-25 management decision: authoritative age range for all recruitment channels
 MIN_AGE = 18
@@ -235,7 +271,8 @@ FEES_REPLY = f"""চাকরির জন্য কোনো ঘুষ বা �
 যদিও প্রসেসিং ফি, জয়েনিং ফি ইত্যাদি অন্যান্য প্রতিষ্ঠানের মত আমাদের এখানেও আছে। তবুও আমরা অগ্রীম গ্রহনের পরিবর্তে মাসিক বেতনের সাথে অর্থ্যাৎ বেতন থেকে কিস্তিতে কাটার ব্যবস্থা রেখেছি।
 
 আর্থিক সমস্যার বিষয়ে আলোচনা করা যায়। টাকা নেই - এজন্য কারো চাকরিতে জয়েন বাঁধা হবে না।
-প্রতিষ্ঠানের নির্দিষ্ট মানি-রিসিট বা টাকা জমা দেয়ার রশিদ ছাড়া কেউ টাকা চাইলে তা প্রতারণা — সরাসরি অফিসে যাচাই করুন বা কল দিন {OFFICE_NUMBERS} নাম্বারে।"""
+প্রতিষ্ঠানের নির্দিষ্ট মানি-রিসিট বা টাকা জমা দেয়ার রশিদ ছাড়া কেউ টাকা চাইলে তা প্রতারণা — সরাসরি অফিসে যাচাই করুন বা নিচের যেকোনো নম্বরে কল দিন:
+{OFFICE_NUMBERS}"""
 
 PAYMENT_INFO_REQUEST_REPLY = """দয়া করে নিচের তথ্যগুলো পাঠান:
 

@@ -51,8 +51,19 @@ async def process_due_threads(limit: int = 10) -> dict:
             skipped += 1
             continue
         if not plan.auto_send:
-            await execute("UPDATE social_inbox_events SET reply_status='ignored' WHERE id = ANY($1::bigint[])", plan.event_ids)
-            skipped += 1
+            # 2026-08-04 (Owner decision): never silently drop a message
+            # Hermes couldn't confidently answer (risk-flagged, or no safe
+            # rule-based reply matched any classified intent) — previously
+            # this branch marked the event 'ignored' with zero admin
+            # visibility. Now flags it (existing social_flagged_items
+            # mechanism, previously written but never actually called) and
+            # sends the Admin a decision request with full context.
+            await _flag_events(plan.event_ids, platform, target_id, plan.flag_reason or "unspecified", events)
+            await _notify_admin_flagged(
+                platform=platform, target_id=target_id, events=events,
+                reason=plan.flag_reason or "unspecified", sender_role=sender_role,
+            )
+            flagged += 1
             continue
         # PATCH 2: per-sender intent cooldown — skip duplicate within cooldown window
         recent_dupe = await fetch_val(
@@ -91,6 +102,8 @@ async def process_due_threads(limit: int = 10) -> dict:
                 intent=plan.intent,
                 sender_role=sender_role,
                 ai_polished=plan.needs_review,
+                validation_reason=plan.validation_reason,
+                events=events,
             )
             if draft_id:
                 await execute("UPDATE social_inbox_events SET reply_status='drafted' WHERE id = ANY($1::bigint[])", plan.event_ids)
@@ -142,9 +155,23 @@ def _primary_admin_number() -> str:
     return admins[0] if admins else settings.admin_meta_number
 
 
+async def _sender_display_name(target_id: str, latest_event: dict) -> str:
+    """Best-effort sender display name via the same identity_brain lookup
+    _is_draft_always_sender already uses — never raises, "Unknown" on any
+    failure (identity resolution must never block a notification)."""
+    try:
+        from modules.identity_brain import detect_identity
+        text = str(latest_event.get("message_text") or "")
+        identity = await detect_identity(target_id, text)
+        return (identity.get("display_name") or "").strip() or "Unknown"
+    except Exception:
+        return "Unknown"
+
+
 async def _draft_instead_of_send(
     *, platform: str, target_id: str, reply_text: str, intent: str, sender_role: str,
-    ai_polished: bool = False,
+    ai_polished: bool = False, validation_reason: str | None = None,
+    events: list[dict] | None = None,
 ) -> int | None:
     """Create a fazle_draft_replies row instead of enqueueing a real send,
     and notify the admin that a draft is waiting. Reuses the same shared
@@ -156,8 +183,18 @@ async def _draft_instead_of_send(
     a DRAFT_ALWAYS_* sender match — labelled distinctly in the admin
     notification so reviewers know why this one needs review (AI-generated
     text, not a policy-based routing).
+
+    validation_reason (2026-08-04, Owner decision): set when this draft
+    exists because _safe_polish() rejected the AI-polished text -- the
+    reply_text being drafted here is the SAFE rule-based fallback (never
+    the rejected AI text), but the Admin still needs to see *why* AI-polish
+    was rejected, plus full sender/message context, per the same "never a
+    silent failure" decision that added _notify_admin_flagged() below.
     """
     context = (
+        f"social_auto_reply planner — AI-polish validation failed, safe fallback used — "
+        f"platform={platform} sender_role={sender_role} reason={validation_reason}"
+        if validation_reason else
         f"social_auto_reply planner — AI-polished reply pending review — "
         f"platform={platform} sender_role={sender_role}"
         if ai_polished else
@@ -177,11 +214,24 @@ async def _draft_instead_of_send(
     admin_phone = _primary_admin_number()
     if admin_phone:
         preview = reply_text if len(reply_text) <= 300 else reply_text[:300] + "…"
-        title = (
-            "🤖 AI-Polished Reply Pending Approval"
-            if ai_polished else
-            "📋 Social Auto-Reply Draft Pending Approval"
-        )
+        if validation_reason:
+            title = "⚠️ AI-Polish Rejected — Safe Fallback Drafted"
+        elif ai_polished:
+            title = "🤖 AI-Polished Reply Pending Approval"
+        else:
+            title = "📋 Social Auto-Reply Draft Pending Approval"
+        latest = events[-1] if events else {}
+        extra_lines = ""
+        if validation_reason:
+            sender_name = await _sender_display_name(target_id, latest)
+            original_message = str(latest.get("message_text") or "")[:500]
+            extra_lines = (
+                f"Message ID: {latest.get('id')}\n"
+                f"Sender Name: {sender_name}\n"
+                f"Sender Mobile: {target_id}\n"
+                f"Original Message: {original_message}\n"
+                f"Reason: {validation_reason}\n"
+            )
         await enqueue_outbound(
             admin_phone,
             (
@@ -189,7 +239,8 @@ async def _draft_instead_of_send(
                 f"Platform: {platform}\n"
                 f"Sender: {target_id}\n"
                 f"Intent: {intent}\n"
-                f"Draft ID: {draft_id}\n\n"
+                f"Draft ID: {draft_id}\n"
+                f"{extra_lines}\n"
                 f"{preview}\n\n"
                 f"Reply APPROVE {draft_id} to send, REJECT {draft_id} to discard."
             ),
@@ -197,9 +248,51 @@ async def _draft_instead_of_send(
             fallback_channel="bridge2",
             purpose="social-draft-pending",
             idempotency_key=f"social-draft-notify:{draft_id}",
-            meta={"draft_id": draft_id, "platform": platform, "target_id": target_id, "ai_polished": ai_polished},
+            meta={
+                "draft_id": draft_id, "platform": platform, "target_id": target_id,
+                "ai_polished": ai_polished, "validation_reason": validation_reason,
+            },
         )
     return draft_id
+
+
+async def _notify_admin_flagged(
+    *, platform: str, target_id: str, events: list[dict], reason: str, sender_role: str,
+) -> None:
+    """Admin decision request for a message Hermes couldn't safely handle
+    (risk-flagged, or no rule-based reply matched any classified intent) —
+    2026-08-04 Owner decision: this must never be a silent drop. Includes
+    Message ID, Sender Name, Sender Mobile, Original Message, and the exact
+    reason, matching the same rich-context requirement as the AI-polish
+    rejection path in _draft_instead_of_send above."""
+    admin_phone = _primary_admin_number()
+    if not admin_phone:
+        return
+    latest = events[-1] if events else {}
+    sender_name = await _sender_display_name(target_id, latest)
+    original_message = str(latest.get("message_text") or "")[:500]
+    message_id = latest.get("id")
+    await enqueue_outbound(
+        admin_phone,
+        (
+            "⚠️ Hermes Needs a Decision\n"
+            f"Platform: {platform}\n"
+            f"Message ID: {message_id}\n"
+            f"Sender Name: {sender_name}\n"
+            f"Sender Mobile: {target_id}\n"
+            f"Sender Role: {sender_role}\n"
+            f"Original Message: {original_message}\n"
+            f"Reason: {reason}\n\n"
+            "No automated reply was sent. Reply with REMEMBER: <instruction> to "
+            "record how to handle this going forward, or "
+            f"SEND {target_id} | <message> to reply directly."
+        ),
+        source_bridge="bridge1",
+        fallback_channel="bridge2",
+        purpose="social-auto-reply-needs-decision",
+        idempotency_key=f"social-flag-notify:{message_id}",
+        meta={"platform": platform, "target_id": target_id, "reason": reason, "message_id": message_id},
+    )
 
 
 async def _flag_events(event_ids: list[int], platform: str, target_id: str, reason: str, events: list[dict]) -> None:

@@ -361,7 +361,7 @@ async def generate_recruitment_reply(
     _fallback = (
         "আমি ফজলে — আল-আকসা HR assistant।\n"
         "চাকরির জন্য নাম, বয়স ও জেলা লিখে পাঠান।\n"
-        "বিস্তারিত জানতে WhatsApp: 01958 122322"
+        "বিস্তারিত জানতে WhatsApp: 01958 122300"
     )
     asyncio.create_task(_log_llm(
         "generate_recruitment_reply", settings.ollama_model, prompt,

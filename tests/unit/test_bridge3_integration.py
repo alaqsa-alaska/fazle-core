@@ -348,3 +348,85 @@ def test_inbound_query_excludes_own_outbound_messages():
         "an is_from_me=1 row (our own outbound reply) must never be returned "
         "as a new inbound message -- this is the loop-prevention guarantee."
     )
+
+
+# ── Test 12: Bridge3 Admin Recognition Channel (2026-08-04, un-reverses ───────
+# nothing -- this is a NEW, narrower, local mechanism, not a re-add of the
+# reversed global one; see modules.bridge_poller._is_bridge3_admin_recognition
+# and its call site in _poll_bridge() for the full incident-history context.
+
+class TestBridge3AdminRecognitionChannel:
+    def test_bridge3_message_from_bridge2_number_is_recognized(self, monkeypatch):
+        import modules.bridge_poller as bp
+        mock_settings = MagicMock()
+        mock_settings.bridge2_number = "8801880446111"
+        monkeypatch.setattr(bp, "_settings", mock_settings)
+
+        assert bp._is_bridge3_admin_recognition("bridge3", "8801880446111") is True
+
+    def test_bridge3_message_from_other_number_is_not_recognized(self, monkeypatch):
+        import modules.bridge_poller as bp
+        mock_settings = MagicMock()
+        mock_settings.bridge2_number = "8801880446111"
+        monkeypatch.setattr(bp, "_settings", mock_settings)
+
+        assert bp._is_bridge3_admin_recognition("bridge3", "8801799999999") is False
+
+    def test_bridge2_channel_with_bridge2_number_is_not_recognized(self, monkeypatch):
+        """The check is channel-specific -- bridge2's own number arriving
+        on bridge2 itself (its normal self-chat pattern) is a completely
+        separate, pre-existing, unaffected code path, not this override."""
+        import modules.bridge_poller as bp
+        mock_settings = MagicMock()
+        mock_settings.bridge2_number = "8801880446111"
+        monkeypatch.setattr(bp, "_settings", mock_settings)
+
+        assert bp._is_bridge3_admin_recognition("bridge2", "8801880446111") is False
+
+    def test_bridge1_channel_with_bridge2_number_is_not_recognized(self, monkeypatch):
+        import modules.bridge_poller as bp
+        mock_settings = MagicMock()
+        mock_settings.bridge2_number = "8801880446111"
+        monkeypatch.setattr(bp, "_settings", mock_settings)
+
+        assert bp._is_bridge3_admin_recognition("bridge1", "8801880446111") is False
+
+    def test_empty_phone_is_not_recognized(self, monkeypatch):
+        import modules.bridge_poller as bp
+        mock_settings = MagicMock()
+        mock_settings.bridge2_number = "8801880446111"
+        monkeypatch.setattr(bp, "_settings", mock_settings)
+
+        assert bp._is_bridge3_admin_recognition("bridge3", "") is False
+
+    def test_this_is_a_local_override_not_a_global_identity_change(self):
+        """Regression guard: this feature must NEVER be implemented by
+        re-adding bridge3 to identity_brain's global admin recognition
+        (that mechanism was reversed 2026-08-04 after a real incident --
+        see test_identity_brain_does_not_recognize_bridge3_as_admin above,
+        which must keep passing unmodified). Structural check: the override
+        lives in bridge_poller, and identity_brain's admin-settings check
+        must still never actually READ admin_bridge3_number (a comment
+        documenting why it's excluded is fine and expected; an attribute
+        access is not)."""
+        import inspect
+        import modules.identity_brain as identity_brain
+        import modules.bridge_poller as bp
+
+        src = inspect.getsource(identity_brain._check_admin_settings)
+        assert ".admin_bridge3_number" not in src, (
+            "admin_bridge3_number must not be READ by _check_admin_settings "
+            "-- a comment merely mentioning it is fine, an attribute access is not"
+        )
+        assert hasattr(bp, "_is_bridge3_admin_recognition")
+
+    def test_call_site_never_removed_from_poll_bridge(self):
+        """Structural guard: if _poll_bridge()'s identity-resolution block
+        changes shape, this must be revisited rather than silently testing
+        stale logic (same pattern as test_bridge_poller_fallback_bridge3_is_none
+        above)."""
+        import inspect
+        import modules.bridge_poller as bp
+
+        src = inspect.getsource(bp._poll_bridge)
+        assert "_is_bridge3_admin_recognition(bridge_name, phone)" in src

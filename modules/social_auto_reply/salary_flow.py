@@ -14,7 +14,10 @@ from app.database import execute
 
 log = logging.getLogger("fazle.social.salary_flow")
 
-_OFFICE_CONTACT = "01958-122311\n01958-122327"
+# Owner-confirmed 2026-08-04 — see reply_rules.OFFICE_NUMBERS's comment for
+# the full C-08-conflict context this corrects (was 01958-122311/122327,
+# neither of which matched the Owner's confirmed list).
+_OFFICE_CONTACT = "01958-122300\n01958-122301\n01958-122302\n01958-122303"
 
 VOICE_REPLY = (
     "ভয়েস নোট প্রসেস করা যাচ্ছে না। "

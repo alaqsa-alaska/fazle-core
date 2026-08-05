@@ -57,6 +57,14 @@ class ReplyPlan:
     # auto_send=False means "skip/ignore entirely" (a different, existing
     # meaning), not "needs review."
     needs_review: bool = False
+    # 2026-08-04 (Owner decision): human-readable reason this plan needs a
+    # decision -- either _safe_polish()'s exact rejection reason, or "why
+    # no safe automated reply exists" for the no-safe-reply/risk-flagged
+    # paths. None when no review is needed. Carried through to the admin
+    # notification so the Admin sees *why*, not just *that*, review is
+    # needed -- see planner_worker.py's _notify_admin_flagged / the
+    # extended _draft_instead_of_send.
+    validation_reason: str | None = None
 
 
 _INTENT_PRIORITY = [
@@ -143,7 +151,16 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
         return ReplyPlan(reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events), needs_review=False)
 
     polished = await _polish_with_ai(reply, combined_text, history, intents, persona_text, resolved_role)
-    if _safe_polish(polished):
+    # Dynamic office-numbers (2026-08-04, Owner decision — see
+    # reply_rules.get_effective_office_numbers()'s docstring): whatever the
+    # AI was actually told in business_facts (static default, or a live
+    # admin override) must also be what _safe_polish() accepts, or a
+    # correct reply quoting the real current number would be wrongly
+    # rejected — exactly the bug found during investigation (the old
+    # whitelist's 122311/122327 never matched OFFICE_NUMBERS' 122300).
+    dynamic_office_numbers = await rules.get_effective_office_numbers()
+    is_safe, fail_reason = _safe_polish(polished, extra_allowed=_extract_number_tokens(dynamic_office_numbers))
+    if is_safe:
         final_reply = polished
         # 2026-08-03 (Owner decision, Phase 4): AI-polished text must go to
         # the existing admin draft/approval queue, never straight to a real
@@ -152,11 +169,21 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
         # (see shared/reply_policy.py's module docstring) with no
         # equivalent polish/validate step to gate today.
         needs_review = os.getenv("SOCIAL_AI_POLISH_REVIEW_REQUIRED", "true").lower() in {"1", "true", "yes"}
+        validation_reason = None
     else:
+        # 2026-08-04 (Owner decision): a validation failure must never be a
+        # silent substitution — the safe rule-based reply is still what
+        # gets sent (never an unvalidated AI reply), but it now ALWAYS
+        # goes through admin review with the exact reason attached,
+        # instead of auto-sending unreviewed as before.
         final_reply = reply
-        needs_review = False
+        needs_review = True
+        validation_reason = fail_reason
     await _update_thread_state(platform, target_id, intents, final_reply)
-    return ReplyPlan(final_reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events), needs_review=needs_review)
+    return ReplyPlan(
+        final_reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events),
+        needs_review=needs_review, validation_reason=validation_reason,
+    )
 
 
 def _classify(platform: str, text: str, media_flag: bool) -> Classification:
@@ -292,13 +319,18 @@ async def _polish_with_ai(
     if os.getenv("SOCIAL_AI_REPLY_ENABLED", "true").lower() not in {"1", "true", "yes"}:
         return ""
     history_text = "\n".join(f"{row.get('direction')}: {row.get('text')}" for row in reversed(history[-12:]))
+    # 2026-08-04 (Owner decision): dynamic office-numbers lookup — see
+    # reply_rules.get_effective_office_numbers()'s docstring. Whatever this
+    # tells the model is also what plan_reply()'s _safe_polish() call
+    # accepts (passed as extra_allowed there), so the two never disagree.
+    office_numbers = await rules.get_effective_office_numbers()
     business_facts = (
         f"Company: {rules.COMPANY_NAME}\n"
         f"Office: {rules.OFFICE_ADDRESS}\n"
         f"Office time: {rules.OFFICE_TIME}\n"
         "Salary: training 10,000-15,000 taka; probation/afterward 12,000-18,000 taka depending on role/responsibility.\n"
         "Fees: processing 350 taka; training/joining 3,500 taka; mess/food advance may be 1,000 taka.\n"
-        f"Contacts: {rules.OFFICE_NUMBERS}\n"
+        f"Contacts: {office_numbers}\n"
     )
     # 2026-08-03 (Phase 3, Owner-approved proposal): additive KB enrichment —
     # same safe_search() call modules/message_router already uses for its
@@ -346,17 +378,64 @@ async def _polish_with_ai(
         return ""
 
 
-def _safe_polish(text: str) -> bool:
-    if not text or len(text) > 1400:
-        return False
+# Salary/fee figures the AI is explicitly given in _polish_with_ai()'s
+# business_facts (kept in sync with that string, and independently
+# verified 2026-08-04 against knowledge_base/04_business_rules/
+# salary_business_rules.md — these are correct, unlike the office-number
+# entries that used to live in this set; see reply_rules.OFFICE_NUMBERS's
+# comment for that history). ADM_WHATSAPP (011004669) kept as before —
+# not part of business_facts, provenance predates this investigation,
+# left untouched since the Owner's 2026-08-04 decision only addressed
+# office numbers, not this one.
+_ALLOWED_POLISH_NUMBERS = frozenset({"350", "1000", "3500", "10000", "12000", "15000", "18000", "011004669"})
+
+
+def _extract_number_tokens(text: str) -> set[str]:
+    """3-6 digit runs from `text`, Bangla-script numerals (০-৯) normalized
+    to ASCII first. Shared by _safe_polish() and plan_reply()'s dynamic-
+    office-number lookup so both use identical tokenization."""
+    normalized = (text or "").translate(_BANGLA_DIGITS)
+    return set(re.findall(r"\b\d{3,6}\b", normalized.replace(",", "")))
+
+
+def _safe_polish(text: str, extra_allowed: set[str] | None = None) -> tuple[bool, str | None]:
+    """Returns (is_safe, reason). reason is None when is_safe is True,
+    otherwise a human-readable explanation suitable for an admin
+    notification (2026-08-04 Owner decision — see plan_reply()'s caller
+    for how this reason now reaches the Admin instead of being silently
+    discarded).
+
+    extra_allowed: additional allowed number tokens beyond
+    _ALLOWED_POLISH_NUMBERS (e.g. the current dynamic office-numbers list)
+    — merged in by the caller so this function itself doesn't need to
+    know how numbers are sourced.
+
+    2026-08-04 fix: numbers are now Bangla-numeral-aware (via
+    _extract_number_tokens's translation) — the previous ASCII-only regex
+    never matched ০-৯ digits at all, silently letting any Bangla-script
+    number through unchecked (which is what every rule-based reply
+    template in reply_rules.py actually uses), while being strict about
+    ASCII digits the model might emit instead.
+    """
+    if not text:
+        return False, "AI-polish returned empty text"
+    if len(text) > 1400:
+        return False, f"AI-polished reply too long ({len(text)} chars, max 1400)"
     if "আপনার বার্তা পেয়েছি" in text:
-        return False
+        return False, "AI-polished reply repeated the generic acknowledgement phrase"
     poison = ("chain_of_thought", "AI", "এআই", "prompt", "ডেটাবেস", "model", "reasoning")
-    if any(p.lower() in text.lower() for p in poison):
-        return False
-    numbers = set(re.findall(r"\b\d{3,6}\b", text.replace(",", "")))
-    allowed = {"350", "1000", "3500", "10000", "12000", "15000", "18000", "01958", "122311", "122327", "011004669"}
-    return numbers.issubset(allowed)
+    lowered = text.lower()
+    hit = next((p for p in poison if p.lower() in lowered), None)
+    if hit:
+        return False, f"AI-polished reply contained a disallowed term: {hit!r}"
+    numbers = _extract_number_tokens(text)
+    allowed = set(_ALLOWED_POLISH_NUMBERS)
+    if extra_allowed:
+        allowed |= extra_allowed
+    unexpected = numbers - allowed
+    if unexpected:
+        return False, f"AI-polished reply contained unapproved number(s): {', '.join(sorted(unexpected))}"
+    return True, None
 
 
 def _dedupe_paragraphs(text: str) -> str:

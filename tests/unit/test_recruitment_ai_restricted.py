@@ -32,7 +32,13 @@ def test_recruitment_source_contains_final_authoritative_facts():
     assert "Mother Vessel" in escort
     assert "১৮–৫৫ বছর" in age
     assert "মোট ৯টি পদে নিয়োগ চলছে" in positions
-    assert "01958-122322" in contact
+    # 2026-08-04 Owner Decision (supersedes the earlier "01958-122322 is
+    # final authoritative" fact this assertion previously encoded — see
+    # knowledge_base/05_workflows/whatsapp_reply_workflow.md's "Office
+    # Contact Numbers — C-08 Conflict Resolved" entry and
+    # management_decisions.md for the full record): 01958-122300 is now
+    # the current, Owner-confirmed office contact number.
+    assert "01958-122300" in contact
     assert "আর্থিক কারণে বাদ" not in office + escort + age
 
 
@@ -42,7 +48,11 @@ def test_recruitment_source_has_no_retired_conflicting_facts():
         "৬টি পদে",
         "১৮ থেকে ৪৫",
         "সকাল ৯টা",
-        "01958-122300",
+        # 01958-122300 REMOVED from this list 2026-08-04 -- it is no
+        # longer a retired/conflicting fact, it is the current Owner-
+        # confirmed office number (see test above). 122311/122327 remain
+        # genuinely retired -- neither is part of the new confirmed set
+        # (01958-122300/122301/122302/122303).
         "01958-122311",
         "01958-122327",
         "joining_fee_policy.txt",

@@ -784,6 +784,20 @@ async def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
     return False
 
 
+def _is_bridge3_admin_recognition(bridge_name: str, phone: str) -> bool:
+    """Bridge3 Admin Recognition Channel (Owner decision, 2026-08-04).
+
+    True only when a message physically arrives ON bridge3 and is sent
+    FROM bridge2's own number -- a narrow, local, one-directional check,
+    deliberately NOT a change to identity_brain's global admin set (see the
+    call site in _poll_bridge() for the full incident-history context this
+    is scoped around). Extracted as its own function purely so it's
+    directly unit-testable without mirroring _poll_bridge()'s much larger
+    body.
+    """
+    return bridge_name == "bridge3" and bool(phone) and phone == _settings.bridge2_number
+
+
 # ── Main poll loop ─────────────────────────────────────────────────────────────
 
 async def _poll_bridge(config: dict):
@@ -1153,6 +1167,41 @@ async def _poll_bridge(config: dict):
                     id_role = identity["identity_role"]
                     id_conf = identity["identity_confidence"]
                     id_name = (identity.get("display_name") or "").strip()
+
+                    # Bridge3 Admin Recognition Channel (Owner decision,
+                    # 2026-08-04). Deliberately NOT implemented as a global
+                    # identity change (i.e. NOT re-adding bridge3 to
+                    # ADMIN_NUMBERS / identity_brain._check_admin_settings())
+                    # -- that broader mechanism was built earlier the same
+                    # day, caused a real ~28-minute cross-bridge message
+                    # loop (see management_decisions.md "INCIDENT: Live
+                    # Cross-Bridge Message Loop"), and was explicitly
+                    # reversed with the comment "ADMIN_BRIDGE3_NUMBER
+                    # intentionally removed; do not re-add without a fresh
+                    # Owner decision" (.env, identity_brain/__init__.py).
+                    # This is that fresh decision, but scoped narrower and
+                    # differently than what caused the incident: a LOCAL,
+                    # per-message override -- only a message physically
+                    # arriving ON bridge3, sent FROM bridge2's own number,
+                    # is treated as Admin for ITS OWN processing. bridge2
+                    # itself gains no new admin recognition of bridge3 (the
+                    # relationship is one-directional), and every other
+                    # bridge/sender combination is completely unaffected.
+                    # The existing LOOP_GUARD below (search
+                    # "cross-bridge bounce") independently still catches
+                    # and diverts-to-draft any admin-role reply whose
+                    # destination is another bridge's own number,
+                    # regardless of how id_role was determined -- that
+                    # safety net is unchanged by this addition.
+                    if _is_bridge3_admin_recognition(bridge_name, phone):
+                        log.info(
+                            "[bridge3] ADMIN_RECOGNITION: sender=%s matches bridge2's own "
+                            "number, arriving on bridge3 -- treating as Admin for this message",
+                            phone,
+                        )
+                        id_role = "admin"
+                        id_conf = 100  # identity_confidence is an int 0-100 scale, not 0.0-1.0
+                        id_name = id_name or "Admin"
 
                     # Update the raw core copy with identity metadata + extracted fields.
                     await _finalize_core_copy(
