@@ -6908,3 +6908,180 @@ no implementation authorized.
 container logs (E's evidence). Bridge3 admin-recognition and LOOP_GUARD
 entries above (same LOOP_GUARD mechanism, D's finding is consistent with
 and does not modify it).
+
+## AI Reply/Polish Provider Chain — OmniRoute → Groq → Local Ollama/Hermes → Kimi — Owner Decision, Implemented, Deployed & Verified (2026-08-05)
+
+### Decision
+Owner-approved final provider order for `app.llm.generate_reply()` /
+`generate_recruitment_reply()` (the AI generation/polish path consumed by
+`modules.social_auto_reply`): **OmniRoute → Groq → local Ollama/Hermes →
+Kimi**. GitHub Models removed from this specific chain (its reply-gen
+functions remain in the codebase, untouched, still reachable by the
+separate, deliberately out-of-scope `classify_intent_llm()` /
+`generate_chat_reply()` paths — see the "Maintenance Repair Pass" entry
+above for why `check_health()` alone was already disabled). OpenCode
+explicitly excluded from this chain per Owner instruction.
+
+### Architecture
+- **OmniRoute**: fazle-core's first-ever code path to the local OpenAI-
+  compatible gateway (`http://127.0.0.1:20128/v1`) that hermes-runner's
+  real Hermes CLI already uses — new file `app/omniroute_provider.py`
+  (one explicitly Owner-approved exception to "no new files"), mirrors
+  `app/groq_provider.py`'s shape exactly.
+- **Credential reuse**: fazle-core's `OMNIROUTE_API_KEY` in `.env` is
+  confirmed (SHA-256 fingerprint match) to be the *same* credential
+  already used by hermes-runner (`~/.hermes/config.yaml`) and
+  assistant-platform (`backend/.env`) — not a newly issued key. `.env` is
+  not git-tracked; this is a live-server config addition only.
+- **Local Ollama/Hermes**: `app/llm._resolve_local_ollama_model()` checks
+  `GET /api/tags` live (cached 5 min) and prefers, smallest-first:
+  `hermes3:3b` → `hermes3` → `hermes3:latest` → `hermes` → `hermes:latest`
+  → falls back to `settings.ollama_model` (`qwen3:8b`) unchanged if none
+  provisioned. `hermes3:3b` (2.0GB, the real smallest official
+  Ollama-library Hermes-family tag — "hermes" alone is not a published
+  tag) was pulled by the Owner and is confirmed live-provisioned.
+- **Kimi**: reached through the *same* `app.ollama` client using
+  `settings.kimi_model_name` (`kimi-k2.6:cloud`) — Ollama's own
+  cloud-model-proxy feature, already provisioned server-side; not a new
+  HTTP provider.
+- **Failure handling**: every step (success/empty/error/skipped) recorded
+  via a new per-asyncio-task trace, `app.llm.get_last_attempts()`. Missing
+  config, timeouts, 5xx, empty/malformed responses, and Ollama's own
+  internal fallback text (`FALLBACK_REPLY_TEXT` /
+  `RECRUITMENT_FALLBACK_TEXT` — these functions never raise/return empty)
+  are all explicitly detected and treated as "continue to next provider."
+  Total exhaustion returns the same fallback text `_safe_polish()` already
+  flags as a "generic acknowledgement phrase" — routes to admin review
+  automatically via the existing mechanism, now enriched with Message ID,
+  Sender Name, Sender Mobile, Original Message, Generated AI Reply,
+  Providers Attempted (with per-provider outcome), and Recommended Action.
+
+### Preserved unchanged (verified, not assumed)
+`never_ai_polish` (salary/salary_objection/fees/payment_issue bypass),
+rule-based-first paths, `_safe_polish()` (including its pre-existing
+Bangla-numeral handling via `_BANGLA_DIGITS`/`_extract_number_tokens()` —
+confirmed already correct, no patch needed), RBAC, LOOP_GUARD, Bridge3
+narrow admin-recognition rule. `modules/route_b` (Owner-approved
+Ollama-only bypass for escort/security_guard/candidate/unknown roles) and
+`modules/knowledge_base.get_reply()`'s RAG-fallback tier were confirmed to
+still call `app.ollama.generate_reply()` directly — deliberately left
+untouched as genuinely different jobs, not accidental duplicates of the
+in-scope social-auto-reply chain; flagged only as future consolidation
+candidates, not implemented.
+
+### Deployment & live verification (2026-08-05, same day)
+Code changes (`app/config.py`, `app/llm.py`, `app/ollama.py`,
+`app/omniroute_provider.py` [new], `modules/social_auto_reply/
+intelligent_generator.py`, `modules/social_auto_reply/planner_worker.py`,
+`tests/unit/test_llm_provider_order.py`) committed by the Owner as
+`8d53b96`, pushed to `origin/main` (confirmed 0 ahead/0 behind), and
+deployed via `fazle-core.service` restart (confirmed clean startup, no
+errors since). Post-restart `GET /health/deep` confirms **live, working
+end-to-end**: `omniroute_configured: true`, `omniroute: {"status":"ok",
+"model":"auto","latency_ms":2460}` (real `POST .../v1/chat/completions`
+200 OK observed in the access log), `groq: {"status":"ok"}`,
+`github_models: {"status":"disabled"}` (correctly excluded),
+`ollama.models` includes `hermes3:3b`. Zero GitHub-Models-410 or
+meta-stale-alert log lines since restart (confirms the earlier repair
+pass's fixes also still hold). 152 unit tests pass across every file
+touched this session (`test_llm_provider_order.py`,
+`test_social_planner_draft_routing.py`,
+`test_scheduler_phase5b_trigger_wiring.py`, `test_admin_ai_router.py`,
+`test_escort_roster_routes.py`). `secret_scan.sh` clean.
+
+### Outstanding (Priority 2, not this entry's scope)
+`_safe_polish()`'s hardcoded numeric-whitelist gap (rejects any AI-polished
+number outside a fixed allowed set — distinct from the Bangla-digit
+handling verified correct above) and bridge3 integration (has real prior
+loop-incident history, see "Bridge3 Admin Reversal" entry) remain open, not touched this session — need a fresh Owner go-ahead each,
+per KB-first policy.
+
+### Cross references
+`app/omniroute_provider.py`, `app/llm.py`, `~/.hermes/config.yaml`,
+`assistant-platform/backend/.env`, `ollama.com/library/hermes3`. Builds on
+the "Maintenance Repair Pass" entry above (GitHub Models dead-endpoint
+fix) and the Hermes-runner `readonly_key` concurrency fix
+(`hermes-runner@abff5bb`, out of this repo).
+
+## `_safe_polish()` Numeric-Whitelist Gap — Owner Decision, Implemented (2026-08-05, Priority 2 Item 1)
+
+### Decision
+Owner-approved: fix `_safe_polish()`'s hardcoded numeric-whitelist gap
+(`modules/social_auto_reply/intelligent_generator.py`) before starting any
+Bridge3 integration work (explicitly deferred this session — see the
+"Bridge3 Admin Reversal" entry above for why it needs separate planning).
+
+### Root cause found
+`_ALLOWED_POLISH_NUMBERS` was a hand-maintained `frozenset` duplicating the
+salary/fee figures also hardcoded, separately, inside `_polish_with_ai()`'s
+`business_facts` prompt string — the exact same class of bug already found
+and fixed for office numbers on 2026-08-04 (two independent copies of the
+same fact that can silently drift apart). Cross-checked against
+`knowledge_base/04_business_rules/salary_business_rules.md`: the escort
+salary/fee figures in both copies (10,000-15,000 / 12,000-18,000 / 350 /
+1,000 / 3,500) were still numerically consistent with each other at the
+time of the fix — no live incorrect-number incident found, unlike the
+office-number case — but the structural risk (one hardcoded copy silently
+diverging from the other on a future business-rule change, e.g. a fee
+increase) was real and unaddressed. `ADM_WHATSAPP` ("011004669") was also
+duplicated as a re-typed literal instead of referencing
+`reply_rules.ADM_WHATSAPP`, the same constant already used elsewhere.
+
+### Fix
+New `_static_prompt_facts_text()` function holds the salary/fee figures
+text as the single source; `_polish_with_ai()` now builds its prompt from
+it, and `plan_reply()`'s `_safe_polish()` call now derives its allowed-
+number set from the same function's output (plus the existing dynamic
+office-numbers lookup, plus `reply_rules.ADM_WHATSAPP` referenced directly)
+— identical pattern to the 2026-08-04 office-number fix, now applied
+consistently to every number category `_safe_polish()` can allow.
+`_ALLOWED_POLISH_NUMBERS` is now intentionally an empty `frozenset()` —
+kept as a module-level name (not deleted, some future caller could still
+reference it) but its safe default is now "nothing implicitly trusted";
+every caller must supply what it actually told the AI via `extra_allowed`.
+
+### Preserved unchanged (verified, not assumed)
+`never_ai_polish` (salary/salary_objection/fees/payment_issue still bypass
+AI-polish entirely, untouched), admin-review routing on validation failure
+(unchanged — a rejected number still forces `needs_review=True` with the
+exact reason, same as before), RBAC/LOOP_GUARD (not in this file's blast
+radius at all). The fix widens what is *correctly* allowed; it does not
+loosen the rejection logic itself — confirmed via a new regression test
+that an unapproved number is still rejected even with the new
+`extra_allowed` set in place.
+
+### Known remaining gap — NOT fixed here, flagged for a separate Owner decision
+`business_facts`'s salary line is role-invariant: it always states the
+Escort training/after-training range (10,000-18,000), sent to the AI
+regardless of `resolved_role`, even though
+`salary_business_rules.md` documents a distinctly different, higher
+Security Guard range (17,000 probationary / 24,700 permanent — see
+`reply_rules.SALARY_REPLY`). This is a content-accuracy question (should
+`_polish_with_ai()` select role-specific salary text?), not a whitelist-
+derivation bug — and it does not currently cause any wrong number to reach
+a user, because "salary"/"salary_objection" intents always trigger the
+`never_ai_polish` bypass before `_polish_with_ai()` ever runs, so the
+Security Guard figures can never leak into this prompt as context either
+(mutually exclusive by construction, verified by code reading, not
+assumed). Left as-is per this task's explicit scope (numeric-whitelist gap
+only); flagged here so it isn't lost.
+
+### Tests
+`tests/unit/test_social_planner_draft_routing.py`: updated 1 existing test
+(`test_bangla_numeral_number_inside_whitelist_still_passes`, now supplies
+`extra_allowed` explicitly) and added 5 new tests covering: the static set
+being empty by design, `_static_prompt_facts_text()`'s exact number
+tokens, an end-to-end `plan_reply()` call correctly allowing a real
+fee figure from the shared source, `ADM_WHATSAPP` reuse, and confirming an
+unapproved number is still rejected. 157 tests pass across every file
+touched across this session's two most recent tasks (this fix +
+`test_llm_provider_order.py`, `test_scheduler_phase5b_trigger_wiring.py`,
+`test_admin_ai_router.py`, `test_escort_roster_routes.py`). `secret_scan.sh`
+clean. No commit/push/restart/deploy performed for this change.
+
+### Cross references
+`modules/social_auto_reply/reply_rules.py` (`ADM_WHATSAPP`,
+`get_effective_office_numbers()`), `knowledge_base/04_business_rules/
+salary_business_rules.md`. Builds on the 2026-08-04 office-number fix
+documented in the Priority 1/social-auto-reply entries above — same root
+cause pattern, now closed for numbers generally, not just office numbers.

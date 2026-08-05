@@ -287,12 +287,39 @@ class TestSafePolishBanglaNumeralFix:
         assert "99999" in reason
 
     def test_bangla_numeral_number_inside_whitelist_still_passes(self):
-        from modules.social_auto_reply.intelligent_generator import _safe_polish
+        """2026-08-05: _ALLOWED_POLISH_NUMBERS is now intentionally empty
+        (see its own comment) -- callers must pass extra_allowed explicitly,
+        exactly as plan_reply() does via _static_prompt_facts_text(). This
+        test now supplies that same source directly, still exercising the
+        actual point of the test: Bangla-numeral normalization against a
+        real allowed number."""
+        from modules.social_auto_reply.intelligent_generator import (
+            _extract_number_tokens, _safe_polish, _static_prompt_facts_text,
+        )
 
-        # ১০,০০০ = 10,000, which IS in _ALLOWED_POLISH_NUMBERS.
-        is_safe, reason = _safe_polish("বেতন ১০,০০০ টাকা থেকে শুরু।")
+        # ১০,০০০ = 10,000, which IS in _static_prompt_facts_text()'s salary line.
+        allowed = _extract_number_tokens(_static_prompt_facts_text())
+        assert "10000" in allowed  # sanity: the source text actually contains it
+        is_safe, reason = _safe_polish("বেতন ১০,০০০ টাকা থেকে শুরু।", extra_allowed=allowed)
         assert is_safe is True
         assert reason is None
+
+    def test_static_allowed_set_is_empty_by_design(self):
+        """2026-08-05 (Owner decision -- numeric-whitelist gap fix):
+        _ALLOWED_POLISH_NUMBERS is now intentionally empty -- every number
+        it used to hardcode has a real single source of truth instead
+        (business_facts text, live office-numbers lookup, or
+        reply_rules.ADM_WHATSAPP directly) that callers must supply via
+        extra_allowed. A caller passing NO extra_allowed must reject any
+        number at all, by design -- nothing is implicitly trusted."""
+        from modules.social_auto_reply.intelligent_generator import (
+            _ALLOWED_POLISH_NUMBERS, _safe_polish,
+        )
+
+        assert _ALLOWED_POLISH_NUMBERS == frozenset()
+        is_safe, reason = _safe_polish("বেতন ১০,০০০ টাকা থেকে শুরু।")
+        assert is_safe is False
+        assert "10000" in reason
 
     def test_ascii_number_still_validated_as_before(self):
         from modules.social_auto_reply.intelligent_generator import _safe_polish
@@ -346,6 +373,89 @@ class TestSafePolishBanglaNumeralFix:
 
         is_safe, reason = _safe_polish("")
         assert is_safe is False
+
+
+class TestSafePolishNumericWhitelistSourceOfTruth:
+    """2026-08-05 (Owner decision) -- the numeric-whitelist gap fix.
+    _static_prompt_facts_text() is now the ONE place salary/fee figures
+    live; both _polish_with_ai()'s prompt and plan_reply()'s allowed-number
+    set derive from it, so they can never disagree."""
+
+    def test_static_prompt_facts_text_numbers_are_all_extractable(self):
+        from modules.social_auto_reply.intelligent_generator import (
+            _extract_number_tokens, _static_prompt_facts_text,
+        )
+
+        tokens = _extract_number_tokens(_static_prompt_facts_text())
+        # The exact escort-role salary/fee figures currently in the prompt.
+        assert tokens == {"10000", "15000", "12000", "18000", "350", "3500", "1000"}
+
+    async def test_plan_reply_allowed_set_matches_static_prompt_facts_text(self, monkeypatch):
+        """Integration-level guard: plan_reply()'s _safe_polish() call must
+        accept every number _static_prompt_facts_text() contains -- an
+        AI-polished reply legitimately quoting a real fee/salary figure
+        from the prompt it was given must never be wrongly rejected."""
+        import modules.social_auto_reply.intelligent_generator as gen
+
+        monkeypatch.setattr(gen, "_polish_with_ai", AsyncMock(return_value="প্রসেসিং ফি ৩৫০ টাকা"))
+        monkeypatch.setattr(gen, "_combined_rule_reply", lambda *a, **k: "rule reply")
+        monkeypatch.setattr(gen, "_thread_risk", lambda *a, **k: None)
+        monkeypatch.setattr(gen, "recent_thread_history", AsyncMock(return_value=[]))
+        monkeypatch.setattr(gen, "thread_state", AsyncMock(return_value=None))
+        monkeypatch.setattr(gen, "detect_identity", AsyncMock(return_value={"role": "candidate"}))
+        monkeypatch.setattr(gen, "_update_thread_state", AsyncMock())
+        monkeypatch.setattr(gen.rules, "get_effective_office_numbers", AsyncMock(return_value="01958-122300"))
+        monkeypatch.setenv("SOCIAL_AI_POLISH_REVIEW_REQUIRED", "false")
+
+        # "fees" is a never_ai_polish intent (bypasses _polish_with_ai
+        # entirely) -- use a non-bypassed intent so the polish path this
+        # test actually targets gets exercised.
+        plan = await gen.plan_reply(
+            "meta_whatsapp", "8801711111111",
+            [{"id": 1, "message_text": "job details?"}],
+        )
+
+        assert plan.reply_text == "প্রসেসিং ফি ৩৫০ টাকা"
+        assert plan.needs_review is False
+        assert plan.validation_reason is None
+
+    async def test_plan_reply_allows_adm_whatsapp_via_reply_rules_constant(self, monkeypatch):
+        """ADM_WHATSAPP is sourced directly from reply_rules.ADM_WHATSAPP
+        (no re-typed literal) -- a change to that constant must flow
+        through automatically."""
+        import modules.social_auto_reply.intelligent_generator as gen
+        from modules.social_auto_reply import reply_rules
+
+        monkeypatch.setattr(gen, "_polish_with_ai", AsyncMock(return_value=f"যোগাযোগ: {reply_rules.ADM_WHATSAPP}"))
+        monkeypatch.setattr(gen, "_combined_rule_reply", lambda *a, **k: "rule reply")
+        monkeypatch.setattr(gen, "_thread_risk", lambda *a, **k: None)
+        monkeypatch.setattr(gen, "recent_thread_history", AsyncMock(return_value=[]))
+        monkeypatch.setattr(gen, "thread_state", AsyncMock(return_value=None))
+        monkeypatch.setattr(gen, "detect_identity", AsyncMock(return_value={"role": "candidate"}))
+        monkeypatch.setattr(gen, "_update_thread_state", AsyncMock())
+        monkeypatch.setattr(gen.rules, "get_effective_office_numbers", AsyncMock(return_value="01958-122300"))
+        monkeypatch.setenv("SOCIAL_AI_POLISH_REVIEW_REQUIRED", "false")
+
+        plan = await gen.plan_reply(
+            "meta_whatsapp", "8801711111111",
+            [{"id": 1, "message_text": "job details?"}],
+        )
+
+        assert plan.needs_review is False
+        assert plan.validation_reason is None
+
+    def test_unapproved_number_still_rejected_with_static_facts_allowed(self):
+        """A number NOT in business_facts/office-numbers/ADM_WHATSAPP must
+        still be rejected -- the fix widens what's correctly allowed, it
+        does not weaken the check itself."""
+        from modules.social_auto_reply.intelligent_generator import (
+            _extract_number_tokens, _safe_polish, _static_prompt_facts_text,
+        )
+
+        allowed = _extract_number_tokens(_static_prompt_facts_text())
+        is_safe, reason = _safe_polish("বিশেষ অফার ৯৯৯৯৯ টাকা", extra_allowed=allowed)
+        assert is_safe is False
+        assert "99999" in reason
         assert reason is not None
 
 

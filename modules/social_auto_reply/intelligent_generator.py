@@ -171,7 +171,21 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
     # rejected — exactly the bug found during investigation (the old
     # whitelist's 122311/122327 never matched OFFICE_NUMBERS' 122300).
     dynamic_office_numbers = await rules.get_effective_office_numbers()
-    is_safe, fail_reason = _safe_polish(polished, extra_allowed=_extract_number_tokens(dynamic_office_numbers))
+    # 2026-08-05 (Owner decision — _safe_polish() numeric-whitelist gap
+    # fix): allowed numbers are now derived entirely from the SAME facts
+    # the AI was actually given (business_facts' salary/fee text via
+    # _static_prompt_facts_text(), plus the live office-numbers lookup,
+    # plus the one fixed legacy admin contact sourced directly from
+    # reply_rules.ADM_WHATSAPP) — never a hand-maintained parallel literal
+    # set that could silently drift out of sync with the real prompt text.
+    # Same pattern already used for office numbers below, now applied
+    # consistently to every number category this function can allow.
+    allowed_numbers = (
+        _extract_number_tokens(dynamic_office_numbers)
+        | _extract_number_tokens(_static_prompt_facts_text())
+        | {rules.ADM_WHATSAPP}
+    )
+    is_safe, fail_reason = _safe_polish(polished, extra_allowed=allowed_numbers)
     # 2026-08-05 (Owner decision, provider-chain change): capture the raw
     # per-provider attempt trace unconditionally, success or failure — the
     # admin-review notification (planner_worker.py) can show exactly which
@@ -362,8 +376,7 @@ async def _polish_with_ai(
         f"Company: {rules.COMPANY_NAME}\n"
         f"Office: {rules.OFFICE_ADDRESS}\n"
         f"Office time: {rules.OFFICE_TIME}\n"
-        "Salary: training 10,000-15,000 taka; probation/afterward 12,000-18,000 taka depending on role/responsibility.\n"
-        "Fees: processing 350 taka; training/joining 3,500 taka; mess/food advance may be 1,000 taka.\n"
+        + _static_prompt_facts_text() +
         f"Contacts: {office_numbers}\n"
     )
     # 2026-08-03 (Phase 3, Owner-approved proposal): additive KB enrichment —
@@ -418,16 +431,58 @@ async def _polish_with_ai(
         return ""
 
 
-# Salary/fee figures the AI is explicitly given in _polish_with_ai()'s
-# business_facts (kept in sync with that string, and independently
-# verified 2026-08-04 against knowledge_base/04_business_rules/
-# salary_business_rules.md — these are correct, unlike the office-number
-# entries that used to live in this set; see reply_rules.OFFICE_NUMBERS's
-# comment for that history). ADM_WHATSAPP (011004669) kept as before —
-# not part of business_facts, provenance predates this investigation,
-# left untouched since the Owner's 2026-08-04 decision only addressed
-# office numbers, not this one.
-_ALLOWED_POLISH_NUMBERS = frozenset({"350", "1000", "3500", "10000", "12000", "15000", "18000", "011004669"})
+def _static_prompt_facts_text() -> str:
+    """The static salary/fee portion of _polish_with_ai()'s business_facts
+    block — the exact figures text the AI is actually told.
+
+    Factored out here (2026-08-05, Owner decision — _safe_polish() numeric-
+    whitelist gap fix) so plan_reply()'s allowed-number set is derived from
+    this SAME text at call time, instead of the old hand-maintained
+    _ALLOWED_POLISH_NUMBERS literal that could silently drift out of sync
+    with it — the identical failure mode already fixed for office numbers
+    via reply_rules.get_effective_office_numbers() + extra_allowed, now
+    applied consistently here too. This is the one place a salary/fee
+    figure needs to change; both the prompt and the whitelist follow
+    automatically.
+
+    Scope note (verified against knowledge_base/04_business_rules/
+    salary_business_rules.md, 2026-08-05): these figures are the Escort-
+    role training/after-training range specifically. The KB documents a
+    separate, higher Security Guard range (৳17,000 probationary /
+    ৳24,700 permanent — see reply_rules.SALARY_REPLY) that this function
+    does NOT include, because business_facts is currently role-invariant
+    (sent to the AI regardless of resolved_role) while _polish_with_ai()
+    never runs at all when "salary"/"salary_objection" is among the
+    detected intents (never_ai_polish bypass, above) — so a security-guard
+    applicant's own salary question is never AI-polished in the first
+    place, and SALARY_REPLY's rule-based figures can never reach this
+    prompt as context either (mutually exclusive by construction). Not
+    fixed here as it is a business_facts *content* question — whether
+    business_facts should be role-aware for salary — not a whitelist-
+    derivation bug; flagged for a separate Owner decision if desired.
+    """
+    return (
+        "Salary: training 10,000-15,000 taka; probation/afterward 12,000-18,000 taka depending on role/responsibility.\n"
+        "Fees: processing 350 taka; training/joining 3,500 taka; mess/food advance may be 1,000 taka.\n"
+    )
+
+
+# 2026-08-05 (Owner decision — _safe_polish() numeric-whitelist gap fix):
+# now intentionally empty. Every number this set used to hardcode has a
+# real single source of truth instead of a hand-maintained copy that could
+# drift out of sync with what the AI is actually told:
+#   - salary/fee figures  -> _static_prompt_facts_text() (the exact text
+#     used to build the AI's prompt, see plan_reply()'s extra_allowed)
+#   - office numbers      -> reply_rules.get_effective_office_numbers()
+#     (already wired this way since the 2026-08-04 office-number fix)
+#   - the one fixed admin contact -> reply_rules.ADM_WHATSAPP directly (no
+#     re-typed literal to drift from it)
+# Kept as a module-level name (not deleted) because it is still
+# _safe_polish()'s implicit default for a caller that passes no
+# extra_allowed at all — an empty set is the correct, safe default there:
+# nothing is implicitly trusted, every caller must say explicitly what
+# facts it actually gave the AI.
+_ALLOWED_POLISH_NUMBERS: frozenset[str] = frozenset()
 
 
 def _extract_number_tokens(text: str) -> set[str]:
@@ -446,9 +501,11 @@ def _safe_polish(text: str, extra_allowed: set[str] | None = None) -> tuple[bool
     discarded).
 
     extra_allowed: additional allowed number tokens beyond
-    _ALLOWED_POLISH_NUMBERS (e.g. the current dynamic office-numbers list)
-    — merged in by the caller so this function itself doesn't need to
-    know how numbers are sourced.
+    _ALLOWED_POLISH_NUMBERS (2026-08-05: intentionally empty by default —
+    see its own comment — so in practice this is where a caller supplies
+    every number it actually wants allowed, e.g. plan_reply()'s dynamic
+    office-numbers + business-facts figures) — merged in by the caller so
+    this function itself doesn't need to know how numbers are sourced.
 
     2026-08-04 fix: numbers are now Bangla-numeral-aware (via
     _extract_number_tokens's translation) — the previous ASCII-only regex
