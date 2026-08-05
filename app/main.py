@@ -34,7 +34,7 @@ from fastapi.security import APIKeyHeader
 
 from app.config import get_settings
 from app.database import init_db, close_db, fetch_one, fetch_all, fetch_val, execute
-from app.bridge import get_bridge1, get_bridge2
+from app.bridge import get_bridge1, get_bridge2, get_bridge3
 from app.logging_setup import setup_logging
 from app import llm as ai
 from modules.intent import classify
@@ -796,18 +796,28 @@ def _probe_cpu() -> dict:
 
 
 async def _build_health(deep: bool = False) -> dict:
-    db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p = await asyncio.gather(
+    # 2026-08-05 (health coverage completion): bridge3 added alongside
+    # bridge1/bridge2, same probes -- bridge3 is configured (BRIDGE_CONFIGS,
+    # .env), actively polled (modules.bridge_poller writes a
+    # "bridge_poller:bridge3" fazle_service_heartbeats row on every cycle,
+    # exactly like bridge1/bridge2 already do), and has its own message
+    # store -- it was simply never added to this aggregate view when it was
+    # brought online. No new probe mechanism; this reuses the exact same
+    # _probe_heartbeat/_probe_file_age helpers bridge1/bridge2 already use.
+    db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p, hb3_p = await asyncio.gather(
         _probe_db(),
         _safe_ollama(),
         _probe_qdrant(),
         _probe_outbound(),
         _probe_heartbeat("bridge_poller:bridge1"),
         _probe_heartbeat("bridge_poller:bridge2"),
+        _probe_heartbeat("bridge_poller:bridge3"),
         return_exceptions=False,
     )
     llm_p = await _safe_llm() if deep else {"status": "skipped", "reason": "deep health only"}
     bridge1_db = _probe_file_age("/home/azim/whatsapp1/store/messages.db", "bridge1")
     bridge2_db = _probe_file_age("/home/azim/whatsapp2/store/messages.db", "bridge2")
+    bridge3_db = _probe_file_age("/home/azim/whatsapp3/store/messages.db", "bridge3")
     # SQLite mtime is activity, not liveness. A fresh poller heartbeat proves
     # the quiet bridge is healthy while preserving the age as diagnostics.
     if hb1_p.get("status") == "ok" and bridge1_db.get("status") == "degraded":
@@ -816,6 +826,9 @@ async def _build_health(deep: bool = False) -> dict:
     if hb2_p.get("status") == "ok" and bridge2_db.get("status") == "degraded":
         bridge2_db["status"] = "ok"
         bridge2_db["quiet_but_poller_healthy"] = True
+    if hb3_p.get("status") == "ok" and bridge3_db.get("status") == "degraded":
+        bridge3_db["status"] = "ok"
+        bridge3_db["quiet_but_poller_healthy"] = True
     disk_p = _probe_disk()
     mem_p = _probe_mem()
     cpu_p = _probe_cpu()
@@ -824,8 +837,10 @@ async def _build_health(deep: bool = False) -> dict:
         "db": db_p,
         "bridge1_db": bridge1_db,
         "bridge2_db": bridge2_db,
+        "bridge3_db": bridge3_db,
         "bridge_poller_b1": hb1_p,
         "bridge_poller_b2": hb2_p,
+        "bridge_poller_b3": hb3_p,
         "outbound": ob_p,
         "disk": disk_p,
         "mem": mem_p,
@@ -848,6 +863,7 @@ async def _build_health(deep: bool = False) -> dict:
             out["bridges"] = {
                 "bridge1": await get_bridge1().status(),
                 "bridge2": await get_bridge2().status(),
+                "bridge3": await get_bridge3().status(),
             }
         except Exception as e:
             out["bridges"] = {"error": str(e)[:200]}

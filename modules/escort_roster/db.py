@@ -1567,7 +1567,21 @@ async def create_roster_change_request(
         """,
         program_id,
         action,
-        json.dumps(payload or {}),
+        # 2026-08-05 (confirmed bug fix): payload can carry raw date/datetime
+        # values (e.g. action="edit"'s payload={"updates": {...}} from
+        # api_roster_patch() -- a PATCH body field like program_date deserializes
+        # to a real date object, nested inside "updates", not at the top level).
+        # json.dumps() has no default encoder for date/datetime, so this raised
+        # "TypeError: Object of type date is not JSON serializable" whenever such
+        # a field was present. default=str matches the existing repo-wide
+        # convention (shared/realtime.py's json.dumps(..., default=str)) and
+        # converts any such value at any nesting depth to its string form --
+        # str(date(...)) is already ISO-8601 (YYYY-MM-DD), matching this file's
+        # own .isoformat() convention used elsewhere for the date/datetime case
+        # specifically. Payload semantics unchanged -- only date/datetime values
+        # become strings, exactly as they would if the caller had already
+        # serialized them.
+        json.dumps(payload or {}, default=str),
         requested_by,
         requested_by_phone,
     )

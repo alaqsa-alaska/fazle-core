@@ -326,3 +326,93 @@ class TestEscortRosterRecalculate:
         assert audit_calls[0]["source"] == "manual_recalculate"
         assert audit_calls[0]["new_data"] == {"note": "manual_roster_noop"}
         assert row["program_id"] == 910
+
+
+class TestCreateRosterChangeRequestDateSerialization:
+    """2026-08-05 confirmed bug fix: json.dumps(payload) raised
+    TypeError: Object of type date is not JSON serializable whenever a
+    PATCH payload (api_roster_patch -> create_roster_change_request)
+    contained a raw date/datetime value -- e.g. a program_date field,
+    nested inside payload={"updates": {...}}, not at the top level."""
+
+    @pytest.mark.asyncio
+    async def test_date_valued_payload_no_longer_raises(self, monkeypatch):
+        from modules.escort_roster import db as roster_db
+
+        captured = {}
+
+        async def _fake_fetch_one(query, *args, **kwargs):
+            if "SELECT id, status" in query:
+                return None  # no existing pending request
+            # INSERT ... RETURNING * path
+            captured["insert_args"] = args
+            return {"id": 501, "program_id": args[0], "action": args[1], "payload": args[2], "status": "pending"}
+
+        async def _fake_log_audit(**kwargs):
+            return None
+
+        monkeypatch.setattr(roster_db, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(roster_db, "log_audit", _fake_log_audit)
+
+        payload = {"updates": {"program_date": date(2026, 8, 10), "escort_name": "New Guard"}}
+        # Must not raise -- this is the exact bug: json.dumps(payload) with
+        # no default encoder for `date` used to throw here.
+        result = await roster_db.create_roster_change_request(
+            program_id=910, action="edit", payload=payload,
+            requested_by="test", requested_by_phone="8801700000000",
+        )
+        assert result["id"] == 501
+
+        # The serialized JSON string actually stored must contain the
+        # ISO-8601 date as a plain string, not have silently dropped/mangled it.
+        stored_json = captured["insert_args"][2]
+        assert isinstance(stored_json, str)
+        assert "2026-08-10" in stored_json
+        assert "New Guard" in stored_json
+
+    @pytest.mark.asyncio
+    async def test_non_date_payload_still_serializes_correctly(self, monkeypatch):
+        """Regression guard: the fix must not change behavior for the
+        common, already-working case (no date/datetime values)."""
+        from modules.escort_roster import db as roster_db
+        import json
+
+        captured = {}
+
+        async def _fake_fetch_one(query, *args, **kwargs):
+            if "SELECT id, status" in query:
+                return None
+            captured["insert_args"] = args
+            return {"id": 502, "program_id": args[0], "action": args[1], "payload": args[2], "status": "pending"}
+
+        async def _fake_log_audit(**kwargs):
+            return None
+
+        monkeypatch.setattr(roster_db, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(roster_db, "log_audit", _fake_log_audit)
+
+        payload = {"updates": {"escort_name": "Plain Guard", "capacity": 3}}
+        await roster_db.create_roster_change_request(
+            program_id=911, action="edit", payload=payload,
+            requested_by="test", requested_by_phone=None,
+        )
+        stored_json = captured["insert_args"][2]
+        assert json.loads(stored_json) == payload
+
+    @pytest.mark.asyncio
+    async def test_existing_pending_request_short_circuits_without_serializing(self, monkeypatch):
+        """Regression guard: the existing dedup-check path (no INSERT at
+        all) must be completely unaffected by this fix."""
+        from modules.escort_roster import db as roster_db
+
+        async def _fake_fetch_one(query, *args, **kwargs):
+            assert "SELECT id, status" in query
+            return {"id": 999, "status": "pending"}
+
+        monkeypatch.setattr(roster_db, "fetch_one", _fake_fetch_one)
+
+        result = await roster_db.create_roster_change_request(
+            program_id=912, action="edit", payload={"updates": {"program_date": date(2026, 8, 11)}},
+            requested_by="test", requested_by_phone=None,
+        )
+        assert result == {"id": 999, "status": "pending"}

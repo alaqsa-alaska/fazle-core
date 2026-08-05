@@ -295,3 +295,107 @@ class TestGetStaleBridgesPerBridgeThreshold:
         from shared.queue import _STALE_THRESHOLD_OVERRIDES_MINUTES
         assert set(_STALE_THRESHOLD_OVERRIDES_MINUTES.keys()) == {"meta"}
         assert _STALE_THRESHOLD_OVERRIDES_MINUTES["meta"] == 30 * 24 * 60
+
+
+class TestBuildHealthBridge3Coverage:
+    """2026-08-05 (health coverage completion): bridge3 was configured,
+    polled, and heartbeating identically to bridge1/bridge2, but was never
+    added to app.main._build_health()'s aggregate probe set. Exercises the
+    real function (all its own internal probe helpers mocked, matching this
+    file's existing app.main._build_health-adjacent tests above) rather than
+    mocking _build_health itself, since this specifically tests its internal
+    composition."""
+
+    def _patch_common_probes(self, monkeypatch, heartbeat_status="ok"):
+        import app.main as main_mod
+
+        async def _fake_probe_db():
+            return {"status": "ok"}
+
+        async def _fake_safe_ollama():
+            return {"status": "ok"}
+
+        async def _fake_probe_qdrant():
+            return {"status": "ok"}
+
+        async def _fake_probe_outbound():
+            return {"status": "ok"}
+
+        async def _fake_probe_heartbeat(service):
+            return {"status": heartbeat_status, "service": service}
+
+        def _fake_probe_file_age(path, label):
+            return {"status": "ok", "label": label, "path": path}
+
+        def _fake_probe_disk():
+            return {"status": "ok"}
+
+        def _fake_probe_mem():
+            return {"status": "ok"}
+
+        def _fake_probe_cpu():
+            return {"status": "ok"}
+
+        monkeypatch.setattr(main_mod, "_probe_db", _fake_probe_db)
+        monkeypatch.setattr(main_mod, "_safe_ollama", _fake_safe_ollama)
+        monkeypatch.setattr(main_mod, "_probe_qdrant", _fake_probe_qdrant)
+        monkeypatch.setattr(main_mod, "_probe_outbound", _fake_probe_outbound)
+        monkeypatch.setattr(main_mod, "_probe_heartbeat", _fake_probe_heartbeat)
+        monkeypatch.setattr(main_mod, "_probe_file_age", _fake_probe_file_age)
+        monkeypatch.setattr(main_mod, "_probe_disk", _fake_probe_disk)
+        monkeypatch.setattr(main_mod, "_probe_mem", _fake_probe_mem)
+        monkeypatch.setattr(main_mod, "_probe_cpu", _fake_probe_cpu)
+        return main_mod
+
+    async def test_bridge3_probes_included_alongside_bridge1_and_bridge2(self, monkeypatch):
+        main_mod = self._patch_common_probes(monkeypatch)
+
+        result = await main_mod._build_health(deep=False)
+
+        probes = result["probes"]
+        for key in ("bridge1_db", "bridge2_db", "bridge3_db", "bridge_poller_b1", "bridge_poller_b2", "bridge_poller_b3"):
+            assert key in probes, f"{key} missing from /health probes"
+        assert probes["bridge3_db"]["label"] == "bridge3"
+        assert probes["bridge3_db"]["path"] == "/home/azim/whatsapp3/store/messages.db"
+        assert probes["bridge_poller_b3"]["service"] == "bridge_poller:bridge3"
+
+    async def test_bridge1_and_bridge2_probe_shape_unchanged(self, monkeypatch):
+        """Regression guard: adding bridge3 must not alter bridge1/bridge2's
+        existing probe keys, labels, or paths."""
+        main_mod = self._patch_common_probes(monkeypatch)
+
+        result = await main_mod._build_health(deep=False)
+
+        probes = result["probes"]
+        assert probes["bridge1_db"]["label"] == "bridge1"
+        assert probes["bridge1_db"]["path"] == "/home/azim/whatsapp1/store/messages.db"
+        assert probes["bridge2_db"]["label"] == "bridge2"
+        assert probes["bridge2_db"]["path"] == "/home/azim/whatsapp2/store/messages.db"
+        assert probes["bridge_poller_b1"]["service"] == "bridge_poller:bridge1"
+        assert probes["bridge_poller_b2"]["service"] == "bridge_poller:bridge2"
+
+    async def test_deep_health_includes_bridge3_status(self, monkeypatch):
+        main_mod = self._patch_common_probes(monkeypatch)
+
+        async def _fake_bridge_status():
+            return {"status": "ok"}
+
+        class _FakeBridge:
+            async def status(self):
+                return await _fake_bridge_status()
+
+        monkeypatch.setattr(main_mod, "get_bridge1", lambda: _FakeBridge())
+        monkeypatch.setattr(main_mod, "get_bridge2", lambda: _FakeBridge())
+        monkeypatch.setattr(main_mod, "get_bridge3", lambda: _FakeBridge())
+        monkeypatch.setattr(main_mod, "_safe_llm", AsyncMock(return_value={"status": "skipped"}))
+
+        result = await main_mod._build_health(deep=True)
+
+        assert set(result["bridges"].keys()) == {"bridge1", "bridge2", "bridge3"}
+
+    async def test_overall_status_ok_when_all_probes_ok(self, monkeypatch):
+        main_mod = self._patch_common_probes(monkeypatch)
+
+        result = await main_mod._build_health(deep=False)
+
+        assert result["status"] == "ok"

@@ -6789,3 +6789,122 @@ Commits `b28cfd8` (fazle-core), `233cf80` (hermes-runner), `373882a`
 (full item-3 proposal + deployment addendum). Phase 5B entry above (same
 day, found the bridge_watchdog bug and named the Chat audit toolkit
 out-of-scope for that phase — both since resolved by this entry).
+
+## Maintenance Repair Pass — Escort Roster Date Serialization, Dead GitHub
+## Models Provider, Bridge3 Health Coverage (2026-08-05)
+
+### Status
+Three confirmed bugs/gaps repaired under Phase 6 (Conditional
+Refactoring — bug fixes and completions, not new features; consistent
+with `master_execution_plan_v2.md`'s active governance state, re-checked
+before this pass). Two additional items (Hermes relay authorization,
+Hermes 502 reliability) investigated read-only only, no code changed for
+either — pending Owner decision.
+
+### A. Escort roster PATCH date serialization (fixed)
+`modules/escort_roster/db.py::create_roster_change_request()` —
+`json.dumps(payload or {})` raised `TypeError: Object of type date is not
+JSON serializable` whenever a PATCH payload (`api_roster_patch()` →
+`payload={"updates": {...}}`) contained a raw `date`/`datetime` value —
+confirmed live in production error logs, 32 occurrences. Fixed with
+`default=str` (matches the existing repo-wide convention already used in
+`shared/realtime.py`; `str(date(...))` is already ISO-8601). 3 new
+regression tests in `tests/unit/test_escort_roster_routes.py`.
+
+### B. Dead GitHub Models provider health-check (fixed)
+`models.github.ai/inference` is permanently retired (confirmed: 117
+repeated `410 Gone` responses in production logs, and independently
+confirmed via OmniRoute's own logs — `"GitHub Models is temporarily
+unavailable as part of a scheduled retirement brownout"`). Root cause
+traced to `app/github_models.py::check_health()`, the sole (and, unlike
+`groq_provider`'s equivalent check, ungated) caller of a live ping to the
+dead endpoint — invoked on every `/chat/models` request via
+`app.llm.check_health()` → `modules.ai_console.provider_registry`. Fixed
+by short-circuiting `check_health()` to return `{"status": "disabled",
+...}` immediately (module-level `_ENDPOINT_CONFIRMED_DEAD = True` flag,
+a one-line reversal if GitHub ever restores/migrates the endpoint). The
+separate reply-generation fallback chain (`generate_reply`/
+`generate_recruitment_reply`/etc. in `app/llm.py`, already correctly
+gated on `settings.github_token` and already handling failure via its
+own existing except/fallback logic) is untouched — out of scope for this
+fix, which targeted only the confirmed-dead, ungated health-check spam.
+3 new regression tests in `tests/unit/test_llm_provider_order.py`.
+
+### C. Bridge3 aggregate health coverage (fixed)
+`app/main.py::_build_health()` included `bridge1_db`/`bridge2_db`/
+`bridge_poller_b1`/`bridge_poller_b2` probes but never gained bridge3
+equivalents when bridge3 was brought online — bridge3 was configured,
+polled, and heartbeating identically to bridge1/bridge2 (confirmed:
+`/home/azim/whatsapp3/store/messages.db` fresh, `fazle_service_heartbeats`
+row for `bridge_poller:bridge3` already being written every poll cycle)
+but invisible in `/health`'s probe list. Added `bridge3_db` +
+`bridge_poller_b3` probes (reusing the exact same `_probe_file_age`/
+`_probe_heartbeat` helpers, same "quiet but poller healthy" reconciliation
+logic) and `bridge3` to the `deep=true` per-bridge status block
+(`get_bridge3()` import added). 4 new regression tests in
+`tests/unit/test_scheduler_phase5b_trigger_wiring.py`.
+
+### D. Hermes relay authorization — read-only findings
+Traced a real prior test message (bridge2, sender `8801958122300` =
+bridge1's own number, text `"HERMES test: ..."`) to its exact database
+record (`fazle_draft_replies.id=2750`) to resolve this precisely rather
+than infer from log lines alone. Confirmed: the message **did** reach
+the real Hermes relay's regex match (`_RE_HERMES` in
+`modules/admin_directives/router.py`) and **was** correctly RBAC-denied
+(`_authorize(sender_phone, "hermes_relay")` requires `superadmin`;
+`8801958122300` holds only the looser `admin` identity tag, not RBAC
+`superadmin` — only bridge2, `8801880446111`, does). The denial text
+itself (`"❌ এই কাজের অনুমতি নেই।"`) is confirmed present verbatim in the
+stored draft's `reply_text` — this corrects an earlier same-day
+in-conversation read that assumed the message fell through to the
+ordinary AI-console path; it did not. The real, separate gap: that
+correct denial then got diverted into an admin-approval draft by
+`bridge_poller`'s existing `LOOP_GUARD` (destination `8801958122300`
+matches bridge1's own configured number), so the sender never saw it
+promptly. Confirmed via code that a genuine bridge2-self-chat
+(`bridge_name == "bridge2"` and recipient == bridge2's own number) does
+**not** trigger `LOOP_GUARD` (`_other_bridge_numbers` explicitly excludes
+the current `bridge_name`) — self-chat on bridge2 is the safe, intended
+test pattern. No RBAC/LOOP_GUARD change made or proposed here — Owner
+decision needed only on whether a cross-bridge `HERMES` denial should
+also be surfaced more promptly to the sender (UX only, not a safety
+change).
+
+### E. Hermes 502 reliability — read-only findings
+Confirmed via `~/.hermes/config.yaml`: the real Hermes CLI is configured
+against OmniRoute (`provider: custom`, `base_url:
+http://127.0.0.1:20128/v1`), not directly against fazle-core's own
+Ollama — contradicting an earlier same-day hedge in conversation that
+this was unconfirmed. OmniRoute's own `omniroute/config.yml` documents a
+"Free Cloud → Local (Ollama) → Paid Cloud" fallback priority, and
+OmniRoute (container up, healthy, 3+ days uptime) was observed in its
+own logs correctly self-healing past the same GitHub Models 410
+retirement (one candidate among many in its "auto" routing combos,
+tries the next on failure) — so simple token exhaustion should not be a
+hard-failure cause by design. However: `hermes-runner/server.py`'s
+`run_hermes()` can only report exactly 3 possible causes for a 502
+(subprocess timeout at `HERMES_RUN_TIMEOUT`=170s, non-zero CLI exit, or
+an empty reply) — and **never persists the actual subprocess
+stderr/exit-detail anywhere**, only returns it transiently in the HTTP
+response body. This means the specific root cause of each of the 27
+historical 502s in the retained log window is **not retroactively
+determinable** from available logs — a genuine observability gap, not a
+resolved question. No fix implemented (read-only per scope); capturing
+a live occurrence with full detail, or adding persistent error logging
+to hermes-runner, would be the natural next step if the Owner wants this
+closed rather than just characterized.
+
+### Owner approval
+Explicit, this session (2026-08-05) — "repair real confirmed bugs, remove
+dead code/dead provider paths, complete incomplete existing health
+coverage... preserve existing architecture, RBAC, safety controls, and
+fallback behavior" for A/B/C; D and E explicitly scoped read-only-only,
+no implementation authorized.
+
+### Cross references
+`modules/escort_roster/db.py`, `app/github_models.py`, `app/main.py`
+(all three A/B/C changes). `fazle_draft_replies.id=2750` (D's evidence).
+`~/.hermes/config.yaml`, `omniroute/config.yml`, `assistant-omniroute`
+container logs (E's evidence). Bridge3 admin-recognition and LOOP_GUARD
+entries above (same LOOP_GUARD mechanism, D's finding is consistent with
+and does not modify it).

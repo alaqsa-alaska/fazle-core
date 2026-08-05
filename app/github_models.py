@@ -331,9 +331,34 @@ async def generate_chat_reply(
     return None
 
 
+# 2026-08-05 (confirmed dead provider path): models.github.ai/inference now
+# returns 410 Gone on every request -- GitHub retired this endpoint. Confirmed
+# via 117 repeated 410 Gone occurrences in production logs, all originating
+# from this function's own health-check ping (app/llm.py's check_health() is
+# the sole caller, called every /chat/models request -- see
+# modules/ai_console/provider_registry.py). Short-circuiting here avoids a
+# guaranteed-failing live network call (and its 10s timeout budget) every
+# poll; return shape is unchanged so callers reading .get("status") are
+# unaffected. This does NOT touch the separate reply-generation fallback
+# chain (generate_reply/generate_recruitment_reply/etc. below, and their
+# Ollama -> Groq -> github_models order in app/llm.py) -- those already
+# correctly gate on settings.github_token and already handle a failed call
+# via their own existing except/fallback logic; disabling this endpoint
+# there too is a separate decision, out of scope for this fix (which only
+# targets the confirmed-dead, ungated health-check spam).
+_ENDPOINT_CONFIRMED_DEAD = True
+
+
 async def check_health() -> dict:
     """Verify GitHub Models token and endpoint are reachable."""
     settings = get_settings()
+    if _ENDPOINT_CONFIRMED_DEAD:
+        return {
+            "status": "disabled",
+            "model": settings.github_model_name,
+            "endpoint": settings.github_model_endpoint,
+            "reason": "models.github.ai/inference confirmed returning 410 Gone (endpoint retired) -- health ping skipped",
+        }
     try:
         client = _make_client()
         resp = await asyncio.wait_for(
