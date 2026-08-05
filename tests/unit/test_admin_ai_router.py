@@ -388,6 +388,22 @@ class TestDeliverHermesReply:
         assert kwargs["source_bridge"] == "bridge2"
         assert kwargs["purpose"] == "hermes_relay_reply"
 
+    async def test_posts_the_whatsapp_relay_readonly_key(self):
+        """2026-08-05 Owner decision: the WhatsApp relay must always
+        identify itself with its own fixed readonly_key, so it serializes
+        against itself, not against Phase 5B job investigations."""
+        mock_resp = type("R", (), {"status_code": 200, "json": lambda self: {"reply": "ok"}})()
+        with patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()):
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("check bridge health", "8801880446111")
+        _, post_kwargs = mock_client.post.call_args
+        assert post_kwargs["json"]["readonly_key"] == "readonly:whatsapp_relay"
+        assert post_kwargs["json"]["read_only"] is True
+
     async def test_hermes_error_status_enqueues_error_text(self):
         mock_resp = type("R", (), {"status_code": 502, "json": lambda self: {"error": "Hermes runner unreachable"}})()
         with patch.object(router, "get_settings", return_value=_FakeSettings()), \
@@ -475,8 +491,9 @@ class TestTriggerAdminInvestigation:
     async def test_request_text_includes_job_name_and_context(self):
         captured = {}
 
-        async def _capture(request_text, *, log_label):
+        async def _capture(request_text, *, log_label, readonly_key=None):
             captured["request_text"] = request_text
+            captured["readonly_key"] = readonly_key
             return "ok"
 
         with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \
@@ -485,6 +502,10 @@ class TestTriggerAdminInvestigation:
             await router.trigger_admin_investigation("bridge_watchdog", "stale_bridges=bridge1(650s)")
         assert "bridge_watchdog" in captured["request_text"]
         assert "stale_bridges=bridge1(650s)" in captured["request_text"]
+        # 2026-08-05 Owner decision: per-job readonly_key so independent
+        # Phase 5B investigations (and the separate WhatsApp relay) don't
+        # collide on hermes-runner's shared "new" lock bucket.
+        assert captured["readonly_key"] == "readonly:job:bridge_watchdog"
 
     async def test_second_call_within_cooldown_skipped(self):
         with patch.object(router, "get_settings", return_value=_FakeSettings(hermes_alert_investigation_enabled=True)), \

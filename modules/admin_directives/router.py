@@ -323,20 +323,31 @@ _HERMES_ACK_MSG = "🔄 Hermes-কে (READ-only) পাঠানো হয়�
 _HERMES_NOT_CONFIGURED_MSG = "⚠️ Hermes relay কনফিগার করা নেই (HERMES_RUNNER_SECRET সেট করা হয়নি)।"
 
 
-async def _call_hermes_readonly(request_text: str, *, log_label: str) -> str:
+async def _call_hermes_readonly(request_text: str, *, log_label: str, readonly_key: str | None = None) -> str:
     """Shared core of the read_only hermes-runner call -- extracted
     (2026-08-04, Phase 5B) so both the WhatsApp-triggered relay
     (_deliver_hermes_reply) and the alert-triggered investigation
     (trigger_admin_investigation) use the exact same HTTP-call logic
     rather than a second, drifting copy. Always returns a display-ready
-    string (a real reply or a Bangla error message) -- never raises."""
+    string (a real reply or a Bangla error message) -- never raises.
+
+    readonly_key (2026-08-05, Owner decision): hermes-runner serializes
+    read_only calls per readonly_key instead of one shared bucket when this
+    is set (see hermes-runner/server.py's _lock_key_for) -- so the WhatsApp
+    relay and each Phase 5B job's investigation no longer contend with each
+    other just because neither carries a real hermes_session_id. Omitting
+    it keeps the prior shared-bucket behavior, unchanged."""
     settings = get_settings()
     try:
         async with httpx.AsyncClient(timeout=175.0) as client:
             resp = await client.post(
                 f"{settings.hermes_runner_url}/run",
                 headers={"Authorization": f"Bearer {settings.hermes_runner_secret}"},
-                json={"message": request_text, "read_only": True},
+                json={
+                    "message": request_text,
+                    "read_only": True,
+                    **({"readonly_key": readonly_key} if readonly_key else {}),
+                },
             )
         try:
             data = resp.json()
@@ -357,7 +368,9 @@ async def _deliver_hermes_reply(request_text: str, sender_phone: str) -> None:
     hermes-runner and delivers the result as a separate outbound WhatsApp
     message. Never awaited inline by _handle_hermes_relay -- see that
     function's docstring for why (MESSAGE_ROUTE_TIMEOUT)."""
-    reply_text = await _call_hermes_readonly(request_text, log_label=f"hermes relay for {sender_phone}")
+    reply_text = await _call_hermes_readonly(
+        request_text, log_label=f"hermes relay for {sender_phone}", readonly_key="readonly:whatsapp_relay",
+    )
 
     try:
         await outbound.enqueue(
@@ -437,7 +450,9 @@ async def trigger_admin_investigation(job_name: str, alert_context: str) -> None
         "next action. If there is insufficient evidence, say so explicitly "
         "rather than guessing."
     )
-    reply_text = await _call_hermes_readonly(request_text, log_label=f"phase5b investigation for job={job_name}")
+    reply_text = await _call_hermes_readonly(
+        request_text, log_label=f"phase5b investigation for job={job_name}", readonly_key=f"readonly:job:{job_name}",
+    )
     log.info("[phase5b_trigger] job=%s event=investigation_complete", job_name)
 
     try:
