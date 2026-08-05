@@ -6693,3 +6693,99 @@ reuses). `modules/scheduler/__init__.py` (`job_dlq_alert`,
 `job_health_summary`, `job_bridge_watchdog` — the three existing trigger
 sources, unmodified in their own alert logic, each gaining one
 additional call).
+
+## Priority 1 Rollout — bridge_watchdog Fix, fazle-mcp/hermes-runner Backup, Chat Audit Toolkit — Deployed & Verified (2026-08-04)
+
+### Status
+CLOSED. All three items from this session's "Priority 1" queue are live
+and independently verified against the running systems, not just tests.
+This entry is the factual deployment record; implementation detail lives
+in the commits and (for item 3) `assistant-platform/proposal_chat_audit_toolkit_20260804.md`.
+
+### Item 1 — bridge_watchdog native alert import bug
+Same-day follow-up to the Phase 5B entry above, which found (but
+deliberately left unfixed, out of scope for that phase) that
+`job_bridge_watchdog`'s native alert path imported `send_to_admin` from
+`modules.message_router`, which never defined it — the `ImportError` was
+silently swallowed by a bare `except Exception: pass`, so the watchdog's
+own native admin alert had never actually fired (Phase 5B's separate
+`trigger_admin_investigation` call was unaffected and continued working).
+Fixed by importing `send_to_admin` from its real location,
+`shared.bridge_orchestrator`, one import statement changed in
+`modules/scheduler/__init__.py`. Regression tests updated/added in
+`tests/unit/test_scheduler_phase5b_trigger_wiring.py`.
+- Commit: `b28cfd8`, pushed to `origin/main` (`arshiyaazim/fazle-core`).
+- Deployed via `scripts/restart_gate.sh --restart` — all 9 checks (working-tree
+  cleanliness, secret scan, xfail count, targeted tests, migration
+  inventory, `.env` flags, backup freshness, pre/post-restart health)
+  passed.
+- Post-restart `GET /health` independently re-confirmed `ok` across every
+  probe (db, bridge1_db, bridge2_db, both bridge pollers, outbound, disk,
+  mem, cpu, ollama, qdrant).
+
+### Item 2 — fazle-mcp / hermes-runner had no backup remote
+Both were local-only git repos (single initial commit each, clean, no
+tracked secrets) with no off-box copy — a real backup/rollback gap.
+Pushed to new private repos on the same GitHub account fazle-core already
+uses (`arshiyaazim`), reusing the SSH key already trusted on this host —
+no new credentials created:
+- `fazle-mcp` → `git@github.com:arshiyaazim/fazle-mcp.git`
+- `hermes-runner` → `git@github.com:arshiyaazim/hermes-runner.git`
+
+Both confirmed local `HEAD` matches remote `HEAD` after push.
+
+### Item 3 — Chat audit toolkit wiring
+Full 6-part proposal, Owner approval, and a mid-implementation design
+amendment (the originally-approved plan assumed `assistant-backend` could
+reach the filesystem directly; it runs in Docker with no host bind mount,
+so the actual build routes through a new authenticated HTTP endpoint on
+hermes-runner instead) are recorded in
+`assistant-platform/proposal_chat_audit_toolkit_20260804.md` — read that
+file for detail, not this summary.
+- Commits: `hermes-runner@233cf80`, `assistant-platform@373882a`, both
+  pushed to their respective remotes.
+- `hermes-runner.service` restarted (new PID confirmed via `systemctl --user status`).
+- `assistant-backend` container rebuilt and recreated
+  (`docker compose up -d --build assistant-backend`).
+- `CHAT_AUDIT_TOOLS_ENABLED=true` set in `assistant-platform/backend/.env`,
+  confirmed loaded inside the running container
+  (`process.env.CHAT_AUDIT_TOOLS_ENABLED === 'true'`).
+- Live authenticated `POST /audit` call against the real, running
+  production hermes-runner instance returned real `git status` output for
+  fazle-core — confirmed the full chain (Chat → hermes-runner → host
+  filesystem/git) works end-to-end, not just in tests. Feature remains
+  admin-only (`req.user.role === 'admin'`, checked in `chat.js` before the
+  audit tools are ever offered to the model or executed) — the
+  `CHAT_AUDIT_TOOLS_ENABLED` flag is an additional kill switch on top of,
+  not instead of, that gate.
+
+### fazle-core working tree, confirmed clean
+As of this entry, `git status --short` on `/home/azim/core` shows nothing
+except two pre-existing untracked items neither created nor touched by
+this rollout: `db/migrations_drafts/` (a kept dead-migration record, see
+Session 20's queue-doc entry) and `moonshot_test.py`.
+
+### Owner approval
+Explicit, this session (2026-08-04) — three separate approvals: item 1
+("Yes, fix + update test now"), item 2 (remote strategy + push
+confirmation), item 3 ("Approve as designed — admin-gated (isAdmin-only)
+port of the 7 read-only audit tools into Chat's tool list"), followed by
+an explicit instruction to push/restart/deploy/enable all three.
+
+### Operational note (not a code issue — logged as backlog, not actioned here)
+Pushing `hermes-runner`'s commit was blocked twice by Claude Code's
+auto-mode permission classifier ("Stage 2 classifier error — blocking
+based on stage 1 assessment... usually transient") before succeeding on
+the third attempt, with no repo-side or credential-side cause — `fazle-mcp`'s
+and `assistant-platform`'s pushes in the same session were not affected.
+Not investigated or fixed as part of this rollout; if it recurs, a Claude
+Code Bash permission rule may resolve it. See also memory
+`feedback_hermes_runner_push_classifier_20260804` for the cross-session
+tooling note.
+
+### Cross references
+Commits `b28cfd8` (fazle-core), `233cf80` (hermes-runner), `373882a`
+(assistant-platform). `assistant-platform/proposal_chat_audit_toolkit_20260804.md`
+(full item-3 proposal + deployment addendum). Phase 5B entry above (same
+day, found the bridge_watchdog bug and named the Chat audit toolkit
+out-of-scope for that phase — both since resolved by this entry).
