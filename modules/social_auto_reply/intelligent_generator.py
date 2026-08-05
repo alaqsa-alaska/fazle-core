@@ -65,6 +65,18 @@ class ReplyPlan:
     # needed -- see planner_worker.py's _notify_admin_flagged / the
     # extended _draft_instead_of_send.
     validation_reason: str | None = None
+    # 2026-08-05 (Owner decision, provider-chain change): the AI-generated
+    # text that _safe_polish() rejected (None if polish never ran, e.g.
+    # never_ai_polish intents, or if it succeeded). The Admin's review
+    # notification shows this alongside the safe rule-based reply_text
+    # that actually gets sent, so a reviewer can judge whether the
+    # rejection was correct.
+    rejected_ai_reply: str | None = None
+    # 2026-08-05: raw per-provider attempt trace (app.llm.get_last_attempts())
+    # captured whenever polish was attempted, success or failure -- lets the
+    # admin notification show exactly which providers were tried and their
+    # outcome, not just a summary reason string.
+    provider_attempts: list[dict] | None = None
 
 
 _INTENT_PRIORITY = [
@@ -160,6 +172,15 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
     # whitelist's 122311/122327 never matched OFFICE_NUMBERS' 122300).
     dynamic_office_numbers = await rules.get_effective_office_numbers()
     is_safe, fail_reason = _safe_polish(polished, extra_allowed=_extract_number_tokens(dynamic_office_numbers))
+    # 2026-08-05 (Owner decision, provider-chain change): capture the raw
+    # per-provider attempt trace unconditionally, success or failure — the
+    # admin-review notification (planner_worker.py) can show exactly which
+    # providers were tried and their outcome whenever polish was attempted.
+    try:
+        from app.llm import get_last_attempts
+        provider_attempts = get_last_attempts() or None
+    except Exception:
+        provider_attempts = None
     if is_safe:
         final_reply = polished
         # 2026-08-03 (Owner decision, Phase 4): AI-polished text must go to
@@ -170,6 +191,7 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
         # equivalent polish/validate step to gate today.
         needs_review = os.getenv("SOCIAL_AI_POLISH_REVIEW_REQUIRED", "true").lower() in {"1", "true", "yes"}
         validation_reason = None
+        rejected_ai_reply = None
     else:
         # 2026-08-04 (Owner decision): a validation failure must never be a
         # silent substitution — the safe rule-based reply is still what
@@ -179,10 +201,22 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
         final_reply = reply
         needs_review = True
         validation_reason = fail_reason
+        rejected_ai_reply = polished or None
+        # 2026-08-05: _safe_polish() rejects app.llm.generate_reply()'s own
+        # all-providers-exhausted boilerplate the same way it rejects any
+        # other unsafe text (it IS the same literal string check) — give
+        # that specific case a clearer summary reason (the raw trace is
+        # still separately available via provider_attempts above).
+        if fail_reason and "generic acknowledgement phrase" in fail_reason and provider_attempts:
+            validation_reason = "All AI providers exhausted — " + "; ".join(
+                f"{a['provider']}({a['model']}): {a['outcome']}" + (f" [{a['detail']}]" if a['detail'] else "")
+                for a in provider_attempts
+            )
     await _update_thread_state(platform, target_id, intents, final_reply)
     return ReplyPlan(
         final_reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events),
         needs_review=needs_review, validation_reason=validation_reason,
+        rejected_ai_reply=rejected_ai_reply, provider_attempts=provider_attempts,
     )
 
 
@@ -364,7 +398,13 @@ async def _polish_with_ai(
         f"Safe draft to improve without changing facts:\n{rule_reply[:1200]}"
     )
     try:
-        from app.ollama import generate_reply as ai_generate_reply
+        # 2026-08-05 (Owner decision): routed through app.llm's full
+        # provider chain (OmniRoute -> Groq -> local Ollama/Hermes -> Kimi)
+        # instead of calling app.ollama directly, so AI-polish inherits the
+        # new chain automatically with no duplicated fallback logic here.
+        # app.llm.generate_reply() never raises (catches everything
+        # internally) -- this try/except is kept as defense-in-depth only.
+        from app.llm import generate_reply as ai_generate_reply
         return await ai_generate_reply(
             user_message=current_text,
             intent="recruitment",

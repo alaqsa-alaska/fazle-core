@@ -103,6 +103,8 @@ async def process_due_threads(limit: int = 10) -> dict:
                 sender_role=sender_role,
                 ai_polished=plan.needs_review,
                 validation_reason=plan.validation_reason,
+                rejected_ai_reply=plan.rejected_ai_reply,
+                provider_attempts=plan.provider_attempts,
                 events=events,
             )
             if draft_id:
@@ -171,6 +173,7 @@ async def _sender_display_name(target_id: str, latest_event: dict) -> str:
 async def _draft_instead_of_send(
     *, platform: str, target_id: str, reply_text: str, intent: str, sender_role: str,
     ai_polished: bool = False, validation_reason: str | None = None,
+    rejected_ai_reply: str | None = None, provider_attempts: list[dict] | None = None,
     events: list[dict] | None = None,
 ) -> int | None:
     """Create a fazle_draft_replies row instead of enqueueing a real send,
@@ -190,6 +193,11 @@ async def _draft_instead_of_send(
     the rejected AI text), but the Admin still needs to see *why* AI-polish
     was rejected, plus full sender/message context, per the same "never a
     silent failure" decision that added _notify_admin_flagged() below.
+
+    rejected_ai_reply / provider_attempts (2026-08-05, Owner decision,
+    provider-chain change): the actual rejected AI text, and which
+    providers were tried and their outcome -- so a reviewer can judge the
+    rejection itself, not just see that one happened.
     """
     context = (
         f"social_auto_reply planner — AI-polish validation failed, safe fallback used — "
@@ -225,12 +233,25 @@ async def _draft_instead_of_send(
         if validation_reason:
             sender_name = await _sender_display_name(target_id, latest)
             original_message = str(latest.get("message_text") or "")[:500]
+            ai_reply_line = (
+                f"Generated AI Reply: {rejected_ai_reply[:500]}\n" if rejected_ai_reply else ""
+            )
+            providers_line = ""
+            if provider_attempts:
+                providers_summary = "; ".join(
+                    f"{a.get('provider')}({a.get('model')}): {a.get('outcome')}" for a in provider_attempts
+                )
+                providers_line = f"Providers Attempted: {providers_summary}\n"
             extra_lines = (
                 f"Message ID: {latest.get('id')}\n"
                 f"Sender Name: {sender_name}\n"
                 f"Sender Mobile: {target_id}\n"
                 f"Original Message: {original_message}\n"
+                f"{ai_reply_line}"
+                f"{providers_line}"
                 f"Reason: {validation_reason}\n"
+                f"Recommended Action: review the generated reply (if any) and either "
+                f"APPROVE the safe fallback below, EDIT it, or REJECT and reply manually.\n"
             )
         await enqueue_outbound(
             admin_phone,
@@ -251,6 +272,7 @@ async def _draft_instead_of_send(
             meta={
                 "draft_id": draft_id, "platform": platform, "target_id": target_id,
                 "ai_polished": ai_polished, "validation_reason": validation_reason,
+                "provider_attempts": provider_attempts,
             },
         )
     return draft_id

@@ -63,6 +63,25 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model_name: str = "llama-3.1-8b-instant"
 
+    # OmniRoute (2026-08-05, Owner decision: new provider order for AI
+    # generation/polish — OmniRoute → Groq → local Ollama/Hermes → Kimi).
+    # Same local AI gateway hermes-runner's own ~/.hermes/config.yaml
+    # already points at (base_url http://127.0.0.1:20128/v1) — no new
+    # network path, just fazle-core's first use of an existing one.
+    # OMNIROUTE_API_KEY needs to be issued for fazle-core specifically
+    # (see the maintenance-repair report, 2026-08-05) — left blank here
+    # like every other provider key, never hardcoded.
+    omniroute_url: str = "http://127.0.0.1:20128/v1"
+    omniroute_api_key: str = ""
+    omniroute_model_name: str = "auto"
+
+    # Kimi (2026-08-05): reached through the existing local Ollama client
+    # (app/ollama.py), not a separate HTTP provider — Ollama's own cloud-
+    # model proxy already has kimi-k2.6:cloud etc. provisioned on this
+    # server (confirmed via GET /api/tags). Configurable in case the
+    # provisioned tag changes.
+    kimi_model_name: str = "kimi-k2.6:cloud"
+
     # Bridges
     bridge1_url: str = "http://localhost:8082"
     bridge1_number: str = ""

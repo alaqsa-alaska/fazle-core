@@ -30,6 +30,18 @@ log = logging.getLogger("fazle.ollama")
 # string-matching a literal in a second place.
 FALLBACK_REPLY_TEXT = "আপনার বার্তা পেয়েছি। একটু পরে বিস্তারিত জানাচ্ছি।"
 
+# 2026-08-05: promoted from a local variable to a module constant, same
+# reason/pattern as FALLBACK_REPLY_TEXT above -- lets app/llm.py's new
+# OmniRoute -> Groq -> local Ollama/Hermes -> Kimi chain detect "this local
+# Ollama call itself fell back internally" (vs. a genuine reply) so it can
+# correctly continue to the Kimi step, instead of treating Ollama's own
+# non-empty fallback string as chain-level success.
+RECRUITMENT_FALLBACK_TEXT = (
+    "আমি ফজলে — আল-আকসা HR assistant।\n"
+    "চাকরির জন্য নাম, বয়স ও জেলা লিখে পাঠান।\n"
+    "বিস্তারিত জানতে WhatsApp: 01958 122300"
+)
+
 
 def _bounded_int(value: int, *, minimum: int, maximum: int, default: int) -> int:
     try:
@@ -212,13 +224,22 @@ async def generate_reply(
     history: str = "",
     role: str = "new_lead",
     source: str = "unknown",
+    model: str | None = None,
 ) -> str:
     """
     Generate a short Bengali reply using local Ollama.
     Serialized through semaphore to prevent concurrent timeout failures.
     Prompt is built by shared.reply_policy — identical for bridge1, bridge2, meta.
+
+    model (2026-08-05, Owner decision): optional override of
+    settings.ollama_model, matching the pattern generate_chat_reply()
+    already used. Lets app/llm.py request a specific model (a local
+    "hermes" model if provisioned, or a kimi-*:cloud model for the Kimi
+    fallback step) through this same client instead of a new one.
+    Omitting it keeps the exact prior behavior.
     """
     settings = get_settings()
+    use_model = model or settings.ollama_model
     prompt = build_whatsapp_reply_policy(
         source=source,
         user_message=user_message,
@@ -232,7 +253,7 @@ async def generate_reply(
     async with _ollama_sem:
         try:
             payload = {
-                "model": settings.ollama_model,
+                "model": use_model,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
@@ -256,14 +277,14 @@ async def generate_reply(
                     ),
                 },
             }
-            if _is_qwen3(settings.ollama_model):
+            if _is_qwen3(use_model):
                 payload["think"] = False
             r = await ollama_daemon.post_generate(payload, timeout=120.0)
             if r.status_code == 200:
                 reply_text = r.json().get("response", "").strip()
                 latency_ms = int((time.monotonic() - t0) * 1000)
                 asyncio.create_task(_log_llm(
-                    "generate_reply", settings.ollama_model, prompt, reply_text, latency_ms,
+                    "generate_reply", use_model, prompt, reply_text, latency_ms,
                 ))
                 return reply_text
             else:
@@ -279,7 +300,7 @@ async def generate_reply(
     except Exception:
         pass
     asyncio.create_task(_log_llm(
-        "generate_reply", settings.ollama_model, prompt,
+        "generate_reply", use_model, prompt,
         FALLBACK_REPLY_TEXT,
         int((time.monotonic() - t0) * 1000), is_fallback=True,
     ))
@@ -292,6 +313,7 @@ async def generate_recruitment_reply(
     history: str = "",
     contact_context: str = "",
     source: str = "unknown",
+    model: str | None = None,
 ) -> str:
     """
     Recruitment-only reply brain.
@@ -299,8 +321,12 @@ async def generate_recruitment_reply(
     This "educates" qwen at runtime with approved recruitment KB + recent
     conversation memory. It does not fine-tune model weights.
     Prompt is built by shared.reply_policy — identical for bridge1, bridge2, meta.
+
+    model (2026-08-05, Owner decision): optional override of
+    settings.ollama_model — see generate_reply()'s docstring above for why.
     """
     settings = get_settings()
+    use_model = model or settings.ollama_model
     prompt = build_whatsapp_recruitment_policy(
         source=source,
         user_message=user_message,
@@ -313,7 +339,7 @@ async def generate_recruitment_reply(
     async with _ollama_sem:
         try:
             payload = {
-                "model": settings.ollama_model,
+                "model": use_model,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
@@ -338,14 +364,14 @@ async def generate_recruitment_reply(
                     "repeat_penalty": 1.08,
                 },
             }
-            if _is_qwen3(settings.ollama_model):
+            if _is_qwen3(use_model):
                 payload["think"] = False
             r = await ollama_daemon.post_generate(payload, timeout=120.0)
             if r.status_code == 200:
                 reply_text = r.json().get("response", "").strip()
                 latency_ms = int((time.monotonic() - t0) * 1000)
                 asyncio.create_task(_log_llm(
-                    "generate_recruitment_reply", settings.ollama_model, prompt, reply_text, latency_ms,
+                    "generate_recruitment_reply", use_model, prompt, reply_text, latency_ms,
                 ))
                 return reply_text
             log.warning("[ollama] generate_recruitment_reply non-200: status=%d body=%.100s",
@@ -358,13 +384,9 @@ async def generate_recruitment_reply(
         _obs.inc("llm_fallback_total", labels={"path": "recruitment"})
     except Exception:
         pass
-    _fallback = (
-        "আমি ফজলে — আল-আকসা HR assistant।\n"
-        "চাকরির জন্য নাম, বয়স ও জেলা লিখে পাঠান।\n"
-        "বিস্তারিত জানতে WhatsApp: 01958 122300"
-    )
+    _fallback = RECRUITMENT_FALLBACK_TEXT
     asyncio.create_task(_log_llm(
-        "generate_recruitment_reply", settings.ollama_model, prompt,
+        "generate_recruitment_reply", use_model, prompt,
         _fallback, int((time.monotonic() - t0) * 1000), is_fallback=True,
     ))
     return _fallback
