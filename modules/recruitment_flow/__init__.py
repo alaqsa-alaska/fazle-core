@@ -37,13 +37,27 @@ OPERATIONAL_INTENTS = frozenset({
 
 # ── Intake trigger keywords ────────────────────────────────────────────────────
 INTAKE_KEYWORDS: set[str] = {
-    "job", "চাকরি", "vacancy", "apply", "hire",
-    "recruit", "নিয়োগ", "কাজের", "interested",
-    "আগ্রহী", "পদ", "পারব", "নেবেন", "জয়েন",
+    "চাকরি", "vacancy", "apply", "hire",
+    "recruit", "নিয়োগ", "কাজের",
+    "পদ", "পারব", "নেবেন", "জয়েন",
     "cv", "joining",  # P17-FIX-3: added for "cv dibo" / "joining kobe" test cases
     "office location", "office address", "contact number", "whatsapp number",
     "অফিস কোথায়", "অফিস কোথায়", "অফিসের ঠিকানা", "যোগাযোগ নম্বর",
 }
+
+# 2026-08-06 fix: "job", "interested", and their Bangla equivalent
+# "আগ্রহী" were removed from the set below -- confirmed live, a bare
+# substring match on any of the three fires on ordinary non-recruitment
+# text (an internal test message "run job health_summary", and a generic
+# business inquiry "I am interested in learning more about your business"
+# both silently opened a recruitment funnel session). The Bangla word is
+# included even though only the two English words were reported live --
+# it's the direct translation of "interested" and carries the identical
+# false-positive risk. All three now only count as a trigger inside a
+# job-shaped phrase (RECRUITMENT_TRIGGER_PHRASES, below) -- matching the
+# specificity every other entry here already has on its own (চাকরি/
+# vacancy/recruit/cv/... are distinctive enough as bare words;
+# job/interested/আগ্রহী were not).
 
 VALID_POSITIONS: dict[str, str] = {
     "1": "Escort",
@@ -339,15 +353,30 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
     }
 
 
+RECRUITMENT_TRIGGER_PHRASES: tuple[str, ...] = (
+    "কাজ চাই", "কাজ করতে চাই", "কাজ আছে", "কাজ পাব", "কাজ করতে আগ্রহী",
+    "looking for work", "need a job", "job available", "job interest",
+    # "job" in job-seeking context (was a bare INTAKE_KEYWORDS entry)
+    "a job", "any job", "job vacancy", "job apply", "apply for job",
+    "job korte chai", "job er jonno", "job ache", "job lagbe",
+    "job pete chai", "job dorkar", "job chai",
+    # "interested" in job-seeking context (was a bare INTAKE_KEYWORDS entry;
+    # its Bangla equivalent "আগ্রহী" keeps working via the existing
+    # phrase above and via "চাকরি"/"নিয়োগ" (still bare keywords) --
+    # no new Bangla phrase added here, see comment on INTAKE_KEYWORDS above.
+    "interested in this job", "interested in the job", "interested to apply",
+    "interested in working", "interested in joining", "job e interested",
+    "interested for the post", "interested in this post",
+    "interested in recruitment", "interested in the vacancy",
+)
+
+
 def is_recruitment_trigger(text: str) -> bool:
     """Quick check: does this message look like a job inquiry?"""
     lower = text.lower()
     if any(kw in lower for kw in INTAKE_KEYWORDS):
         return True
-    return any(phrase in lower for phrase in (
-        "কাজ চাই", "কাজ করতে চাই", "কাজ আছে", "কাজ পাব", "কাজ করতে আগ্রহী",
-        "looking for work", "need a job", "job available", "job interest",
-    ))
+    return any(phrase in lower for phrase in RECRUITMENT_TRIGGER_PHRASES)
 
 
 async def get_active_session(phone: str) -> Optional[dict]:
