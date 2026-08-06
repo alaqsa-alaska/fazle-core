@@ -153,3 +153,18 @@ modules/rbac/__init__.py
 # original asyncpg.UndefinedColumnError class) all passing pre-restart.
 modules/bridge_poller/__init__.py
 tests/unit/test_bridge_poller_orphan_message_fix.py
+
+# 2026-08-06: IDENTITY_BRAIN_NAME_LOOKUP_AUDIT_REPORT.md — a read-only
+# architecture audit (auditor: Cline, per its own header), generated at
+# Owner's request, proposing removal of the display-name-based escort
+# marker (`identity_brain._matches_escort_name_marker()`) from
+# `detect_identity()`. Status per the report itself: "WAITING FOR OWNER
+# APPROVAL BEFORE ANY CODE CHANGES" — no code changed, nothing applied.
+# Owner-confirmed this session (2026-08-06, during Phase 1A recruitment
+# fix deployment) that this file is expected and does not conflict with
+# that deployment. Administrative acknowledgment only — this manifest
+# entry does NOT constitute review or approval of the report's proposal.
+# The report itself stays uncommitted/untracked by explicit Owner
+# instruction. Remove this entry once the Owner reviews the report and
+# either commits it (if it's to be kept in the repo) or deletes it.
+IDENTITY_BRAIN_NAME_LOOKUP_AUDIT_REPORT.md
