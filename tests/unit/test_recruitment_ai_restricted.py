@@ -128,6 +128,61 @@ def test_unknown_sender_location_and_contact_questions_enter_recruitment_gate():
     assert not is_recruitment_trigger("এই কাজ শেষ হয়েছে")
 
 
+# ===========================================================================
+# 2026-08-06 fix: "job"/"interested" (and Bangla equivalent) over-broad bare
+# substring match -- confirmed live to false-trigger on an internal test
+# message ("run job health_summary") and a generic business inquiry ("I am
+# interested in learning more about your business"), both of which silently
+# opened a recruitment funnel session on a real WhatsApp number. See
+# knowledge_base/06_developer_system/recruitment_flow_system.md for the
+# documented trigger-keyword table this fix also updates.
+# ===========================================================================
+
+def test_bare_job_and_interested_no_longer_false_trigger():
+    """The two exact real-incident messages must NOT open a recruitment
+    session anymore."""
+    assert not is_recruitment_trigger("run job health_summary")
+    assert not is_recruitment_trigger(
+        "I am interested in learning more about your business"
+    )
+    assert not is_recruitment_trigger("job well done, thanks for the update")
+    assert not is_recruitment_trigger("just checking, are you interested in coffee?")
+
+
+def test_genuine_job_seeking_phrases_still_trigger_english():
+    """Legitimate English job-seeking phrasing must still work -- "job" and
+    "interested" remain triggers when they appear in job-shaped context."""
+    assert is_recruitment_trigger("I need a job")
+    assert is_recruitment_trigger("looking for work")
+    assert is_recruitment_trigger("any job available?")
+    assert is_recruitment_trigger("I want to apply for job")
+    assert is_recruitment_trigger("I am interested in this job")
+    assert is_recruitment_trigger("interested in the vacancy, how to apply?")
+    assert is_recruitment_trigger("job chai")
+    assert is_recruitment_trigger("ami ekta job korte chai")
+
+
+def test_genuine_job_seeking_phrases_still_trigger_bangla():
+    """Legitimate Bangla job-seeking phrasing must still work -- চাকরি/নিয়োগ/পদ
+    remain bare keywords (unaffected by this fix), and the existing
+    "কাজ করতে আগ্রহী" phrase still covers the Bangla আগ্রহী case."""
+    assert is_recruitment_trigger("চাকরি করতে চাই")
+    assert is_recruitment_trigger("চাকরিতে আগ্রহী")  # via bare চাকরি keyword
+    assert is_recruitment_trigger("কাজ করতে আগ্রহী")  # pre-existing phrase
+    assert is_recruitment_trigger("নিয়োগ চলছে কি?")
+    assert is_recruitment_trigger("cv dibo")
+    assert is_recruitment_trigger("joining kobe")
+
+
+def test_existing_non_recruitment_behavior_unchanged():
+    """Sanity check that nothing outside the job/interested change
+    regressed -- reuses the pre-existing gate test's own assertions."""
+    assert is_recruitment_trigger('অফিস কোথায়?')
+    assert is_recruitment_trigger('যোগাযোগ নম্বর দিন')
+    assert not is_recruitment_trigger('নয়টা ছয় মিনিট অফিসে কোন স্টাফ আসে নাই')
+    assert not is_recruitment_trigger('এই কাজ শেষ হয়েছে')
+
+
 async def test_meta_recruitment_safe_mode_bypass_uses_queue_compatible_channel():
     from app.main import _handle_meta_message
 

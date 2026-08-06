@@ -28,7 +28,7 @@ When `recruitment_eligibility()` returns `eligible=True`, the router chooses one
 
 | Path | Trigger | Handler | `autosend` |
 |---|---|---|---|
-| **Funnel** | `INTAKE_KEYWORDS` match in message | `recruitment_flow.intake_message()` | `True` — sent immediately |
+| **Funnel** | `INTAKE_KEYWORDS` or `RECRUITMENT_TRIGGER_PHRASES` match in message | `recruitment_flow.intake_message()` | `True` — sent immediately |
 | **LLM Chat** | Active session + `_QUESTION_HINTS` match | `recruitment_ai.generate_recruitment_reply()` | `False` — goes to admin draft |
 | **Not eligible** | `OPERATIONAL_ROLES` or `OPERATIONAL_INTENTS` detected | Route normally (not recruitment) | — |
 
@@ -48,19 +48,25 @@ An open intake session expires after 24 hours of inactivity. Expired sessions ar
 
 ---
 
-### `INTAKE_KEYWORDS` (~23 unique terms)
+### `INTAKE_KEYWORDS` (bare substring match, ~20 unique terms)
 
 Explicit signals that a sender is seeking employment. Match triggers the funnel (path 1) regardless of session state.
 
 ```
-"job", "চাকরি", "vacancy", "apply", "hire", "recruit",
-"নিয়োগ", "কাজের", "interested", "আগ্রহী", "পদ", "পারব",
-"নেবেন", "জয়েন", "cv", "joining", "office location",
-"office address", "contact number", "whatsapp number",
-"অফিস কোথায়", "অফিসের ঠিকানা", "যোগাযোগ নম্বর"
+"চাকরি", "vacancy", "apply", "hire", "recruit", "নিয়োগ", "কাজের", "পদ", "পারব", "নেবেন", "জয়েন", "cv", "joining", "office location", "office address", "contact number", "whatsapp number", "অফিস কোথায়", "অফিস কোথায়", "অফিসের ঠিকানা", "যোগাযোগ নম্বর"
 ```
 
-Note: `INTAKE_KEYWORDS` is a Python `set` — duplicate entries are automatically deduplicated.
+**2026-08-06 fix:** `"job"`, `"interested"`, and their Bangla equivalent `"আগ্রহী"` were removed from this bare set — a bare substring match on any of the three fired on ordinary non-recruitment text. Confirmed live: an internal test message ("run job health_summary") and a generic business inquiry ("I am interested in learning more about your business") both silently opened a recruitment funnel session on a real WhatsApp number. All three now only count as a trigger inside a job-shaped phrase — see `RECRUITMENT_TRIGGER_PHRASES` below.
+
+### `RECRUITMENT_TRIGGER_PHRASES` (contextual, 31 phrases)
+
+`"job"`, `"interested"`, and `"আগ্রহী"` still trigger the funnel, but only inside one of these job-shaped phrases (requires an accompanying work/post/apply/join word, not standing alone):
+
+```
+"কাজ চাই", "কাজ করতে চাই", "কাজ আছে", "কাজ পাব", "কাজ করতে আগ্রহী", "looking for work", "need a job", "job available", "job interest", "a job", "any job", "job vacancy", "job apply", "apply for job", "job korte chai", "job er jonno", "job ache", "job lagbe", "job pete chai", "job dorkar", "job chai", "interested in this job", "interested in the job", "interested to apply", "interested in working", "interested in joining", "job e interested", "interested for the post", "interested in this post", "interested in recruitment", "interested in the vacancy"
+```
+
+Note: `INTAKE_KEYWORDS` is a Python `set` — duplicate entries are automatically deduplicated. `RECRUITMENT_TRIGGER_PHRASES` is a `tuple` (order-preserving, not deduplicated).
 
 ---
 
@@ -236,7 +242,7 @@ Main handler for the intake funnel. Returns `{reply, action, session_id}`.
 
 **Flow:**
 1. Load active session via `get_active_session(phone)`
-2. If no session: check `INTAKE_KEYWORDS` → if match, create session → return `name` question
+2. If no session: check `INTAKE_KEYWORDS`/`RECRUITMENT_TRIGGER_PHRASES` (via `is_recruitment_trigger()`) → if match, create session → return `name` question
 3. If session exists: advance to next step based on current `collection_step`
 4. Validate input for each step (`_parse_age()` for age, `VALID_POSITIONS` lookup for job_preference)
 5. After `phone_confirm`: compute score → return `INTAKE_COMPLETE_MSG`
