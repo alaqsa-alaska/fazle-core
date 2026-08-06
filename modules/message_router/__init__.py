@@ -905,7 +905,34 @@ async def process_message(
     reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
     # Phase 4 Step 4 — strip artifact prefixes from structured prompt output
     from shared.reply_policy import clean_general_reply as _clean_reply
-    return _clean_reply(reply), None
+    reply = _clean_reply(reply)
+
+    # Phase 2 (2026-08-06, Owner-approved "Universal AI Responder", shadow
+    # mode -- see management_decisions.md "Universal AI Responder — Phase
+    # 2"): compute the upgraded KB/RAG/faithfulness-validated pipeline in
+    # parallel and log it alongside today's bare-AI reply for comparison.
+    # Does NOT affect what's returned/sent unless
+    # settings.tier15_universal_responder_live is explicitly True (default
+    # False) -- a separate, later Owner decision. This is the ONLY change
+    # at Tier 15; every upstream tier/gate (family, escort, admin,
+    # accountant, employee's own branches, Route B) is unreached code from
+    # here and is completely unaffected.
+    try:
+        from modules.conversation_layer import generate_universal_reply
+        universal_reply = await generate_universal_reply(
+            phone=sender, text=text, source=source,
+            intent=intent, role=role_str, history=history, db_ctx=db_ctx,
+        )
+        log.info(
+            "[tier15_shadow] sender=%s old_reply=%r new_reply=%r",
+            sender, (reply or "")[:200], (universal_reply or "")[:200],
+        )
+        if get_settings().tier15_universal_responder_live and universal_reply:
+            return universal_reply, None
+    except Exception as e:
+        log.debug("[tier15_shadow] universal responder failed (non-fatal): %s", e)
+
+    return reply, None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -965,16 +992,38 @@ def _resolve_forward_target(command_text: str, settings) -> Optional[str]:
 
 
 async def get_recent_history(phone: str, limit: int = 5) -> list:
-    """Return recent inbound message texts for a given phone number."""
+    """Return recent BIDIRECTIONAL message texts for a given phone number.
+
+    Phase 2 (2026-08-06, Owner-approved "Universal AI Responder"):
+    extended from inbound-only to include the bot's own outbound replies
+    too, so every caller (recruitment's live LLM layer, Tier 15's new
+    Universal Responder, recruitment_detector) gets real back-and-forth
+    context instead of only the human's side. `sender_number` represents
+    the counterparty phone for BOTH directions in this table -- confirmed
+    against live data, an outbound row's sender_number is still the
+    human's number, not the bot's -- so no join or recipient-tracking
+    change was needed, only dropping the `direction = 'inbound'` filter.
+    Each line is prefixed "Them: " (inbound) or "You: " (outbound) so a
+    downstream prompt can tell who said what; this is a formatting change
+    for every existing caller of this function, all of which build a
+    plain history block for an LLM prompt where this is a pure
+    improvement, not a behavior-affecting one."""
     try:
         rows = await fetch_all(
-            """SELECT message_body
+            """SELECT message_body, direction
                FROM wbom_whatsapp_messages
-               WHERE sender_number = $1 AND direction = 'inbound'
+               WHERE sender_number = $1 AND direction IN ('inbound', 'outbound')
                ORDER BY received_at DESC LIMIT $2""",
             phone, limit,
         )
-        return [r["message_body"] for r in reversed(rows) if r.get("message_body")]
+        out = []
+        for r in reversed(rows):
+            body = (r.get("message_body") or "").strip()
+            if not body:
+                continue
+            prefix = "You: " if r.get("direction") == "outbound" else "Them: "
+            out.append(prefix + body)
+        return out
     except Exception as e:
         log.debug(f"get_recent_history error: {e}")
         return []

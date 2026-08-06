@@ -1,6 +1,14 @@
-"""Recruitment playbook primitives for shadow-mode reply generation."""
+"""Recruitment playbook primitives for shadow-mode reply generation --
+plus, since Phase 2 (2026-08-06), validate_faithfulness() at the bottom
+of this file: a topic-agnostic safety check for Tier 15's Universal
+Responder, co-located with classify_reply_safety() (the closest existing
+analog) rather than in a new file. See
+knowledge_base/00_governance/management_decisions.md "Universal AI
+Responder — Phase 2"."""
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 
 
@@ -246,3 +254,74 @@ def build_rule_reply(signals: RecruitmentSignals) -> str:
         )
 
     return f"{fact}\nআগ্রহী হলে {APPLICATION_FIELDS} পাঠান, অফিস থেকে পরের ধাপ জানানো হবে।"
+
+
+# ── Faithfulness validator (Phase 2, 2026-08-06) ────────────────────────────
+# Universal Responder's grounding check for Tier 15 -- parallel in spirit
+# to social_auto_reply/intelligent_generator.py's _safe_polish(), but
+# grounded against THIS query's own RAG citations (dynamic, per call)
+# rather than a static numeric whitelist tuned for one topic. NOT a full
+# semantic-entailment check -- that needs either a second LLM call or real
+# NLP infrastructure, neither of which this function does. This is a
+# crude but real, honest, deterministic proxy:
+#   1. every number in the reply must appear somewhere in the retrieved
+#      RAG text -- exactly _safe_polish()'s numeric-grounding idea,
+#      generalized from "static whitelist" to "this query's own facts".
+#   2. no poison words (the reply must not talk about being an AI, a
+#      database, a model, a prompt).
+#   3. if RAG found nothing at all, the reply MUST be the safe fallback
+#      exactly -- there is nothing for the LLM to have grounded an answer
+#      in, so any freeform text at that point is by definition ungrounded.
+
+SAFE_FALLBACK_REPLY = "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+
+_POISON_WORDS = ("chain_of_thought", "ai", "\u098f\u0986\u0987", "prompt", "\u09a1\u09c7\u099f\u09be\u09ac\u09c7\u099c", "database", "model", "reasoning")
+
+_BANGLA_DIGITS_TRANS = str.maketrans("\u09e6\u09e7\u09e8\u09e9\u09ea\u09eb\u09ec\u09ed\u09ee\u09ef", "0123456789")
+
+
+def _extract_numbers(text: str) -> set[str]:
+    normalized = unicodedata.normalize("NFC", text or "").translate(_BANGLA_DIGITS_TRANS)
+    return set(re.findall(r"\b\d{2,6}\b", normalized))
+
+
+def validate_faithfulness(
+    reply: str,
+    rag_answer: str | None,
+    citations: list | None = None,
+) -> tuple[bool, str | None]:
+    """Returns (is_faithful, reason). reason is None when is_faithful is
+    True, otherwise a human-readable explanation (matches
+    _safe_polish()'s own (is_safe, reason) return-shape convention)."""
+    if not reply:
+        return False, "empty reply"
+    if len(reply) > 1400:
+        return False, f"reply too long ({len(reply)} chars, max 1400)"
+
+    # Word-boundary matched, NOT raw substring (unlike social_auto_reply's
+    # _safe_polish(), whose equivalent poison list is a plain `in` check --
+    # harmless there since its replies are Bangla-first by construction,
+    # but a real bug for this function: short English tokens like "ai"
+    # match as bare substrings inside ordinary words -- "contain", "again",
+    # "maintain" all contain "ai". Caught and fixed before shipping, not
+    # copied from _safe_polish() as-is.
+    lowered = reply.lower()
+    hit = next(
+        (p for p in _POISON_WORDS if re.search(r"\b" + re.escape(p.lower()) + r"\b", lowered)),
+        None,
+    )
+    if hit:
+        return False, f"reply contained a disallowed term: {hit!r}"
+
+    if not rag_answer or not (citations or []):
+        if reply.strip() != SAFE_FALLBACK_REPLY:
+            return False, "no RAG facts were retrieved -- reply must be the safe fallback, not a freeform answer"
+        return True, None
+
+    reply_numbers = _extract_numbers(reply)
+    grounding_numbers = _extract_numbers(rag_answer)
+    unsupported = reply_numbers - grounding_numbers
+    if unsupported:
+        return False, f"reply contained number(s) not present in retrieved facts: {', '.join(sorted(unsupported))}"
+
+    return True, None

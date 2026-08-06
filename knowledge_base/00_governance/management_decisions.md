@@ -7168,3 +7168,94 @@ recruitment_flow_system.md` (canonical phone format,
 6-part proposal (recruitment + social_auto_reply reply-system upgrade)
 this Phase 1B is part of are recorded in this session's conversation
 history, not yet a separate KB entry.
+
+## Universal AI Responder — Phase 2 — Owner Decision, Implemented, Shadow-Mode Only (2026-08-06)
+
+### Background
+Recruitment's own live path (Phase 1A/1B above) only benefits unknown/
+candidate senders. Every other role (employee, supervisor, vendor,
+known_contact, internal_coordinator -- anyone not claimed by an earlier,
+dedicated tier) that reaches `message_router`'s Tier 15 (AI FALLBACK)
+gets a bare `ai.generate_reply()` call: no KB/RAG canonical facts, no
+faithfulness check, only the same thin inbound-only history recruitment
+had before Phase 1B.
+
+### Decision
+**APPROVED, shadow-mode only.** Tier 15 now also computes a second,
+upgraded reply (`modules.conversation_layer.generate_universal_reply()`)
+in parallel with the existing bare-AI call, and logs both side by side.
+**Auto-send behavior is unchanged** -- which reply is actually returned
+is gated by `app.config.Settings.tier15_universal_responder_live`
+(default `False`). Flipping that flag to route real traffic through the
+new pipeline is a **separate, later Owner decision**, not authorized by
+this entry.
+
+**Architecture, Owner-endorsed:** rather than adding new role-detection
+logic, this upgrades Tier 15 itself -- which is *already* the shared,
+role-agnostic catch-all every sender falls through to only after every
+protected tier (family, escort, admin, accountant, employee's own
+branches, Route B) has had first refusal. This gives "known and unknown
+both get the smart response" with **zero new gating code** and
+structurally guarantees gate isolation: Tier 15 is unreachable for any
+role those tiers claim, by construction, not by a new check added here.
+
+### Fix
+- `app/config.py`: new `tier15_universal_responder_live: bool = False`.
+- `modules/message_router/__init__.py`:
+  - `get_recent_history()` extended from inbound-only to bidirectional
+    (`direction IN ('inbound','outbound')`), each line prefixed "Them: "/
+    "You: ". Affects every existing caller (recruitment's live path,
+    `recruitment_detector`, Tier 15) -- a pure improvement for a plain
+    LLM-prompt history block, not a behavior-affecting one for any of
+    them.
+  - Tier 15: computes `generate_universal_reply()` alongside the existing
+    `ai.generate_reply()` call, logs both, returns the new one only if
+    the flag above is `True` and a reply was produced.
+- `modules/conversation_layer/__init__.py`: new `generate_universal_reply()`
+  -- reuses `app.llm.generate_reply()`'s existing multi-provider chain for
+  actual text generation (same reliability Tier 15 already has), adds
+  RAG-grounded prompt context and a faithfulness check around it.
+- `modules/conversation_layer/prompting.py`: new
+  `build_universal_prompt_context()` -- topic-agnostic (no hardcoded
+  facts, unlike the recruitment-specific builder above it in the same
+  file); facts come from `rag.safe_answer()` per query.
+- `modules/conversation_layer/playbooks.py`: new `validate_faithfulness()`
+  -- parallel in spirit to `social_auto_reply`'s `_safe_polish()`, but
+  grounded against *this query's own* RAG citations rather than a static
+  numeric whitelist. Two checks: every number in the reply must appear in
+  the retrieved RAG text; no poison words (AI/database/model/prompt
+  mentions). If RAG found nothing at all, the reply must be the exact
+  safe-fallback string. **Caught and fixed during implementation, not
+  copied as-is:** the poison-word check must be word-boundary matched,
+  not raw substring -- `_safe_polish()`'s own equivalent check is a bare
+  `in` test, harmless there since its replies are Bangla-first by
+  construction, but a real bug here since Tier 15 can produce English
+  replies where "ai" as a substring would false-positive inside
+  "contain"/"again"/"maintain".
+
+### Preserved unchanged (verified, not assumed)
+`recruitment_eligibility()`, `OPERATIONAL_ROLES`, `route_recruitment_message()`
+-- zero diff lines in `modules/recruitment_flow/__init__.py` this session,
+confirmed via `git diff --stat`. `_should_silent_skip()`, `_ESCORT_ROLES`,
+`ADMIN_NUMBERS`/admin tier, accountant tier, family tier -- none appear in
+the `message_router` diff except in prose comments explaining why Tier 15
+is unreached code for them. Auto-send behavior for every real sender is
+byte-identical while the flag is `False` (its shipped default).
+
+### Tests
+17 new tests in `test_final_instruction_fixes.py`: bidirectional history
+(3), the faithfulness validator (7, including a regression guard for the
+word-boundary bug found above), `generate_universal_reply()` (4), and
+Tier 15's shadow-mode wiring (3, including an exception-safety test
+confirming the new pipeline can never break the existing reply even with
+the flag on). Full relevant regression sweep (recruitment/message_router/
+route_b files, 96 tests) clean; pre-existing unrelated failures in the
+full suite confirmed identical via `git stash` (same set as Phase 1A/1B
+sessions).
+
+### Cross references
+`modules/message_router/__init__.py` (Tier 15, `get_recent_history()`),
+`modules/conversation_layer/` (`__init__.py`, `prompting.py`,
+`playbooks.py`), `app/config.py`. Builds on Phase 1A/1B above (same
+initiative, same combined 6-part proposal this session's conversation
+history recorded).

@@ -475,3 +475,281 @@ class TestOllamaCompanyIdentity:
         assert inspect.isfunction(rp._general_identity)
         assert inspect.isfunction(rp._recruitment_role)
         assert inspect.isfunction(rp._base_prompt)
+
+
+# ===========================================================================
+# Phase 2 (2026-08-06): Universal AI Responder -- bidirectional history,
+# the faithfulness validator, generate_universal_reply(), and Tier 15's
+# shadow-mode wiring. See knowledge_base/00_governance/management_decisions.md
+# "Universal AI Responder — Phase 2" for the full decision record.
+# ===========================================================================
+
+class TestBidirectionalHistory:
+    """get_recent_history() now includes outbound (bot-authored) rows,
+    not just inbound, prefixed so a caller can tell who said what."""
+
+    @pytest.mark.asyncio
+    async def test_includes_both_directions_with_prefixes(self, monkeypatch):
+        import modules.message_router as mr
+
+        # fetch_all returns DESC (newest first) per the real query --
+        # the function reverses this internally to chronological order.
+        rows = [
+            {"message_body": "third (newest)", "direction": "outbound"},
+            {"message_body": "second", "direction": "inbound"},
+            {"message_body": "first (oldest)", "direction": "outbound"},
+        ]
+        monkeypatch.setattr(mr, "fetch_all", AsyncMock(return_value=rows))
+
+        result = await mr.get_recent_history("8801700000099")
+
+        assert result == [
+            "You: first (oldest)",
+            "Them: second",
+            "You: third (newest)",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_skips_empty_message_bodies(self, monkeypatch):
+        import modules.message_router as mr
+
+        rows = [
+            {"message_body": "   ", "direction": "inbound"},
+            {"message_body": "real message", "direction": "outbound"},
+        ]
+        monkeypatch.setattr(mr, "fetch_all", AsyncMock(return_value=rows))
+
+        result = await mr.get_recent_history("8801700000099")
+
+        assert result == ["You: real message"]
+
+    @pytest.mark.asyncio
+    async def test_db_error_returns_empty_list_not_raise(self, monkeypatch):
+        import modules.message_router as mr
+
+        monkeypatch.setattr(mr, "fetch_all", AsyncMock(side_effect=RuntimeError("db down")))
+
+        result = await mr.get_recent_history("8801700000099")
+
+        assert result == []
+
+
+class TestFaithfulnessValidator:
+    """modules.conversation_layer.playbooks.validate_faithfulness()."""
+
+    def test_no_rag_facts_requires_exact_safe_fallback(self):
+        from modules.conversation_layer.playbooks import validate_faithfulness, SAFE_FALLBACK_REPLY
+
+        is_faithful, reason = validate_faithfulness("some freeform answer", None, None)
+        assert is_faithful is False
+        assert "safe fallback" in reason
+
+        is_faithful, reason = validate_faithfulness(SAFE_FALLBACK_REPLY, None, None)
+        assert is_faithful is True
+        assert reason is None
+
+    def test_numeric_grounding_rejects_unsupported_number(self):
+        from modules.conversation_layer.playbooks import validate_faithfulness
+
+        is_faithful, reason = validate_faithfulness(
+            "the figure is 99999", "office facts mention 15000 and 18000", [{"n": 1}],
+        )
+        assert is_faithful is False
+        assert "99999" in reason
+
+    def test_numeric_grounding_accepts_supported_number(self):
+        from modules.conversation_layer.playbooks import validate_faithfulness
+
+        is_faithful, reason = validate_faithfulness(
+            "the figure is 15000", "office facts mention 15000 and 18000", [{"n": 1}],
+        )
+        assert is_faithful is True
+        assert reason is None
+
+    def test_poison_word_uses_word_boundary_not_substring(self):
+        """Regression guard for a bug caught during implementation --
+        bare substring matching on "ai" would false-positive inside
+        ordinary English words. Must not trigger on "again"/"contact"."""
+        from modules.conversation_layer.playbooks import validate_faithfulness
+
+        is_faithful, reason = validate_faithfulness(
+            "please contact the office again", "office facts", [{"n": 1}],
+        )
+        assert reason != "reply contained a disallowed term: \'ai\'"
+
+    def test_actual_poison_word_is_still_rejected(self):
+        from modules.conversation_layer.playbooks import validate_faithfulness
+
+        is_faithful, reason = validate_faithfulness(
+            "I am an ai model", "office facts", [{"n": 1}],
+        )
+        assert is_faithful is False
+        assert "disallowed term" in reason
+
+    def test_empty_reply_rejected(self):
+        from modules.conversation_layer.playbooks import validate_faithfulness
+
+        assert validate_faithfulness("", "facts", [{"n": 1}]) == (False, "empty reply")
+
+    def test_reply_too_long_rejected(self):
+        from modules.conversation_layer.playbooks import validate_faithfulness
+
+        is_faithful, reason = validate_faithfulness("x" * 1401, "facts", [{"n": 1}])
+        assert is_faithful is False
+        assert "too long" in reason
+
+
+class TestUniversalReplyGenerator:
+    """modules.conversation_layer.generate_universal_reply()."""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_grounded_reply_returned(self, monkeypatch):
+        import modules.conversation_layer as cl
+
+        rag_mock = AsyncMock(return_value={
+            "answer": "office hours are 10am-5pm, contact 01958-122300",
+            "citations": [{"n": 1, "source": "kb", "title": "office", "score": 3.0}],
+            "top_score": 3.0,
+        })
+        monkeypatch.setattr("modules.rag.safe_answer", rag_mock)
+        ai_mock = AsyncMock(return_value="Office is open 10am-5pm, call 01958-122300")
+        monkeypatch.setattr("app.llm.generate_reply", ai_mock)
+
+        result = await cl.generate_universal_reply(
+            phone="8801700000030", text="office hours?", source="bridge1",
+        )
+
+        assert result == "Office is open 10am-5pm, call 01958-122300"
+        rag_mock.assert_awaited_once()
+        ai_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_rag_hits_and_ungrounded_draft_returns_none(self, monkeypatch):
+        import modules.conversation_layer as cl
+
+        monkeypatch.setattr("modules.rag.safe_answer", AsyncMock(return_value=None))
+        monkeypatch.setattr("app.llm.generate_reply", AsyncMock(return_value="I think it is probably fine"))
+
+        result = await cl.generate_universal_reply(
+            phone="8801700000031", text="random question", source="bridge1",
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_faithfulness_rejection_falls_back_to_safe_reply(self, monkeypatch):
+        import modules.conversation_layer as cl
+        from modules.conversation_layer.playbooks import SAFE_FALLBACK_REPLY
+
+        monkeypatch.setattr("modules.rag.safe_answer", AsyncMock(return_value={
+            "answer": "salary is 15000", "citations": [{"n": 1}], "top_score": 3.0,
+        }))
+        monkeypatch.setattr("app.llm.generate_reply", AsyncMock(return_value="salary is 99999"))
+
+        result = await cl.generate_universal_reply(
+            phone="8801700000032", text="salary?", source="bridge1",
+        )
+
+        assert result == SAFE_FALLBACK_REPLY
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_returns_none_not_raise(self, monkeypatch):
+        import modules.conversation_layer as cl
+
+        monkeypatch.setattr("modules.rag.safe_answer", AsyncMock(return_value=None))
+        monkeypatch.setattr("app.llm.generate_reply", AsyncMock(side_effect=RuntimeError("provider down")))
+
+        result = await cl.generate_universal_reply(
+            phone="8801700000033", text="anything", source="bridge1",
+        )
+
+        assert result is None
+
+
+class TestTier15ShadowMode:
+    """message_router's Tier 15 (AI FALLBACK) shadow-mode wiring. A
+    "vendor" role sender is used since it has no dedicated tier and no
+    Route B membership, so it is guaranteed to fall all the way through
+    to Tier 15 -- the same structural guarantee (nothing upstream claims
+    it) the proposal relies on for gate isolation."""
+
+    def _identity(self):
+        return {
+            "role": "vendor", "display_name": "", "identity_confidence": 0,
+            "identity_source": "none", "employee_id": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_shadow_mode_returns_old_reply_when_flag_off(self, monkeypatch):
+        import modules.message_router as router
+        from app.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "tier15_universal_responder_live", False)
+        monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
+        monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=self._identity()))
+        monkeypatch.setattr(router, "is_registered_employee_phone", AsyncMock(return_value=False))
+        monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=None))
+        monkeypatch.setattr(router, "get_contact_context", AsyncMock(return_value=""))
+        monkeypatch.setattr(router, "get_recent_history", AsyncMock(return_value=[]))
+        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="OLD_BARE_AI_REPLY"))
+        monkeypatch.setattr(
+            "modules.conversation_layer.generate_universal_reply",
+            AsyncMock(return_value="NEW_UNIVERSAL_REPLY"),
+        )
+
+        reply, admin_note = await router.process_message(
+            "8801700000040", "একটা প্রশ্ন ছিল", "bridge1",
+        )
+
+        assert reply == "OLD_BARE_AI_REPLY"
+
+    @pytest.mark.asyncio
+    async def test_shadow_mode_returns_new_reply_when_flag_on(self, monkeypatch):
+        import modules.message_router as router
+        from app.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "tier15_universal_responder_live", True)
+        monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
+        monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=self._identity()))
+        monkeypatch.setattr(router, "is_registered_employee_phone", AsyncMock(return_value=False))
+        monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=None))
+        monkeypatch.setattr(router, "get_contact_context", AsyncMock(return_value=""))
+        monkeypatch.setattr(router, "get_recent_history", AsyncMock(return_value=[]))
+        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="OLD_BARE_AI_REPLY"))
+        monkeypatch.setattr(
+            "modules.conversation_layer.generate_universal_reply",
+            AsyncMock(return_value="NEW_UNIVERSAL_REPLY"),
+        )
+
+        reply, admin_note = await router.process_message(
+            "8801700000041", "একটা প্রশ্ন ছিল", "bridge1",
+        )
+
+        assert reply == "NEW_UNIVERSAL_REPLY"
+
+    @pytest.mark.asyncio
+    async def test_universal_responder_exception_does_not_break_old_reply(self, monkeypatch):
+        """The shadow computation must never take down Tier 15's existing,
+        already-live reply path -- even with the flag on, an exception in
+        the new pipeline must fall back to the old reply, not raise."""
+        import modules.message_router as router
+        from app.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "tier15_universal_responder_live", True)
+        monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
+        monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=self._identity()))
+        monkeypatch.setattr(router, "is_registered_employee_phone", AsyncMock(return_value=False))
+        monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=None))
+        monkeypatch.setattr(router, "get_contact_context", AsyncMock(return_value=""))
+        monkeypatch.setattr(router, "get_recent_history", AsyncMock(return_value=[]))
+        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="OLD_BARE_AI_REPLY"))
+        monkeypatch.setattr(
+            "modules.conversation_layer.generate_universal_reply",
+            AsyncMock(side_effect=RuntimeError("shadow pipeline blew up")),
+        )
+
+        reply, admin_note = await router.process_message(
+            "8801700000042", "একটা প্রশ্ন ছিল", "bridge1",
+        )
+
+        assert reply == "OLD_BARE_AI_REPLY"
