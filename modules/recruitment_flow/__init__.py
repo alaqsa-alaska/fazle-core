@@ -475,6 +475,29 @@ async def recruitment_eligibility(
             "active_session": active_session}
 
 
+def _is_llm_priority_phone(phone: str) -> bool:
+    """Phase 1B (2026-08-06, Owner-approved allowlist, see
+    management_decisions.md "Recruitment Phase 1B — Active-Session LLM
+    Priority Allowlist"). True only for phones explicitly approved to have
+    the live KB/RAG/LLM reply layer (generate_recruitment_reply()) tried
+    BEFORE intake_message() during an active recruitment session --
+    everyone else keeps the unconditional intake_message()-first behavior
+    in route_recruitment_message() unchanged. Deliberately a plain exact-
+    string check, not phone-normalized (unlike e.g.
+    modules.escort._escort_client_phone_list()'s normalize_bd_phone()
+    usage) -- every phone already reaching route_recruitment_message() is
+    already in this module's own canonical 8801XXXXXXXXX form (see
+    fazle_recruitment_sessions.phone in knowledge_base/06_developer_system/
+    recruitment_flow_system.md), so adding a second normalization step
+    here would risk a silent format mismatch rather than prevent one.
+    Config value is empty by default -- see recruitment_llm_priority_phones
+    in app/config.py for the full comment and admission-criteria record."""
+    from app.config import get_settings
+    raw = getattr(get_settings(), "recruitment_llm_priority_phones", "") or ""
+    allowlist = {p.strip() for p in raw.split(",") if p.strip()}
+    return phone in allowlist
+
+
 async def route_recruitment_message(
     phone: str,
     text: str,
@@ -496,6 +519,33 @@ async def route_recruitment_message(
         }
 
     active_session = decision.get("active_session")
+
+    # Phase 1B (2026-08-06, Owner-approved allowlist): for an explicitly
+    # allowlisted phone only, try the live KB/RAG/LLM reply layer FIRST,
+    # even during an active session -- falling through to the unchanged
+    # intake_message()-first logic below if it returns nothing (same
+    # empty-reply fallback semantics as the non-active-session path
+    # further down). This is the one case where the 2026-07-22 rule right
+    # below does not apply unconditionally; every non-allowlisted phone
+    # (i.e. everyone, while the allowlist is empty) is completely
+    # unaffected by this block.
+    if active_session and _is_llm_priority_phone(phone):
+        from modules.conversation_layer import generate_recruitment_reply as _llm_priority_reply
+
+        priority_reply = await _llm_priority_reply(
+            phone=phone, text=text, source=source,
+            contact_context=contact_context, history=history,
+        )
+        if priority_reply:
+            return {
+                "eligible": True,
+                "autosend": bool(decision.get("autosend")),
+                "reason": "llm_priority_session_continuation",
+                "reply": priority_reply,
+            }
+        # LLM layer produced nothing (empty or safety-restricted) -- fall
+        # through to the unchanged intake_message()-first logic below,
+        # same as every non-allowlisted phone.
 
     # 2026-07-22 (Final Instruction Section 4 — recruitment audit found
     # this was FAIL for multi-message continuation): an in-progress funnel

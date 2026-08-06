@@ -7085,3 +7085,86 @@ clean. No commit/push/restart/deploy performed for this change.
 salary_business_rules.md`. Builds on the 2026-08-04 office-number fix
 documented in the Priority 1/social-auto-reply entries above — same root
 cause pattern, now closed for numbers generally, not just office numbers.
+
+## Recruitment Phase 1B — Active-Session LLM Priority Allowlist — Owner Decision, Implemented (2026-08-06)
+
+### Background
+Phase 1A (same day, separate entry not yet added to this file at time of
+writing — see commit `bc4fc4e`/merge `85ba6ab`) fixed false-positive
+recruitment-funnel entry ("job"/"interested"/"আগ্রহী" bare-keyword
+over-matching). It did not fix the second, separate gap found in the same
+incident: once a phone has an active recruitment session,
+`modules.recruitment_flow.route_recruitment_message()` always routes
+through the step-locked `intake_message()` form, unconditionally, per the
+2026-07-22 "Final Instruction Section 4" rule — the already-live KB/RAG/
+LLM reply layer (`generate_recruitment_reply()`) never gets a chance to
+answer a real, off-script message during an active session. This is the
+mechanism that produced the repeated-identical-canned-reply behavior seen
+live on the Magnus-Marine number (phone `8801805529211`, session id 18).
+
+### Decision
+**Mechanism: APPROVED.** For an explicitly Owner-allowlisted phone number
+only, `route_recruitment_message()` now tries the live LLM/RAG layer
+FIRST, even during an active session, falling back to the unchanged
+`intake_message()`-first logic if the LLM layer returns nothing (empty or
+safety-filter-restricted). Every non-allowlisted phone — i.e. everyone,
+while the allowlist holds only the Phase A test number — is completely
+unaffected; the 2026-07-22 rule still applies to them exactly as before,
+unconditionally.
+
+**Admission criteria: TWO-PHASE, explicit.**
+- **Phase A (this change):** exactly one number, `8801880446111`
+  (Owner's own test number), for live validation of the mechanism before
+  any real candidate is exposed to it. Set via `.env`
+  (`RECRUITMENT_LLM_PRIORITY_PHONES`), not hardcoded in code — the Python
+  setting default (`app.config.Settings.recruitment_llm_priority_phones`)
+  is empty, a true no-op if `.env` doesn't set it.
+- **Phase B (explicitly NOT part of this decision):** any further
+  addition — including the real incident number, `8801805529211` — is a
+  **separate, future, dated Owner decision**, not pre-authorized here.
+  This entry does not approve Phase B numbers; do not add any number to
+  `RECRUITMENT_LLM_PRIORITY_PHONES` without a new dated entry recording
+  that specific decision.
+
+### Fix
+- `app/config.py`: new `recruitment_llm_priority_phones: str = ""` field,
+  following the exact existing `escort_client_phones` pattern
+  (comma-separated, empty default).
+- `modules/recruitment_flow/__init__.py`: new `_is_llm_priority_phone()`
+  helper (plain exact-string match against the allowlist — not
+  phone-normalized, since every phone reaching this module is already in
+  its own canonical `8801XXXXXXXXX` form); one additive conditional block
+  in `route_recruitment_message()`, inserted immediately before the
+  existing 2026-07-22 `if active_session:` block, which itself is
+  unmodified.
+
+### Preserved unchanged (verified, not assumed)
+`_should_silent_skip()`, `_ESCORT_ROLES` routing, `OPERATIONAL_ROLES`,
+`OPERATIONAL_INTENTS`, `DRAFT_ALWAYS_ROLES`, and every other role-gate
+this repo relies on for escort/accountant/client exclusion — none of
+these were touched; they all execute upstream of, and independently from,
+`route_recruitment_message()`. `_safe_polish()` and the social_auto_reply
+pipeline were not touched (out of scope, different module).
+`conversation_memory` history wiring was explicitly out of scope for this
+task (Owner instruction) — the allowlisted path still uses
+`generate_recruitment_reply()`'s existing `history` parameter as passed
+in by the caller, unchanged.
+
+### Tests
+4 new tests added to `tests/unit/test_final_instruction_fixes.py`'s
+existing `TestRecruitmentSessionContinuation` class: allowlisted number
+gets the LLM path first during an active session; non-allowlisted number
+still gets `intake_message()` first (byte-identical to pre-Phase-1B);
+empty allowlist means no behavior change for anyone; LLM path returning
+nothing falls back to `intake_message()` correctly for an allowlisted
+number. Full relevant suite run — see commit for exact pass count.
+
+### Cross references
+`modules/recruitment_flow/__init__.py` (`route_recruitment_message()`,
+`_is_llm_priority_phone()`), `app/config.py`
+(`recruitment_llm_priority_phones`), `knowledge_base/06_developer_system/
+recruitment_flow_system.md` (canonical phone format,
+`fazle_recruitment_sessions.phone`). Phase 1A and the original combined
+6-part proposal (recruitment + social_auto_reply reply-system upgrade)
+this Phase 1B is part of are recorded in this session's conversation
+history, not yet a separate KB entry.

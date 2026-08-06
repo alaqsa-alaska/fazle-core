@@ -19,6 +19,7 @@ Each fix addressed a specific gap found by a read-only code audit:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -100,6 +101,130 @@ class TestRecruitmentSessionContinuation:
         await rf.route_recruitment_message("8801700000022", "ভাই কেমন আছেন", source="bridge1")
 
         intake_mock.assert_not_called()
+
+
+class TestRecruitmentLlmPriorityAllowlist:
+    """Phase 1B (2026-08-06, Owner-approved allowlist) -- see
+    knowledge_base/00_governance/management_decisions.md "Recruitment
+    Phase 1B — Active-Session LLM Priority Allowlist" for the full
+    decision record. Covers modules.recruitment_flow._is_llm_priority_phone()
+    and the new conditional block in route_recruitment_message()."""
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_number_gets_llm_path_first_during_active_session(self, monkeypatch):
+        import modules.recruitment_flow as rf
+
+        monkeypatch.setattr(rf, "_is_llm_priority_phone", lambda phone: True)
+        monkeypatch.setattr(
+            rf, "recruitment_eligibility",
+            AsyncMock(return_value={
+                "eligible": True, "autosend": False, "reason": "session_followup_draft",
+                "active_session": {"id": 1, "collection_step": "age"},
+            }),
+        )
+        generate_mock = AsyncMock(return_value="আমাদের বিজনেস সম্পর্কে জানতে চাইলে...")
+        monkeypatch.setattr("modules.conversation_layer.generate_recruitment_reply", generate_mock)
+        intake_mock = AsyncMock(return_value={"reply": "আপনার বয়স কত?", "action": "collecting", "session_id": 1})
+        monkeypatch.setattr(rf, "intake_message", intake_mock)
+
+        result = await rf.route_recruitment_message(
+            "8801880446111", "তোমার বিজনেস কি?", source="bridge1",
+        )
+
+        assert result["reply"] == "আমাদের বিজনেস সম্পর্কে জানতে চাইলে..."
+        assert result["reason"] == "llm_priority_session_continuation"
+        generate_mock.assert_awaited_once()
+        intake_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_allowlisted_number_still_gets_fsm_first(self, monkeypatch):
+        """Byte-identical to the pre-Phase-1B behavior in
+        test_active_session_calls_intake_message_directly -- a real
+        (unmocked) _is_llm_priority_phone() with a real settings object
+        confirms this specific phone is simply not in the allowlist."""
+        import modules.recruitment_flow as rf
+        from app import config as app_config
+
+        fake_settings = SimpleNamespace(recruitment_llm_priority_phones="8801880446111")
+        monkeypatch.setattr(app_config, "get_settings", lambda: fake_settings)
+        monkeypatch.setattr(
+            rf, "recruitment_eligibility",
+            AsyncMock(return_value={
+                "eligible": True, "autosend": False, "reason": "session_followup_draft",
+                "active_session": {"id": 1, "collection_step": "age"},
+            }),
+        )
+        intake_mock = AsyncMock(return_value={"reply": "আপনার বয়স কত?", "action": "collecting", "session_id": 1})
+        monkeypatch.setattr(rf, "intake_message", intake_mock)
+        generate_mock = AsyncMock(return_value="should not be called")
+        monkeypatch.setattr("modules.conversation_layer.generate_recruitment_reply", generate_mock)
+
+        # A different phone -- not the one in fake_settings' allowlist.
+        result = await rf.route_recruitment_message("8801700000020", "25", source="bridge1")
+
+        assert result["reply"] == "আপনার বয়স কত?"
+        assert result["reason"] == "session_followup_draft"  # passed through from the mocked decision
+        intake_mock.assert_awaited_once()
+        generate_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_allowlist_no_behavior_change_for_anyone(self, monkeypatch):
+        """Default config (empty string) must be a true no-op -- even the
+        Phase A test number itself gets FSM-first behavior if the
+        allowlist is empty."""
+        import modules.recruitment_flow as rf
+        from app import config as app_config
+
+        fake_settings = SimpleNamespace(recruitment_llm_priority_phones="")
+        monkeypatch.setattr(app_config, "get_settings", lambda: fake_settings)
+        monkeypatch.setattr(
+            rf, "recruitment_eligibility",
+            AsyncMock(return_value={
+                "eligible": True, "autosend": False, "reason": "session_followup_draft",
+                "active_session": {"id": 1, "collection_step": "age"},
+            }),
+        )
+        intake_mock = AsyncMock(return_value={"reply": "আপনার বয়স কত?", "action": "collecting", "session_id": 1})
+        monkeypatch.setattr(rf, "intake_message", intake_mock)
+        generate_mock = AsyncMock(return_value="should not be called")
+        monkeypatch.setattr("modules.conversation_layer.generate_recruitment_reply", generate_mock)
+
+        result = await rf.route_recruitment_message("8801880446111", "25", source="bridge1")
+
+        assert result["reply"] == "আপনার বয়স কত?"
+        assert result["reason"] == "session_followup_draft"  # passed through from the mocked decision
+        intake_mock.assert_awaited_once()
+        generate_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_llm_path_returning_nothing_falls_back_to_intake(self, monkeypatch):
+        """An allowlisted phone whose LLM reply comes back empty (or
+        safety-restricted -- conversation_layer.generate_recruitment_reply
+        already collapses both to None) must still fall through to
+        intake_message(), not silently drop the message."""
+        import modules.recruitment_flow as rf
+
+        monkeypatch.setattr(rf, "_is_llm_priority_phone", lambda phone: True)
+        monkeypatch.setattr(
+            rf, "recruitment_eligibility",
+            AsyncMock(return_value={
+                "eligible": True, "autosend": False, "reason": "session_followup_draft",
+                "active_session": {"id": 1, "collection_step": "age"},
+            }),
+        )
+        generate_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("modules.conversation_layer.generate_recruitment_reply", generate_mock)
+        intake_mock = AsyncMock(return_value={"reply": "আপনার বয়স কত?", "action": "collecting", "session_id": 1})
+        monkeypatch.setattr(rf, "intake_message", intake_mock)
+
+        result = await rf.route_recruitment_message(
+            "8801880446111", "??", source="bridge1",
+        )
+
+        assert result["reply"] == "আপনার বয়স কত?"
+        assert result["reason"] == "session_followup_draft"  # passed through from the mocked decision
+        generate_mock.assert_awaited_once()
+        intake_mock.assert_awaited_once()
 
 
 class TestRecruitmentSalaryQueryEligibility:

@@ -223,6 +223,24 @@ class Settings(BaseSettings):
     # Comma-separated phone numbers that are authorised to send escort client orders.
     # When EMPTY (default), all inbound phones are accepted (open mode).
     escort_client_phones: str = ""
+
+    # Phase 1B (2026-08-06, Owner decision -- see management_decisions.md
+    # "Recruitment Phase 1B — Active-Session LLM Priority Allowlist"):
+    # comma-separated phone numbers (canonical recruitment_flow format,
+    # 8801XXXXXXXXX -- see fazle_recruitment_sessions.phone in
+    # knowledge_base/06_developer_system/recruitment_flow_system.md) for
+    # which modules.recruitment_flow.route_recruitment_message() tries the
+    # live KB/RAG/LLM reply layer FIRST even during an active recruitment
+    # session, before falling back to the step-locked intake_message()
+    # form. Every other number keeps the unconditional intake_message()-
+    # first behavior unchanged. Code default is EMPTY (true no-op) -- the
+    # actual Phase A test number lives in .env, not here, so the code
+    # itself never hardcodes a live phone number. Two-phase admission,
+    # Owner-approved 2026-08-06: Phase A is exactly one test number
+    # (validation only, set via .env); Phase B (any further additions,
+    # e.g. a real incident number) is a separate future Owner decision,
+    # not pre-authorized by this comment or this setting's existence.
+    recruitment_llm_priority_phones: str = ""
     # Comma-separated bridge IDs trusted to submit new escort orders.
     # Example: "bridge1,bridge2,meta"
     escort_trusted_sources: str = "bridge1,bridge2,meta"
