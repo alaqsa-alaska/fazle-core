@@ -88,6 +88,22 @@ Routing-এর ভিত্তি হবে:
 - Existing safety gates বজায় থাকবে
 - Customer-facing structured business flow এখানেই চলবে
 
+**Universal AI Responder — Phase 2 (2026-08-06, Owner-approved, SHADOW MODE
+ONLY — see `knowledge_base/00_governance/management_decisions.md` "Universal
+AI Responder — Phase 2" for the full decision record):** the final tier of
+this route — `modules.message_router.process_message()`'s Tier 15 (AI
+FALLBACK), reached by any Route A role not claimed by an earlier, more
+specific tier (e.g. `employee`, `supervisor`, `vendor`, `known_contact`,
+`internal_coordinator`) — now computes a second, upgraded reply
+(`modules.conversation_layer.generate_universal_reply()`: KB → RAG
+(`rag.safe_answer()`) → the same multi-provider `ai.generate_reply()` chain
+→ a faithfulness validator grounding every number in the reply against the
+retrieved facts) in parallel with the existing bare `ai.generate_reply()`
+call, and logs both side by side for comparison. **Which one is actually
+returned/sent is gated by `app.config.Settings.tier15_universal_responder_live`
+(default `False`)** — while off, Tier 15's live output is unchanged
+pipeline-wise. Flipping that flag is a separate, later Owner decision.
+
 ### 4.2 Route B
 
 **Engine:** **Ollama only** (`modules.route_b.handle_route_b_message()` → `app.ollama.generate_reply()`)
@@ -290,6 +306,19 @@ Route B local AI **read-only** access পাবে approved context sources-এ�
 ### 11.1 Allowed read sources
 
 **1) `wbom_whatsapp_messages`** — Allowed fields: `sender_number`, `receiver_number`, `direction`, `message_body`, `ai_response`, `source_timestamp`, `platform`, `identity_role`, `identity_confidence`, `classification`, `intent_detected`, `extracted_text`. Purpose: recent conversation history, both inbound and outbound.
+
+**Correction (2026-08-06, Universal AI Responder Phase 2):** "both inbound
+and outbound" was already true for Route B's own separate history function
+(`modules.route_b._get_conversation_history()`) but was NOT true for Route
+A's shared `modules.message_router.get_recent_history()` — that function
+was inbound-only until this date. Fixed as part of Phase 2 to actually
+match what this line always documented. **This is a live behavior change,
+not gated by `tier15_universal_responder_live`** — every existing caller
+of `get_recent_history()` (recruitment's live reply path, Tier 15's
+existing bare-AI fallback, `recruitment_detector`) now receives bidirectional
+history immediately, regardless of the shadow flag's state, since the flag
+only controls which *pipeline* generates Tier 15's reply, not what history
+context is built for either pipeline.
 
 **2) `wbom_contacts`** — Allowed fields: `display_name`, `relation`, `company_name`, `notes`, `personality_hint`, `last_seen`, `interaction_count`. Purpose: saved contact metadata.
 

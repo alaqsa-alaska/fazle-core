@@ -241,6 +241,20 @@ class Settings(BaseSettings):
     # e.g. a real incident number) is a separate future Owner decision,
     # not pre-authorized by this comment or this setting's existence.
     recruitment_llm_priority_phones: str = ""
+
+    # Phase 2 (2026-08-06, Owner-approved "Universal AI Responder" -- see
+    # management_decisions.md "Universal AI Responder — Phase 2"): shadow-
+    # mode kill switch for Tier 15's upgraded KB/RAG/faithfulness-validated
+    # reply pipeline (modules.conversation_layer.generate_universal_reply).
+    # False (default) means Tier 15 keeps returning today's bare
+    # ai.generate_reply() output unchanged -- auto-send behavior is
+    # untouched -- while the new pipeline still runs in parallel purely
+    # for shadow-comparison logging (see message_router's Tier 15). Only
+    # flipping this to True changes what a real sender actually receives;
+    # that flip is a separate, later Owner decision, not authorized by
+    # this default or by this comment.
+    tier15_universal_responder_live: bool = False
+
     # Comma-separated bridge IDs trusted to submit new escort orders.
     # Example: "bridge1,bridge2,meta"
     escort_trusted_sources: str = "bridge1,bridge2,meta"

@@ -1,4 +1,10 @@
-"""Prompt assembly for the shadow-only recruitment conversation layer."""
+"""Prompt assembly for the conversation layer -- originally recruitment-
+only (build_recruitment_prompt_context, still recruitment-specific,
+unchanged), now also home to build_universal_prompt_context() (Phase 2,
+2026-08-06), the general-purpose builder for Tier 15's Universal
+Responder. Module docstring updated to match -- see
+knowledge_base/00_governance/management_decisions.md "Universal AI
+Responder — Phase 2"."""
 from __future__ import annotations
 
 from .playbooks import CANONICAL_FACTS, APPLICATION_FIELDS, RecruitmentSignals
@@ -45,3 +51,41 @@ def build_recruitment_prompt_context(
 
     facts.extend(["", f"Incoming message: {message[:500]}"])
     return "\n".join(facts)
+
+
+def build_universal_prompt_context(
+    message: str,
+    rag_answer: str | None = None,
+    history: str | None = None,
+) -> str:
+    """Phase 2 (2026-08-06, Owner-approved "Universal AI Responder") --
+    general-purpose prompt context for Tier 15's upgraded reply pipeline
+    (modules.conversation_layer.generate_universal_reply). Unlike
+    build_recruitment_prompt_context() above, this is deliberately topic-
+    agnostic: no hardcoded canonical-facts list, no recruitment signals.
+    Any topic's facts come from rag_answer, per query, dynamically -- the
+    faithfulness validator downstream (playbooks.validate_faithfulness())
+    is what keeps the reply grounded to whatever was actually retrieved,
+    not a fixed list scoped to one topic."""
+    parts = [
+        "General reply rules:",
+        "- Bangla-first unless the incoming message is in English; short, human, 1-4 lines.",
+        "- Answer ONLY using the facts provided below. If the facts don't cover "
+        "the question, say so plainly and suggest contacting the office directly "
+        "-- never guess or invent a fact.",
+        "- Do not discuss payroll, roster, escort program operations, vessel "
+        "names, private employee data, or internal finance unless it is "
+        "explicitly present in the facts below.",
+    ]
+    if rag_answer:
+        parts.extend(["", "Retrieved facts (the ONLY facts you may use):", rag_answer[:1800]])
+    else:
+        parts.extend([
+            "",
+            "No relevant facts were found for this question -- say so plainly "
+            "rather than answering from general knowledge.",
+        ])
+    if history:
+        parts.extend(["", "Recent conversation history:", history[:1200]])
+    parts.extend(["", f"Incoming message: {message[:500]}"])
+    return "\n".join(parts)
