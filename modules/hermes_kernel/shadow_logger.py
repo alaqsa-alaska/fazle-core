@@ -38,12 +38,25 @@ if TYPE_CHECKING:
 log = logging.getLogger("fazle.hermes_kernel.shadow_logger")
 
 # Configuration Contract: flag state is cached once per cache lifecycle (normally
-# once per process lifetime). Changes to hermes_decision_audit_enabled or
-# hermes_event_log_enabled in .env require an application restart to take effect.
-# Runtime hot-reload is not supported. Tests must call invalidate_flag_cache()
-# between cases that change flag values.
+# once per process lifetime). Primary source: .env via get_settings(). Secondary
+# source (checked only when primary is False): assistant_feature_flags DB table,
+# read via modules.preflight_guard.is_feature_active(). Runtime activation via
+# /api/assistant/ops/activate takes effect immediately (next message turn).
+# .env changes still require a restart to take effect.
+# Tests must call invalidate_flag_cache() between cases that change flag values.
 _AUDIT_ENABLED: bool | None = None
 _EVENT_ENABLED: bool | None = None
+
+
+def _resolve_flag(env_value: bool, runtime_name: str) -> bool:
+    """Return True if the .env setting is True OR the runtime ops flag is active."""
+    if env_value:
+        return True
+    try:
+        from modules.preflight_guard import is_feature_active
+        return is_feature_active(runtime_name, default=False)
+    except Exception:
+        return False
 
 
 def _is_audit_enabled() -> bool:
@@ -51,9 +64,10 @@ def _is_audit_enabled() -> bool:
     if _AUDIT_ENABLED is None:
         try:
             from app.config import get_settings
-            _AUDIT_ENABLED = bool(get_settings().hermes_decision_audit_enabled)
+            env_val = bool(get_settings().hermes_decision_audit_enabled)
         except Exception:
-            _AUDIT_ENABLED = False
+            env_val = False
+        _AUDIT_ENABLED = _resolve_flag(env_val, "hermes_decision_audit")
     return _AUDIT_ENABLED
 
 
@@ -62,9 +76,10 @@ def _is_event_enabled() -> bool:
     if _EVENT_ENABLED is None:
         try:
             from app.config import get_settings
-            _EVENT_ENABLED = bool(get_settings().hermes_event_log_enabled)
+            env_val = bool(get_settings().hermes_event_log_enabled)
         except Exception:
-            _EVENT_ENABLED = False
+            env_val = False
+        _EVENT_ENABLED = _resolve_flag(env_val, "hermes_event_log")
     return _EVENT_ENABLED
 
 

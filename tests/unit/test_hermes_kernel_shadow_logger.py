@@ -42,9 +42,10 @@ class TestFlagFalseProducesNoWrite:
         with patch("app.config.get_settings") as m:
             m.return_value.hermes_decision_audit_enabled = False
             m.return_value.hermes_event_log_enabled = False
-            with patch("app.database.execute", new=AsyncMock()) as ex:
-                await log_decision(_rec())
-                ex.assert_not_called()
+            with patch("modules.preflight_guard.is_feature_active", return_value=False):
+                with patch("app.database.execute", new=AsyncMock()) as ex:
+                    await log_decision(_rec())
+                    ex.assert_not_called()
 
     async def test_log_event_no_write(self):
         _fresh()
@@ -52,10 +53,11 @@ class TestFlagFalseProducesNoWrite:
         with patch("app.config.get_settings") as m:
             m.return_value.hermes_decision_audit_enabled = False
             m.return_value.hermes_event_log_enabled = False
-            with patch("app.database.execute", new=AsyncMock()) as ex:
-                r = _rec()
-                await log_event(_evt(r))
-                ex.assert_not_called()
+            with patch("modules.preflight_guard.is_feature_active", return_value=False):
+                with patch("app.database.execute", new=AsyncMock()) as ex:
+                    r = _rec()
+                    await log_event(_evt(r))
+                    ex.assert_not_called()
 
     async def test_disabled_never_raises(self):
         """A flag=False call must complete without raising regardless of DB state."""
@@ -64,9 +66,10 @@ class TestFlagFalseProducesNoWrite:
         with patch("app.config.get_settings") as m:
             m.return_value.hermes_decision_audit_enabled = False
             m.return_value.hermes_event_log_enabled = False
-            r = _rec()
-            await log_decision(r)
-            await log_event(_evt(r))
+            with patch("modules.preflight_guard.is_feature_active", return_value=False):
+                r = _rec()
+                await log_decision(r)
+                await log_event(_evt(r))
 
 
 # ── 2. Flag=True → execute() is called ───────────────────────────────────────
@@ -106,6 +109,18 @@ class TestFlagTrueProducesWrite:
             m.return_value.hermes_event_log_enabled = True
             with patch("app.database.execute", new=AsyncMock(side_effect=RuntimeError("DB down"))):
                 await log_decision(_rec())  # must not raise
+
+    async def test_runtime_ops_flag_enables_when_env_is_false(self):
+        """Runtime ops flag True with env False must enable the logger."""
+        _fresh()
+        from modules.hermes_kernel.shadow_logger import log_decision
+        with patch("app.config.get_settings") as m:
+            m.return_value.hermes_decision_audit_enabled = False
+            m.return_value.hermes_event_log_enabled = False
+            with patch("modules.preflight_guard.is_feature_active", return_value=True):
+                with patch("app.database.execute", new=AsyncMock()) as ex:
+                    await log_decision(_rec())
+                    assert ex.call_count == 1
 
 
 # ── 3. Cache invalidate → new config is picked up ────────────────────────────
