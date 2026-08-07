@@ -28,9 +28,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("fazle.hermes_kernel.shadow_logger")
 
-# One-time flag cache — populated on first call; never re-read unless explicitly
-# invalidated. Satisfies: "configuration lookup shall occur at most once per
-# process lifetime unless explicitly reloaded."
+# Configuration Contract: flag state is cached once per cache lifecycle (normally
+# once per process lifetime). Changes to hermes_decision_audit_enabled or
+# hermes_event_log_enabled in .env require an application restart to take effect.
+# Runtime hot-reload is not supported. Tests must call invalidate_flag_cache()
+# between cases that change flag values.
 _AUDIT_ENABLED: bool | None = None
 _EVENT_ENABLED: bool | None = None
 
