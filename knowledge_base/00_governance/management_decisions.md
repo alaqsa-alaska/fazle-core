@@ -7259,3 +7259,46 @@ sessions).
 `playbooks.py`), `app/config.py`. Builds on Phase 1A/1B above (same
 initiative, same combined 6-part proposal this session's conversation
 history recorded).
+
+---
+
+## Hermes AI Operating System Kernel — C0/C1/C2 Completion Record (2026-08-07)
+
+### Context
+The Hermes AI Operating System kernel was implemented in Stages C0 through C2 as
+part of the Hermes Kernel project (see HERMES_ARCHITECTURAL_PRINCIPLES_2026-08-06.md
+and the full audit report).
+
+### C0.2 — Integration Scaffolding (ACCEPTED, tag: hermes-c0.2-accepted)
+- Added `modules/hermes_kernel/` package: DecisionRecord, KernelEvent, TrustEvaluation
+- Migration 060: hermes_decision_audit_log + hermes_event_log (append-only, no FK to business tables)
+- Feature flags `HERMES_DECISION_AUDIT_ENABLED` and `HERMES_EVENT_LOG_ENABLED` (default False, now True in .env)
+- Wired shadow logging at 3 exit points in process_message()
+- Accepted: 118 tests pass, freeze tag hermes-c0.2-accepted
+
+### C1 — Shadow Execution (VALIDATED, 2026-08-07)
+- Shadow logging live in production
+- C1 validation confirmed: 1 decision row, 1 event row, trace_id integrity PASS
+- Bugs fixed during C1: stale get_settings() cache, Route B fallback wiring, additional routing branches
+- 25 routing branches now wired to _hk_fire
+
+### C2 — Read-only Decision Comparison (DEPLOYED, 2026-08-07)
+- C2-1: All remaining routing branches wired to _hk_fire (full coverage ~95%+)
+- C2-2: intent_method (rule|llm) and provider_used now populated in shadow rows
+- C2-3: Migration 061: hermes_divergence_snapshots append-only table
+- C2-4: scripts/c2_divergence_report.py — read-only divergence analysis script
+- Divergence gate: < 5% role divergence over >= 10 matched rows
+- C2 collection period: minimum 7 days of real traffic before gate can be assessed
+- Script confirmed running: 1 row, 0 divergences, INSUFFICIENT DATA (expected)
+
+### Owner decisions recorded
+- HERMES_DECISION_AUDIT_ENABLED=true enabled in production .env (2026-08-07)
+- HERMES_EVENT_LOG_ENABLED=true enabled in production .env (2026-08-07)
+- hermes_decision_audit and hermes_event_log runtime ops flags activated (2026-08-07)
+- C2 7-day collection window started: 2026-08-07
+- C3 may begin after: Owner review of divergence report (earliest 2026-08-14)
+
+### Rollback
+Set HERMES_DECISION_AUDIT_ENABLED=false and HERMES_EVENT_LOG_ENABLED=false in .env,
+restart fazle-core. All shadow and snapshot tables are append-only and have no FK
+dependencies on business tables. They can be left empty with zero business impact.
