@@ -57,6 +57,7 @@ def build_universal_prompt_context(
     message: str,
     rag_answer: str | None = None,
     history: str | None = None,
+    owner_knowledge: str | None = None,
 ) -> str:
     """Phase 2 (2026-08-06, Owner-approved "Universal AI Responder") --
     general-purpose prompt context for Tier 15's upgraded reply pipeline
@@ -66,7 +67,10 @@ def build_universal_prompt_context(
     Any topic's facts come from rag_answer, per query, dynamically -- the
     faithfulness validator downstream (playbooks.validate_faithfulness())
     is what keeps the reply grounded to whatever was actually retrieved,
-    not a fixed list scoped to one topic."""
+    not a fixed list scoped to one topic.
+
+    S3 (2026-08-08): owner_knowledge is injected above RAG context when
+    present, labeled as authoritative business rules."""
     parts = [
         "General reply rules:",
         "- Bangla-first unless the incoming message is in English; short, human, 1-4 lines.",
@@ -77,6 +81,8 @@ def build_universal_prompt_context(
         "names, private employee data, or internal finance unless it is "
         "explicitly present in the facts below.",
     ]
+    if owner_knowledge:
+        parts.extend(["\nOwner-approved knowledge (business rules — authoritative):", owner_knowledge])
     if rag_answer:
         parts.extend(["", "Retrieved facts (the ONLY facts you may use):", rag_answer[:1800]])
     else:

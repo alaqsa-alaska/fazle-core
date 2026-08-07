@@ -91,6 +91,26 @@ async def generate_universal_reply(
     behaves for its own callers. Deliberately does NOT touch
     recruitment_eligibility(), OPERATIONAL_ROLES, or
     route_recruitment_message() -- see module docstring."""
+    # S3: fetch active owner-approved governance facts (business rules).
+    # Filter: status='active' AND deprecated_at IS NULL. Bounded at 30.
+    owner_knowledge: str | None = None
+    try:
+        from app.database import fetch_all as _db_fetch
+        gov_rows = await _db_fetch(
+            """SELECT category, fact_key, fact_value
+               FROM fazle_knowledge_governance
+               WHERE status = 'active' AND deprecated_at IS NULL
+               ORDER BY category, fact_key
+               LIMIT 30"""
+        )
+        if gov_rows:
+            owner_knowledge = "\n".join(
+                f"[{r['category']}] {r['fact_key']}: {r['fact_value']}"
+                for r in gov_rows
+            )
+    except Exception as _e:
+        log.debug("[universal_reply] owner knowledge fetch skipped: %s", _e)
+
     try:
         from modules import rag as _rag
         rag_result = await _rag.safe_answer(text, k=3, min_score=1.0, role="candidate")
@@ -101,7 +121,7 @@ async def generate_universal_reply(
     citations = rag_result.get("citations") if rag_result else None
 
     universal_context = build_universal_prompt_context(
-        message=text, rag_answer=rag_answer, history=history,
+        message=text, rag_answer=rag_answer, history=history, owner_knowledge=owner_knowledge,
     )
     combined_ctx = f"{db_ctx}\n\n{universal_context}".strip() if db_ctx else universal_context
 

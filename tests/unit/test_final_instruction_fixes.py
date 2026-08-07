@@ -753,3 +753,124 @@ class TestTier15ShadowMode:
         )
 
         assert reply == "OLD_BARE_AI_REPLY"
+
+
+# ---------------------------------------------------------------------------
+# S3: Owner Knowledge Injection Tests
+# ---------------------------------------------------------------------------
+
+class TestS3OwnerKnowledgeInjection:
+    """S3 (2026-08-08) — fazle_knowledge_governance injection into
+    generate_universal_reply via build_universal_prompt_context.
+
+    Each test patches app.database.fetch_all so the suite never hits a
+    real database. Two governance rows are used as a fixture (representative
+    of real active rows, security-clean)."""
+
+    _ACTIVE_ROWS = [
+        {"category": "company_info", "fact_key": "established_year", "fact_value": "2014"},
+        {"category": "salary_rules", "fact_key": "payment_date", "fact_value": "10th-12th of each month"},
+    ]
+
+    def _patch_db(self, monkeypatch, rows):
+        db_mock = AsyncMock(return_value=rows)
+        monkeypatch.setattr("app.database.fetch_all", db_mock)
+        return db_mock
+
+    @pytest.mark.asyncio
+    async def test_active_governance_facts_appear_in_prompt_context(self, monkeypatch):
+        """Test A: active governance rows are formatted into owner_knowledge
+        and placed in the LLM context."""
+        from modules.conversation_layer.prompting import build_universal_prompt_context
+
+        fact_lines = "\n".join(
+            f"[{r['category']}] {r['fact_key']}: {r['fact_value']}"
+            for r in self._ACTIVE_ROWS
+        )
+        ctx = build_universal_prompt_context(
+            message="what year was the company founded?",
+            owner_knowledge=fact_lines,
+        )
+
+        assert "Owner-approved knowledge" in ctx
+        assert "authoritative" in ctx
+        assert "2014" in ctx
+        assert "payment_date" in ctx
+
+    @pytest.mark.asyncio
+    async def test_no_owner_knowledge_section_when_none(self, monkeypatch):
+        """Test B: when owner_knowledge is None the prompt has no owner section."""
+        from modules.conversation_layer.prompting import build_universal_prompt_context
+
+        ctx = build_universal_prompt_context(
+            message="anything",
+            owner_knowledge=None,
+        )
+
+        assert "Owner-approved knowledge" not in ctx
+
+    @pytest.mark.asyncio
+    async def test_db_fetch_called_with_active_filter(self, monkeypatch):
+        """Test C: generate_universal_reply() calls fetch_all with query that
+        filters status='active' and deprecated_at IS NULL."""
+        import modules.conversation_layer as cl
+
+        db_mock = self._patch_db(monkeypatch, self._ACTIVE_ROWS)
+        monkeypatch.setattr("modules.rag.safe_answer", AsyncMock(return_value=None))
+        monkeypatch.setattr("app.llm.generate_reply", AsyncMock(return_value=None))
+
+        await cl.generate_universal_reply(
+            phone="8801700000050", text="office address?", source="bridge1",
+        )
+
+        db_mock.assert_awaited_once()
+        query_used = db_mock.call_args[0][0]
+        assert "status" in query_used
+        assert "active" in query_used
+        assert "deprecated_at" in query_used.lower()
+
+    @pytest.mark.asyncio
+    async def test_owner_knowledge_above_rag_in_authority_order(self, monkeypatch):
+        """Test D: owner_knowledge section appears above RAG facts in the prompt."""
+        from modules.conversation_layer.prompting import build_universal_prompt_context
+
+        fact_lines = "[salary_rules] payment_date: 10th-12th"
+        ctx = build_universal_prompt_context(
+            message="when is salary?",
+            rag_answer="salary paid around the 10th",
+            owner_knowledge=fact_lines,
+        )
+
+        owner_pos = ctx.index("Owner-approved knowledge")
+        rag_pos = ctx.index("Retrieved facts")
+        assert owner_pos < rag_pos, "Owner knowledge must precede RAG facts in the prompt"
+
+    @pytest.mark.asyncio
+    async def test_db_failure_does_not_raise(self, monkeypatch):
+        """Test E: if DB fetch raises, function continues without crashing."""
+        import modules.conversation_layer as cl
+
+        monkeypatch.setattr("app.database.fetch_all", AsyncMock(side_effect=OSError("db gone")))
+        monkeypatch.setattr("modules.rag.safe_answer", AsyncMock(return_value=None))
+        monkeypatch.setattr("app.llm.generate_reply", AsyncMock(return_value=None))
+
+        result = await cl.generate_universal_reply(
+            phone="8801700000051", text="any question", source="bridge1",
+        )
+        assert result is None  # None because LLM returned None, not because of crash
+
+    @pytest.mark.asyncio
+    async def test_security_no_secret_keywords_in_context(self, monkeypatch):
+        """Test F (security): governance row format never emits secret-like keywords."""
+        from modules.conversation_layer.prompting import build_universal_prompt_context
+
+        fact_lines = "\n".join(
+            f"[{r['category']}] {r['fact_key']}: {r['fact_value']}"
+            for r in self._ACTIVE_ROWS
+        )
+        ctx = build_universal_prompt_context(message="test", owner_knowledge=fact_lines)
+
+        import re
+        assert not re.search(r"password|api_key|\btoken\b|secret", ctx, re.I), (
+            "Security violation: secret-like keyword found in prompt context"
+        )
