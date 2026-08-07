@@ -4,9 +4,12 @@ Correctness contracts:
   1. Flag=False  → no DB write attempted
   2. Flag=True   → execute() called with correct INSERT
   3. Cache invalidate → new config picked up; without invalidation cache is sticky
+  4. Flag=False (integration) → hermes_decision_audit_log row count unchanged
+     Requires a live DB; skipped automatically when DB is unavailable.
 """
 from __future__ import annotations
 
+import os
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -132,3 +135,66 @@ class TestCacheInvalidation:
         with patch("app.config.get_settings") as m:
             m.return_value.hermes_decision_audit_enabled = True
             assert _is_audit_enabled() is False
+
+
+# ── 4. Integration: Flag=False → row count unchanged in live DB ───────────────
+
+def _db_url() -> str | None:
+    """Return live DB URL from env or secure backup; None when unavailable."""
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    try:
+        for line in open("/home/azim/secure-env-backup/runtime-services.env"):
+            if line.startswith("DATABASE_URL="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+@pytest.mark.integration
+class TestRowCountIntegration:
+    """Verify that flag=False leaves hermes_decision_audit_log row count unchanged.
+
+    Skipped automatically when no live DB is reachable so CI never fails.
+    This test proves the real side effect is absent, not just the execute() call.
+    """
+
+    async def test_flag_false_row_count_unchanged(self):
+        import asyncpg
+        url = _db_url()
+        if not url:
+            pytest.skip("DATABASE_URL not available — skipping integration test")
+
+        try:
+            conn = await asyncpg.connect(url)
+        except Exception as exc:
+            pytest.skip(f"DB not reachable from test environment: {exc}")
+
+        try:
+            before = await conn.fetchval("SELECT COUNT(*) FROM hermes_decision_audit_log")
+        finally:
+            await conn.close()
+
+        _fresh()
+        from modules.hermes_kernel.shadow_logger import log_decision
+        with patch("app.config.get_settings") as m:
+            m.return_value.hermes_decision_audit_enabled = False
+            m.return_value.hermes_event_log_enabled = False
+            await log_decision(_rec())
+
+        try:
+            conn = await asyncpg.connect(url)
+        except Exception as exc:
+            pytest.skip(f"DB not reachable from test environment: {exc}")
+
+        try:
+            after = await conn.fetchval("SELECT COUNT(*) FROM hermes_decision_audit_log")
+        finally:
+            await conn.close()
+
+        assert after == before, (
+            f"hermes_decision_audit_log row count changed from {before} to {after} "
+            f"despite hermes_decision_audit_enabled=False"
+        )

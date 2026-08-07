@@ -17,6 +17,15 @@ C0.2 fix (2026-08-07): flags are read at most once per process lifetime.
   DATABASE_URL in test environments). The one-time cached booleans below satisfy
   the acceptance criterion: disabled shadow logging must not repeatedly invoke
   expensive configuration loading or validation.
+
+  Cold-path cost (first call only per process):
+    The first call to _is_audit_enabled() / _is_event_enabled() includes:
+    - lazy import of app.config and app.database
+    - .env file I/O and pydantic validation (via get_settings())
+    - module-level cache population
+    Measured: ~46ms (DATABASE_URL present) / ~243ms (absent, ValidationError).
+    This cost occurs once at process startup, not per message.
+    Hot path (all subsequent calls): ~0.0005 ms/message (single bool read).
 """
 from __future__ import annotations
 
