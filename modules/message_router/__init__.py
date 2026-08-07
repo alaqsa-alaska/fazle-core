@@ -1143,6 +1143,23 @@ async def get_contact_context(phone: str) -> str:
                 f"কর্মী: {emp['employee_name']}, {emp.get('designation','')}, "
                 f"বেতন: ৳{emp['basic_salary']}, স্ট্যাটাস: {emp['status']}"
             )
+
+        # S2: inject user_memory facts as conversational context (read-only).
+        # Priority: authoritative DB > memory. Memory is labeled as context only.
+        mem_rows = []
+        for v in phone_variants:
+            mem_rows = await fetch_all(
+                """SELECT memory_type, content FROM user_memory
+                   WHERE phone_canonical = $1
+                   ORDER BY created_at DESC LIMIT 5""",
+                v,
+            )
+            if mem_rows:
+                break
+        if mem_rows:
+            mem_lines = [f"- [{m['memory_type']}] {m['content'][:120]}" for m in mem_rows]
+            lines.append("স্মৃতি-প্রসঙ্গ (context only — not authoritative):\n" + "\n".join(mem_lines))
+
     except Exception as e:
         log.debug(f"Context fetch error: {e}")
     return "\n".join(lines)
