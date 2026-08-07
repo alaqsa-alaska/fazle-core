@@ -7302,3 +7302,34 @@ and the full audit report).
 Set HERMES_DECISION_AUDIT_ENABLED=false and HERMES_EVENT_LOG_ENABLED=false in .env,
 restart fazle-core. All shadow and snapshot tables are append-only and have no FK
 dependencies on business tables. They can be left empty with zero business impact.
+
+---
+
+## S1 — Hybrid RAG Verification (2026-08-08)
+
+### Finding
+S1 was tasked with enabling `HYBRID_SEARCH_ENABLED=true`. Inspection confirmed
+the flag was already set as part of **Hybrid RAG Milestone 3.9** (approved 2026-06-22).
+No configuration change was required.
+
+### Verified state (2026-08-08)
+- `HYBRID_SEARCH_ENABLED=true` in `core/.env` (with inline comment: Approved 2026-06-22)
+- `QDRANT_HOST=172.20.0.2`, `QDRANT_PORT=6333` — server mode
+- Production `/rag/stats` endpoint confirms: `hybrid_search_enabled: true`, `mode: server`
+- Qdrant collection `fazle_rag_chunks`: 15,552 points present
+- BM25 index: 15,552 docs, vocab 13,992, avgdl 36.48
+- Hybrid search RRF confirmed: query "ডিউটি কত ঘন্টা" returns RRF scores (0.031, 0.016) not BM25 scores
+- Top result: `escort_duty_policy` — correct answer for duty hours
+
+### No change required
+- No `.env` change
+- No code change
+- No restart performed
+- No migration
+
+### Regression
+- 118 tests pass, 0 failures
+- C2 shadow logging intact: 22 decision rows, 22 event rows
+
+### Rollback (if ever needed)
+Set `HYBRID_SEARCH_ENABLED=false` in `core/.env` and restart `fazle-core`.
