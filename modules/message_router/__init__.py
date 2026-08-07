@@ -364,6 +364,41 @@ async def process_message(
     settings = get_settings()
     sender = normalize_phone(sender) or sender.strip()
 
+    # Hermes Kernel C0.2: create a shadow DecisionRecord and EVT-001 event at
+    # the start of every turn. Both are written fire-and-forget only when
+    # their respective feature flags are True. No routing logic is changed.
+    try:
+        from modules.hermes_kernel.data_classes import DecisionRecord, KernelEvent
+        _hk_record = DecisionRecord(
+            sender_phone=sender,
+            source=source,
+            raw_input_text=(text or "")[:2000],
+        )
+        _hk_evt001 = KernelEvent(
+            trace_id=_hk_record.trace_id,
+            event_name="EVT-001 message.received",
+            payload={"sender_phone": sender, "source": source},
+        )
+    except Exception:
+        _hk_record = None  # type: ignore[assignment]
+        _hk_evt001 = None  # type: ignore[assignment]
+
+    def _hk_fire(role: str, intent: str, action: str, explanation: str = "") -> None:
+        """Fire-and-forget shadow log; never raises; never blocks."""
+        if _hk_record is None:
+            return
+        try:
+            _hk_record.identity_role = role
+            _hk_record.intent = intent
+            _hk_record.chosen_action = action
+            _hk_record.explanation = explanation
+            from modules.hermes_kernel.shadow_logger import log_decision, log_event
+            asyncio.create_task(log_decision(_hk_record))
+            if _hk_evt001 is not None:
+                asyncio.create_task(log_event(_hk_evt001))
+        except Exception as _hk_exc:
+            log.warning("[hermes_kernel] _hk_fire non-fatal: %s", _hk_exc)
+
     # TASK 2: Silent-skip excluded contacts before any processing or draft creation.
     # Escort work messages are operational inputs, so they must still create
     # admin-review drafts even when the contact name contains "client/escort".
@@ -373,6 +408,7 @@ async def process_message(
             log.info("[SILENT_SKIP_BYPASS] %s → escort workflow allowed (%s)", sender, _skip_reason)
         elif "display_name contains" in _skip_reason or "display_name starts with" in _skip_reason:
             log.info("[DRAFT_ONLY_CONTACT] %s → admin draft, no auto-reply (%s)", sender, _skip_reason)
+            _hk_fire("", "", "draft", "draft-only-contact")
             return "", {
                 "admin_phone": get_primary_admin(),
                 "bridge": source,
@@ -386,6 +422,7 @@ async def process_message(
             }
         else:
             log.info("[SILENT_SKIP] %s → no reply, no draft (%s)", sender, _skip_reason)
+            _hk_fire("", "", "no_action", "silent-skip")
             return "", None
 
     identity = await detect_identity(sender, text)
@@ -398,6 +435,11 @@ async def process_message(
         f"[IDENTITY] {sender} → {role_str} "
         f"(conf={identity['identity_confidence']}, src={identity['identity_source']})"
     )
+    # Populate kernel record with identity data now that it's resolved.
+    if _hk_record is not None:
+        _hk_record.identity_role = role_str
+        _hk_record.identity_confidence = identity.get("confidence")  # 0.0-1.0 float
+        _hk_record.identity_source = identity.get("identity_source", "")
 
     # ── 1. FAMILY — personal, no business workflow ────────────────────────────
     if role_str == "family":
@@ -932,6 +974,8 @@ async def process_message(
     except Exception as e:
         log.debug("[tier15_shadow] universal responder failed (non-fatal): %s", e)
 
+    # Hermes Kernel C0.2: fire shadow audit log for this turn (Tier 15 — AI reply).
+    _hk_fire(role_str, intent, "reply", "ai-fallback-tier15")
     return reply, None
 
 

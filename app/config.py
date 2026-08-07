@@ -335,6 +335,13 @@ class Settings(BaseSettings):
     # same phone is suppressed from creating a second admin draft.
     route_b_handoff_cooldown_hours: int = 6
 
+    # ── Hermes Kernel Scaffolding (Stage C0.2, 2026-08-07) ──────────────────
+    # All default False. No production behavior changes until explicitly enabled.
+    # Write a DecisionRecord shadow row for every process_message() turn.
+    hermes_decision_audit_enabled: bool = False
+    # Write a KernelEvent (EVT-001) row for every inbound message turn.
+    hermes_event_log_enabled: bool = False
+
     # Fazle Payroll Engine (FPE)
     fpe_sync_chat_jids: str = ""   # comma-separated target JIDs for historical sync
     # Phones authorized to send "Cash <phone> <name> <amount>" commands

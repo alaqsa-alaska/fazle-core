@@ -82,3 +82,4 @@ RECRUITMENT_BOT_COORDINATION.md
 backups/
 cleanup-log*.txt
 cleanup-post-state.json
+moonshot_test.py
