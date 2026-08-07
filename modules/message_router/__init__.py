@@ -883,6 +883,7 @@ async def process_message(
             sender, text, source, identity, intent, message_id=message_id,
         )
         if reply:
+            _hk_fire(role_str, intent, "reply", "route-b")
             return reply, admin_note
 
     # ── 12. OFFICE LOCATION FAST PATH (KB-only, no AI, no reviewed memory) ──────
@@ -905,6 +906,7 @@ async def process_message(
     # ── 13. KNOWLEDGE BASE (all roles, all other intents) ─────────────────────
     kb_reply = await kb_get_reply(text, intent)
     if kb_reply:
+        _hk_fire(role_str, intent, "reply", "kb")
         return kb_reply, None
 
     # ── 14. REVIEWED REPLY LOOKUP ─────────────────────────────────────────────
@@ -922,6 +924,7 @@ async def process_message(
                 "[reviewed] hit sender=%s intent=%s scope=%s id=%s",
                 sender, intent, _reviewed.get("match_scope"), _reviewed.get("id"),
             )
+            _hk_fire(role_str, intent, "reply", "reviewed-memory")
             return _reviewed["reply_text"], None
     except Exception as _rrm_err:
         log.debug("[reviewed] lookup non-fatal error: %s", _rrm_err)
