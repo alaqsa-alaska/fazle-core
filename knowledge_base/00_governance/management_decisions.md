@@ -7333,3 +7333,83 @@ No configuration change was required.
 
 ### Rollback (if ever needed)
 Set `HYBRID_SEARCH_ENABLED=false` in `core/.env` and restart `fazle-core`.
+
+---
+
+## S2 — User Memory Context Integration (2026-08-08)
+
+### Problem identified
+`user_memory` table had 1,464 rows of per-sender conversational facts extracted from
+WhatsApp conversations, but the value was never retrieved or injected into the LLM
+conversation context. Every LLM response was generated without these facts.
+
+### Existing memory infrastructure discovered
+- `user_memory` table: 1,464 rows, schema: id, phone_canonical, memory_type, content,
+  confidence, source, created_at
+- Memory types: work_info (682), pending_matter (476), personal_info (306)
+- 97.9% of rows use 880-prefix phone format
+- `role_classifier.get_user_context()` exists but requires a `user_profiles` entry —
+  misses ~90% of user_memory rows (user_profiles has only 130 rows)
+- `get_contact_context()` in message_router was the correct integration point: already
+  async, already uses `_phone_variants()` for normalization, already called from all
+  LLM routing paths
+
+### Integration point
+File: modules/message_router/__init__.py
+Function: get_contact_context(phone: str) -> str
+After the existing wbom_contacts and wbom_employees lookups, query user_memory using
+_phone_variants(phone) and append up to 5 recent facts labeled as context only.
+
+### Files changed
+- modules/message_router/__init__.py (+17 lines, inside existing try/except)
+
+### Database changes
+None. No migration. No new table.
+
+### Phone scoping
+Exact match using _phone_variants(phone) — generates all three format variants
+(880XXXXXXXXXXX, 01XXXXXXXXX, +880XXXXXXXXXXX). Same normalization already in use
+for contact and employee lookups. No fuzzy matching. No cross-user contamination.
+
+### Bounds
+Maximum 5 facts per request. Content truncated at 120 chars. Inside existing
+try/except — any failure silently logged at debug level.
+
+### Authority precedence
+Memory is labeled "স্মৃতি-প্রসঙ্গ (context only — not authoritative)" in the context
+string. Memory appears AFTER authoritative DB data (contact name, employee record)
+in the context block. LLM system prompt (build_universal_prompt_context) instructs:
+"Answer ONLY using the facts provided below" — authoritative facts are listed first.
+
+### Security
+Memory is scoped by exact phone match only. Admin phone (8801958122300) tested:
+receives only its OWN 128 memory rows, not other users' memory. PASS.
+
+### Tests performed
+- Test A: Phone with memory → memory injected: PASS
+- Test B: Unknown phone → empty context, no crash: PASS
+- Test C: Phone with 128 rows → exactly 5 injected (bounds check): PASS
+- Test D: Admin phone → receives only own memory: PASS
+- 118 unit tests pass, 0 failures
+
+### C2 integrity
+22 decision rows, 22 event rows, 0 divergence snapshots — unchanged.
+
+### Restart
+YES — required to load updated message_router code into production process.
+Restart performed by Owner.
+
+### Rollback
+Revert single hunk in modules/message_router/__init__.py (the 17-line S2 block
+inside get_contact_context) and restart fazle-core. No DB change to undo.
+
+### Known limitations
+1. Memory extraction (`memory_extractor`) is a scheduled job — new facts appear with
+   delay. Memory is not real-time.
+2. Some older memory rows use non-880 phone formats (22 rows) — matched via
+   _phone_variants() fallback.
+3. Pending_matter memory may reference stale tasks; the label "context only — not
+   authoritative" prevents the LLM from acting on stale data.
+
+### Commit
+4192fcc — feat(s2): inject scoped user_memory into get_contact_context()
