@@ -444,6 +444,7 @@ async def process_message(
     # ── 1. FAMILY — personal, no business workflow ────────────────────────────
     if role_str == "family":
         name = identity.get("display_name") or "আপনি"
+        _hk_fire("family", "greeting", "reply", "family-personal")
         return (
             f"আস-সালামু আলাইকুম {name}! 😊\n"
             f"এটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন।",
@@ -510,6 +511,7 @@ async def process_message(
     # Completed escort slips sent by a client/non-admin are not final admin
     # confirmations. Keep them visible by sending them to admin review.
     if role_str != "admin" and is_completed_escort_draft(text):
+        _hk_fire(role_str, "escort_duty", "draft", "escort-slip-review")
         return "", {
             "admin_phone": get_primary_admin(),
             "bridge": source,
@@ -628,6 +630,7 @@ async def process_message(
         result = await create_attendance_draft(parsed, sender, source)
         admin_phone = settings.admin_bridge1_number if source == "bridge1" \
             else settings.admin_bridge2_number
+        _hk_fire(role_str, "attendance", "draft", "attendance-draft")
         return result["message"], {
             "admin_phone": admin_phone,
             "text": result["admin_msg"],
@@ -639,7 +642,13 @@ async def process_message(
     intent = await ai.classify_intent_llm(text)
     if intent == "unknown":
         intent = classify(text)
+        _intent_method = "rule"
+    else:
+        _intent_method = "llm"
     log.info(f"[INTENT] {sender} → {intent}")
+    if _hk_record is not None:
+        _hk_record.intent = intent
+        _hk_record.intent_method = _intent_method
 
     # Trusted operational identities must never enter any recruitment reply
     # fallback, even if the message text itself looks recruitment-related.
@@ -648,6 +657,7 @@ async def process_message(
             "[RECRUITMENT_BLOCKED_OPERATIONAL] sender=%s role=%s source=%s",
             sender, role_str, identity.get("identity_source"),
         )
+        _hk_fire(role_str, intent, "no_action", "recruitment-blocked-operational")
         return "", None
 
     # ── 6. ACCOUNTANT ─────────────────────────────────────────────────────────
@@ -702,6 +712,7 @@ async def process_message(
         )
         ai_reply = (rec_route.get("reply") or "").strip()
         if ai_reply:
+            _hk_fire(role_str, intent, "reply", "recruitment")
             return ai_reply, None
 
     # ── 9. ESCORT ORDER (intent-triggered for non-registered senders) ─────────
@@ -723,6 +734,7 @@ async def process_message(
         if not emp_id:
             mismatch = await check_identity_mismatch(sender)
             if mismatch:
+                _hk_fire(role_str, intent, "reply", "employee-identity-mismatch")
                 return mismatch, None
 
         # ── Sprint-3A: Employee Conversation Workflow ──────────────────────────
@@ -736,18 +748,22 @@ async def process_message(
                 sender, text, source, emp_id
             )
             if reply:
+                _hk_fire(role_str, intent, "reply", "employee-sprint3a-session")
                 return reply, admin_note
 
         # Legacy verification session (selfie/slip flow) — still active for
         # release-slip submissions that pre-date Sprint-3A.
         session = await get_verification_session(sender)
         if session:
+            _hk_fire(role_str, intent, "reply", "employee-verification-session")
             return await advance_verification(sender, text, source, emp_id)
 
         if intent == "attendance" or is_attendance_message(text):
+            _hk_fire(role_str, "attendance", "draft", "employee-attendance")
             return await handle_attendance_message(text, sender, source)
 
         if intent == "slip_submission":
+            _hk_fire(role_str, "slip_submission", "draft", "employee-slip")
             return await start_slip_verification(sender, text, source, emp_id)
 
         # Employee release messages request admin review. Only an admin's exact
@@ -755,6 +771,7 @@ async def process_message(
         if emp_id:
             from modules.escort_lifecycle import is_release_intent
             if is_release_intent(text):
+                _hk_fire(role_str, intent, "draft", "employee-release-review")
                 return (
                     "✅ আপনার release request পাওয়া গেছে। Admin যাচাই করে "
                     "[RELEASE CONFIRMED] পাঠানোর পর attendance ও settlement তৈরি হবে।",
@@ -785,6 +802,7 @@ async def process_message(
                 source_module="message_router",
             )
             log.warning("[COMPLAINT_DRAFT] intent=%s sender=%s emp_id=%s", intent, sender, emp_id)
+            _hk_fire(role_str, intent, "draft", "employee-complaint")
             return "আপনার বার্তা পেয়েছি। দায়িত্বশীল ব্যক্তি শীঘ্রই যোগাযোগ করবেন।", None
 
         # 2026-07-22 (Final Instruction Section 5): an INFORMATIONAL salary
@@ -806,6 +824,7 @@ async def process_message(
             db_ctx = format_payroll_context(payroll)
             history = "\n".join(await get_recent_history(sender))
             reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
+            _hk_fire(role_str, intent, "reply", "employee-payroll")
             return reply, None
 
         # Sprint-3A: Route payment requests through the AI conversation workflow.
@@ -818,10 +837,12 @@ async def process_message(
                 sender, text, source, emp_id
             )
             if reply:
+                _hk_fire(role_str, intent, "reply", "employee-sprint3a-trigger")
                 return reply, admin_note
             # Fallback: if Sprint-3A didn't start (e.g. unknown trigger edge),
             # fall through to legacy advance verification.
             if is_advance_request(text):
+                _hk_fire(role_str, intent, "draft", "employee-advance-legacy")
                 return await start_advance_verification(sender, source, emp_id)
 
     # ── 11. ADVANCE/PAYMENT REQUEST (any role not already handled) ───────────
@@ -834,6 +855,7 @@ async def process_message(
             sender, text, source, identity.get("employee_id")
         )
         if reply:
+            _hk_fire(role_str, intent, "reply", "catchall-sprint3a-session")
             return reply, admin_note
 
     ec_trigger_catchall = ec_detect_trigger(text)
@@ -842,11 +864,13 @@ async def process_message(
             sender, text, source, identity.get("employee_id")
         )
         if reply:
+            _hk_fire(role_str, intent, "reply", "catchall-sprint3a-trigger")
             return reply, admin_note
 
     # Legacy fallback: advance request via old verification flow
     existing_session = await get_verification_session(sender)
     if not existing_session and is_advance_request(text) and role_str != "admin":
+        _hk_fire(role_str, intent, "draft", "advance-legacy")
         return await start_advance_verification(sender, source, identity.get("employee_id"))
 
     # ── 11.5 ROUTE B (2026-07-21) — escort / security_guard / candidate / unknown ─
@@ -948,6 +972,13 @@ async def process_message(
         log.debug("[router] rag enrichment skipped: %s", _rag_err)
     history = "\n".join(await get_recent_history(sender))
     reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
+    # Populate provider_used from the provider attempt trace (zero cost — already computed).
+    try:
+        _attempts = ai.get_last_attempts()
+        if _attempts and _hk_record is not None:
+            _hk_record.provider_used = _attempts[0].get("provider", "")
+    except Exception:
+        pass
     # Phase 4 Step 4 — strip artifact prefixes from structured prompt output
     from shared.reply_policy import clean_general_reply as _clean_reply
     reply = _clean_reply(reply)
