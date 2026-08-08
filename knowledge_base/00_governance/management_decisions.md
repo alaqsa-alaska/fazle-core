@@ -7782,6 +7782,65 @@ no accidental or unrelated modification in either repo.
 All mandatory S6 acceptance conditions are implemented, test-proven, and/or
 runtime-proven. The three deferred items (video processing,
 location/sticker/unsupported media, Dhanai Basic Auth) are Owner decisions
-by design, not blockers, and are not reopened here. No commit has been
-made — commit remains a separate, explicit action for whenever authorized.
-S7 has not been started.
+by design, not blockers, and are not reopened here. S7 has not been
+started.
+
+### S6 — Committed, pushed, deployed, verified (2026-08-08, same day)
+
+Owner authorized commit + push + deploy + verify. Executed in that order:
+
+- **core**: committed `ea94645 feat(s6): close Hermes wrong-bridge gap,
+  extend AI-output confidentiality to all reply exit points` (8 files —
+  the 7 reviewed above plus one same-turn fixup: `tests/unit/
+  test_reply_policy.py`'s DATABASE_URL fixture used `user:secret@`, which
+  `scripts/secret_scan.sh` correctly flagged as a false positive; changed
+  to the already-documented-safe `postgres:postgres@` placeholder
+  (`SAFE_VALUE_SUBSTRINGS`), re-tested, no behavior change). Pushed to
+  `origin/main` (`567e17a..ea94645`) — the first push attempt was denied
+  by this environment's own push classifier, a known transient issue
+  (see `[[feedback_hermes_runner_push_classifier_20260804]]`); succeeded
+  on immediate retry.
+- **assistant-platform**: committed `b89b229 feat(s6): admin-only Hermes
+  route guard + backend auth-boundary tests` (2 files). Pushed to
+  `origin/main` (`c85d80b..b89b229`), succeeded first try.
+- **core deploy**: `scripts/restart_gate.sh --check-only` → PASS (0
+  warnings, all 7 checks green) before touching anything; then
+  `scripts/restart_gate.sh --restart` → pre-restart health `ok`,
+  `systemctl restart fazle-core.service` (via this session's existing
+  NOPASSWD grant, invoked by the gate script itself, not bypassed),
+  post-restart health `ok` within 6s, `RESTART: SUCCESS`. Verified after:
+  new PID (191363), `ActiveEnterTimestamp` matches the restart, `/health`
+  → `status: ok` with every probe (db, all 3 bridge pollers, outbound,
+  disk, mem, cpu, Ollama, Qdrant) `ok`, error log clean (only normal
+  startup/shutdown INFO lines, no traceback), and the running code on
+  disk confirmed to contain `source_bridge` (i.e. the actual new logic,
+  not a stale process).
+- **assistant-platform deploy**: only `assistant-frontend` needed a
+  rebuild (the only runtime-code change was `App.jsx`; the backend change
+  was a test file only, not deployed). `docker compose build
+  assistant-frontend` → succeeded; `docker compose up -d
+  assistant-frontend` → container recreated (new image, new asset hash
+  `index-DKsHXpw_.js`, replacing the pre-deploy `index-CskXeigS.js`);
+  `assistant-db`/`assistant-redis`/`assistant-backend`/`omniroute`
+  untouched (uptimes unchanged — 6d/6d/3d/5d respectively, confirming no
+  unrelated container was restarted). Verified: the minified bundle
+  contains `role!=="admin"?...:children`-shaped logic (the `RequireAdmin`
+  guard, confirmed present via direct asset fetch+grep — quote/spacing
+  differs from source due to minification, confirmed via the `'admin'`
+  string literal and the surrounding ternary structure, not just presence
+  of the word "admin"). `assistant.iamazim.com` and `panai.iamazim.com`
+  both now serve the identical new asset hash — confirms Panai correctly
+  mirrors the live assistant-platform deployment. `assistant-backend`
+  `/health` → `{"ok":true}`, logs clean (one pre-existing, unrelated `pg`
+  client deprecation warning, not caused by this deploy).
+- **Regression check post-deploy**: `chat.iamazim.com` → 200,
+  `dhanai.iamazim.com` → 307 (Portainer's own redirect, unchanged) — both
+  unaffected by either deploy.
+- **Not done**: no certbot run, no migration, no service restart other
+  than `fazle-core.service` (via the gate) and the one Docker container
+  recreate (`assistant-frontend`) — no other systemd service or container
+  touched.
+
+No commit has been made for this addendum itself yet — it is being written
+as part of this same closure turn and will be included if/when this file
+is next committed.
