@@ -227,11 +227,12 @@ class TestRecruitmentLlmPriorityAllowlist:
         intake_mock.assert_awaited_once()
 
 
-class TestRecruitmentSalaryQueryEligibility:
+class TestRecruitmentInformationalIntentEligibility:
 
-    def test_salary_query_intent_no_longer_blocks_candidate_eligibility(self):
+    def test_informational_intents_do_not_block_candidate_eligibility(self):
         import modules.recruitment_flow as rf
         assert "salary_query" not in rf.OPERATIONAL_INTENTS
+        assert "escort_duty" not in rf.OPERATIONAL_INTENTS
 
     @pytest.mark.asyncio
     async def test_candidate_salary_question_is_eligible(self, monkeypatch):
@@ -244,6 +245,69 @@ class TestRecruitmentSalaryQueryEligibility:
         assert decision["reason"] != "operational_intent"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("role", "text", "intent"),
+        [
+            ("unknown", "চাকরির বেতন কত?", "salary_query"),
+            ("candidate", "escort কাজের duty কী?", "escort_duty"),
+            ("unknown", "escort কাজের duty কতদিন?", "escort_duty"),
+        ],
+    )
+    async def test_recruitment_shaped_salary_and_duty_questions_are_eligible(
+        self, monkeypatch, role, text, intent,
+    ):
+        import modules.recruitment_flow as rf
+        monkeypatch.setattr(rf, "get_active_session", AsyncMock(return_value=None))
+
+        decision = await rf.recruitment_eligibility(
+            "8801700000025", text, role=role, intent=intent,
+        )
+
+        assert decision["eligible"] is True
+        assert decision["reason"] == "explicit_recruitment"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("role", "text", "intent"),
+        [
+            ("unknown", "escort er beton kotoo", "salary_query"),
+            ("candidate", "escort duty কতদিন?", "escort_duty"),
+        ],
+    )
+    async def test_bare_informational_questions_are_eligible_via_detector(
+        self, monkeypatch, role, text, intent,
+    ):
+        import modules.recruitment_flow as rf
+        monkeypatch.setattr(rf, "get_active_session", AsyncMock(return_value=None))
+
+        decision = await rf.recruitment_eligibility(
+            "8801700000028", text, role=role, intent=intent,
+        )
+
+        assert decision["eligible"] is True
+        assert decision["reason"] == "detector_entity"
+
+    @pytest.mark.asyncio
+    async def test_candidate_duty_question_reaches_existing_kb_rag_reply_path(self, monkeypatch):
+        import modules.recruitment_flow as rf
+        monkeypatch.setattr(rf, "get_active_session", AsyncMock(return_value=None))
+        generate_mock = AsyncMock(return_value="এস্কর্ট ডিউটির তথ্য")
+        monkeypatch.setattr(
+            "modules.conversation_layer.generate_recruitment_reply", generate_mock,
+        )
+        intake_mock = AsyncMock(return_value={"reply": "", "action": "created"})
+        monkeypatch.setattr(rf, "intake_message", intake_mock)
+
+        result = await rf.route_recruitment_message(
+            "8801700000025", "escort কাজের duty কী?",
+            source="bridge1", role="candidate", intent="escort_duty",
+        )
+
+        assert result["eligible"] is True
+        assert result["reply"] == "এস্কর্ট ডিউটির তথ্য"
+        generate_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_employee_role_still_excluded_regardless_of_intent(self, monkeypatch):
         """The role check runs first and still fully protects real
         employees — this fix only affects candidate/unknown/new_lead."""
@@ -254,6 +318,44 @@ class TestRecruitmentSalaryQueryEligibility:
         )
         assert decision["eligible"] is False
         assert decision["reason"] == "operational_identity"
+
+    @pytest.mark.asyncio
+    async def test_employee_duty_question_still_excluded_by_role(self, monkeypatch):
+        import modules.recruitment_flow as rf
+        monkeypatch.setattr(rf, "get_active_session", AsyncMock(return_value=None))
+        decision = await rf.recruitment_eligibility(
+            "8801700000026", "আমার escort duty কবে?",
+            role="employee", intent="escort_duty",
+        )
+        assert decision["eligible"] is False
+        assert decision["reason"] == "operational_identity"
+
+    @pytest.mark.asyncio
+    async def test_unknown_client_order_remains_operational(self, monkeypatch):
+        import modules.recruitment_flow as rf
+        monkeypatch.setattr(rf, "get_active_session", AsyncMock(return_value=None))
+        decision = await rf.recruitment_eligibility(
+            "8801700000027", "MV Banglar Joy-তে ৪ জন escort লাগবে",
+            role="unknown", intent="client_order",
+        )
+        assert decision["eligible"] is False
+        assert decision["reason"] == "operational_intent"
+
+    @pytest.mark.asyncio
+    async def test_order_shaped_escort_duty_is_not_claimed_as_recruitment(self, monkeypatch):
+        import modules.recruitment_flow as rf
+        monkeypatch.setattr(rf, "get_active_session", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "modules.message_router.get_recent_history", AsyncMock(return_value=[]),
+        )
+
+        decision = await rf.recruitment_eligibility(
+            "8801700000029", "MV Banglar Joy, lighter Ababil, ৪ জন escort লাগবে",
+            role="unknown", intent="escort_duty",
+        )
+
+        assert decision["eligible"] is False
+        assert decision["reason"] == "no_recruitment_context"
 
 
 # ===========================================================================

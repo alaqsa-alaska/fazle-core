@@ -86,14 +86,20 @@ OPERATIONAL_ROLES = frozenset({
 
 ### `OPERATIONAL_INTENTS` — Block Recruitment on These Intents
 
-If the router resolves any of these 8 intents for a sender, recruitment is skipped:
+After the operational-role check, any of these 6 intents skips recruitment:
 
 ```python
 OPERATIONAL_INTENTS = frozenset({
-    "attendance", "leave", "salary_query", "payment_due",
-    "advance_request", "escort_duty", "client_order", "slip_submission",
+    "attendance", "leave", "payment_due", "advance_request",
+    "client_order", "slip_submission",
 })
 ```
+
+`salary_query` and `escort_duty` are intentionally excluded. For
+`unknown`/`candidate`/`new_lead` senders, informational questions for those
+topics proceed to recruitment detection and the KB/RAG reply path. Operational
+roles remain blocked by `OPERATIONAL_ROLES`, while order-shaped escort text
+continues to the escort-order route when recruitment detection does not match.
 
 ---
 

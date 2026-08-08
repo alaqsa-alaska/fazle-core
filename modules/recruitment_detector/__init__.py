@@ -81,6 +81,15 @@ ENTITY_SIGNALS: dict[str, tuple[str, ...]] = {
         "ভাই বলেছে", "স্যার বলেছে", "আপনার নম্বর দিয়েছে",
         "someone referred", "was told to contact", "was asked to call",
     ),
+    "salary_information": (
+        "বেতন কত", "বেতন কতো", "salary কত", "salary কতো",
+        "beton koto", "beton kotoo", "salary amount", "monthly salary",
+    ),
+    "duty_information": (
+        "ডিউটি কী", "ডিউটি কি", "ডিউটি কতদিন", "ডিউটি কতোদিন",
+        "duty কী", "duty কি", "duty কতদিন", "duty কতোদিন",
+        "what is escort duty", "how long is escort duty",
+    ),
     "self_introduction_for_work": (
         "আমার নাম", "আমি থাকি", "আমার বয়স",
         "আমার address", "আমার phone",
@@ -93,7 +102,10 @@ ENTITY_SIGNALS: dict[str, tuple[str, ...]] = {
 # categories are individually ambiguous (e.g. "আমার বয়স ২৫" alone appears in
 # lots of non-recruitment contexts) and only count combined with something
 # else. WEAK categories never trigger alone under any circumstance.
-DECISIVE_CATEGORIES = {"seeking_work", "opportunity_ask", "reference_or_referral"}
+DECISIVE_CATEGORIES = {
+    "seeking_work", "opportunity_ask", "reference_or_referral",
+    "salary_information", "duty_information",
+}
 SUPPORTING_CATEGORIES = {"availability", "experience_mention", "qualification_mention"}
 WEAK_CATEGORIES = {"self_introduction_for_work"}
 ENTITY_THRESHOLD = 2  # combined SUPPORTING/WEAK categories needed when no DECISIVE match

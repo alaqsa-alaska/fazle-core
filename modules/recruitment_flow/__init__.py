@@ -24,16 +24,17 @@ OPERATIONAL_ROLES = frozenset({
 })
 OPERATIONAL_INTENTS = frozenset({
     "attendance", "leave", "payment_due", "advance_request",
-    "escort_duty", "client_order", "slip_submission",
+    "client_order", "slip_submission",
 })
-# "salary_query" deliberately excluded (2026-07-22, Final Instruction
-# Section 4/5): by the time this set is even consulted in
+# "salary_query" and "escort_duty" are deliberately excluded: by the time
+# this set is consulted in
 # recruitment_eligibility(), role has already been confirmed non-operational
 # (unknown/new_lead/candidate) -- a real employee's salary question never
 # reaches this check at all, it's already rejected by the role check above.
-# For a candidate/unknown sender, "escort e monthly koto salary?" IS a
-# legitimate recruitment question and must not be excluded from the
-# recruitment reply path.
+# Candidate/unknown questions about escort salary or duty are legitimate
+# recruitment topics and must reach the recruitment detector. Actual escort
+# orders still fail recruitment detection and continue to the escort-order
+# gate in modules.message_router.
 
 # ── Intake trigger keywords ────────────────────────────────────────────────────
 INTAKE_KEYWORDS: set[str] = {
