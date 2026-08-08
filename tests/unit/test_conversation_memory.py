@@ -186,20 +186,18 @@ class TestTTLConfiguration:
 # ===========================================================================
 
 def test_stage1_flags_enabled_stage2_stage3_flags_still_off():
-    """Reflects the real, intentional production state as of the Stage 1
-    checkpoint (2026-07-19): conversation_memory_enabled and
-    whatsapp_thread_reconstruction_enabled are ON in production .env
-    (Section 1 of the Stage 2 spec required enabling them, after all 4
-    pre-flag-enable checks passed). The two still-gated capabilities --
-    multi_message_escort_parser_enabled and bangla_semantic_parser_enabled
-    -- must remain OFF until their own Owner-approved checkpoint."""
+    """Reflects the real, intentional production state as of the Stage 2
+    checkpoint (2026-08-08): all four conversation-memory flags are ON in
+    production .env after Owner approval -- conversation_memory_enabled,
+    whatsapp_thread_reconstruction_enabled, multi_message_escort_parser_enabled
+    and bangla_semantic_parser_enabled."""
     from app.config import get_settings
     get_settings.cache_clear()
     s = get_settings()
     assert s.conversation_memory_enabled is True
     assert s.whatsapp_thread_reconstruction_enabled is True
-    assert s.multi_message_escort_parser_enabled is False
-    assert s.bangla_semantic_parser_enabled is False
+    assert s.multi_message_escort_parser_enabled is True
+    assert s.bangla_semantic_parser_enabled is True
 
 
 def test_stage2_stage3_flags_default_off_at_code_level(monkeypatch):
@@ -208,8 +206,10 @@ def test_stage2_stage3_flags_default_off_at_code_level(monkeypatch):
     requirement is a code-level guarantee, not just today's deployment
     fact."""
     from app.config import get_settings
-    monkeypatch.delenv("MULTI_MESSAGE_ESCORT_PARSER_ENABLED", raising=False)
-    monkeypatch.delenv("BANGLA_SEMANTIC_PARSER_ENABLED", raising=False)
+    # setenv overrides the .env file value; delenv alone does not because
+    # pydantic-settings re-reads the .env file after the env var is removed.
+    monkeypatch.setenv("MULTI_MESSAGE_ESCORT_PARSER_ENABLED", "false")
+    monkeypatch.setenv("BANGLA_SEMANTIC_PARSER_ENABLED", "false")
     get_settings.cache_clear()
     try:
         s = get_settings()

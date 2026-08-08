@@ -5,6 +5,7 @@ never passed to app.include_router(), so their endpoints were unreachable
 (despite being served by the currently-running, older in-memory process).
 """
 import pytest
+from unittest.mock import AsyncMock, patch
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -47,10 +48,13 @@ async def test_drafts_routes_are_mounted_and_auth_gated():
             )
 
         # With the real internal key, the route must be reachable (not 404).
+        # DB calls are mocked so the test never needs a real connection.
         key = get_settings().internal_api_key
-        with_auth = await ac.get(
-            "/api/drafts/stats", headers={"X-Internal-Key": key}
-        )
+        with patch("modules.drafts.routes.fetch_all", new=AsyncMock(return_value=[])), \
+             patch("modules.drafts.routes.fetch_one", new=AsyncMock(return_value=None)):
+            with_auth = await ac.get(
+                "/api/drafts/stats", headers={"X-Internal-Key": key}
+            )
         assert with_auth.status_code != 404
         assert with_auth.status_code == 200
 
@@ -70,7 +74,10 @@ async def test_social_auto_reply_routes_are_mounted_and_auth_gated():
         assert no_auth.status_code == 403
 
         key = get_settings().internal_api_key
-        with_auth = await ac.get(
-            "/api/social/status", headers={"X-Internal-Key": key}
-        )
+        with patch("modules.social_auto_reply.state_tracker.fetch_one", new=AsyncMock(return_value=None)), \
+             patch("modules.social_auto_reply.state_tracker.fetch_all", new=AsyncMock(return_value=[])), \
+             patch("modules.social_auto_reply.state_tracker.fetch_val", new=AsyncMock(return_value=0)):
+            with_auth = await ac.get(
+                "/api/social/status", headers={"X-Internal-Key": key}
+            )
         assert with_auth.status_code != 404

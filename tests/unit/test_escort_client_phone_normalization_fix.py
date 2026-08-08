@@ -32,6 +32,7 @@ continues to work correctly, not that it should be changed.
 from __future__ import annotations
 
 import pytest
+from unittest.mock import AsyncMock
 
 pytestmark = pytest.mark.unit
 
@@ -244,9 +245,24 @@ async def test_phase_b_observer_accepts_authorized_client_after_fix(escort_clien
 
     monkeypatch.setattr(cm, "is_message_processed", _not_processed)
     monkeypatch.setattr(cm, "get_open_thread", _fake_get_open_thread)
+    monkeypatch.setattr(cm, "get_open_threads", AsyncMock(return_value=[]))
     monkeypatch.setattr(cm, "create_thread", _fake_create_thread)
     monkeypatch.setattr(cm, "update_thread", _noop)
     monkeypatch.setattr(cm, "mark_message_processed", _noop)
+    monkeypatch.setattr(cm, "record_shadow_comparison", _noop)
+
+    # shadow_mode_scope wraps the DB transaction; mock it as a no-op so
+    # the test never needs a real DB connection.
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def _noop_scope(): yield
+    monkeypatch.setattr("app.database.shadow_mode_scope", _noop_scope)
+
+    # check_existing_draft_relation makes a DB read; replace with stub.
+    monkeypatch.setattr(
+        "modules.conversation_memory.grouping.check_existing_draft_relation",
+        AsyncMock(return_value=("no_candidate", {"reason": "test_stub"})),
+    )
 
     try:
         local_form = "0" + PROD_CLIENT_NUMBERS[0][3:]

@@ -66,6 +66,7 @@ async def test_phase8c_ai_console_response_returns_structured_evidence(monkeypat
         web_context=True,
         include_provider_response=False,
         registry=None,
+        actor_role_level=100,
     ):
         class _Resp:
             request_id = "live-888"

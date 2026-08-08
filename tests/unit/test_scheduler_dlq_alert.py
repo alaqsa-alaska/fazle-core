@@ -26,11 +26,19 @@ class TestJobDlqAlertIdempotency:
              patch("modules.outbound.actionable_dlq_count", new=AsyncMock(return_value=2)), \
              patch("modules.outbound.pending_count", new=AsyncMock(return_value=3)), \
              patch("modules.scheduler._admin_number", return_value="8801900000001"), \
-             patch("modules.outbound.enqueue", mock_enqueue):
+             patch("modules.outbound.enqueue", mock_enqueue), \
+             patch("modules.admin_directives.router.trigger_admin_investigation", new=AsyncMock()):
             await job_dlq_alert()
 
-        mock_enqueue.assert_called_once()
-        key = mock_enqueue.call_args.kwargs["idempotency_key"]
+        # The DLQ alert is the first enqueue call; Phase 5B investigation
+        # may add a second call -- assert only the primary DLQ call's key.
+        assert mock_enqueue.call_count >= 1
+        dlq_calls = [
+            c for c in mock_enqueue.call_args_list
+            if c.kwargs.get("purpose") == "dlq-alert"
+        ]
+        assert len(dlq_calls) == 1
+        key = dlq_calls[0].kwargs["idempotency_key"]
         assert key.startswith("dlq-alert-")
         assert "actionable" not in key
         assert "pending" not in key
@@ -51,7 +59,8 @@ class TestJobDlqAlertIdempotency:
              patch("modules.outbound.actionable_dlq_count", new=AsyncMock(side_effect=[2, 5, 8])), \
              patch("modules.outbound.pending_count", new=AsyncMock(side_effect=[3, 0, 0])), \
              patch("modules.scheduler._admin_number", return_value="8801900000001"), \
-             patch("modules.outbound.enqueue", side_effect=_capture_enqueue):
+             patch("modules.outbound.enqueue", side_effect=_capture_enqueue), \
+             patch("modules.admin_directives.router.trigger_admin_investigation", new=AsyncMock()):
             await job_dlq_alert()
             await job_dlq_alert()
             await job_dlq_alert()
@@ -66,7 +75,8 @@ class TestJobDlqAlertIdempotency:
              patch("modules.outbound.actionable_dlq_count", new=AsyncMock(return_value=1)), \
              patch("modules.outbound.pending_count", new=AsyncMock(return_value=0)), \
              patch("modules.scheduler._admin_number", return_value="8801900000001"), \
-             patch("modules.outbound.enqueue", mock_enqueue):
+             patch("modules.outbound.enqueue", mock_enqueue), \
+             patch("modules.admin_directives.router.trigger_admin_investigation", new=AsyncMock()):
             result = await job_dlq_alert()
 
         assert result["alerted"] is True
