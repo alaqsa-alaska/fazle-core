@@ -99,8 +99,8 @@
 057_route_b_handoffs.sql
 058_rebrand_al_rifai_kb_text.sql
 059_admin_directives.sql
-060_hermes_kernel_audit.sql
-061_hermes_divergence_snapshots.sql
+060_hermes_kernel_scaffolding.sql
+061_hermes_c2_divergence_snapshots.sql
 062_candidate_conversation_message_identity.sql
 ```
 
@@ -137,13 +137,22 @@ to rows that still contain an old name). See `management_decisions.md`
 2026-07-22 "Second Rebrand" for the full company-name centralization change
 this is part of.
 
-**`062_candidate_conversation_message_identity.sql` (2026-08-08, S5, NOT YET
-APPLIED to production):** adds nullable `source_bridge` and `message_id` columns
+**`060_hermes_kernel_scaffolding.sql` (2026-08-07, Stage C0.2):** creates the
+append-only `hermes_decision_audit_log` and `hermes_event_log` shadow tables and
+their supporting indexes. No existing business table is altered.
+
+**`061_hermes_c2_divergence_snapshots.sql` (2026-08-07, Stage C2):** creates the
+append-only `hermes_divergence_snapshots` comparison table and its supporting
+indexes. No existing business table is altered.
+
+**`062_candidate_conversation_message_identity.sql` (2026-08-08, S5, applied
+directly to production and recorded in `schema_migrations` at 2026-08-08
+03:39:30 UTC):** adds nullable `source_bridge` and `message_id` columns
 to the existing `wbom_candidate_conversations` table and a partial unique index
 on `(source_bridge, message_id)` where `message_id IS NOT NULL`. Existing rows
-are preserved, and callers without a message ID retain append-only behavior.
-Application requires an explicit deployment decision; do not run the full stale
-`db/migrate.py` queue described above.
+were preserved, and callers without a message ID retain append-only behavior.
+It was applied as one guarded transaction together with its migration-tracking
+row; the full stale `db/migrate.py` queue was not run.
 
 **`059_admin_directives.sql` (2026-07-30):** adds `fazle_admin_directives` — the
 Unified Admin AI Engine's narrow admin directive/action memory table
