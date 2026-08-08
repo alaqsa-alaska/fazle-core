@@ -99,6 +99,9 @@
 057_route_b_handoffs.sql
 058_rebrand_al_rifai_kb_text.sql
 059_admin_directives.sql
+060_hermes_kernel_audit.sql
+061_hermes_divergence_snapshots.sql
+062_candidate_conversation_message_identity.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -134,6 +137,14 @@ to rows that still contain an old name). See `management_decisions.md`
 2026-07-22 "Second Rebrand" for the full company-name centralization change
 this is part of.
 
+**`062_candidate_conversation_message_identity.sql` (2026-08-08, S5, NOT YET
+APPLIED to production):** adds nullable `source_bridge` and `message_id` columns
+to the existing `wbom_candidate_conversations` table and a partial unique index
+on `(source_bridge, message_id)` where `message_id IS NOT NULL`. Existing rows
+are preserved, and callers without a message ID retain append-only behavior.
+Application requires an explicit deployment decision; do not run the full stale
+`db/migrate.py` queue described above.
+
 **`059_admin_directives.sql` (2026-07-30):** adds `fazle_admin_directives` — the
 Unified Admin AI Engine's narrow admin directive/action memory table
 (`directive_text`, DB-CHECK-constrained `category`/`created_by_channel`/`status`,
@@ -145,7 +156,7 @@ insert method used for `056`/`057`, not a full `db/migrate.py` run, for the same
 reason documented there). Full record: `management_decisions.md` 2026-07-30
 "Unified Admin AI Engine".
 
-**Next available number for new work: `060`.**
+**Next available number for new work: `063`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 

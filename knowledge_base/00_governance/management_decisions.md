@@ -7413,3 +7413,59 @@ inside get_contact_context) and restart fazle-core. No DB change to undo.
 
 ### Commit
 4192fcc — feat(s2): inject scoped user_memory into get_contact_context()
+
+---
+
+## S5 — Candidate Conversation Audit Trail Implementation (2026-08-08)
+
+### Decision and scope
+
+The active async recruitment funnel now reuses the existing `wbom_candidates`
+and `wbom_candidate_conversations` domain tables. No second conversation or
+candidate subsystem was introduced. New intake creates or recovers the permanent
+candidate by unique phone and links `fazle_recruitment_sessions.candidate_id`.
+
+### Audit behavior
+
+- The trigger is stored as step `intake`; later inbound messages use the
+  pre-transition `collection_step`.
+- Optional bridge `message_id` is propagated from `process_message()` through
+  canonical recruitment routing and Route B.
+- Migration 062 adds nullable `source_bridge`/`message_id` and a partial unique
+  index. A proven ID-bearing retry returns the current prompt without advancing
+  the session. Messages without IDs remain append-only.
+- Audit operations return distinct inserted/duplicate/unavailable outcomes.
+  Persistence failure logs a warning and intake continues unchanged.
+- On scoring, collected session fields and score are copied to the linked
+  permanent candidate.
+
+### S5 files changed
+
+- `modules/recruitment_flow/__init__.py`
+- `modules/message_router/__init__.py`
+- `modules/route_b_handoff/__init__.py`
+- `db/migrations/062_candidate_conversation_message_identity.sql`
+- `tests/unit/test_recruitment_conversation_audit.py`
+- Recruitment system/business-rule documentation and migration inventory
+
+### Validation state
+
+- Focused S5 contract: 15 tests passed.
+- Recruitment detector, Route B, final-instruction/S4, and restricted-AI
+  regressions: 107 tests passed; one pre-existing Route B assertion expects the
+  old three-argument failure-recording call while runtime already supplies
+  `sender_name` and `sender_message`; two pre-existing async cleanup warnings.
+- Changed Python modules compile; `git diff --check` passes.
+- The guarded test harness applied all 82 migration files to `fazle_test`.
+- Migration 062 was executable-certified in an isolated test transaction:
+  first/second application, catalog shape, partial uniqueness, distinct bridge
+  identities, append-only `NULL` IDs, rollback, and cleanup all passed.
+
+### Production and safety state
+
+No migration was applied, no production candidate/audit row was created, no
+WhatsApp message was sent, no service was restarted, and no commit was created.
+Production activation requires explicit migration approval and a later controlled
+service restart. Rollback is to revert the code, disable S5 writes by deploying
+the prior version, then manually drop the partial index and the two nullable
+columns only if their data is no longer required.

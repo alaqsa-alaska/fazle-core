@@ -208,7 +208,7 @@ Stored in `fazle_recruitment_sessions.score_bucket`.
 ## `wbom_candidates` — Permanent Candidate Record (U-01, verified 2026-06-23)
 
 **Source:** Verified via `\d wbom_candidates` on production DB.
-**Relationship to `fazle_recruitment_sessions`:** `fazle_recruitment_sessions` is the **temporary** intake session (expires after SESSION_TTL=24h). `wbom_candidates` is the **permanent** candidate record created when a session completes scoring. FK: `fazle_recruitment_sessions.candidate_id → wbom_candidates.candidate_id ON DELETE SET NULL`.
+**Relationship to `fazle_recruitment_sessions`:** `fazle_recruitment_sessions` is the **temporary** intake session (expires after SESSION_TTL=24h). `wbom_candidates` is the **permanent** candidate record created (or recovered by unique phone) when intake starts, then linked through `fazle_recruitment_sessions.candidate_id`. Collected fields and the final score are copied into the permanent record when scoring completes. FK: `fazle_recruitment_sessions.candidate_id → wbom_candidates.candidate_id ON DELETE SET NULL`.
 
 | Column | Type | Nullable | Default | Notes |
 |---|---|---|---|---|
@@ -240,19 +240,28 @@ Stored in `fazle_recruitment_sessions.score_bucket`.
 
 ---
 
+## `wbom_candidate_conversations` — Candidate Intake Audit (S5)
+
+Every inbound recruitment trigger or step answer is appended before the session advances. The row stores the canonical `candidate_id`, the pre-transition `step`, direction `inbound`, exact message text, and collection timestamp. Migration 062 adds nullable `source_bridge` and `message_id` columns plus a partial unique index on `(source_bridge, message_id)` where `message_id IS NOT NULL`.
+
+When a bridge message ID is present, a conflict proves the message is a retry: the audit insert is suppressed and the intake state does not advance. Messages without an ID remain append-only and cannot be safely deduplicated. Audit persistence is fail-open, but session and permanent-candidate mutations share a transaction in both audited and audit-outage paths. A mutation failure rolls back the transition, retains the current-step reply, and leaves the message retryable.
+
+---
+
 ## Key Functions
 
-### `intake_message(phone, text, source) → dict`
+### `intake_message(phone, text, source, role, message_id) → dict`
 
 Main handler for the intake funnel. Returns `{reply, action, session_id}`.
 
 **Flow:**
 1. Load active session via `get_active_session(phone)`
-2. If no session: check `INTAKE_KEYWORDS`/`RECRUITMENT_TRIGGER_PHRASES` (via `is_recruitment_trigger()`) → if match, create session → return `name` question
-3. If session exists: advance to next step based on current `collection_step`
-4. Validate input for each step (`_parse_age()` for age, `VALID_POSITIONS` lookup for job_preference)
-5. After `phone_confirm`: compute score → return `INTAKE_COMPLETE_MSG`
-6. Return `{reply: <step_question>, action: "intake", session_id: ...}`
+2. If no session: check intake keywords → create session and permanent candidate, link them, audit the trigger as step `intake`, then return the `name` question
+3. If session exists: audit the inbound message against the current pre-transition `collection_step`
+4. If an ID-bearing audit conflict proves a retry, return the current question without advancing state
+5. Validate input for each step (`_parse_age()` for age, `VALID_POSITIONS` lookup for job_preference)
+6. Advance the session; after `phone_confirm`, compute score and finalize the linked permanent candidate
+7. Return `{reply: <step_question>, action: created|collecting|scored, session_id: ...}`
 
 ### `get_active_session(phone) → Optional[dict]`
 

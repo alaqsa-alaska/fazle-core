@@ -4,6 +4,8 @@ Adapted from resources/recruitment.py for asyncpg DB interface.
 
 Tables used:
   fazle_recruitment_sessions — tracks conversation state per phone
+    wbom_candidates — canonical candidate identity linked to each session
+    wbom_candidate_conversations — append-only inbound conversation audit
   (falls back gracefully if table doesn't exist yet)
 
 Steps: name → age → area → job_preference → experience → phone_confirm
@@ -11,12 +13,18 @@ Steps: name → age → area → job_preference → experience → phone_confirm
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
-from app.database import fetch_one, execute, fetch_val
+from app.database import db_conn, fetch_one, execute, fetch_val
 
 log = logging.getLogger("fazle.recruitment")
 SESSION_TTL = timedelta(hours=24)
+
+
+class _ConversationAuditUnavailable(RuntimeError):
+    pass
+
+
 OPERATIONAL_ROLES = frozenset({
     "admin", "accountant", "employee", "supervisor", "family",
     "escort_client", "client_escort_buyer", "vip_client", "repeat_client",
@@ -218,7 +226,7 @@ async def _create_session(phone: str, source_msg: str, source: str) -> Optional[
         return None
 
 
-async def _update_session(phone: str, fields: dict) -> None:
+async def _update_session(phone: str, fields: dict, *, conn: Any = None) -> None:
     if not fields:
         return
     fields["updated_at"] = datetime.now(timezone.utc)
@@ -230,14 +238,178 @@ async def _update_session(phone: str, fields: dict) -> None:
     vals.append(phone)
     sql = f"UPDATE fazle_recruitment_sessions SET {', '.join(set_parts)} WHERE phone = ${len(vals)}"
     try:
-        await execute(sql, *vals)
+        if conn is not None:
+            await conn.execute(sql, *vals)
+        else:
+            await execute(sql, *vals)
     except Exception as e:
+        if conn is not None:
+            raise
         log.warning(f"[recruit] update session failed: {e}")
+
+
+async def _ensure_candidate_for_session(
+    phone: str,
+    session_id: int,
+    source_message: str,
+    source: str,
+) -> Optional[int]:
+    try:
+        candidate_id = await fetch_val(
+            """INSERT INTO wbom_candidates
+                   (phone, funnel_stage, collection_step, source_message, updated_at)
+               VALUES ($1, 'collecting', 'name', $2, NOW())
+               ON CONFLICT (phone) DO NOTHING
+               RETURNING candidate_id""",
+            phone, source_message[:500],
+        )
+        if candidate_id is None:
+            candidate_id = await fetch_val(
+                "SELECT candidate_id FROM wbom_candidates WHERE phone = $1",
+                phone,
+            )
+        if candidate_id is not None:
+            await execute(
+                """UPDATE fazle_recruitment_sessions
+                   SET candidate_id = $1, updated_at = NOW()
+                   WHERE id = $2""",
+                candidate_id, session_id,
+            )
+            return int(candidate_id)
+    except Exception as e:
+        log.warning(
+            "[recruit] candidate link failed phone=%s session=%s source=%s: %s",
+            phone, session_id, source, e,
+        )
+    return None
+
+
+async def _audit_candidate_conversation(
+    candidate_id: int,
+    step: str,
+    message: str,
+    source: str,
+    message_id: Optional[str] = None,
+    *,
+    conn: Any = None,
+) -> Optional[bool]:
+    try:
+        sql = """INSERT INTO wbom_candidate_conversations
+                     (candidate_id, step, direction, message_text, source_bridge, message_id)
+                 VALUES ($1, $2, 'inbound', $3, $4, $5)
+                 ON CONFLICT (source_bridge, message_id)
+                     WHERE message_id IS NOT NULL
+                 DO NOTHING
+                 RETURNING conv_id"""
+        args = (candidate_id, step, message, source, message_id or None)
+        if conn is not None:
+            conv_id = await conn.fetchval(sql, *args)
+        else:
+            conv_id = await fetch_val(sql, *args)
+        return conv_id is not None
+    except Exception as e:
+        if conn is not None:
+            raise
+        log.warning(
+            "[recruit] conversation audit failed candidate=%s step=%s: %s",
+            candidate_id, step, e,
+        )
+        return None
+
+
+async def _finalize_candidate(candidate_id: int, session: dict, *, conn: Any = None) -> None:
+    try:
+        sql = """UPDATE wbom_candidates
+                 SET full_name = $1, age = $2, area = $3,
+                     job_preference = $4, experience_years = $5,
+                     funnel_stage = 'scored', collection_step = NULL,
+                     score = $6, score_bucket = $7,
+                     last_contact_at = NOW(), updated_at = NOW()
+                 WHERE candidate_id = $8"""
+        args = (
+            session.get("full_name"), session.get("age"), session.get("area"),
+            session.get("job_preference"), session.get("experience_years") or 0,
+            session.get("score") or 0, session.get("score_bucket") or "cold",
+            candidate_id,
+        )
+        if conn is not None:
+            await conn.execute(sql, *args)
+        else:
+            await execute(sql, *args)
+    except Exception as e:
+        if conn is not None:
+            raise
+        log.warning("[recruit] candidate finalize failed candidate=%s: %s", candidate_id, e)
+
+
+async def _apply_audited_transition(
+    phone: str,
+    candidate_id: int,
+    step: str,
+    message: str,
+    source: str,
+    message_id: Optional[str],
+    update: dict,
+    final_session: Optional[dict] = None,
+) -> Optional[bool]:
+    try:
+        async with db_conn() as conn:
+            async with conn.transaction():
+                try:
+                    inserted = await _audit_candidate_conversation(
+                        candidate_id=candidate_id,
+                        step=step,
+                        message=message,
+                        source=source,
+                        message_id=message_id,
+                        conn=conn,
+                    )
+                except Exception as e:
+                    raise _ConversationAuditUnavailable from e
+                if inserted is False:
+                    return False
+                await _update_session(phone, dict(update), conn=conn)
+                if final_session is not None:
+                    await _finalize_candidate(candidate_id, final_session, conn=conn)
+        return True
+    except _ConversationAuditUnavailable as e:
+        log.warning(
+            "[recruit] conversation audit failed; continuing without audit "
+            "candidate=%s step=%s: %s",
+            candidate_id, step, e,
+        )
+        try:
+            async with db_conn() as conn:
+                async with conn.transaction():
+                    await _update_session(phone, dict(update), conn=conn)
+                    if final_session is not None:
+                        await _finalize_candidate(candidate_id, final_session, conn=conn)
+            return None
+        except Exception as fallback_error:
+            log.warning(
+                "[recruit] audit fail-open transition rolled back "
+                "candidate=%s step=%s: %s",
+                candidate_id, step, fallback_error,
+            )
+            return False
+    except Exception as e:
+        log.warning(
+            "[recruit] audited transition rolled back candidate=%s step=%s: %s",
+            candidate_id, step, e,
+        )
+        return False
 
 
 # ── Main intake function ───────────────────────────────────────────────────────
 
-async def intake_message(phone: str, message: str, source: str = "whatsapp", role: str = "unknown") -> dict:
+async def intake_message(
+    phone: str,
+    message: str,
+    source: str = "whatsapp",
+    role: str = "unknown",
+    message_id: Optional[str] = None,
+    trigger_text: Optional[str] = None,
+) -> dict:
     """
     Process one inbound WhatsApp message for recruitment funnel.
 
@@ -254,8 +426,9 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
       }
     """
     phone = phone.strip()
-    text = message.strip()
-    lower = text.lower()
+    raw_message = message
+    text = raw_message.strip()
+    lower = (trigger_text if trigger_text is not None else text).lower()
 
     session = await _get_session(phone)
 
@@ -265,6 +438,16 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
             return {"reply": "", "action": "ignored", "session_id": None}
 
         sid = await _create_session(phone, text, source)
+        if sid is not None:
+            candidate_id = await _ensure_candidate_for_session(phone, sid, text, source)
+            if candidate_id is not None:
+                await _audit_candidate_conversation(
+                    candidate_id=candidate_id,
+                    step="intake",
+                    message=raw_message,
+                    source=source,
+                    message_id=message_id,
+                )
         reply = STEP_QUESTIONS["name"]
         if (role or "").strip().lower() == "unknown":
             reply = UNKNOWN_SENDER_SOFT_ASK + reply
@@ -289,6 +472,14 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
 
     # ── Collecting answers step by step ───────────────────────────────────────
     step = session.get("collection_step") or "name"
+    candidate_id = session.get("candidate_id")
+    if candidate_id is None:
+        candidate_id = await _ensure_candidate_for_session(
+            phone,
+            session["id"],
+            session.get("source_message") or text,
+            session.get("source_bridge") or source,
+        )
     update: dict = {}
 
     if step == "name":
@@ -298,6 +489,10 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
         if val:
             update["age"] = val
         else:
+            if candidate_id is not None:
+                await _audit_candidate_conversation(
+                    candidate_id, step, raw_message, source, message_id,
+                )
             return {
                 "reply": "সাধারণ বয়সসীমা ১৮–৫৫ বছর। দয়া করে সঠিক বয়স লিখুন (যেমন: 25)",
                 "action": "collecting",
@@ -310,6 +505,10 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
         if pos:
             update["job_preference"] = pos
         else:
+            if candidate_id is not None:
+                await _audit_candidate_conversation(
+                    candidate_id, step, raw_message, source, message_id,
+                )
             return {
                 "reply": "দয়া করে ১ থেকে ৮ নম্বর বা পদের নাম লিখুন।\n" + STEP_QUESTIONS["job_preference"],
                 "action": "collecting",
@@ -333,7 +532,18 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
     if next_idx < len(COLLECTION_STEPS):
         next_step = COLLECTION_STEPS[next_idx]
         update["collection_step"] = next_step
-        await _update_session(phone, update)
+        if candidate_id is not None:
+            audit_inserted = await _apply_audited_transition(
+                phone, candidate_id, step, raw_message, source, message_id, update,
+            )
+            if audit_inserted is False:
+                return {
+                    "reply": STEP_QUESTIONS.get(step, STEP_QUESTIONS["name"]),
+                    "action": "collecting",
+                    "session_id": session["id"],
+                }
+        else:
+            await _update_session(phone, update)
         reply = STEP_QUESTIONS[next_step]
         return {"reply": reply, "action": "collecting", "session_id": session["id"]}
 
@@ -344,7 +554,19 @@ async def intake_message(phone: str, message: str, source: str = "whatsapp", rol
     update["funnel_stage"] = "scored"
     update["score"] = score
     update["score_bucket"] = bucket
-    await _update_session(phone, update)
+    final_session = {**merged, **update}
+    if candidate_id is not None:
+        audit_inserted = await _apply_audited_transition(
+            phone, candidate_id, step, raw_message, source, message_id, update, final_session,
+        )
+        if audit_inserted is False:
+            return {
+                "reply": STEP_QUESTIONS.get(step, STEP_QUESTIONS["name"]),
+                "action": "collecting",
+                "session_id": session["id"],
+            }
+    else:
+        await _update_session(phone, update)
 
     log.info(f"[recruit] {phone} scored={score} ({bucket}) — {merged.get('full_name','?')}")
     return {
@@ -504,6 +726,7 @@ async def route_recruitment_message(
     text: str,
     *,
     source: str,
+    message_id: Optional[str] = None,
     role: str = "unknown",
     intent: str = "unknown",
     history: str = "",
@@ -538,6 +761,22 @@ async def route_recruitment_message(
             contact_context=contact_context, history=history,
         )
         if priority_reply:
+            candidate_id = active_session.get("candidate_id")
+            if candidate_id is None:
+                candidate_id = await _ensure_candidate_for_session(
+                    phone,
+                    active_session["id"],
+                    active_session.get("source_message") or text,
+                    active_session.get("source_bridge") or source,
+                )
+            if candidate_id is not None:
+                await _audit_candidate_conversation(
+                    candidate_id=candidate_id,
+                    step=active_session.get("collection_step") or "name",
+                    message=text,
+                    source=source,
+                    message_id=message_id,
+                )
             return {
                 "eligible": True,
                 "autosend": bool(decision.get("autosend")),
@@ -557,7 +796,9 @@ async def route_recruitment_message(
     # informational text) -- so collection_step effectively never advanced
     # past the first question in practice, even with an active session.
     if active_session:
-        intake = await intake_message(phone, text, source, role=role)
+        intake = await intake_message(
+            phone, text, source, role=role, message_id=message_id,
+        )
         intake_reply = (intake.get("reply") or "").strip()
         if intake_reply:
             return {
@@ -585,7 +826,9 @@ async def route_recruitment_message(
         if step:
             reply = STEP_QUESTIONS.get(step, STEP_QUESTIONS["name"])
         else:
-            intake = await intake_message(phone, text, source, role=role)
+            intake = await intake_message(
+                phone, text, source, role=role, message_id=message_id,
+            )
             reply = (intake.get("reply") or "").strip() or STEP_QUESTIONS["name"]
     elif not active_session and decision.get("autosend"):
         # 2026-07-22: a genuinely new, high-confidence job inquiry (explicit
@@ -600,7 +843,9 @@ async def route_recruitment_message(
         # detector layers (context/intent), which is the correct, more
         # conservative behavior for lower-confidence matches.
         try:
-            await intake_message(phone, text, source, role=role)
+            await intake_message(
+                phone, text, source, role=role, message_id=message_id,
+            )
         except Exception as e:
             log.debug(f"[recruit] background session-open failed: {e}")
 

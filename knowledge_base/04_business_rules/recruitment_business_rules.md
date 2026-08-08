@@ -91,6 +91,18 @@ After a candidate completes the data collection session, a score is computed to 
 
 ---
 
+## Candidate Conversation Audit Trail
+
+**Business Rule:** A recruitment intake trigger and every subsequent inbound answer must be recorded against the linked permanent candidate using the step that was active before the message changed session state. When the bridge supplies a message ID, `(source_bridge, message_id)` is idempotent: a retry must neither create a second audit row nor advance the funnel. Without a message ID, each received message is recorded because exact retry identity cannot be proven.
+
+Audit persistence is fail-open: an unavailable audit store does not block an otherwise valid transition. Session and permanent-candidate mutations remain atomic; if either mutation fails, the transaction rolls back, the current-step reply is retained, and the message remains retryable. Candidate-link errors are logged and preserve the established intake behavior.
+
+**Source Module:** `modules/recruitment_flow`
+**Source Functions:** `_ensure_candidate_for_session()`, `_audit_candidate_conversation()`, `intake_message()`
+**Schema:** `wbom_candidates`, `wbom_candidate_conversations`, migration 062
+
+---
+
 ## Recruitment Session TTL
 
 **Business Rule:** A recruitment data-collection session expires after **24 hours** of inactivity.

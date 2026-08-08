@@ -106,7 +106,7 @@ async def _on_cooldown(phone: str, destination: str) -> bool:
 # ── Stage 1.1 — active recruitment-session continuation ────────────────────────
 
 async def _check_active_recruitment_session(
-    sender: str, text: str, source: str, role: str,
+    sender: str, text: str, source: str, role: str, message_id: Optional[str] = None,
 ) -> Optional[HandoffResult]:
     """If a recruitment funnel session is already in progress, continue it
     unconditionally via the canonical intake_message() -- it advances an
@@ -117,7 +117,9 @@ async def _check_active_recruitment_session(
     session = await get_active_session(sender)
     if not session:
         return None
-    intake = await intake_message(sender, text, source, role=role)
+    intake = await intake_message(
+        sender, text, source, role=role, message_id=message_id,
+    )
     reply = (intake.get("reply") or "").strip()
     return HandoffResult(
         reply=reply, admin_note=None, destination="recruitment",
@@ -130,7 +132,7 @@ async def _check_active_recruitment_session(
 
 async def _check_recruitment_handoff(
     sender: str, text: str, source: str, role: str, intent: str,
-    history: str, ollama_category: str,
+    history: str, ollama_category: str, message_id: Optional[str] = None,
 ) -> Optional[HandoffResult]:
     # Deterministic-first, current message only -- identical to what
     # message_router Tier 7/8 already computed for this same message before
@@ -141,7 +143,7 @@ async def _check_recruitment_handoff(
     if decision.get("eligible"):
         rec_route = await route_recruitment_message(
             phone=sender, text=text, source=source, role=role, intent=intent,
-            history=history, contact_context="",
+            history=history, contact_context="", message_id=message_id,
         )
         reply = (rec_route.get("reply") or "").strip()
         if reply:
@@ -169,7 +171,7 @@ async def _check_recruitment_handoff(
 
     rec_route = await route_recruitment_message(
         phone=sender, text=text, source=source, role=role, intent="recruitment",
-        history=history, contact_context="",
+        history=history, contact_context="", message_id=message_id,
     )
     if rec_route.get("eligible") and (rec_route.get("reply") or "").strip():
         return HandoffResult(
@@ -186,7 +188,10 @@ async def _check_recruitment_handoff(
     # its own keyword gate for a brand-new session -- the returned reply is
     # still the fixed, canonical "what's your name?" prompt, not anything
     # derived from Ollama's output.
-    intake = await intake_message(sender, window_text, source, role=role)
+    intake = await intake_message(
+        sender, text, source, role=role, message_id=message_id,
+        trigger_text=window_text,
+    )
     if intake.get("action") == "ignored" or not (intake.get("reply") or "").strip():
         return None
     return HandoffResult(
@@ -422,7 +427,9 @@ async def evaluate_handoff(
 
     role = identity.get("identity_role") or identity.get("role") or "unknown"
 
-    session_result = await _check_active_recruitment_session(sender, text, source, role)
+    session_result = await _check_active_recruitment_session(
+        sender, text, source, role, message_id,
+    )
     if session_result:
         await _record_handoff(
             phone=sender, message_id=message_id, destination=session_result.destination,
@@ -438,7 +445,9 @@ async def evaluate_handoff(
         log.warning("[route_b_handoff] unexpected classify error phone=%s: %s", sender, e)
         ollama_category = "none"
 
-    rec_result = await _check_recruitment_handoff(sender, text, source, role, intent, history, ollama_category)
+    rec_result = await _check_recruitment_handoff(
+        sender, text, source, role, intent, history, ollama_category, message_id,
+    )
     if rec_result:
         await _record_handoff(
             phone=sender, message_id=message_id, destination=rec_result.destination,

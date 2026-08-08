@@ -705,6 +705,7 @@ async def process_message(
             phone=sender,
             text=text,
             source=source,
+            message_id=message_id,
             role=role_str,
             intent=intent,
             contact_context=db_ctx,
