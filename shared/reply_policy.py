@@ -23,6 +23,7 @@ Phase 4 Step 3 — Structured context format (6 sections, applied to both builde
 from __future__ import annotations
 
 import logging
+import re
 
 from app.config import get_settings
 
@@ -39,6 +40,19 @@ def _company_name() -> str:
 
 POLICY_VERSION = "structured_v2"
 WHATSAPP_SOURCES: frozenset[str] = frozenset({"bridge1", "bridge2", "meta"})
+CONFIDENTIALITY_FALLBACK_REPLY = "এই তথ্যটি নিরাপদভাবে দেওয়া যাচ্ছে না। অফিসে যোগাযোগ করুন।"
+
+_SENSITIVE_OUTPUT_PATTERN = re.compile(
+    r"(?:"
+    r"database_url\s*=|authorization\s*:\s*bearer\b|"
+    r"api[_ -]?key\s*[:=]|jwt[_ -]?secret\s*[:=]|encryption[_ -]?key\s*[:=]|"
+    r"\bsystem\s+prompt\b|"
+    r"^\s*##\s*(?:ভূমিকা|ব্যবসায়িক নিয়ম|কার্যপ্রবাহ|জ্ঞান ও তথ্য|কথোপকথন|প্রশ্ন|"
+    r"role|business rules|workflow|knowledge|conversation|user question)\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PHONE_LIKE_PATTERN = re.compile(r"(?<!\d)\+?\d[\d\s().-]{8,}\d(?!\d)")
 
 
 def get_channel_family(source: str) -> str:
@@ -342,6 +356,44 @@ def clean_general_reply(reply: str) -> str:
     lines = [ln for ln in text.splitlines() if not ln.startswith("## ")]
     cleaned = "\n".join(lines).strip()
     return cleaned if cleaned else reply.strip()
+
+
+def enforce_general_reply_confidentiality(reply: str, *, sender_phone: str) -> str:
+    """Fail closed when a non-admin caller's AI reply exposes internal data.
+
+    Tier 15 (and, since S6 2026-08-08, the accountant and employee-payroll
+    ai.generate_reply() exit points in modules.message_router -- neither is
+    "admin", so neither is exempt) may receive sender context and recent
+    history. This final output boundary permits the sender's own phone
+    number, but blocks credential-like material, echoed prompt sections,
+    and any other phone-like identifier.
+    """
+    text = (reply or "").strip()
+    if not text:
+        return text
+
+    if _SENSITIVE_OUTPUT_PATTERN.search(text):
+        log.warning("[reply_policy] blocked sensitive or internal AI output")
+        return CONFIDENTIALITY_FALLBACK_REPLY
+
+    sender_digits = re.sub(r"\D", "", sender_phone or "")
+    for match in _PHONE_LIKE_PATTERN.finditer(text):
+        candidate_digits = re.sub(r"\D", "", match.group(0))
+        if len(candidate_digits) < 10:
+            continue
+        same_sender = bool(
+            sender_digits
+            and (
+                candidate_digits == sender_digits
+                or candidate_digits.endswith(sender_digits)
+                or sender_digits.endswith(candidate_digits)
+            )
+        )
+        if not same_sender:
+            log.warning("[reply_policy] blocked AI output containing a non-sender phone")
+            return CONFIDENTIALITY_FALLBACK_REPLY
+
+    return text
 
 
 def build_whatsapp_recruitment_policy(

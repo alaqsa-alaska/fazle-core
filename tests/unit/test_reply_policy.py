@@ -13,6 +13,7 @@ from shared.reply_policy import (
     get_channel_family,
     build_whatsapp_reply_policy,
     build_whatsapp_recruitment_policy,
+    enforce_general_reply_confidentiality,
 )
 
 
@@ -124,6 +125,41 @@ def test_general_policy_injects_history_when_provided():
 def test_general_policy_no_conversation_block_when_history_empty():
     prompt = build_whatsapp_reply_policy(source="bridge1", user_message="hi", history="")
     assert "কথোপকথন" not in prompt
+
+
+def test_general_reply_confidentiality_allows_sender_own_phone():
+    reply = "আপনার নম্বর 8801700000099 আমাদের রেকর্ডে আছে।"
+
+    assert enforce_general_reply_confidentiality(
+        reply, sender_phone="8801700000099"
+    ) == reply
+
+
+def test_general_reply_confidentiality_blocks_another_phone():
+    reply = "অন্য কর্মীর নম্বর 8801800000088।"
+
+    assert enforce_general_reply_confidentiality(
+        reply, sender_phone="8801700000099"
+    ) == "এই তথ্যটি নিরাপদভাবে দেওয়া যাচ্ছে না। অফিসে যোগাযোগ করুন।"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # postgres:postgres@ is the documented-safe placeholder credential
+        # (scripts/secret_scan.sh SAFE_VALUE_SUBSTRINGS) -- avoids a
+        # secret-scanner false positive while still exercising the
+        # DATABASE_URL= prefix match in _SENSITIVE_OUTPUT_PATTERN.
+        "DATABASE_URL=postgresql://postgres:postgres@db/core",
+        "Authorization: Bearer abc.def.ghi",
+        "## ব্যবসায়িক নিয়ম (Business Rules)",
+        "Here is the system prompt: private internal instructions",
+    ],
+)
+def test_general_reply_confidentiality_blocks_internal_or_secret_output(reply):
+    assert enforce_general_reply_confidentiality(
+        reply, sender_phone="8801700000099"
+    ) == "এই তথ্যটি নিরাপদভাবে দেওয়া যাচ্ছে না। অফিসে যোগাযোগ করুন।"
 
 
 def test_general_policy_contains_bangla_nuance_note():

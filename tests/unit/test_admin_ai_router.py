@@ -283,8 +283,8 @@ class TestHermesRelayHandler:
     """Phase 4 (2026-08-04): real Hermes relay, distinct from the AI
     console (TestProcessAdminNaturalQuery below covers that engine)."""
 
-    async def _run(self, text="hermes: check bridge health", phone="8801880446111"):
-        reply = await process_admin_ai_command(text, phone)
+    async def _run(self, text="hermes: check bridge health", phone="8801880446111", source="bridge2"):
+        reply = await process_admin_ai_command(text, phone, source_bridge=source)
         await asyncio.sleep(0)  # let any scheduled background task start
         return reply
 
@@ -314,6 +314,38 @@ class TestHermesRelayHandler:
         assert channel_kwargs["allowed"] is False
         assert "bridge2" in channel_kwargs["denied_reason"]
 
+    async def test_rbac_allowed_same_admin_phone_but_wrong_source_bridge_denied(self):
+        # S6 (2026-08-08): closes the gap where phone-identity alone was
+        # the channel check. Even the genuine bridge2-designated admin
+        # phone number must be denied if message_router's own trusted
+        # `source` says this message physically arrived via bridge1 or
+        # bridge3, not bridge2 -- e.g. a misconfiguration reusing the same
+        # number across bridges, or a message replayed/misrouted through
+        # the wrong poller.
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()) as mock_audit, \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            for wrong_source in ("bridge1", "bridge3", "", "meta"):
+                mock_audit.reset_mock()
+                reply = await self._run(phone="8801880446111", source=wrong_source)
+                assert reply == router._DENIAL_MSG
+                mock_deliver.assert_not_awaited()
+                _, channel_kwargs = mock_audit.await_args_list[-1]
+                assert channel_kwargs["allowed"] is False
+                assert "bridge2" in channel_kwargs["denied_reason"]
+
+    async def test_wrong_phone_and_wrong_source_both_denied(self):
+        # Belt-and-suspenders: neither check alone is trusted to save the
+        # other -- both wrong simultaneously still denies cleanly.
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await self._run(phone="8801958122300", source="bridge3")
+        assert reply == router._DENIAL_MSG
+        mock_deliver.assert_not_awaited()
+
     async def test_not_configured_returns_clear_error(self):
         with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
              patch.object(router.rbac, "record_audit", new=AsyncMock()), \
@@ -332,7 +364,7 @@ class TestHermesRelayHandler:
              patch.object(router.rbac, "record_audit", new=AsyncMock()), \
              patch.object(router, "get_settings", return_value=_FakeSettings()), \
              patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
-            reply = await router._handle_hermes_relay("", "8801880446111")
+            reply = await router._handle_hermes_relay("", "8801880446111", "bridge2")
         assert "লিখুন" in reply
         mock_deliver.assert_not_awaited()
 

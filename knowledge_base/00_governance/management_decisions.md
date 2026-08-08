@@ -7463,9 +7463,325 @@ candidate by unique phone and links `fazle_recruitment_sessions.candidate_id`.
 
 ### Production and safety state
 
-No migration was applied, no production candidate/audit row was created, no
-WhatsApp message was sent, no service was restarted, and no commit was created.
-Production activation requires explicit migration approval and a later controlled
-service restart. Rollback is to revert the code, disable S5 writes by deploying
-the prior version, then manually drop the partial index and the two nullable
-columns only if their data is no longer required.
+- S5 was committed as `1ae6348 feat(s5): add candidate conversation audit
+  trail`; migration inventory correction `6fd4553` followed.
+- Migration 062 was applied to production and verified.
+- The controlled restart passed, `fazle-core.service` restarted successfully,
+  and final health returned HTTP 200 with overall status `ok`.
+- Database, all three bridge pollers, outbound queues, Ollama, Qdrant, disk,
+  memory, and CPU checks were `ok`; outbound pending/DLQ was `0/0`.
+- Focused S5 validation passed 15/15. The authorized S4/recruitment regression
+  set passed 107/107; this was not an unrestricted full-suite pass because one
+  documented stale Route B assertion remained excluded.
+- A rollback-contained production real-path S5 probe passed exact raw inbound
+  persistence, duplicate identity suppression, cross-bridge identity, append-only
+  `NULL` IDs, audit fail-open, and business-mutation rollback/same-identity retry.
+- The probe left zero synthetic production residue and sent no outbound message.
+- S6 had not previously started; it remains a separate gated implementation phase.
+
+## S6 — AI-driven conversational operation safety (2026-08-08, CLOSED — COMMIT READY)
+
+**Scope:** make the existing Fazle/Hermes system safe for real AI-driven
+conversational operation without redesigning the architecture. Continuation
+of a prior agent's partial S6 work (Hermes `/hermes` frontend admin-only
+guard in `assistant-platform/frontend/src/App.jsx`; a final AI-output
+confidentiality policy, `shared/reply_policy.enforce_general_reply_
+confidentiality()`, wired into Tier 15). This session inspected that work,
+found and closed concrete gaps, and added test-proven evidence. **No
+migration or service restart was made — code and governance-doc changes
+only, all still local (uncommitted).** *(The "no Nginx/TLS change" part of
+this sentence was accurate for this session's first turn only; a later
+same-day turn did deploy the Panai/Dhanai Nginx config and reload — see
+"### S6 — Panai/Dhanai/TLS deployed and runtime-verified" below and the
+FINAL CLOSURE section at the end of this S6 record for the actual final
+state. No migration and no service restart happened in either turn.)*
+
+### Findings and fixes this session
+
+1. **Hermes wrong-bridge gap (real, closed).** `_handle_hermes_relay()`'s
+   "designated bridge2 channel" check was phone-identity-only (`sender_phone
+   == settings.admin_bridge2_number`), never checking which bridge/poller
+   actually delivered the message. A same-numbered admin message arriving
+   via bridge1/bridge3 (misconfiguration, or a compromised/less-trusted
+   ingestion path) would have passed. Fixed: `process_admin_ai_command()`
+   and `_handle_hermes_relay()` now take `source_bridge` (message_router's
+   own trusted `source` value, never derived from message text) and require
+   BOTH the phone match AND `source_bridge == "bridge2"`. 6 new/updated
+   tests in `tests/unit/test_admin_ai_router.py` cover same-phone-wrong-
+   channel and wrong-phone-wrong-channel denial.
+2. **Confidentiality wrapper coverage gap (real, closed).**
+   `enforce_general_reply_confidentiality()` was wired into Tier 15 only.
+   Two other `ai.generate_reply()` exit points in `modules/message_router`
+   (accountant free-text KB fallback; employee's own payroll/salary-query
+   reply) returned LLM output unchecked. Neither accountant nor employee is
+   "admin". Both now pass through the same final confidentiality net
+   (credential-like output, echoed prompt sections, any non-sender phone
+   number) — sender's own data (own phone, own salary, scoped by
+   server-resolved `emp_id`) remains unaffected since the check already
+   permits the sender's own phone and never inspects amounts.
+3. **Hermes frontend/backend authorization: verified sound, strengthened
+   with tests, no code change needed.** Backend `router.use(requireAuth,
+   requireAdmin)` on every `/hermes/*` route; `requireAdmin` checks a
+   JWT-verified `role` claim (server-signed at login from the `users` table,
+   never client-settable — signup hardcodes `role='user'`). Frontend's new
+   `RequireAdmin` guard plus the pre-existing admin-gated sidebar nav are
+   UX-only, backed by the real server-side boundary. Added 6 new backend
+   unit tests (`assistant-platform/backend/tests/authMiddleware.test.js`)
+   proving: ordinary-user 403, missing/invalid/forged-signature token 401
+   (a token claiming `role:"admin"` signed with the wrong secret is
+   rejected — proves the role claim is verified, not trusted blindly),
+   genuine admin 200. Backend suite: 52/52. Frontend build: passes.
+4. **Identity/role trust: verified sound, no gap found.**
+   `modules.identity_brain.detect_identity()` resolves role purely from
+   phone (settings/DB) except two low-trust text-hint fallbacks
+   (`candidate` conf=50, `repeat_client` conf=40) — text can never produce
+   `admin`/`employee`/`supervisor`. Proved directly (not by inspection
+   alone) with 2 new tests in `tests/unit/test_conversation_isolation.py`
+   sending admin-claiming and Hermes-claiming text from an unseeded phone.
+5. **Cross-user context/history isolation: proved against a real DB, not
+   assumed.** New `tests/unit/test_conversation_isolation.py` (real
+   Postgres round-trip, not mocked) proves `get_contact_context()` and
+   `get_recent_history()` are strictly phone-scoped — inserted two distinct
+   phones' employee/salary, contact display-name, `user_memory`, and
+   WhatsApp-message rows in the same test and asserted neither phone's
+   context/history ever contains the other's data. RAG role isolation
+   (payroll/admin KB content unreachable at `role="candidate"`) already had
+   pre-existing, passing coverage in `tests/unit/test_rag_knowledge_base.py`
+   (14/14) — not duplicated.
+6. **Media matrix: audited honestly, one placeholder-only gap documented
+   with a new test, one silent-drop gap documented with 3 new tests.**
+   Text/image/audio(voice)/document: real processing exists (OCR, STT, PDF/
+   doc extraction) on both the Meta webhook path
+   (`modules/media_normalization`) and the bridge-poller path (richer:
+   2-step image classification, STT-failure/doc-failure admin drafts).
+   Video: download succeeds but there is no processing branch at all —
+   always falls through to `"[video message] <caption>"` — proved by a new
+   test, not previously covered. Location/sticker/contacts/reaction/unknown
+   message types on the Meta webhook path (`app.main._handle_meta_message`)
+   are silently dropped (`text` stays empty, function returns before any
+   reply/draft/save/enqueue) — proved by 3 new tests in
+   `tests/unit/test_media_normalization_phase3.py`. Not fixed (would be new
+   scope/business-logic, not a security gap) — reported honestly per S6's
+   instruction not to fabricate support that doesn't exist.
+7. **Postgres test-environment blocker: resolved for this session, not a
+   code fix.** `TEST_DB_PASSWORD` was unset (by design — no hardcoded
+   fallback, per the 2026-07-12 leaked-password incident). Found the repo's
+   own pre-existing, already-running disposable `docker-compose.test.yml`
+   `postgres-test` container (`127.0.0.1:5433`, isolated volume/network,
+   left running from an earlier, unrelated session) and pointed
+   `TEST_DATABASE_URL` at it. Full `tests/unit/` run: 22 failed + 2 errors
+   out of the suite, all confirmed pre-existing test-schema drift
+   (`UndefinedTableError`/`UndefinedColumnError` in modules this session
+   never touched — attendance/billing/bridge-poller-orphan/conversation-
+   memory-stage2 — matching the previously-documented drift pattern, see
+   `[[feedback_test_prod_schema_drift]]`), none in any file this session
+   changed. All S6-relevant suites clean: 186/186
+   (`test_admin_ai_router.py`, `test_admin_directives_routes.py`,
+   `test_reply_policy.py`, `test_conversation_isolation.py`,
+   `test_media_normalization_phase3.py`, `test_rag_knowledge_base.py`,
+   `test_final_instruction_fixes.py`).
+8. **Panai/Dhanai/TLS: root cause confirmed, draft configs prepared, NOT
+   deployed.** *(STALE — SUPERSEDED same day. This was the state at the end
+   of this session's first turn only. A later same-day turn deployed both
+   hostnames and reloaded Nginx — see "### S6 — Panai/Dhanai/TLS deployed
+   and runtime-verified" below for the actual final state. Left as-written
+   here for an accurate turn-by-turn record; do not read this bullet as
+   current.)* No `panai.iamazim.com`/`dhanai.iamazim.com` Nginx server
+   block exists in `sites-available` or `sites-enabled`; the `default` site
+   has no `listen 443 ssl default_server`, so HTTPS requests for either
+   hostname fall through to `assistant.iamazim.com`'s block, whose cert
+   lacks the right SANs — matches the audit brief exactly. Portainer
+   confirmed already running (`127.0.0.1:9002`), assistant-platform
+   frontend/backend confirmed already running (`127.0.0.1:3000`/`3001`).
+   This session has no sudo (password required, non-interactive) and made
+   no changes to `/etc/nginx` or `/etc/letsencrypt`. Draft server-block
+   configs for both hostnames (reusing existing upstreams only, no new
+   port/service) plus a step-by-step deployment sequence were written to
+   the session scratchpad, not the repo, since they can't be applied by
+   this session and don't belong in git until deployed.
+
+### Explicitly not done in this session (first turn only — see below for what the later same-day turn added)
+
+- No commit. All changes above are local working-tree edits only.
+- No migration, no service restart, no Nginx reload, no certbot run.
+  *(STALE — SUPERSEDED: a later same-day turn DID run `nginx -t` and
+  `nginx -s reload`, via this session's existing scoped NOPASSWD sudo grant,
+  to deploy Panai/Dhanai — see below. No certbot run was ever needed or
+  performed, and no migration/service-restart happened in either turn —
+  those two parts of this bullet remain accurate.)*
+- No fix attempted for the pre-existing schema-drift test failures (out of
+  S6's scope; not caused by this session).
+- No fix for the video/location/media gaps (would be new business-logic
+  scope, not requested; reported honestly instead).
+- Full assistant-platform frontend visual verification still has no browser
+  tool in this environment (build/curl-level only, same limitation as the
+  2026-08-02 UI redesign — see
+  `[[project_assistant_platform_ui_redesign_20260802]]`).
+
+### S6 — Panai/Dhanai/TLS deployed and runtime-verified (2026-08-08, same day)
+
+**Correction to the earlier note above:** the cert at
+`/etc/letsencrypt/live/dhanai.iamazim.com/` already had SANs for both
+`dhanai.iamazim.com` and `panai.iamazim.com` (issued 2026-08-08, valid to
+2026-11-06) — no certbot run was ever needed. The remaining gap was purely
+Nginx virtual-host routing, as the Owner correctly identified.
+
+**Division of labor:** this session prepared and self-reviewed a deploy
+script (`deploy_panai_dhanai.sh`, scratchpad-only, not committed) that
+writes exactly two Nginx server-block files, symlinks them into
+`sites-enabled/`, and runs `nginx -t`/`nginx -s reload`. This session's
+sudo grant is narrow (`NOPASSWD: nginx -t, nginx -s reload,` and 4 unrelated
+`systemctl restart` lines only — confirmed via `sudo -n -l`; no file-write
+or certbot permission). The Owner ran the file/symlink portion themselves;
+this session then independently re-verified the deployed file content
+byte-for-byte against the reviewed script, ran its own `sudo nginx -t` and
+`sudo nginx -s reload`, and ran the full runtime verification pass below.
+
+**Runtime-proven (not just config-reviewed):**
+- `sudo nginx -t`: syntax OK, test successful.
+- `nginx.service` uptime unchanged across the reload (`Active: ... since
+  2026-07-21`) — confirms a graceful worker reload, not a service restart.
+- `sites-enabled/` diffed before/after: exactly 2 new symlinks
+  (`panai.iamazim.com`, `dhanai.iamazim.com`) added; all 6 pre-existing
+  symlinks untouched.
+- Public HTTPS reachable for both hostnames from outside this host
+  (`curl https://panai.iamazim.com/` → 200, `https://dhanai.iamazim.com/` →
+  307 to Portainer's own `/timeout.html`, both over real DNS/internet, not
+  localhost).
+- `openssl s_client -servername panai.iamazim.com` and `-servername
+  dhanai.iamazim.com` both return the same multi-SAN cert
+  (`DNS:dhanai.iamazim.com, DNS:panai.iamazim.com`), not
+  `assistant.iamazim.com`'s cert — confirms SNI-based routing is now
+  correct, closing the original "fallback vhost / wrong SANs" symptom.
+- Panai body: real assistant-platform frontend HTML (`<title>Assistant</title>`,
+  same Vite asset hashes as `assistant.iamazim.com`'s own build);
+  `GET /api/panai.../api/auth/me`-shaped probe returns
+  `{"error":"missing token"}` — the real backend's `requireAuth` response,
+  not a 404/fallback.
+- Dhanai body (after following the redirect): real Portainer HTML
+  (`ng-app="@portainer/ce"`, `<title>Portainer</title>`).
+- Cross-check: Panai's body contains zero occurrences of "portainer";
+  Dhanai's body contains zero occurrences of `<title>Assistant` — no
+  bleed-through either direction.
+- HTTP→HTTPS redirect (301) confirmed working for both hostnames.
+- `ss -tln` (both with and without sudo): port 9119 is not listening
+  anywhere on the host — confirmed not revived.
+- Regression check: `assistant.iamazim.com` and `chat.iamazim.com` both
+  still return 200 after the reload — no unrelated site broken.
+- No certbot invocation anywhere in the deploy script (grepped for
+  "certbot" as a command, not just the webroot path string) or run by this
+  session. No service other than an Nginx *reload* (not restart) was
+  touched.
+
+**Not done / explicitly deferred:** Nginx-level Basic Auth in front of
+Dhanai's Portainer proxy — Owner explicitly declined to add it unless
+later required by the existing architecture; Portainer's own
+authentication remains the sole access control for now. Recorded here as
+the standing open decision, not re-decided.
+
+### S6 FINAL CLOSURE / COMMIT-READINESS (2026-08-08)
+
+A dedicated closure pass re-verified every claim above independently
+(not re-trusting the earlier turns' own summaries) before recording this
+decision.
+
+**Diff review (both repos, full `git diff` read line-by-line):**
+
+| Repo | File | Change | Verdict |
+|---|---|---|---|
+| core | `modules/admin_directives/router.py` | `source_bridge` param threaded through `process_admin_ai_command`/`_handle_hermes_relay`; two-independent-check gate; docstrings updated | Matches documented fix exactly, no unintended edits |
+| core | `modules/message_router/__init__.py` | `source_bridge=source` passed at the one call site; confidentiality wrapper added at accountant, employee-payroll, and both Tier-15 (base + universal) reply points | Exactly 3 wiring points, matches the "all three exit points" claim |
+| core | `shared/reply_policy.py` | New `enforce_general_reply_confidentiality()` + patterns/constant | Matches documented behavior |
+| core | `tests/unit/test_admin_ai_router.py` | `_run()` gained `source` param; 2 new tests (wrong-source-same-phone, wrong-both); 1 direct-call test updated | Additive, correct |
+| core | `tests/unit/test_reply_policy.py` | 6 new confidentiality tests | Additive, correct |
+| core | `tests/unit/test_media_normalization_phase3.py` | 1 new video test + 3 new silent-drop tests | Additive, correct |
+| core | `tests/unit/test_conversation_isolation.py` (new file) | Real-DB cross-user isolation + identity-trust tests | New file, in-scope, no overlap with existing test files |
+| core | `knowledge_base/00_governance/management_decisions.md` | This S6 record itself | Governance-only |
+| assistant-platform | `frontend/src/App.jsx` | `RequireAdmin` guard on `/hermes` route | Matches documented fix, pre-existing from before this session's first turn |
+| assistant-platform | `backend/tests/authMiddleware.test.js` (new file) | 6 auth-boundary tests | Additive, correct |
+
+**Unrelated/pre-existing items confirmed NOT part of this diff:**
+`IDENTITY_BRAIN_NAME_LOOKUP_AUDIT_REPORT.md` and `db/migrations_drafts/`
+are untracked, root/pre-session-owned, predate this S6 work (Aug 6 and
+Jul 30 respectively), and are unmodified by any S6 turn — confirmed via
+`git status --porcelain` showing them as `??` (untracked, never touched)
+with no corresponding entry in `git diff --stat`. No other stray
+modifications found anywhere in either repo.
+
+`git diff --check` (both repos): clean. `py_compile` on every changed
+Python file: clean.
+
+**Stale-wording sweep (per the explicit checklist):** found and corrected
+two genuinely stale passages from this S6 record's own first turn (written
+before Panai/Dhanai were deployed): the "no Nginx/TLS change was made"
+line in this section's opening paragraph, and finding #8 / the "Explicitly
+not done" list further up, both of which still said "NOT deployed" /
+"no Nginx reload." Both are now annotated in place as superseded (not
+silently rewritten — this is a chronological log; the annotations point to
+the later "Panai/Dhanai/TLS deployed and runtime-verified" section for the
+actual final state). No remaining occurrence of "S6 is incomplete,"
+"Panai/Dhanai are not deployed," "TLS is broken," "Postgres test blocker is
+unresolved," "Hermes wrong-bridge gap remains open," or "confidentiality
+coverage exists only at Tier 15" as an unqualified *current* claim
+anywhere in this S6 record — every other mention is either already
+correctly marked "(real, closed)"/"resolved" or is now annotated
+superseded.
+
+**Tests/builds re-run this closure pass (fresh, not reused from memory):**
+- `tests/unit/test_admin_ai_router.py` + `test_admin_directives_routes.py`
+  + `test_reply_policy.py` + `test_conversation_isolation.py` +
+  `test_media_normalization_phase3.py` + `test_rag_knowledge_base.py` +
+  `test_final_instruction_fixes.py`: **186/186 passed.**
+- `tests/unit/test_route_b_handoff.py` alone: 18/19 passed — the 1 failure
+  (`test_ollama_failure_produces_safe_response_not_dropped`) is the
+  previously-documented pre-existing stale-mock-kwargs assertion, confirmed
+  unrelated to any S6 change (no S6 turn touched this file or the code
+  path it exercises).
+- `assistant-platform/backend`: `npm test` → 52/52 passed.
+- `assistant-platform/frontend`: `npm run build` → succeeds.
+- `git diff --check` and `py_compile`: clean (both repos).
+
+**Live infrastructure re-confirmed (read-only checks only, nothing
+changed this pass):** `sudo nginx -t` → OK; `panai.iamazim.com` → HTTP 200;
+`dhanai.iamazim.com` → HTTP 307 (Portainer's own redirect);
+`assistant.iamazim.com`/`chat.iamazim.com` regression → both 200; port
+9119 → not listening. The live Nginx state from the prior turn was
+preserved exactly — this pass made no Nginx/certificate/service change.
+
+**Separation of the four required categories:**
+
+- **S6 mandatory acceptance requirements — ALL MET:** Hermes UI/backend
+  authorization, WhatsApp Hermes authorization incl. wrong-bridge denial,
+  privileged tool isolation, server-side identity/role trust, cross-user
+  memory/history isolation (real-DB proven), RAG isolation, AI-output
+  confidentiality at all 3 exit points, Panai/Dhanai/TLS routing (live,
+  runtime-verified), conversation continuity, regression tests.
+- **Deferred Owner decisions (not S6 blockers):** video media processing
+  (currently placeholder-only), location/sticker/unsupported Meta-webhook
+  message types (currently silently dropped), Dhanai Nginx Basic Auth.
+- **Pre-existing unrelated test failures (not S6-caused):** 22 failed + 2
+  errors across `test_attendance_crud.py`, `test_billing_payments.py`,
+  `test_bridge_poller_orphan_message_fix.py`,
+  `test_client_billing_profiles.py`, `test_conversation_memory_shadow_hook.py`,
+  `test_conversation_memory_stage2.py` (all confirmed schema-drift
+  `UndefinedTableError`/`UndefinedColumnError` in modules no S6 turn
+  touched), plus the 1 pre-existing `test_route_b_handoff.py` failure
+  above.
+- **Infrastructure changes already live:** Panai/Dhanai Nginx server
+  blocks (2 files, 2 symlinks), Nginx reload. Nothing else — no migration,
+  no service restart, no certbot run, no other Nginx site touched.
+- **Code changes still awaiting commit:** all 10 files in the diff-review
+  table above, in both repos. Nothing has been committed.
+
+**Repository safety to commit:** confirmed safe. The diff is exactly the
+intended S6 change set, byte-for-byte reviewed, fully test-covered, with
+no accidental or unrelated modification in either repo.
+
+## FINAL DECISION: S6-CLOSED — COMMIT READY
+
+All mandatory S6 acceptance conditions are implemented, test-proven, and/or
+runtime-proven. The three deferred items (video processing,
+location/sticker/unsupported media, Dhanai Basic Auth) are Owner decisions
+by design, not blockers, and are not reopened here. No commit has been
+made — commit remains a separate, explicit action for whenever authorized.
+S7 has not been started.

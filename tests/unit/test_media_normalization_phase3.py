@@ -55,3 +55,70 @@ async def test_missing_media_id_stays_placeholder() -> None:
     out = await mn.normalize_meta_media_message({"type": "image", "image": {}})
     assert out["text"] == "[image message]"
     assert out["meta"]["normalized"] is False
+
+
+@pytest.mark.asyncio
+async def test_video_has_no_real_processing_placeholder_only() -> None:
+    """S6 media audit (2026-08-08): 'video' is in the download-eligible type
+    set (image/audio/document/video), but normalize_meta_media_message() has
+    no video-processing branch at all -- it always falls through to the
+    generic placeholder, even with a successful download and a caption.
+    Honest acceptance evidence, not a bug fix: video content is never
+    actually extracted/transcribed by this system."""
+    with patch.object(mn, "_download_meta_media", new=AsyncMock(return_value="/tmp/fake.mp4")):
+        with patch("os.path.exists", return_value=False):
+            out = await mn.normalize_meta_media_message({
+                "type": "video",
+                "video": {"id": "m4", "mime_type": "video/mp4", "caption": "escort duty video"},
+            })
+    assert out["text"] == "[video message] escort duty video"
+    assert out["meta"]["normalized"] is False
+
+
+class TestMetaUnsupportedMessageTypesAreSilentlyDropped:
+    """S6 media audit (2026-08-08): app.main._handle_meta_message() only
+    special-cases type in {text, image, audio, document, video}. Any other
+    inbound type (location, sticker, contacts, reaction, interactive,
+    unknown/future types) leaves `text` as "" and hits the function's own
+    `if not text: return` -- no reply, no admin draft, no outbound queue
+    entry, no DB save. Proven here directly (not inferred from reading the
+    code) so this honest gap is test-evidenced, matching the S6 mandate not
+    to fabricate media support that doesn't exist."""
+
+    async def _run(self, msg: dict) -> None:
+        from app.main import _handle_meta_message
+
+        with (
+            patch("app.main._process_message", new=AsyncMock(return_value=("reply", None))) as process,
+            patch("app.main._save_message", new=AsyncMock()) as save,
+            patch("app.main.record_heartbeat", new=AsyncMock()),
+            patch("app.main.fetch_one", new=AsyncMock(return_value=None)),
+            patch("modules.outbound.enqueue", new=AsyncMock()) as enqueue,
+        ):
+            await _handle_meta_message(msg, {})
+        process.assert_not_awaited()
+        save.assert_not_awaited()
+        enqueue.assert_not_awaited()
+
+    async def test_location_message_is_silently_dropped(self):
+        await self._run({
+            "id": "wamid.test-location",
+            "from": "01999999998",
+            "type": "location",
+            "location": {"latitude": 23.8, "longitude": 90.4},
+        })
+
+    async def test_sticker_message_is_silently_dropped(self):
+        await self._run({
+            "id": "wamid.test-sticker",
+            "from": "01999999998",
+            "type": "sticker",
+            "sticker": {"id": "sticker123"},
+        })
+
+    async def test_unknown_future_type_is_silently_dropped(self):
+        await self._run({
+            "id": "wamid.test-unknown",
+            "from": "01999999998",
+            "type": "some_future_message_type",
+        })

@@ -5,7 +5,7 @@ Unified Admin AI Engine (Phase 3 Step 5).
 Public entry points (mirrors modules.admin_commands.nl_router's own
 is_X/process_X convention):
   - is_admin_ai_command(text) -> bool
-  - process_admin_ai_command(text, sender_phone) -> str | None
+  - process_admin_ai_command(text, sender_phone, source_bridge="") -> str | None
 
 Wired into modules.message_router's admin branch AFTER is_admin_command
 and is_nl_admin_query, BEFORE the hardcoded-help fallback (Step 6, not
@@ -23,7 +23,14 @@ in this codebase already uses, no new RBAC mechanism introduced. Of the
 2026-08-04, HERMES <request> (real Hermes relay, not the AI console --
 see _handle_hermes_relay), IS registered there at "superadmin" and is
 additionally gated to the specific bridge2 channel, a stricter bar than
-every other command in this file.
+every other command in this file. That channel gate is TWO independent
+checks (S6, 2026-08-08): the sender's phone must equal
+settings.admin_bridge2_number AND the message must have physically
+arrived via source_bridge == "bridge2" -- checking phone identity alone
+would (mis)trust a same-numbered admin message replayed or misrouted
+through bridge1/bridge3; source_bridge is the caller-trusted value
+message_router already resolves from which poller/webhook ingested the
+message, never taken from message text.
 
 process_admin_ai_command() never raises to its caller -- every branch is
 exception-guarded and returns a user-facing Bangla string on failure,
@@ -468,20 +475,28 @@ async def trigger_admin_investigation(job_name: str, alert_context: str) -> None
         log.error("[phase5b_trigger] job=%s event=report_send_failed error=%s", job_name, exc)
 
 
-async def _handle_hermes_relay(request_text: str, sender_phone: str) -> str:
+async def _handle_hermes_relay(request_text: str, sender_phone: str, source_bridge: str = "") -> str:
     """Phase 4 (2026-08-04): relays an admin's WhatsApp request to the real
     Hermes (assistant-platform's BUILD/RUN-capable agent), hard-locked to
     READ-only for every relayed call (read_only=true, enforced in
     hermes-runner/server.py -- a relayed message can make Hermes
     investigate and report, never build, run, or change its own mode).
 
-    Gated on two INDEPENDENT checks, both required: RBAC role (superadmin,
-    via _authorize below and COMMAND_ROLE['hermes_relay']) AND the specific
-    bridge2 channel (checked separately, after _authorize, so every attempt
+    Gated on three INDEPENDENT checks, all required: RBAC role (superadmin,
+    via _authorize below and COMMAND_ROLE['hermes_relay']), the sender's
+    phone matching settings.admin_bridge2_number, AND source_bridge itself
+    being "bridge2" (checked together, after _authorize, so every attempt
     -- including a channel-mismatch denial -- gets its own honest audit
     row rather than silently reusing _authorize's RBAC-only verdict).
     bridge1 is also bootstrapped as superadmin but is deliberately not the
     designated Hermes channel.
+
+    source_bridge (S6, 2026-08-08): phone-identity alone is not a channel
+    check -- it would (mis)trust an admin_bridge2_number-matching sender
+    replayed or misrouted through bridge1/bridge3. source_bridge is
+    message_router's own trusted `source` value (which poller/webhook
+    actually ingested this message), never derived from message text, so
+    it can't be spoofed by anything the sender types.
 
     Runs the actual Hermes call as a background task rather than awaiting
     it inline: this codebase's message-routing pipeline wraps every inbound
@@ -494,12 +509,17 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str) -> str:
         return _DENIAL_MSG
 
     settings = get_settings()
-    if sender_phone != (settings.admin_bridge2_number or ""):
+    wrong_identity = sender_phone != (settings.admin_bridge2_number or "")
+    wrong_channel = source_bridge != "bridge2"
+    if wrong_identity or wrong_channel:
         try:
             await rbac.record_audit(
                 channel="whatsapp", command="hermes_relay", actor_phone=sender_phone,
                 actor_admin=admin, allowed=False,
-                denied_reason="RBAC allowed but sender is not the designated bridge2 Hermes channel",
+                denied_reason=(
+                    "RBAC allowed but sender is not the designated bridge2 Hermes channel "
+                    f"(identity_mismatch={wrong_identity}, source_bridge={source_bridge or 'unknown'})"
+                ),
             )
         except Exception:
             log.error("[admin_ai_router] record_audit failed for hermes_relay channel-mismatch, phone=%s", sender_phone)
@@ -524,11 +544,19 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str) -> str:
     return _HERMES_ACK_MSG
 
 
-async def process_admin_ai_command(text: str, sender_phone: str) -> Optional[str]:
+async def process_admin_ai_command(text: str, sender_phone: str, source_bridge: str = "") -> Optional[str]:
     """Returns a plain-text WhatsApp reply, or None if text matches none of
     the 6 patterns (caller falls through to its own next check). Never
     raises -- the outer try/except is a final safety net on top of every
-    handler's own internal exception handling."""
+    handler's own internal exception handling.
+
+    source_bridge: message_router's trusted `source` value for this inbound
+    message (which poller/webhook ingested it). Only the HERMES <request>
+    command uses it (see _handle_hermes_relay) -- every other command here
+    is phone-identity-scoped only, unchanged. Defaults to "" for existing
+    callers/tests that don't pass it; that default can never satisfy the
+    Hermes relay's source_bridge == "bridge2" check, so omitting it is
+    fail-closed, not a bypass."""
     try:
         stripped = (text or "").strip()
         if not stripped:
@@ -556,7 +584,7 @@ async def process_admin_ai_command(text: str, sender_phone: str) -> Optional[str
 
         m = _RE_HERMES.match(stripped)
         if m:
-            return await _handle_hermes_relay(m.group(1).strip(), sender_phone)
+            return await _handle_hermes_relay(m.group(1).strip(), sender_phone, source_bridge)
 
         return None
     except Exception as exc:

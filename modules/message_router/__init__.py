@@ -571,7 +571,7 @@ async def process_message(
         # reach this branch, never unmatched free text).
         if is_admin_ai_command(text):
             ai_reply = await process_admin_ai_command(
-                text, sender_phone=sender
+                text, sender_phone=sender, source_bridge=source
             )
             if ai_reply is not None:
                 return ai_reply, None
@@ -688,6 +688,17 @@ async def process_message(
         db_ctx = await get_contact_context(sender)
         history = "\n".join(await get_recent_history(sender))
         reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
+        # S6 (2026-08-08): accountant is trusted for its own domain's data
+        # (payments/cash), but is still not admin -- the same final
+        # confidentiality net Tier 15 already has (blocks credential-like
+        # output, echoed prompt sections, and any non-sender phone number)
+        # closes this AI-reply exit point too. See shared/reply_policy.py's
+        # enforce_general_reply_confidentiality() docstring.
+        from shared.reply_policy import (
+            clean_general_reply as _clean_reply,
+            enforce_general_reply_confidentiality as _enforce_confidentiality,
+        )
+        reply = _enforce_confidentiality(_clean_reply(reply), sender_phone=sender)
         return reply, None
 
     # ── 7/8. Recruitment — one eligibility decision for every unknown/candidate ─
@@ -825,6 +836,18 @@ async def process_message(
             db_ctx = format_payroll_context(payroll)
             history = "\n".join(await get_recent_history(sender))
             reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
+            # S6 (2026-08-08): db_ctx above is scoped to this employee's own
+            # emp_id (server-resolved, not user-supplied), so their own
+            # salary is expected and allowed here (enforce_general_reply_
+            # confidentiality() already permits the sender's own phone the
+            # same way) -- this only adds the same last-resort net Tier 15
+            # has against credential-like output or an echoed prompt
+            # section, and against any OTHER phone number appearing.
+            from shared.reply_policy import (
+                clean_general_reply as _clean_reply,
+                enforce_general_reply_confidentiality as _enforce_confidentiality,
+            )
+            reply = _enforce_confidentiality(_clean_reply(reply), sender_phone=sender)
             _hk_fire(role_str, intent, "reply", "employee-payroll")
             return reply, None
 
@@ -981,8 +1004,11 @@ async def process_message(
     except Exception:
         pass
     # Phase 4 Step 4 — strip artifact prefixes from structured prompt output
-    from shared.reply_policy import clean_general_reply as _clean_reply
-    reply = _clean_reply(reply)
+    from shared.reply_policy import (
+        clean_general_reply as _clean_reply,
+        enforce_general_reply_confidentiality as _enforce_confidentiality,
+    )
+    reply = _enforce_confidentiality(_clean_reply(reply), sender_phone=sender)
 
     # Phase 2 (2026-08-06, Owner-approved "Universal AI Responder", shadow
     # mode -- see management_decisions.md "Universal AI Responder — Phase
@@ -1005,6 +1031,9 @@ async def process_message(
             sender, (reply or "")[:200], (universal_reply or "")[:200],
         )
         if get_settings().tier15_universal_responder_live and universal_reply:
+            universal_reply = _enforce_confidentiality(
+                _clean_reply(universal_reply), sender_phone=sender,
+            )
             return universal_reply, None
     except Exception as e:
         log.debug("[tier15_shadow] universal responder failed (non-fatal): %s", e)
