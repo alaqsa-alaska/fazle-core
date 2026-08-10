@@ -102,6 +102,7 @@
 060_hermes_kernel_scaffolding.sql
 061_hermes_c2_divergence_snapshots.sql
 062_candidate_conversation_message_identity.sql
+063_ai_read_cash_transactions.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -153,6 +154,23 @@ on `(source_bridge, message_id)` where `message_id IS NOT NULL`. Existing rows
 were preserved, and callers without a message ID retain append-only behavior.
 It was applied as one guarded transaction together with its migration-tracking
 row; the full stale `db/migrate.py` queue was not run.
+
+**`063_ai_read_cash_transactions.sql` (2026-08-10, Hermes Capability
+Expansion Level 1, NOT YET APPLIED to production):** adds
+`ai_read_cash_transactions`, a read-only view over `fpe_cash_transactions`
+(joined to `fpe_employees` for the employee name), completing the
+already-Owner-approved `proposal_ai_read_cash_transactions_20260802.md`
+(assistant-platform repo, marked FINAL). Purely additive (`CREATE VIEW` +
+one `GRANT SELECT`), same pattern as every other `ai_read_*` view (012,
+045). No existing table/view touched, no `ALTER`/`DROP`. Application-side
+code consuming it (`fazleBridge.js`, `fazleTools.js`, fazle-mcp's
+`get_cash_transactions`) was already written and deployed against this
+exact view name/columns — it currently short-circuits with a clear "not
+yet available" message rather than erroring, and needs no further code
+change once this migration is applied. **Deliberately not run by AI** —
+KB hard constraint #7. To apply: run the file directly against production
+Postgres as a role with `CREATE`/`GRANT` on `public`, same direct-script
+method used for `056`/`057`/`062` above.
 
 **`059_admin_directives.sql` (2026-07-30):** adds `fazle_admin_directives` — the
 Unified Admin AI Engine's narrow admin directive/action memory table
