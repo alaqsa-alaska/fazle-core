@@ -3155,6 +3155,55 @@ async def revoke_admin_directive(directive_id: int, key: str = Depends(require_a
     return {"revoked": revoked}
 
 
+# ── Hermes Capability Expansion Level 2 (2026-08-10) ──────────────────────────
+# Admin-commanded, one-off WhatsApp send -- explicitly NOT part of the
+# automated customer-facing reply pipeline (message_router/identity_brain/
+# app.llm are completely untouched by this route; it calls
+# modules.outbound.enqueue() directly, the same primitive the draft-approve
+# flow already uses). superadmin-gated (COMMAND_ROLE), same tier as
+# hermes_relay -- the existing precedent for "an AI-adjacent action with a
+# real external effect." Every call is audited (fazle_admin_audit) pairing
+# the admin's original instruction text with the exact recipient+body that
+# was actually sent, so a mistake is traceable after the fact even though
+# there's no separate approval-click step (deliberate design choice -- see
+# project_hermes_unification_20260810.md, Capability Expansion Plan, Level 2).
+@app.post("/admin/send-whatsapp", dependencies=[Depends(require_command("send_whatsapp_message"))])
+async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_key)):
+    from modules import outbound, rbac
+
+    recipient = (payload or {}).get("recipient", "").strip()
+    body = (payload or {}).get("body", "").strip()
+    source_bridge = (payload or {}).get("source_bridge") or "bridge2"
+    admin_instruction = (payload or {}).get("admin_instruction", "")
+
+    if not recipient or not body:
+        raise HTTPException(status_code=400, detail="recipient and body are required")
+
+    actor = await _rbac_actor_from_key(key)
+    queue_id = await outbound.enqueue(
+        recipient,
+        body,
+        source_bridge=source_bridge,
+        purpose="hermes_admin_send",
+    )
+    await rbac.record_audit(
+        channel="http",
+        command="send_whatsapp_message",
+        actor_phone=actor.get("phone"),
+        actor_admin=actor,
+        args=json.dumps({"admin_instruction": admin_instruction}),
+        allowed=True,
+        required_role="superadmin",
+        result_summary=json.dumps({
+            "recipient": recipient,
+            "body": body,
+            "source_bridge": source_bridge,
+            "queue_id": queue_id,
+        }),
+    )
+    return {"ok": True, "queue_id": queue_id}
+
+
 # ── Batch 20 — Admin Dashboard aggregate endpoint ─────────────────────────────
 @app.get("/admin/overview", dependencies=[Depends(require_api_key)])
 async def b20_overview():

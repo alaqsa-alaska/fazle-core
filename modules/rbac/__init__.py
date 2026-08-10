@@ -74,6 +74,14 @@ COMMAND_ROLE: dict[str, str] = {
     # top of the bridge2-specific check in admin_directives/router.py
     # (two independent gates: role AND channel, not either alone).
     "hermes_relay":        "superadmin",
+    # Hermes Capability Expansion Level 2 (2026-08-10): admin-commanded,
+    # one-off WhatsApp send via POST /admin/send-whatsapp -- same tier as
+    # hermes_relay above, the closest existing precedent for "an AI-adjacent
+    # action with a real external effect." Deliberately explicit here: an
+    # unlisted command silently falls back to DEFAULT_REQUIRED_ROLE ("admin"),
+    # which would be too permissive for something that sends a real message
+    # to a real person.
+    "send_whatsapp_message": "superadmin",
 }
 
 DEFAULT_REQUIRED_ROLE = "admin"  # unknown cmd defaults to admin
