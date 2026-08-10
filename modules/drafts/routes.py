@@ -49,6 +49,15 @@ class EditRequest(BaseModel):
     admin_note: Optional[str] = None
 
 
+class CreateDraftRequest(BaseModel):
+    recipient: str
+    bridge: str
+    draft_text: str
+    role: str = "unknown"
+    intent: str = "hermes_suggested"
+    context: str = ""
+
+
 # ── GET /api/drafts/stats ───────────────────────────────────────────────────
 @router.get("/api/drafts/stats")
 async def draft_stats(_: None = Depends(_require_api_key)):
@@ -119,6 +128,45 @@ async def list_drafts(
         )
         result.append(row)
     return {"drafts": result, "count": len(result)}
+
+
+# ── POST /api/drafts (create) ────────────────────────────────────────────────
+@router.post("/api/drafts")
+async def create_draft(
+    body: CreateDraftRequest,
+    _: None = Depends(_require_api_key),
+):
+    """Create a new pending draft reply — external-caller entry point
+    (2026-08-10, Hermes Capability Expansion Level 1: fazle-mcp's
+    draft_whatsapp_reply tool is the first caller). Thin wrapper around
+    shared.draft_reply.create_draft_reply(), the same race-safe/deduped/
+    audited insert path every internal module already uses — no new
+    draft-storage logic here. This never sends anything; a draft only
+    leaves 'pending' via the approve/edit endpoints above, exactly like
+    every other draft in the system, so this endpoint cannot itself cause
+    an outbound message."""
+    from shared.draft_reply import create_draft_reply
+
+    if not body.recipient.strip() or not body.draft_text.strip():
+        raise HTTPException(status_code=400, detail="recipient and draft_text are required")
+
+    draft_id = await create_draft_reply(
+        sender=body.recipient,
+        bridge=body.bridge,
+        draft_text=body.draft_text,
+        role=body.role,
+        intent=body.intent,
+        context=body.context,
+        source_module="hermes_admin",
+    )
+    if draft_id is None:
+        return {
+            "ok": False,
+            "reason": "suppressed — either a pending draft already exists for "
+            "this recipient+bridge within the last 5 minutes, or a transient "
+            "lock/DB issue. Not an error to retry blindly; check GET /api/drafts first.",
+        }
+    return {"ok": True, "draft_id": draft_id, "status": "pending"}
 
 
 # ── POST /api/drafts/{id}/approve ──────────────────────────────────────────

@@ -40,6 +40,7 @@ async def test_drafts_routes_are_mounted_and_auth_gated():
             ("post", "/api/drafts/999999999/approve"),
             ("post", "/api/drafts/999999999/edit"),
             ("post", "/api/drafts/999999999/delete"),
+            ("post", "/api/drafts"),
         ]:
             resp = await ac.request(method, path, json={})
             assert resp.status_code == 403, (

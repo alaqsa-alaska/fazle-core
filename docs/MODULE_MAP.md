@@ -165,8 +165,8 @@
 
 ### `modules.drafts`
 - **Purpose:** Draft-dashboard API — lists pending drafts, shows stats, and lets an operator approve/edit/soft-delete/block a draft from the web dashboard (distinct from the WhatsApp `APPROVE`/`EDIT` admin commands).
-- **Key files:** `routes.py` (294 lines); `__init__.py` is empty.
-- **Main APIs (`APIRouter(tags=["drafts"])`):** `GET /api/drafts/stats` (`:55`), `GET /api/drafts` (`:71`), `POST /api/drafts/{id}/approve` (`:127`), `POST /api/drafts/{id}/edit` (`:189`), `POST /api/drafts/{id}/delete` (`:220`), `POST /api/drafts/{id}/block` (`:243`). Protected by `X-Internal-Key`.
+- **Key files:** `routes.py`; `__init__.py` is empty.
+- **Main APIs (`APIRouter(tags=["drafts"])`):** `GET /api/drafts/stats` (`:62`), `GET /api/drafts` (`:78`), `POST /api/drafts` (`:134`, create — added 2026-08-10, Hermes Capability Expansion Level 1; external entry point wrapping `shared.draft_reply.create_draft_reply()`, never sends), `POST /api/drafts/{id}/approve` (`:173`), `POST /api/drafts/{id}/edit` (`:261`), `POST /api/drafts/{id}/delete` (`:331`). Protected by `X-Internal-Key`. (`/block` was permanently removed 2026-07-11, migration 042 — this line previously still listed it in error.)
 - **DB tables used:** `fazle_contact_roles`, `fazle_draft_replies`, `wbom_contacts`.
 - **Critical dependencies:** `app.config`, `app.database`, `modules.outbound` (approve action calls `outbound.enqueue`).
 - **Risk level:** Critical — `/approve` directly triggers real outbound sends. **Note:** this router's mounting in `app/main.py` was found dropped by in-flight uncommitted work and restored 2026-07-09 — verify a restart has happened since, or the fix isn't live yet. **Real bug fixed (2026-07-11):** `/approve` was intent-agnostic and never called `save_attendance()` — approving an `intent='attendance'` draft from this dashboard silently marked it approved and sent the reply without ever saving to `wbom_attendance`. Now delegates to `modules.attendance.finalize_attendance_draft()` for that intent specifically (same shared service the WhatsApp `APPROVE <id>` command uses); every other intent's behavior is unchanged.
