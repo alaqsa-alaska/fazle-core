@@ -1307,6 +1307,10 @@ async def _poll_bridge(config: dict):
                     is_order_complete, handle_group_escort_order,
                 )
                 from modules.escort_lifecycle import is_release_confirmation, handle_admin_release_confirmation
+                # Hermes self-relay (2026-08-12, Owner-directed): reuses the
+                # exact regex admin_directives.router's own inbound HERMES
+                # command uses, so the two paths recognize identical text.
+                from modules.admin_directives.router import process_admin_ai_command, _RE_HERMES
 
                 admin_number = (
                     _settings.bridge1_number if bridge_name == "bridge1"
@@ -1333,6 +1337,45 @@ async def _poll_bridge(config: dict):
                         and bridge_name == "bridge2"
                         and chat_jid == trusted_group_jid
                     )
+
+                    # Hermes self-relay (2026-08-12, Owner-directed): a
+                    # message the Owner sends to himself on bridge2 is
+                    # is_from_me=1 by construction -- WhatsApp multi-device's
+                    # is_from_me flag is account-level, so the inbound
+                    # (is_from_me=0) pipeline can never see a self-sent
+                    # message, on any device, by design of the protocol
+                    # itself (not a bug in this codebase). This is therefore
+                    # the ONLY channel through which the Owner's own
+                    # "hermes <request>" WhatsApp message can ever reach the
+                    # real Hermes agent. Scoped to bridge2 only (never
+                    # bridge1 -- that's the HR number, not Super Admin).
+                    # Reuses process_admin_ai_command()/_handle_hermes_relay()
+                    # unchanged -- no new authorization logic here; sender==
+                    # admin_number (== settings.bridge2_number ==
+                    # settings.admin_bridge2_number in this deployment) and
+                    # source_bridge=="bridge2" both trivially satisfy the
+                    # existing gate, exactly as the inbound path already
+                    # requires. Only the HERMES pattern is recognized here,
+                    # deliberately -- not the other 5 admin_ai_command
+                    # patterns (AI/autoreply/remember/forget/send), which
+                    # stay inbound-only until a separate Owner decision.
+                    if bridge_name == "bridge2" and _RE_HERMES.match(otext.strip()):
+                        log.info(f"[{bridge_name}] outgoing HERMES self-relay detected → msg={omsg_id}")
+                        try:
+                            ack = await process_admin_ai_command(
+                                otext, sender_phone=admin_number, source_bridge=bridge_name,
+                            )
+                            if ack:
+                                from modules.outbound import enqueue as enqueue_outbound
+                                await enqueue_outbound(
+                                    admin_number, ack,
+                                    source_bridge=bridge_name,
+                                    purpose="hermes-self-relay-ack",
+                                    idempotency_key=f"hermes-self-relay:{omsg_id}",
+                                )
+                        except Exception as _hermes_err:
+                            log.error(f"[{bridge_name}] hermes self-relay error for msg {omsg_id}: {_hermes_err}")
+                        continue
 
                     # Phase 22: release confirmation takes priority
                     if is_release_confirmation(otext):
