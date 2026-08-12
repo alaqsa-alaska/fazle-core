@@ -185,6 +185,28 @@ _REVERSE_RE = re.compile(r"^reverse\s+\d+.*$", re.IGNORECASE)
 _ADJUST_RE = re.compile(r"^adjust\s+\d+.*$", re.IGNORECASE)
 
 
+def is_report_command(text: str) -> bool:
+    """Narrow subset of is_admin_command() — matches ONLY the report_*
+    command shapes (report list/daily/payroll/cash/recon/escort), nothing
+    else. Added 2026-08-12 (Owner-directed, Phase 1 "Accountant Reports")
+    so modules.message_router's Accountant branch can safely offer report
+    access without also exposing APPROVE/PAID/REVERSE/etc. -- this
+    function is the entire safety boundary on the message_router side;
+    process_admin_command() itself additionally re-checks RBAC
+    permission (rbac.check_permission(), fails closed) keyed on the
+    caller's own phone, so even a caller of this function bypassing the
+    regex gate would still need a registered, sufficiently-privileged
+    fazle_admins row to get anything back. All 6 report commands are
+    read-only (see modules/reports/__init__.py) -- no report handler
+    writes to any table."""
+    t = text.strip()
+    return bool(
+        _REPORT_DAILY_RE.match(t) or _REPORT_PAYROLL_RE.match(t) or
+        _REPORT_CASH_RE.match(t) or _REPORT_RECON_RE.match(t) or
+        _REPORT_ESCORT_RE.match(t) or _REPORT_LIST_RE.match(t)
+    )
+
+
 def is_admin_command(text: str) -> bool:
     """Quick check if message is an admin command."""
     t = text.strip()

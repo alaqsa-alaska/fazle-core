@@ -662,6 +662,22 @@ async def process_message(
 
     # ── 6. ACCOUNTANT ─────────────────────────────────────────────────────────
     if role_str == "accountant":
+        # Phase 1 "Accountant Reports" (2026-08-12, Owner-directed, from the
+        # 2026-08-12 System Operations Audit's priority recommendations):
+        # the existing REPORT command family (daily cash, reconciliation,
+        # payroll, escort, list) was previously reachable only from the
+        # Admin branch above -- an accountant typing "report cash 30" fell
+        # through to a generic AI reply instead of the real reports engine.
+        # is_report_command() is a narrow subset of is_admin_command() (see
+        # its own docstring) matching ONLY the 6 report_* shapes, nothing
+        # else in the admin command set (no APPROVE/PAID/REVERSE/etc reach
+        # this branch). process_admin_command() additionally re-checks RBAC
+        # permission for the caller's own phone before running anything --
+        # this call is not a bypass of that check.
+        from modules.admin_commands import is_report_command, process_admin_command
+        if is_report_command(text):
+            return await process_admin_command(text, admin_phone=sender), None
+
         from modules.accountant_summary import is_accountant_summary, ack_accountant_summary
         if is_accountant_summary(text):
             return ack_accountant_summary(text), None
