@@ -7,11 +7,23 @@ Shadow/simulation helpers remain available for A/B analysis.
 Phase 2 (2026-08-06, Owner-approved "Universal AI Responder" -- see
 knowledge_base/00_governance/management_decisions.md "Universal AI
 Responder — Phase 2"): also exports generate_universal_reply(), the
-role-agnostic sibling of generate_recruitment_reply() used by
-message_router's Tier 15 (AI fallback). Deliberately separate from the
-recruitment path -- does not touch recruitment_eligibility(),
-OPERATIONAL_ROLES, or route_recruitment_message(); Tier 15 is only ever
-reached by senders none of those gates claim in the first place.
+role-agnostic sibling of generate_recruitment_reply() originally used by
+message_router's Tier 15 (AI fallback) in shadow mode. Deliberately
+separate from the recruitment path -- does not touch
+recruitment_eligibility(), OPERATIONAL_ROLES, or
+route_recruitment_message().
+
+RETIRED FROM PRODUCTION ROUTING (2026-08-12, Owner decision -- see the
+Tier-15 shadow forensics report): message_router no longer calls
+generate_universal_reply() at all. It reasoned from its own
+independently-fetched context rather than the identity/intent/routing
+context Tier 15 had already resolved, and issued a second, redundant
+ai.generate_reply() call on every Tier-15 message purely for shadow
+comparison. The function itself is kept, not deleted -- its own unit
+tests (TestUniversalReplyGenerator) still exercise it directly -- in
+case it's repurposed later (e.g. as an Owner-reviewed evaluator rather
+than a parallel responder), but nothing in the live message-processing
+path calls it as of this date.
 """
 
 from __future__ import annotations
@@ -73,10 +85,14 @@ async def generate_universal_reply(
     history: str = "",
     db_ctx: str = "",
 ) -> Optional[str]:
-    """Phase 2 (2026-08-06) -- role-agnostic reply generator for Tier 15
-    (message_router's AI fallback), same KB->RAG->LLM->faithfulness-
-    validate shape generate_recruitment_reply() already has, generalized
-    to any topic rather than recruitment specifically.
+    """Phase 2 (2026-08-06) -- role-agnostic reply generator, same
+    KB->RAG->LLM->faithfulness-validate shape generate_recruitment_reply()
+    already has, generalized to any topic rather than recruitment
+    specifically.
+
+    RETIRED FROM PRODUCTION ROUTING (2026-08-12) -- no longer called by
+    message_router's Tier 15; see this module's own top-of-file docstring.
+    Kept for its own unit tests and any future, separately-authorized reuse.
 
     Reuses app.llm's existing multi-provider ai.generate_reply() for the
     actual text generation -- same reliability/fallback-chain Tier 15

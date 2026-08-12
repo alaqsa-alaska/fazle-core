@@ -834,8 +834,48 @@ async def process_message(
         if intent in ("salary_query", "payment_due") and emp_id:
             payroll = await get_payroll_summary(emp_id)
             db_ctx = format_payroll_context(payroll)
+            # KB gap fix (2026-08-12, Owner-confirmed): db_ctx above only ever
+            # carried this employee's OWN payroll numbers -- it never included
+            # general salary POLICY content (payment-date rule, its
+            # attendance condition, deductions, etc.), even though that
+            # content already exists and is indexed for this role (see
+            # knowledge_base/01_employee_knowledge/salary_policy.md, mirrored
+            # customer-reachable at resources/generated_kb/...). Same
+            # RAG-enrichment pattern Tier 15 already uses (line ~999 above) --
+            # fail-safe, never blocks the reply if RAG is slow/unavailable.
+            try:
+                from modules.rag import safe_search as _rag_search
+                _rag_hits = await _rag_search(text, k=3, role=role_str)
+                if _rag_hits:
+                    _rag_lines = [
+                        f"- {h.get('title', '')}: {(h.get('text') or '').strip()[:300]}"
+                        for h in _rag_hits
+                        if (h.get("text") or "").strip()
+                    ]
+                    if _rag_lines:
+                        db_ctx = (db_ctx + "\n\nKB Context:\n" + "\n".join(_rag_lines)).strip()
+                        log.info("[router] employee-salary RAG enrichment added hits=%d sender=%s", len(_rag_hits), sender)
+            except Exception as _rag_err:
+                log.debug("[router] employee-salary rag enrichment skipped: %s", _rag_err)
             history = "\n".join(await get_recent_history(sender))
-            reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
+            # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal
+            # Modification Plan item 1): flag-gated substitution, default
+            # OFF. Reuses the SAME pre-fetched db_ctx/history this branch
+            # already builds -- Hermes gets no extra data access beyond
+            # what ai.generate_reply() already receives here. Falls
+            # through to the unchanged app.llm chain whenever the flag is
+            # off or the Hermes call fails/times out/returns nothing --
+            # never both, never neither.
+            reply = None
+            from modules.preflight_guard import is_feature_active
+            if is_feature_active("hermes_customer_employee", default=False):
+                from modules.hermes_dispatch import generate_reply as _hermes_generate_reply
+                reply = await _hermes_generate_reply(
+                    text, intent, db_ctx, history=history, role=role_str, source=source,
+                    sender_phone=sender,
+                )
+            if not reply:
+                reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
             # S6 (2026-08-08): db_ctx above is scoped to this employee's own
             # emp_id (server-resolved, not user-supplied), so their own
             # salary is expected and allowed here (enforce_general_reply_
@@ -995,7 +1035,21 @@ async def process_message(
     except Exception as _rag_err:
         log.debug("[router] rag enrichment skipped: %s", _rag_err)
     history = "\n".join(await get_recent_history(sender))
-    reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
+    # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal Modification
+    # Plan item 1): flag-gated substitution, default OFF, same
+    # fail-through contract as the employee branch above -- see that
+    # branch's comment for the full rationale. This is the general/
+    # company-policy/unrecognized-intent catch-all tier.
+    reply = None
+    from modules.preflight_guard import is_feature_active
+    if is_feature_active("hermes_customer_general", default=False):
+        from modules.hermes_dispatch import generate_reply as _hermes_generate_reply
+        reply = await _hermes_generate_reply(
+            text, intent, db_ctx, history=history, role=role_str, source=source,
+            sender_phone=sender,
+        )
+    if not reply:
+        reply = await ai.generate_reply(text, intent, db_ctx, history=history, role=role_str, source=source)
     # Populate provider_used from the provider attempt trace (zero cost — already computed).
     try:
         _attempts = ai.get_last_attempts()
@@ -1010,33 +1064,26 @@ async def process_message(
     )
     reply = _enforce_confidentiality(_clean_reply(reply), sender_phone=sender)
 
-    # Phase 2 (2026-08-06, Owner-approved "Universal AI Responder", shadow
-    # mode -- see management_decisions.md "Universal AI Responder — Phase
-    # 2"): compute the upgraded KB/RAG/faithfulness-validated pipeline in
-    # parallel and log it alongside today's bare-AI reply for comparison.
-    # Does NOT affect what's returned/sent unless
-    # settings.tier15_universal_responder_live is explicitly True (default
-    # False) -- a separate, later Owner decision. This is the ONLY change
-    # at Tier 15; every upstream tier/gate (family, escort, admin,
-    # accountant, employee's own branches, Route B) is unreached code from
-    # here and is completely unaffected.
-    try:
-        from modules.conversation_layer import generate_universal_reply
-        universal_reply = await generate_universal_reply(
-            phone=sender, text=text, source=source,
-            intent=intent, role=role_str, history=history, db_ctx=db_ctx,
-        )
-        log.info(
-            "[tier15_shadow] sender=%s old_reply=%r new_reply=%r",
-            sender, (reply or "")[:200], (universal_reply or "")[:200],
-        )
-        if get_settings().tier15_universal_responder_live and universal_reply:
-            universal_reply = _enforce_confidentiality(
-                _clean_reply(universal_reply), sender_phone=sender,
-            )
-            return universal_reply, None
-    except Exception as e:
-        log.debug("[tier15_shadow] universal responder failed (non-fatal): %s", e)
+    # Retired (2026-08-12, Owner decision — see the Tier-15 shadow forensics
+    # report and modules/hermes_dispatch.py's own Phase 1 docstring): this
+    # tier used to also run modules.conversation_layer.generate_universal_reply()
+    # in shadow mode here (Phase 2, 2026-08-06 — 0cadbfc), purely for
+    # side-by-side comparison logging, gated live by
+    # settings.tier15_universal_responder_live (always False in production;
+    # never enabled outside a unit test's own monkeypatch — see the
+    # forensics report). Retired because the shadow pipeline reasoned from
+    # its own independently-fetched context rather than the identity/intent/
+    # routing context this tier already resolved, and because it issued a
+    # second, redundant ai.generate_reply() call on every Tier-15 message
+    # regardless of whether anything used its output (confirmed via
+    # llm_learning_memory: two real provider calls per turn while shadow
+    # mode was active). Reply generation above (Hermes when
+    # hermes_customer_general is on, else the unchanged app.llm chain) is
+    # now the ONLY customer-facing AI generation path this tier has.
+    # generate_universal_reply() itself is not deleted — see its own
+    # docstring — only this call site is removed. Historical shadow-mode
+    # log lines and hermes_decision_audit_log rows from before this date
+    # are untouched and remain available as audit history.
 
     # Hermes Kernel C0.2: fire shadow audit log for this turn (Tier 15 — AI reply).
     _hk_fire(role_str, intent, "reply", "ai-fallback-tier15")

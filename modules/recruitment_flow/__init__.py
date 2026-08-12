@@ -754,12 +754,50 @@ async def route_recruitment_message(
     # (i.e. everyone, while the allowlist is empty) is completely
     # unaffected by this block.
     if active_session and _is_llm_priority_phone(phone):
-        from modules.conversation_layer import generate_recruitment_reply as _llm_priority_reply
-
-        priority_reply = await _llm_priority_reply(
-            phone=phone, text=text, source=source,
-            contact_context=contact_context, history=history,
-        )
+        # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal
+        # Modification Plan item 2): flag-gated substitution, default
+        # OFF, same fall-through contract as the other three migrated
+        # call sites — see modules/hermes_dispatch.py's own docstring.
+        # The deterministic session/candidate bookkeeping below is
+        # completely unaffected either way, since it only consumes
+        # whatever `priority_reply` text ends up here.
+        priority_reply = None
+        from modules.preflight_guard import is_feature_active
+        if is_feature_active("hermes_customer_recruitment", default=False):
+            # KB gap fix (2026-08-12, Owner-confirmed), targeted revision
+            # (2026-08-12): resources/ops/recruitment_source_of_truth.txt
+            # is the deliberate single authoritative source for
+            # recruitment answers (see its own header). This call site
+            # originally passed no kb_context at all (Hermes correctly
+            # declined to invent position details rather than
+            # hallucinate). A first fix tried the same generic RAG fetch
+            # (k=2, min_score=2.0) conversation_layer/recruitment.py's own
+            # _safe_rag_context() uses -- live-tested and found it doesn't
+            # reliably surface this file for natural phrasings, so it's
+            # read whole instead (short file, ~4KB, cached after first
+            # read). "Finding E" revision (2026-08-12, Owner-directed):
+            # the fee/deposit section is now included only when this
+            # message itself looks like a fee question (matches the
+            # source file's own "don't volunteer fee info" instruction),
+            # and hermes_dispatch.generate_recruitment_reply() itself now
+            # fact-checks the reply against this same kb_context before
+            # returning it -- see hermes_dispatch.build_recruitment_context
+            # / _recruitment_reply_matches_source().
+            from modules.hermes_dispatch import (
+                generate_recruitment_reply as _hermes_recruitment_reply,
+                build_recruitment_context as _build_recruitment_context,
+            )
+            _kb_context = _build_recruitment_context(text)
+            priority_reply = await _hermes_recruitment_reply(
+                phone=phone, text=text, source=source,
+                kb_context=_kb_context, contact_context=contact_context, history=history,
+            )
+        if not priority_reply:
+            from modules.conversation_layer import generate_recruitment_reply as _llm_priority_reply
+            priority_reply = await _llm_priority_reply(
+                phone=phone, text=text, source=source,
+                contact_context=contact_context, history=history,
+            )
         if priority_reply:
             candidate_id = active_session.get("candidate_id")
             if candidate_id is None:
@@ -811,15 +849,40 @@ async def route_recruitment_message(
         # template that happened to be empty) — fall through to the
         # informational reply below as a safety net, same as before.
 
-    from modules.conversation_layer import generate_recruitment_reply
-
-    reply = await generate_recruitment_reply(
-        phone=phone,
-        text=text,
-        source=source,
-        contact_context=contact_context,
-        history=history,
-    )
+    # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal Modification
+    # Plan item 2): flag-gated substitution, default OFF, same
+    # fall-through contract as every other migrated call site. The
+    # deterministic intake_message()/STEP_QUESTIONS fallback below is
+    # completely unaffected either way — it only runs when `reply` ends
+    # up empty from either engine.
+    reply = None
+    from modules.preflight_guard import is_feature_active
+    if is_feature_active("hermes_customer_recruitment", default=False):
+        # KB gap fix (2026-08-12, Owner-confirmed), targeted revision
+        # (2026-08-12) — see the identical comment at this function's
+        # other call site above.
+        from modules.hermes_dispatch import (
+            generate_recruitment_reply as _hermes_recruitment_reply,
+            build_recruitment_context as _build_recruitment_context,
+        )
+        _kb_context = _build_recruitment_context(text)
+        reply = await _hermes_recruitment_reply(
+            phone=phone,
+            text=text,
+            source=source,
+            kb_context=_kb_context,
+            contact_context=contact_context,
+            history=history,
+        )
+    if not reply:
+        from modules.conversation_layer import generate_recruitment_reply
+        reply = await generate_recruitment_reply(
+            phone=phone,
+            text=text,
+            source=source,
+            contact_context=contact_context,
+            history=history,
+        )
 
     if not reply:
         step = active_session.get("collection_step") if isinstance(active_session, dict) else None

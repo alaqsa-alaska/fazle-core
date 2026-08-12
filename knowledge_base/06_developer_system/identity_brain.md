@@ -320,6 +320,8 @@ Each resolved role injects a Bangla language-style directive into the LLM system
 - `06_developer_system/automation_pipeline.md` — memory_extractor that populates `user_memory`
 - `role_permissions.md`
 
+**Superseded module (2026-08-12, Owner-directed audit):** `modules/user_role/__init__.py`'s `detect_role()` is an older, pre-identity_brain role resolver with zero live callers today (only its `normalize_phone` wrapper is still used, and one of its two remaining callers is itself in `archive/deprecated/`). Every role/lookup capability it had is covered here, mostly more comprehensively — including the admin-settings check, employee lookup with FPE fallback, and contact/relation mapping. Its one relation value with no direct equivalent here (`relation_name == "partner"`) was confirmed via a live-DB query (2026-08-12) to never actually occur in `wbom_contacts.relation` in production — not a real gap. Safe to delete `modules/user_role/__init__.py` when convenient.
+
 ---
 
 ## Revision History

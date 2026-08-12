@@ -7844,3 +7844,269 @@ Owner authorized commit + push + deploy + verify. Executed in that order:
 No commit has been made for this addendum itself yet — it is being written
 as part of this same closure turn and will be included if/when this file
 is next committed.
+
+---
+
+## S7 — Discovery & Readiness Gate (2026-08-08)
+
+**Scope of this record:** read-only discovery only. No code, config, schema,
+service, or Nginx/TLS change was made in this gate. S5 and S6 are not
+reopened — both remain CLOSED as recorded above. This record does not
+supersede or amend any S5/S6 finding; where it references S5/S6 evidence it
+is re-verifying, not re-litigating.
+
+**Method:** two independent read-only audits covering (a) the inbound
+message path, Hermes/hermes_kernel, security boundaries, and frontends, and
+(b) the AI-provider chain, conversation memory, RAG, media, and business
+capabilities — each citing file:line evidence, cross-checked against live
+`.env` flags, running processes/containers, and existing passing tests —
+plus direct verification in this session of the Meta WhatsApp webhook path,
+the `ai_readonly_tools` registry, the RBAC table, the Panai/Nginx frontend
+mapping, and KB certification staleness.
+
+### Executive conclusion
+
+Fazle Core's WhatsApp/Meta message pipeline is a genuinely deep,
+production-grade implementation, not a thin demo: identity resolution,
+role-gated routing, KB/RAG grounding, multi-provider AI fallback, output
+confidentiality, and outbound delivery are all implemented and wired into
+the live call graph, most of it test-proven. The real Hermes admin-control
+system (hermes-runner + WhatsApp relay + Panai's Hermes UI) is likewise
+implemented and its admin-only boundary is genuinely server-enforced at
+every layer checked (frontend guard, backend middleware, WhatsApp
+bridge2+RBAC+phone triple-check), not merely documented. The single largest
+gap against the "ChatGPT-like conversational app" objective is that real
+multi-turn memory/thread continuity (Phase B / Tier 15) computes and
+persists correctly against live traffic today but is architecturally
+prevented from reaching any real user's reply — that switch is a pending
+Owner decision already in motion under a separate tracked plan (Tier 15
+shadow monitoring), not a new blocker created by this gate. A second,
+smaller gap is that two backend capabilities (dispatch, reports) have no
+AI-tool wrapper reachable from ordinary WhatsApp chat. Everything else
+found is either working as designed (G), an already-deferred Owner
+decision (F), or low-cost documentation/dead-code hygiene (D).
+
+### Current capability level
+
+**High.** Of the ~20 discrete findings across both audits, the large
+majority classify G (implemented, wired, not a gap) or F (implemented,
+intentionally gated on an Owner decision already recorded elsewhere).
+Only one C (missing implementation — `hermes_kernel`'s `TrustEvaluation`
+dataclass, itself a shadow-only observability engine, not customer-facing)
+and one B (incomplete — no chat-facing AI tool for dispatch/reports) were
+found. This is consistent with S1/S2/S5/S6 having already closed the
+Hybrid-RAG-flag, user-memory-injection, candidate-audit-trail, and
+conversational-safety work earlier the same day.
+
+### What is already production-capable
+
+- **Inbound pipeline** (`app/main.py` Meta webhook + `modules/bridge_poller`
+  for bridge1/bridge2/bridge3): identity-first routing, real media
+  processing for text/image/audio/document, unified across all four
+  channels since 2026-07-21.
+- **Meta WhatsApp Cloud API number** ("Magnus-Marine",
+  `+880 1958-122322`) is not merely verified reachable (per
+  [[project_whatsapp_magnus_marine_20260806]]) — it is live-wired: webhook
+  signature-verified (`app/main.py:1378-1396`), routed through the same
+  `_process_message()` pipeline as bridge1/2/3, and
+  `AUTO_REPLY_SOURCES=bridge1,bridge2,bridge3,meta` with
+  `AUTO_REPLY_ENABLED=true` in production `.env` — real AI-generated
+  replies are sent on this number today, not just logged.
+- **Identity/role resolution**: phone-first identity (`identity_brain`),
+  text can never elevate a caller to `admin`/`employee`/`supervisor`,
+  proven by real-DB tests (`tests/unit/test_conversation_isolation.py`).
+- **RBAC**: 6-tier `fazle_roles` hierarchy, fail-closed, documented in
+  `README.md` and independently confirmed live.
+- **RAG/KB grounding**: hybrid BM25+Qdrant+RRF search
+  (`modules/rag/__init__.py`) is called from the live Tier-15 AI-fallback
+  prompt-construction path (`modules/message_router/__init__.py:983-994`)
+  and four other call sites — a real grounding step, not a static KB
+  folder. `HYBRID_SEARCH_ENABLED=true` in production (S1, confirmed
+  2026-08-08, 15,552 indexed points).
+- **Bounded user-memory injection**: `user_memory` facts (1,464 rows) are
+  now injected into `get_contact_context()` for every LLM routing path
+  (S2, committed `4192fcc`, live since this session's restart) — labeled
+  non-authoritative, capped at 5 facts, phone-exact-scoped, admin-tested
+  for no cross-user leakage.
+- **AI provider chain**: OmniRoute → Groq → local Ollama (now genuinely
+  resolving to `hermes3:3b`, provisioned 2026-08-06) → Kimi, all three
+  tiers configured and live (`app/llm.py`, commit `8d53b96`), one shared
+  OmniRoute gateway container reached by both fazle-core and
+  assistant-platform through separate client code, not two systems.
+- **Output confidentiality**: `enforce_general_reply_confidentiality()`
+  wired at all 3 `ai.generate_reply()` exit points (S6), test-proven.
+- **Real Hermes admin AI brain**: READ/BUILD/RUN mode gate with TTL
+  auto-revert and audit log (`hermes-runner/server.py`), WhatsApp relay
+  hard-locked to bridge2 + RBAC superadmin + admin phone (all three,
+  independently, `modules/admin_directives/router.py:512-526`), Panai's
+  `HermesPage.jsx` wired to real endpoints, admin-only enforcement
+  verified server-side at every layer (frontend guard, Express
+  `requireAuth`+`requireAdmin` middleware, JWT-derived role never
+  client-settable).
+- **Business capability tools**: `modules/ai_readonly_tools` already
+  exposes contacts, employees, payments, billing, escort programs,
+  attendance, payroll status, employee advances, recruitment leads, and KB
+  articles as named AI-callable functions; the ordinary WhatsApp chat path
+  additionally reaches employee info, attendance, payroll, escort, and
+  recruitment directly through `message_router`'s role-gated tiers; the
+  admin-only AI Console (`modules/ai_console`, BUS-001..018) covers a wider
+  read-only surface including cash ledger and dispatch.
+- **Recruitment Phase 1A+** (`bc4fc4e` and successors through `1ae6348`,
+  2026-08-08) is confirmed live in the running process (`fazle-core.service`
+  active since 08:58:37 today, postdating the code's mtimes) — not merely
+  committed, contrary to the 2026-08-06 memory note.
+- **Frontends**: Panai is a Nginx-alias mirror of the identical
+  assistant-platform build (not a separate codebase) — confirmed live
+  asset-hash match; Hermes UI, Chat UI, and Dhanai (Portainer passthrough,
+  Basic Auth deliberately deferred per S6) are all wired to real backends.
+
+### What remains incomplete
+
+- **Customer-visible multi-turn memory continuity** (Phase B thread
+  reconstruction / Tier 15 Universal Responder): shadow-computed and
+  persisted against real traffic (`CONVERSATION_MEMORY_ENABLED`,
+  `WHATSAPP_THREAD_RECONSTRUCTION_ENABLED`, and two related parser flags
+  flipped `true` since the 2026-07-19 record), hard-walled from ever
+  reaching a reply by `shadow_mode_scope()` and by
+  `tier15_universal_responder_live` remaining `False`. This is the
+  functional gap between "answers correctly per-turn with bounded fact
+  injection" (already live, see S2 above) and genuine ChatGPT-style
+  running conversational memory.
+- **Dispatch and `reports`** have no AI-tool wrapper reachable from
+  ordinary WhatsApp chat (dispatch has one at the admin-Chat-Lab tier
+  only; `reports` has none in any chat-shaped surface, only an HTTP API
+  and a scheduled digest).
+- **`hermes_kernel.TrustEvaluation`**: defined (`data_classes.py:25-80`)
+  but never populated or referenced anywhere — the 7-dimension
+  trust-scoring engine described in `HERMES_TRUST_ENGINE_2026-08-06.md`
+  does not exist in running code; only the simpler `DecisionRecord`/
+  `KernelEvent` shadow-audit classes are wired.
+- **Video media**: no processing branch, placeholder-only (`[video
+  message] <caption>`) — unchanged since S6, still Owner-deferred.
+- **Location/sticker/contacts/reaction/interactive/unsupported Meta
+  message types**: silently dropped, unchanged since S6, still
+  Owner-deferred.
+- **Dead/orphaned references surfaced by this audit**: `modules/client_memory`
+  has no `__init__.py` (only a stray `__pycache__`) and zero callers —
+  it exists in this task brief's audit checklist and prior planning docs
+  but not as running code; `modules/recruitment_assistant` (29 lines) has
+  zero callers anywhere in the codebase or tests — both are dead code, not
+  functional gaps, but both are documentation/governance drift worth
+  cleaning up.
+
+### Critical blockers
+
+None found for bounded, scoped next-milestone work. The one item that
+blocks the *specific* "full ChatGPT-like continuous memory" objective is
+not a defect but a pending Owner decision already tracked under
+[[project_tier15_shadow_monitoring_20260806]] (target: 30-50 real
+comparisons collected over 1-2 weeks from 2026-08-06, i.e. review not due
+before roughly 2026-08-13 to 2026-08-20; today is 2026-08-08). No S7
+finding shortens or extends that timeline — it is reported here only to
+avoid a duplicate, premature proposal to flip the flag before the
+monitoring window closes.
+
+### Non-blocking gaps
+
+- B: dispatch/reports have no ordinary-chat AI-tool wrapper (bounded,
+  small, reuses existing `ai_console`/`ai_readonly_tools` adapter pattern
+  if the Owner wants it).
+- C: `hermes_kernel.TrustEvaluation` unpopulated — shadow-only, no
+  customer-facing effect either way.
+- D: `knowledge_base/00_governance/kb_manifest.yaml` and `kb_certification.md`
+  both show `last_verified: 2026-06-24` against the Memory index's record
+  of "KB v2.0 CERTIFIED" — the certification artifacts have not been
+  regenerated to match; re-run `scripts/audit_kb_structure.py` /
+  `build_traceability_matrix.py` / `generate_certification_reports.py` to
+  refresh, no code change implied.
+- D: `assistant-platform/omniroute/config.yml`'s comment that the
+  container is "NOT active until started" is stale — it has run
+  continuously for 6+ days.
+- D: the 2026-07-19 Phase B memory note ("flags mostly off") is now stale
+  — three of four flags are `true`; only the customer-visible flag remains
+  off. [[project_phase_b_conversation_memory_20260719]] should be updated
+  to reflect this, not treated as current state.
+- D: dead-code cleanup for `modules/client_memory` (absent) and
+  `modules/recruitment_assistant` (orphaned) — remove or wire, no
+  functional urgency either way.
+- E: this gate's own agents could not execute the DB-gated conversation-
+  memory/RAG integration test suites (`test_conversation_memory_shadow_hook.py`,
+  `test_conversation_memory_stage2.py`, etc.) for lack of `TEST_DB_PASSWORD`
+  in their sandboxes — an audit-environment limitation, not a code defect;
+  these suites exist and are DB-integration-shaped, just unexecuted by this
+  gate.
+
+### Deferred Owner decisions
+
+- Whether/when to flip `tier15_universal_responder_live` to `true` once
+  the shadow-monitoring review completes (pre-existing, tracked separately,
+  not created by this gate).
+- Whether dispatch/`reports` should be exposed to ordinary WhatsApp users
+  via a new chat-facing AI tool, and if so which roles.
+- Whether to implement or formally retire `hermes_kernel.TrustEvaluation`.
+- Video processing and location/sticker/unsupported-media handling
+  (already deferred at S6, restated here only for completeness, not
+  reopened).
+- Dhanai Basic Auth (already deferred at S6, restated here only for
+  completeness, not reopened).
+
+### Existing-code reuse opportunities
+
+No new module or file is required for any item above:
+- A chat-facing dispatch/reports tool would reuse the existing
+  `modules/ai_console` BUS-tool adapter pattern and
+  `modules/ai_readonly_tools` registry shape, wired into
+  `modules/message_router`'s existing tier-dispatch structure — the same
+  pattern already used for employee/attendance/payroll/escort/recruitment.
+- KB re-certification reuses the three existing scripts named in
+  `kb_certification.md` — no new tooling.
+- The stale-comment and stale-memory-note fixes are single-line
+  corrections in existing files.
+- Dead-code removal is a deletion, not an addition.
+
+### Required acceptance tests
+
+For any future milestone that touches these areas, the following evidence
+would be the minimum bar, reusing existing test infrastructure/patterns
+rather than inventing new ones:
+- If `tier15_universal_responder_live` is ever flipped: the existing
+  `test_conversation_memory_shadow_hook.py` / `test_conversation_memory_stage2.py`
+  "AgainstRealDB" suites must be run and pass (not just exist), plus the
+  Owner's own review of the shadow-comparison data already being
+  collected — both are prerequisites already defined by the Tier 15
+  monitoring plan, not new requirements invented here.
+- If dispatch/reports gain a chat-facing tool: a role-scoped test
+  following the exact shape of `test_conversation_isolation.py` (real-DB,
+  proves no cross-user/cross-role leakage) plus a `test_admin_ai_router.py`-
+  style authorization test if any tier above `viewer` is involved.
+- KB re-certification: the three certification scripts' own pass/fail
+  output is the acceptance evidence — no new test needed.
+
+### Recommended next milestone
+
+A bounded **hygiene-and-completion milestone** (tentatively "S8" to
+continue this session's own numbering, naming not binding) consisting
+only of: (1) the dispatch/reports chat-tool gap, if and only if the Owner
+scopes it; (2) KB re-certification refresh; (3) the four documentation/
+dead-code items listed under Non-blocking gaps. This is deliberately
+**not** "activate Tier 15" — that decision belongs to the already-running
+shadow-monitoring plan and should not be pre-empted or duplicated here.
+
+### Explicit S7 implementation boundary
+
+This gate implemented nothing. No file other than this governance record
+was modified. No migration, restart, deployment, or Nginx/TLS change
+occurred. The recommended next milestone above is a recommendation only —
+it requires its own management-approved 6-part proposal
+([[feedback_kb_first_policy]]) and explicit Owner authorization before any
+implementation begins, exactly as S1/S2/S5/S6 each did.
+
+### Final decision
+
+**S7-CONDITIONAL** — bounded hygiene/completion work (KB re-certification,
+documentation corrections, dead-code cleanup, and an optional
+Owner-scoped dispatch/reports chat-tool) may proceed once proposed and
+approved per [[feedback_kb_first_policy]]; the customer-visible
+conversation-continuity milestone (flipping `tier15_universal_responder_live`)
+remains conditional on the Owner's review of the separately-tracked Tier 15
+shadow-monitoring report, not yet due.

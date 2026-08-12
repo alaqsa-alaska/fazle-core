@@ -768,12 +768,15 @@ class TestUniversalReplyGenerator:
         assert result is None
 
 
-class TestTier15ShadowMode:
-    """message_router's Tier 15 (AI FALLBACK) shadow-mode wiring. A
-    "vendor" role sender is used since it has no dedicated tier and no
-    Route B membership, so it is guaranteed to fall all the way through
-    to Tier 15 -- the same structural guarantee (nothing upstream claims
-    it) the proposal relies on for gate isolation."""
+class TestTier15ShadowRetired:
+    """message_router's Tier 15 (AI FALLBACK) no longer runs
+    generate_universal_reply() at all (retired 2026-08-12, Owner decision
+    -- see the Tier-15 shadow forensics report). Replaces the old
+    TestTier15ShadowMode class, which asserted the shadow-comparison
+    behavior these tests now assert is gone. A "vendor" role sender is
+    used since it has no dedicated tier and no Route B membership, so it
+    is guaranteed to fall all the way through to Tier 15 -- the same
+    structural guarantee the original tests relied on for gate isolation."""
 
     def _identity(self):
         return {
@@ -782,79 +785,105 @@ class TestTier15ShadowMode:
         }
 
     @pytest.mark.asyncio
-    async def test_shadow_mode_returns_old_reply_when_flag_off(self, monkeypatch):
+    async def test_tier15_never_calls_generate_universal_reply(self, monkeypatch):
+        """The single most important regression guard for the retirement:
+        even with hermes_customer_general off (falling through to the bare
+        app.llm chain, same as before), generate_universal_reply() must
+        never be invoked -- not called, not awaited, not imported for use."""
         import modules.message_router as router
-        from app.config import get_settings
 
-        monkeypatch.setattr(get_settings(), "tier15_universal_responder_live", False)
         monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
         monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=self._identity()))
         monkeypatch.setattr(router, "is_registered_employee_phone", AsyncMock(return_value=False))
         monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=None))
         monkeypatch.setattr(router, "get_contact_context", AsyncMock(return_value=""))
         monkeypatch.setattr(router, "get_recent_history", AsyncMock(return_value=[]))
-        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="OLD_BARE_AI_REPLY"))
+        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="BARE_AI_REPLY"))
+        universal_reply_mock = AsyncMock(return_value="SHOULD_NEVER_BE_RETURNED")
         monkeypatch.setattr(
-            "modules.conversation_layer.generate_universal_reply",
-            AsyncMock(return_value="NEW_UNIVERSAL_REPLY"),
+            "modules.conversation_layer.generate_universal_reply", universal_reply_mock,
         )
 
         reply, admin_note = await router.process_message(
             "8801700000040", "একটা প্রশ্ন ছিল", "bridge1",
         )
 
-        assert reply == "OLD_BARE_AI_REPLY"
+        assert reply == "BARE_AI_REPLY"
+        universal_reply_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_shadow_mode_returns_new_reply_when_flag_on(self, monkeypatch):
+    async def test_hermes_on_is_the_sole_ai_path_app_llm_not_called(self, monkeypatch):
+        """With hermes_customer_general active and Hermes succeeding,
+        app.llm.generate_reply() must not be called at all -- exactly one
+        customer-facing AI generation path per message, per the Phase 1
+        acceptance-audit requirement."""
         import modules.message_router as router
-        from app.config import get_settings
+        import modules.preflight_guard as pg
 
-        monkeypatch.setattr(get_settings(), "tier15_universal_responder_live", True)
         monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
         monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=self._identity()))
         monkeypatch.setattr(router, "is_registered_employee_phone", AsyncMock(return_value=False))
         monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=None))
         monkeypatch.setattr(router, "get_contact_context", AsyncMock(return_value=""))
         monkeypatch.setattr(router, "get_recent_history", AsyncMock(return_value=[]))
-        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="OLD_BARE_AI_REPLY"))
+        monkeypatch.setattr(pg, "is_feature_active", lambda name, default=False: name == "hermes_customer_general")
+        ai_generate_reply_mock = AsyncMock(return_value="SHOULD_NEVER_BE_RETURNED")
+        monkeypatch.setattr(router.ai, "generate_reply", ai_generate_reply_mock)
         monkeypatch.setattr(
-            "modules.conversation_layer.generate_universal_reply",
-            AsyncMock(return_value="NEW_UNIVERSAL_REPLY"),
+            "modules.hermes_dispatch.generate_reply",
+            AsyncMock(return_value="HERMES_REPLY"),
+        )
+        universal_reply_mock = AsyncMock(return_value="SHOULD_NEVER_BE_RETURNED")
+        monkeypatch.setattr(
+            "modules.conversation_layer.generate_universal_reply", universal_reply_mock,
         )
 
         reply, admin_note = await router.process_message(
             "8801700000041", "একটা প্রশ্ন ছিল", "bridge1",
         )
 
-        assert reply == "NEW_UNIVERSAL_REPLY"
+        assert reply == "HERMES_REPLY"
+        ai_generate_reply_mock.assert_not_awaited()
+        universal_reply_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_universal_responder_exception_does_not_break_old_reply(self, monkeypatch):
-        """The shadow computation must never take down Tier 15's existing,
-        already-live reply path -- even with the flag on, an exception in
-        the new pipeline must fall back to the old reply, not raise."""
+    async def test_hermes_on_but_failing_falls_through_to_app_llm_only(self, monkeypatch):
+        """Hermes failure still falls through to the unchanged app.llm
+        chain (Phase 1's existing fail-closed contract) -- and the retired
+        shadow path still never runs, even on that fallback route."""
         import modules.message_router as router
-        from app.config import get_settings
+        import modules.preflight_guard as pg
 
-        monkeypatch.setattr(get_settings(), "tier15_universal_responder_live", True)
         monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
         monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=self._identity()))
         monkeypatch.setattr(router, "is_registered_employee_phone", AsyncMock(return_value=False))
         monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=None))
         monkeypatch.setattr(router, "get_contact_context", AsyncMock(return_value=""))
         monkeypatch.setattr(router, "get_recent_history", AsyncMock(return_value=[]))
-        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="OLD_BARE_AI_REPLY"))
+        monkeypatch.setattr(pg, "is_feature_active", lambda name, default=False: name == "hermes_customer_general")
+        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value="BARE_AI_REPLY"))
         monkeypatch.setattr(
-            "modules.conversation_layer.generate_universal_reply",
-            AsyncMock(side_effect=RuntimeError("shadow pipeline blew up")),
+            "modules.hermes_dispatch.generate_reply",
+            AsyncMock(return_value=None),
+        )
+        universal_reply_mock = AsyncMock(return_value="SHOULD_NEVER_BE_RETURNED")
+        monkeypatch.setattr(
+            "modules.conversation_layer.generate_universal_reply", universal_reply_mock,
         )
 
         reply, admin_note = await router.process_message(
             "8801700000042", "একটা প্রশ্ন ছিল", "bridge1",
         )
 
-        assert reply == "OLD_BARE_AI_REPLY"
+        assert reply == "BARE_AI_REPLY"
+        universal_reply_mock.assert_not_awaited()
+
+    def test_tier15_universal_responder_live_setting_removed(self):
+        """Regression guard: the retired kill-switch field must not
+        silently reappear in Settings."""
+        from app.config import Settings
+
+        assert "tier15_universal_responder_live" not in Settings.model_fields
 
 
 # ---------------------------------------------------------------------------

@@ -209,6 +209,20 @@ class Settings(BaseSettings):
     hermes_runner_url: str = "http://127.0.0.1:8093"
     hermes_runner_secret: str = ""
 
+    # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal Modification
+    # Plan). A SEPARATE credential from hermes_runner_secret above --
+    # deliberately not reused -- so a customer-facing call can never be
+    # authenticated with the same secret the admin WhatsApp relay/Assistant
+    # Platform use. See hermes-runner/server.py's own handling of
+    # caller_scope="customer" for the corresponding server-side check.
+    # Empty by default: modules.hermes_dispatch.generate_reply() checks
+    # this and returns None (fail-closed, caller falls through to
+    # app.llm.generate_reply() unchanged) whenever it's unset — a second,
+    # independent "off" beyond the preflight_guard feature flags that gate
+    # each call site, so setting the flags alone can never route real
+    # traffic to Hermes until this is also deliberately configured.
+    hermes_runner_customer_secret: str = ""
+
     # Phase 5B (2026-08-04): proactive alert-triggered Hermes investigation,
     # Owner-approved option (b) only (see management_decisions.md "Hermes
     # Phase 5B"). Default-DISABLED kill switch -- fail-closed even after
@@ -242,18 +256,15 @@ class Settings(BaseSettings):
     # not pre-authorized by this comment or this setting's existence.
     recruitment_llm_priority_phones: str = ""
 
-    # Phase 2 (2026-08-06, Owner-approved "Universal AI Responder" -- see
-    # management_decisions.md "Universal AI Responder — Phase 2"): shadow-
-    # mode kill switch for Tier 15's upgraded KB/RAG/faithfulness-validated
-    # reply pipeline (modules.conversation_layer.generate_universal_reply).
-    # False (default) means Tier 15 keeps returning today's bare
-    # ai.generate_reply() output unchanged -- auto-send behavior is
-    # untouched -- while the new pipeline still runs in parallel purely
-    # for shadow-comparison logging (see message_router's Tier 15). Only
-    # flipping this to True changes what a real sender actually receives;
-    # that flip is a separate, later Owner decision, not authorized by
-    # this default or by this comment.
-    tier15_universal_responder_live: bool = False
+    # Removed (2026-08-12, Owner decision): tier15_universal_responder_live
+    # was Phase 2's shadow-mode kill switch for
+    # modules.conversation_layer.generate_universal_reply(), never enabled
+    # in production (confirmed via git history + the Tier-15 shadow
+    # forensics report — the only place it was ever True was inside a unit
+    # test's own monkeypatch). message_router's Tier 15 no longer calls
+    # generate_universal_reply() at all, so this field had no remaining
+    # operational purpose. The function itself is not deleted — see its
+    # own docstring in modules/conversation_layer/__init__.py.
 
     # Comma-separated bridge IDs trusted to submit new escort orders.
     # Example: "bridge1,bridge2,meta"

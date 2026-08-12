@@ -1,8 +1,8 @@
 ---
 title: Recruitment AI — Detailed Developer Reference
 owner: Fazle Core Admin
-status: active
-last_verified: 2026-06-24
+status: superseded
+last_verified: 2026-08-12
 runtime_index: true
 ---
 
@@ -11,6 +11,25 @@ runtime_index: true
 **Source:** `modules/recruitment_ai/__init__.py` (258 lines — read 2026-06-23)
 **Visibility:** Developer
 **Certified:** 2026-06-23 (Wave-4, W4-AUTH)
+
+> **STATUS CORRECTION (2026-08-12, Owner-directed audit):** this doc was
+> marked `status: active` but `modules/recruitment_ai/__init__.py` has
+> **zero live callers** — the module's own header has said so since
+> 2026-07-11. The live free-text recruitment path is
+> `modules/conversation_layer/recruitment.py`'s `generate_recruitment_reply()`
+> (see `recruitment_flow_system.md`'s "Two-Path Recruitment Architecture"),
+> not this module. This module's two real guardrails —
+> conditional fee-section inclusion and a numeric/place fact-check against
+> source content — were never wired into that live path either; they were
+> ported into `modules/hermes_dispatch.py` for the newer Hermes
+> customer-dispatch call sites on 2026-08-12 (see
+> `recruitment_flow_system.md`'s "Hermes customer-dispatch guardrails"
+> section). The `conversation_layer/recruitment.py` path still lacks both
+> guardrails as of this writing. The architecture described below is kept
+> for reference (and this file's own test coverage,
+> `tests/unit/test_recruitment_ai_restricted.py`) but does not reflect
+> live behavior — do not cite it as evidence of current production
+> behavior.
 
 ---
 

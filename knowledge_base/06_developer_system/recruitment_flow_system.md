@@ -2,7 +2,7 @@
 title: Recruitment Flow System
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-08-12
 runtime_index: true
 ---
 
@@ -315,7 +315,27 @@ Used in path 2 routing. Checks for `_QUESTION_HINTS`:
 | **BR-25** (age 18–55) | `_parse_age()` — rejects ages outside 18–55 |
 | Session TTL 24h | `get_active_session()` — marks sessions older than SESSION_TTL as expired |
 | Operational exclusion | `recruitment_eligibility()` — OPERATIONAL_ROLES + OPERATIONAL_INTENTS block |
-| No fee collection | `recruitment_ai` module (sister module) enforces via `_FEE_PHRASES` guard |
+| No unsolicited fee mention | `modules/hermes_dispatch.py`'s `build_recruitment_context()` (Hermes path, see below) — **correction, 2026-08-12**: this row previously credited `recruitment_ai`'s `_FEE_PHRASES` guard, but `recruitment_ai` has zero live callers (see `recruitment_ai_detail.md`, now marked superseded) — that guard was never actually wired into any production path until the 2026-08-12 fix below. The pre-existing `conversation_layer/recruitment.py` path (live when `hermes_customer_recruitment` is off) still has **no** equivalent guard today. |
+
+---
+
+## Hermes customer-dispatch guardrails (2026-08-12, Owner-directed "Finding E")
+
+When `hermes_customer_recruitment` is active (see `runtime_gateway_flags.md`), both call sites above (`route_recruitment_message()`'s session-continuation path and its main informational-reply path) route through `modules/hermes_dispatch.generate_recruitment_reply()` instead of `conversation_layer.generate_recruitment_reply()`. Two guardrails were ported into `modules/hermes_dispatch.py` from the dead `modules/recruitment_ai/__init__.py` (which had them but was never live) — neither guardrail exists in the `conversation_layer/recruitment.py` path today:
+
+1. **Conditional fee-section inclusion** (`build_recruitment_context(message)`): `resources/ops/recruitment_source_of_truth.txt` is read whole and cached, but its "ভর্তি ফি / ডিপোজিট" section is stripped from the context unless the inbound message itself looks like a fee/deposit question (`_looks_like_fee_question()`) — matching the source file's own instruction not to volunteer fee figures unsolicited. Ported from `recruitment_ai._looks_like_fee_question()` / `build_recruitment_source_context()`'s fee-stripping regex.
+2. **Post-generation fact-check** (`_recruitment_reply_matches_source()`): before `generate_recruitment_reply()` returns a Hermes reply, every numeric token and Bangla place-name-shaped token in the reply must appear in the `kb_context` that was given to Hermes — any reply introducing an unsupported number (invented salary/fee/age figure) or unsupported place name (invented vacancy location) is rejected (returns `None`, which callers already fall through to the safe `conversation_layer` path for, per this module's existing fail-closed contract). Ported from `recruitment_ai.enforce_recruitment_reply_policy()`. This is a conservative check (catches fabricated numbers/places specifically), not a full faithfulness validator.
+
+**Known limitation carried over from the original**: the fact-check compares reply-numbers against `kb_context` only, not against the candidate's own message — a reply that legitimately echoes back a number the candidate stated (e.g. their own age) can be blocked as "unsupported" if that number doesn't independently appear in the source file. Accepted as low-risk (the funnel mostly asks forward questions rather than restating candidate-supplied figures), matching the original module's own design.
+
+---
+
+## Dead-module audit (2026-08-12, Owner-directed)
+
+Two modules once considered candidates for feature loss on deletion were checked feature-by-feature against the live app; **neither has any missing coverage** — safe to delete when convenient:
+
+- **`modules/user_role/__init__.py`** (`detect_role()`): zero live callers. Every capability it had (admin/accountant/employee/contact role resolution) is covered, and in most cases more comprehensively, by `identity_brain.detect_identity()` (see `identity_brain.md`) plus `message_router`'s own direct `settings.accountant_phone` check (Tier 6). Its `relation_name == "partner"` mapping has no live equivalent in `identity_brain`, but a live-DB check (2026-08-12) confirmed `wbom_contacts.relation` has never contained `"partner"` in production — purely theoretical, not a real gap.
+- **`modules/reply_templates/__init__.py`**: only reachable via `conversation_layer/recruitment.py`'s `simulate_current_core_reply()`, itself a shadow/simulation function, not the live `generate_recruitment_reply()`. Its topics (recruitment/greeting/salary_query/complaint/leave/join) are all covered live elsewhere with more detail: recruitment → `recruitment_source_of_truth.txt`; salary_query → `salary_policy.md` + Tier 10 RAG enrichment (2026-08-12 fix, see `hybrid_search.md`); leave → `knowledge_base/01_employee_knowledge/leave_policy.md`, RAG-reachable via Tier 15's existing generic enrichment; join → `recruitment_source_of_truth.txt`'s "আবেদন ও যোগদান" section; complaint always routes to human/admin review (never auto-sent) so no auto-reply content is needed.
 
 ---
 
@@ -323,6 +343,7 @@ Used in path 2 routing. Checks for `_QUESTION_HINTS`:
 
 - `identity_brain.md` — candidate/new_lead detection upstream of recruitment routing
 - `identity_integration.md` — dimension 3 (workflow availability per sender type)
-- `recruitment_ai_detail.md` — LLM-based path 2 handler
+- `recruitment_ai_detail.md` — dead/superseded module; see its own status note
 - `visibility_rules.md` — KB categories accessible to candidate role
 - `automation_pipeline.md` — session expiry scheduler job
+- `runtime_gateway_flags.md` — `hermes_customer_recruitment` and sibling feature flags

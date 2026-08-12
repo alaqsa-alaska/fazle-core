@@ -294,9 +294,28 @@ async def handle_route_b_message(
 
     db_context = "\n\n".join(p for p in db_context_parts if p)
 
-    reply = await ollama_generate_reply(
-        text, effective_intent, db_context, history=history, role=role, source=source,
-    )
+    # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal Modification
+    # Plan item 3): flag-gated substitution, default OFF. Owner-approved
+    # override of this tier's previous Ollama-only design boundary (see
+    # this module's own docstring) -- the money-intent deterministic
+    # admin-draft branch below is completely unaffected either way, since
+    # it only consumes whatever `reply` text ends up here, and the
+    # FALLBACK_REPLY_TEXT failure-alert check below still fires correctly
+    # on a genuine Ollama failure even when Hermes was tried first (a
+    # Hermes failure alone just falls through to ollama_generate_reply(),
+    # same as if the flag were off).
+    reply = None
+    from modules.preflight_guard import is_feature_active
+    if is_feature_active("hermes_customer_route_b", default=False):
+        from modules.hermes_dispatch import generate_reply as _hermes_generate_reply
+        reply = await _hermes_generate_reply(
+            text, effective_intent, db_context, history=history, role=role, source=source,
+            sender_phone=sender,
+        )
+    if not reply:
+        reply = await ollama_generate_reply(
+            text, effective_intent, db_context, history=history, role=role, source=source,
+        )
 
     admin_notification = None
     if money_request:
