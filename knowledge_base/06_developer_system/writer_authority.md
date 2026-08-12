@@ -1,3 +1,12 @@
+---
+title: Writer Authority — Payroll / Roster / Payment
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-08-12
+runtime_index: true
+tags: [developer-system, payroll, escort-roster, data-integrity]
+---
+
 # Writer Authority — Payroll / Roster / Payment
 
 Compiled 2026-07-19, by direct code audit (file:line citations below).

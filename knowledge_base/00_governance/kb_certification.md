@@ -37,26 +37,27 @@ prior `last_verified`). Full output: `reports/kb_audit/kb_audit_report.md`,
 `reports/traceability_matrix.md`, `reports/certification/*.md`,
 `reports/certification/certification_scores.json`.
 
+First pass found 6 files missing required frontmatter fields
+(`last_verified`/`owner`/`runtime_index`/`status`/`title`), including,
+notably, **`CANONICAL_BUSINESS_RULES.md` itself** — the document this
+repo's own doc-precedence stack treats as the single most authoritative
+business-rule source. The other 5:
+`incidents/2026-07-17_test_postgres_public_exposure.md`,
+`06_developer_system/admin_ai_engine.md`,
+`06_developer_system/writer_authority.md`, and both
+`07_archived/legacy_*/ARCHIVE_NOTICE.md` files. All 6 fixed same-day
+(frontmatter added, matching each file's actual status — the two
+archived-folder files got `runtime_index: false`/`status: archived`,
+matching `kb_manifest.yaml`'s protected-paths rule for `07_archived/`).
+Re-ran the audit after fixing: 0 missing metadata, 0 stale files.
+
 | Score | Result | Basis |
 |---|---|---|
-| KB Coverage | **97.32%** | 224 files scanned, 218 with clean metadata + no staleness, 6 missing required frontmatter fields (see below) |
+| KB Coverage | **100%** | 224 files scanned, all with clean metadata, 0 stale, 0 duplicate-content groups |
 | AI Readiness | **100%** | All 4 checks pass (ollama_memory, ai_readonly_tools, sync script, migration 012 all present) |
 | Module Coverage | *not computable this run* | Requires `reports/baseline/baseline_inventory.json`, which does not exist in this checkout — this is a missing-input gap, not a measured 0% |
 | Workflow Coverage | *not computable this run* | Same missing-baseline cause |
 | Operations Readiness | *not computable this run (3 of 4 checks depend on the same missing baseline)* | The one directly-checkable item (`modules/operations_health` exists) passes |
-
-**Real, actionable finding from this run** — 6 files fail the metadata check
-(missing `last_verified`/`owner`/`runtime_index`/`status`/`title`
-frontmatter), including, notably, **`CANONICAL_BUSINESS_RULES.md` itself**
-— the document this repo's own doc-precedence stack treats as the
-single most authoritative business-rule source. The other 5:
-`incidents/2026-07-17_test_postgres_public_exposure.md`,
-`06_developer_system/admin_ai_engine.md`,
-`06_developer_system/writer_authority.md`, and both
-`07_archived/legacy_*/ARCHIVE_NOTICE.md` files. None are duplicate-content
-(0 duplicate groups found). Fixing these is a small, contained,
-low-risk edit (add the missing frontmatter block to each) — not done as
-part of this pass, since content changes were out of this task's scope.
 
 **Not attempted this run**: regenerating `reports/baseline/baseline_inventory.json`
 (a separate, earlier-stage script not covered by the three re-certification

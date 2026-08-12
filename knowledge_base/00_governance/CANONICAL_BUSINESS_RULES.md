@@ -1,3 +1,12 @@
+---
+title: Canonical Business Rules
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-08-12
+runtime_index: true
+tags: [governance, business-rules, canonical]
+---
+
 # Canonical Business Rules — Fazle Core
 
 **Version:** 1.0

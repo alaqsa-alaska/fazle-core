@@ -1,3 +1,11 @@
+---
+title: Archive Notice — legacy_03_developer_system
+owner: Fazle Core Admin
+status: archived
+last_verified: 2026-08-12
+runtime_index: false
+---
+
 # ARCHIVE NOTICE
 Archived: 2026-07-02
 Reason: Legacy developer system folder replaced by 06_developer_system/

@@ -1,3 +1,12 @@
+---
+title: Admin AI Engine — Developer Notes
+owner: Fazle Core Admin
+status: active
+last_verified: 2026-08-12
+runtime_index: true
+tags: [developer-system, admin-ai, rag]
+---
+
 # Admin AI Engine — Developer Notes
 
 **See also:** `docs/ADMIN_AI_ENGINE.md` (architecture/rollback/ops reference), `docs/DEVELOPER_GUIDE.md` §H (message parser/AI/RAG flow this system builds on), `CANONICAL_BUSINESS_RULES.md` §Roles for the RBAC hierarchy.

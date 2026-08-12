@@ -1,7 +1,10 @@
 ---
 title: Test Postgres public exposure and attempted RCE — 2026-07-17
+owner: Fazle Core Admin
 severity: high (confirmed exploit attempt, exploit itself failed)
 status: contained, remediation in progress
+last_verified: 2026-08-12
+runtime_index: true
 ---
 
 # Test Postgres Public Exposure — Incident Record
