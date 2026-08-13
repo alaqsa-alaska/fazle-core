@@ -527,6 +527,44 @@ async def process_message(
 
     # ── 3. ADMIN ───────────────────────────────────────────────────────────────
     if role_str == "admin":
+        # Cross-bridge Hermes-reply echo guard (bridge1 Hermes Control
+        # Channel, Owner-directed, 2026-08-12 -- accepted structural
+        # tradeoff, see modules.admin_directives.router._handle_hermes_relay's
+        # docstring). A reply _deliver_hermes_reply sends out via bridge1
+        # to settings.admin_bridge2_number physically lands on bridge2 as
+        # a genuine new is_from_me=0 inbound message, sender = bridge1's
+        # own number -- identity_brain._check_admin_settings() already
+        # globally recognizes admin_bridge1_number as role="admin"
+        # regardless of source, so without this guard that message would
+        # re-enter this exact ADMIN branch. bridge_poller.
+        # process_bridge_inbound()'s existing LOOP_GUARD ("cross-bridge
+        # bounce" check) already stops it being auto-*sent* back out a
+        # second time, but only after a full RBAC-audited AI-console call
+        # already ran -- wasted LLM cost, latency, and audit-log noise on
+        # every single Hermes reply. Recognized narrowly by exact content
+        # signature ("🤖 Hermes:" is the literal, stable prefix
+        # _deliver_hermes_reply's own outbound.enqueue() call always uses)
+        # + sender + arrival channel -- mirrors bridge_poller's
+        # _is_bridge3_admin_recognition()'s "narrow, one-directional,
+        # local" precedent rather than widening any global identity rule,
+        # so it can never collide with scheduler alerts (different
+        # prefixes) or real bridge1 HR/recruitment traffic (never sent by
+        # bridge1's own number). Silently ignored -- nothing was
+        # authorized or attempted, so no RBAC audit call, just an INFO log
+        # line for observability.
+        if (
+            source == "bridge2"
+            and sender == (settings.bridge1_number or "")
+            and text.lstrip().startswith("🤖 Hermes:")
+        ):
+            log.info(
+                "[hermes_echo_guard] ignoring bridge1-originated Hermes reply "
+                "arriving on bridge2 (sender=%s) -- not a new admin request",
+                sender,
+            )
+            _hk_fire("admin", "hermes_reply_echo", "no_action", "hermes-cross-bridge-echo-guard")
+            return "", None
+
         if is_completed_escort_draft(text):
             # Admin can finalize by replying directly to the system as well.
             confirm_text, client_delivery = await handle_admin_escort_completion(
@@ -576,6 +614,36 @@ async def process_message(
             if ai_reply is not None:
                 return ai_reply, None
 
+        # Bridge1 Hermes Control Channel reliability fix (2026-08-13,
+        # found during a live hardening pass -- real log evidence, not
+        # speculative): the loose substring keyword shortcuts just below
+        # ("draft"/"payment"/"attendance" etc.) run BEFORE
+        # process_admin_natural_query's own bridge1/bridge2 Hermes bypass,
+        # so any Admin message on the Hermes control channel that happens
+        # to contain one of those common English/Bangla words (e.g. "আজকের
+        # attendance record...", "employee attendance এবং payroll...")
+        # never reaches Hermes at all -- it's answered by the OLDER,
+        # narrower get_attendance_summary()/list_payment_drafts()/
+        # _cmd_admin_list() handlers instead. On bridge1 specifically that
+        # reply then hits bridge_poller's pre-existing (2026-08-04)
+        # cross-bridge LOOP_GUARD -- which correctly, if too broadly,
+        # treats "reply recipient == another bridge's own number" as a
+        # likely bounce and diverts it to a manual-review draft instead of
+        # sending -- so the Admin sees NO reply at all. This traced back
+        # and fully explains 2 requests (1b, 14a) that the 2026-08-13
+        # capability assessment reported as unexplained hangs; they were
+        # never sent to hermes-runner in the first place. Fix: for the
+        # Admin's own phone on a dedicated Hermes control channel, skip
+        # straight to process_admin_natural_query (which itself decides
+        # Hermes vs the AI console) -- the same precedence the bridge2
+        # self-chat path already has by construction (it never passes
+        # through this keyword-shortcut block at all, see bridge_poller's
+        # separate is_from_me=1 handling). Every other sender/channel is
+        # completely unaffected -- these keyword shortcuts still run
+        # exactly as before for bridge2/bridge3's own AI-console users.
+        if sender == (settings.admin_bridge2_number or "") and source in ("bridge1", "bridge2"):
+            return await process_admin_natural_query(text, sender, source_bridge=source), None
+
         lower = text.lower()
         if "draft" in lower or "পেন্ডিং" in lower or "list" in lower:
             return await _cmd_admin_list(), None
@@ -597,14 +665,22 @@ async def process_message(
         # itself returns nothing.
         #
         # NOTE (2026-08-04, corrected same day): earlier comments here
-        # called this engine "Hermes" — it is not. This is fazle-core's own
-        # AI console (read-only RT-*/BUS-*/MEM-* tool registry), a
-        # deliberately separate system from the real Hermes (assistant-
-        # platform's BUILD/RUN-capable agent, reached via a dedicated
-        # HERMES <request> command — see admin_directives/router.py). Do
-        # not reintroduce the naming conflation.
-        console_reply = await process_admin_natural_query(text, sender)
-        if console_reply:
+        # called this engine "Hermes" — it is not, EXCEPT on the dedicated
+        # bridge2/superadmin Admin<->Hermes channel, where (2026-08-12,
+        # direct Owner instruction) process_admin_natural_query itself now
+        # delegates unprefixed free text straight to the real Hermes relay
+        # instead of this AI console — see that function's docstring. This
+        # is still fazle-core's own AI console (read-only RT-*/BUS-*/MEM-*
+        # tool registry) for every other admin/channel, a deliberately
+        # separate system from the real Hermes (assistant-platform's
+        # BUILD/RUN-capable agent).
+        console_reply = await process_admin_natural_query(text, sender, source_bridge=source)
+        # "is not None", not a truthy check: a real Hermes relay dispatch
+        # returns "" on purpose (2026-08-12 UX fix — no intermediate "sent
+        # to Hermes" acknowledgement message; see _handle_hermes_relay) and
+        # must still short-circuit here, matching process_admin_ai_command's
+        # own is-not-None check above for the identical reason.
+        if console_reply is not None:
             return console_reply, None
 
         return (

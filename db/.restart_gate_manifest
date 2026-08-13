@@ -168,3 +168,50 @@ tests/unit/test_bridge_poller_orphan_message_fix.py
 # instruction. Remove this entry once the Owner reviews the report and
 # either commits it (if it's to be kept in the repo) or deletes it.
 IDENTITY_BRAIN_NAME_LOOKUP_AUDIT_REPORT.md
+
+# 2026-08-12: Bridge1 Hermes Control Channel (Owner-directed, plan-mode
+# approved) -- new dedicated Admin<->Hermes channel via bridge1 (genuine
+# is_from_me=0 inbound, no self-chat ambiguity), alongside the existing
+# bridge2 self-chat mechanism (unchanged). modules/admin_directives/
+# router.py: _HERMES_CONTROL_CHANNELS constant, widened channel gates in
+# _handle_hermes_relay/process_admin_natural_query, source_bridge-aware
+# reply routing in _deliver_hermes_reply (defaults to "bridge2", so every
+# existing call site is unaffected). modules/message_router/__init__.py:
+# new cross-bridge echo guard (first statement of the ADMIN branch) so a
+# Hermes reply delivered via bridge1 back to the Admin's bridge2 number
+# isn't mistaken for a new admin request when it lands there -- explicit,
+# narrow content-signature match ("🤖 Hermes:" prefix + bridge1's own
+# number + arriving on bridge2), not a general identity-recognition
+# widening; mirrors bridge_poller's existing _is_bridge3_admin_
+# recognition() precedent. New test file covers the guard in isolation.
+# 92/92 targeted unit tests green pre-restart; full make test-unit run
+# with only pre-existing, unrelated failures (missing TEST_DB_PASSWORD).
+# Verification plan: exactly one live WhatsApp round-trip post-restart,
+# log-confirmed clean (echo guard fires once, no LOOP_GUARD, no second
+# AI-console call) before any further use -- see plan file
+# self-chat-witty-cat.md. Remove this entry once committed.
+tests/unit/test_hermes_cross_bridge_echo_guard.py
+
+# 2026-08-13: Bridge1 Hermes Control Channel reliability hardening pass.
+# Two parts: (1) session continuity + durable hang diagnostics for
+# hermes-runner (already deployed same day, see HERMES_BRIDGE1_
+# RELIABILITY_INTEGRATION_PHASE_2026-08-13.md); (2) a genuine defect found
+# DURING this pass, with real log evidence: modules/message_router/
+# __init__.py's ADMIN branch had loose keyword shortcuts ("draft"/
+# "payment"/"attendance" substring matches) running BEFORE the bridge1/
+# bridge2 Hermes bypass, so any Admin message on the Hermes control
+# channel containing one of those common words never reached Hermes --
+# it hit the older get_attendance_summary()/list_payment_drafts()/
+# _cmd_admin_list() handlers instead, whose reply then triggered bridge_
+# poller's pre-existing (2026-08-04) cross-bridge LOOP_GUARD and silently
+# vanished into a manual-review draft. This fully explains the 2
+# "unexplained hangs" (test ids 1b, 14a) from the 2026-08-13 capability
+# assessment -- they never reached hermes-runner at all. Fix: for the
+# Admin's own phone on a dedicated Hermes control channel (bridge1 or
+# bridge2), skip straight to process_admin_natural_query() before the
+# keyword shortcuts -- every other sender/channel unaffected, confirmed
+# by dedicated tests (test_hermes_channel_keyword_bypass.py, new) plus
+# updated dispatch-order regression tests. 1260/1266 unit tests pass
+# (6 pre-existing DB-connection failures, unchanged baseline; 0 new
+# failures). Remove this entry once committed.
+tests/unit/test_hermes_channel_keyword_bypass.py
