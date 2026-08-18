@@ -215,3 +215,11 @@ tests/unit/test_hermes_cross_bridge_echo_guard.py
 # (6 pre-existing DB-connection failures, unchanged baseline; 0 new
 # failures). Remove this entry once committed.
 tests/unit/test_hermes_channel_keyword_bypass.py
+
+# 2026-08-19: HERMES_PAYROLL_WORKFLOW_GAP_AUDIT_2026-08-18.md — an
+# untracked report from a separate, unrelated task (payroll workflow gap
+# audit), not part of the Hermes Identity/Role/Intent Capability Fix this
+# restart is deploying. Deliberately left uncommitted here rather than
+# committed alongside this fix's own changes, to keep that unrelated
+# task's commit as a separate, deliberate action for whoever picks it up.
+HERMES_PAYROLL_WORKFLOW_GAP_AUDIT_2026-08-18.md

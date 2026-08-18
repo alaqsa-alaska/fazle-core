@@ -103,6 +103,7 @@
 061_hermes_c2_divergence_snapshots.sql
 062_candidate_conversation_message_identity.sql
 063_ai_read_cash_transactions.sql
+066_ai_read_employees_fpe_fallback.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -183,7 +184,35 @@ insert method used for `056`/`057`, not a full `db/migrate.py` run, for the same
 reason documented there). Full record: `management_decisions.md` 2026-07-30
 "Unified Admin AI Engine".
 
-**Next available number for new work: `063`.**
+**`066_ai_read_employees_fpe_fallback.sql` (2026-08-18, Hermes Identity/Role/Intent
+Capability Audit, APPLIED to production 2026-08-18):** extends `ai_read_employees`
+(`CREATE OR REPLACE VIEW`, same view migration 012 created) with a `UNION ALL`
+branch surfacing `fpe_employees`-linked employees that have no matching
+`wbom_employees` row — the same fallback `modules.identity_brain._lookup_employee()`
+already checks for every real WhatsApp identity resolution, so Hermes's
+`get_employees` tool no longer misses a category of employee `identity_brain`
+itself can already resolve. Purely additive at the row level (no source table
+altered, no `ALTER`/`DROP`); `bkash_number` deliberately excluded, matching every
+other `ai_read_*` view's sensitive-field exclusion. Preserves the existing
+`ai_read_employees` output contract exactly (same column count, names, order) —
+required explicit `CAST`s on `employee_name` (`varchar(100)`), `employee_mobile`
+(`varchar(20)`), `designation` (`varchar(30)`), and `status` (`varchar(20)`),
+discovered only by execution, not by static review: Postgres's `CREATE OR
+REPLACE VIEW` requires exact output-type equality with the current live view,
+and `UNION`/`COALESCE` type-unification silently drops `varchar(N)` length
+modifiers unless cast explicitly. First live attempt failed cleanly
+(`InvalidTableDefinitionError`, transaction auto-rolled-back, verified zero
+partial state); second attempt, after adding the casts and a non-destructive
+dry-run-and-rollback verification pass, succeeded. Applied via the previously
+verified scoped-transaction path (pre-checked target not already tracked,
+referenced tables exist, single transaction wrapping both the `CREATE OR
+REPLACE VIEW` and its `schema_migrations` insert, commit only on full success).
+Row-count reconciled exactly: 247 `wbom_employees` baseline rows + 86
+FPE-only-active-unlinked rows = 333 resulting view rows, zero duplicate
+non-NULL `employee_id` groups. Full evidence trail:
+`HERMES_IDENTITY_GAP_FIX_PREDEPLOYMENT_ACCEPTANCE_2026-08-18.md`.
+
+**Next available number for new work: `067`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
