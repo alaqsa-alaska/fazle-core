@@ -1167,6 +1167,7 @@ async def whatsapp_messages_lookup(
             f"""
             SELECT message_id, sender_number, canonical_phone, platform, direction,
                    message_type, is_processed, status, received_at, processed_at,
+                   identity_role, identity_confidence, intent_detected,
                    classification, workflow_triggered
               FROM wbom_whatsapp_messages
               {where_clause}
@@ -1179,6 +1180,34 @@ async def whatsapp_messages_lookup(
     except Exception as exc:
         log.warning("[whatsapp] /api/whatsapp/messages/lookup error: %s", exc)
         return {"count": 0, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+# ── 2026-08-18 — Identity/Intent resolution, exposed for Hermes ──────────────
+# Closes the capability-exposure gap found in
+# HERMES_IDENTITY_ROLE_INTENT_CONTENT_CAPABILITY_AUDIT_2026-08-18.md: Hermes
+# had no tool reaching the canonical resolvers (identity_brain.detect_identity,
+# modules.intent.classify) even though both are the same live, production
+# logic message_router already uses for every real WhatsApp turn. Thin,
+# read-only pass-throughs -- no new classification logic here.
+@app.get("/api/identity/resolve", dependencies=[Depends(require_api_key)])
+async def api_resolve_identity(phone: str, text: str = ""):
+    """Resolve a phone number's role/identity via the same identity_brain
+    used by message_router for real messages. bkash_number/basic_salary are
+    stripped from the result -- more sensitive than anything else exposed to
+    Hermes today (get_employees/get_contacts don't return bkash_number
+    either), and not needed for identity/role/intent purposes."""
+    from modules.identity_brain import detect_identity
+    result = await detect_identity(phone, text)
+    return {k: v for k, v in result.items() if k not in ("bkash_number", "basic_salary")}
+
+
+@app.get("/api/intent/classify", dependencies=[Depends(require_api_key)])
+async def api_classify_intent(text: str):
+    """Classify a message's intent via the same deterministic
+    keyword/regex/fuzzy classifier message_router uses. No DB access, no
+    LLM call."""
+    from modules.intent import classify
+    return {"intent": classify(text)}
 
 
 # ── Phase 13D — Bridge orchestration diagnostics ──────────────────────────────

@@ -2,7 +2,7 @@
 title: AI Identity Overview
 owner: Fazle Core Admin
 status: active
-last_verified: 2026-06-24
+last_verified: 2026-08-18
 runtime_index: true
 ---
 
@@ -49,13 +49,18 @@ The AI must answer by role and visibility first, then by topic. Domain-only retr
 ## Revision History
 - 2026-06-19: Created as dedicated identity domain.
 - 2026-06-22: Enriched with production resolution algorithm, evidence sources, and confidence scoring (Wave-1).
+- 2026-08-18: Re-synced against `identity_brain/__init__.py` after the
+  `HERMES_IDENTITY_ROLE_INTENT_CONTENT_CAPABILITY_AUDIT_2026-08-18.md` audit found this section had
+  drifted from a real 2026-08-01 code fix (function name, confidence scale, step structure, and one
+  step describing a code path that no longer exists were all corrected below).
 
 ---
 
 ## Identity Resolution Algorithm (Production)
 
 ### Purpose
-The production identity engine resolves each contact to a single role using an 11-step priority algorithm. The first step that produces a match wins.
+The production identity engine resolves each contact to a single role using a priority cascade.
+The first step that produces a match wins.
 
 ### Ordered Resolution Steps
 
@@ -63,46 +68,63 @@ The production identity engine resolves each contact to a single role using an 1
 
 | Step | Resolved Role | Evidence Source | Table |
 |---|---|---|---|
-| 1 | admin | `fazle_admins` OR `fazle_contact_roles` where role='admin' | `fazle_admins`, `fazle_contact_roles` |
-| 2 | family | `fazle_contact_roles` where role='family' | `fazle_contact_roles` |
-| 3 | accountant | `fazle_contact_roles` where role='accountant' | `fazle_contact_roles` |
-| 4 | vip_client | `fazle_contact_roles` where role='vip_client' | `fazle_contact_roles` |
-| 5 | client_escort_buyer | `fazle_contact_roles` where role='client_escort_buyer' | `fazle_contact_roles` |
-| 6 | repeat_client | Repeat payment history | `fpe_cash_transactions` |
-| 7 | vendor | `fazle_contact_roles` where role='vendor' | `fazle_contact_roles` |
-| 8 | employee | Phone match (primary + 4 secondary sources) | See below |
-| 9 | supervisor | `fazle_contact_roles` where role='supervisor' | `fazle_contact_roles` |
-| 10 | candidate | Active recruitment session | `fazle_recruitment_sessions` |
-| 11 | unknown | No match found | Fallback |
+| 1 | admin | Admin settings (env), then `fazle_contact_roles` where role='admin' | settings, `fazle_contact_roles` |
+| 2 | *(single seed lookup — see below)* family / accountant / vip_client / client_escort_buyer / vendor / supervisor — whichever `fazle_contact_roles` row for this phone has the highest `priority` value | `fazle_contact_roles` |
+| 3 | employee | Phone match, `wbom_employees` primary, `fpe_employees` fallback | See below |
+| 4 | employee (via operational evidence, gated) | `fpe_cash_transactions` or `wbom_attendance` — only checked when the phone is **not** in the `ESCORT_CLIENT_PHONES` env allowlist (2026-08-01 fix, see note below) | `fpe_cash_transactions`, `wbom_attendance` |
+| 5 | escort / repeat_client | `wbom_escort_programs` — `escort_mobile` match → `escort`; `master_mobile`-only match → `repeat_client` | `wbom_escort_programs` |
+| 6 | client_escort_buyer | Explicit `ESCORT_CLIENT_PHONES` env allowlist match | env |
+| 7 | client_escort_buyer / other | `wbom_contacts` — name marker match → `client_escort_buyer`; otherwise mapped from `relation` column | `wbom_contacts` |
+| 8 | candidate | Text-hint keyword match on message content (unverified) | message text only |
+| 9 | repeat_client | Escort-content keyword regex on an unknown sender's message (unverified) | message text only |
+| 10 | unknown | No match found | Fallback |
 
-### Employee Secondary Evidence (Step 8)
+**2026-08-01 fix note (why step 4 is gated):** a one-off cash payment or attendance record must
+never override an explicit, Owner-configured `ESCORT_CLIENT_PHONES` entry — a verified escort-client
+buyer who received a single incidental cash payment was previously misidentified as `role="employee"`
+forever after. See the inline comment at `identity_brain/__init__.py:207-220` for the full incident.
+
+**Step 2 is not six separate hardcoded steps.** `identity_brain` runs one query against
+`fazle_contact_roles` ordered by that table's own `priority DESC` column
+(`_lookup_seed()`, `identity_brain/__init__.py:346-366`) — the relative ordering between
+family/accountant/vip_client/client_escort_buyer/vendor/supervisor is whatever the seed data's
+`priority` values say today, not a fixed sequence baked into code. Editing `fazle_contact_roles.priority`
+changes this ordering without a code change.
+
+**Superseded step removed:** an earlier version of this doc listed a step "repeat_client ← repeat
+payment history (`fpe_cash_transactions`)." No such code path exists — the actual cash-payment
+branch (step 4 above) resolves to an **employee-designation** role, never literally `repeat_client`.
+The two real sources of `repeat_client` are listed at steps 5 and 9 above.
+
+### Employee Evidence (Step 3)
 
 Primary: `wbom_employees` — phone match on 3 variants (01X, 880X, +880X)
 
-If primary fails, try secondary sources in order:
-- Secondary A: `fpe_cash_transactions` — any payment record with this phone
-- Secondary B: `wbom_attendance` — any attendance record with this phone
-- Secondary C: `escort_roster_entries` — any roster entry with this phone
-- Secondary D: `wbom_contacts` — contact book match
+Fallback: `fpe_employees` (payroll-engine-only employees, e.g. auto-created through the cash/payroll
+flow) joined to `wbom_employees` where linked — `identity_brain/__init__.py:386-401`.
 
 **Source Module:** `modules/identity_brain`
-**Source Function:** `resolve_identity()`, `_ROLE_PRIORITY`
+**Source Function:** `detect_identity(phone, text)` — *not* `resolve_identity()` (a previous version
+of this doc named the wrong function; there is no `resolve_identity` in this module).
 **PKCA Report:** 11_identity_coverage_report.md
-**Management Authority:** Production evidence; documented 2026-06-22
+**Management Authority:** Production evidence; documented 2026-06-22, re-verified 2026-08-18
 
 ---
 
 ## Identity Confidence Scoring
 
-| Evidence Type | Confidence Score |
-|---|---|
-| Direct seed record (`fazle_contact_roles`) | 1.0 |
-| `wbom_employees` primary phone match | 0.95 |
-| Secondary evidence (cash / attendance / roster) | 0.7 |
-| Contact book match only | 0.5 |
-| No evidence / fallback (unknown) | 0.0 |
+`identity_brain.detect_identity()` returns **two** confidence fields in every result
+(`_build()`/`_build_contact()`, `identity_brain/__init__.py:575-628`) — use `identity_confidence`
+as the primary one; `confidence` is a legacy-compatible mirror:
 
-**Business Rule:** Low-confidence identities (< 0.7) may cause the system to create a draft for admin review rather than auto-send, even for normally safe intents.
+| Field | Scale | Example values |
+|---|---|---|
+| `identity_confidence` | integer 0–100 | 100 (admin/settings), 88 (`wbom_employees` primary), 86 (cash/attendance evidence), 85 (escort roster / contact name marker), 95 (env escort-phone allowlist), 80 (contact book relation match), 50 (text-hint candidate), 40 (escort-content regex), 0 (unknown) |
+| `confidence` (legacy) | float 0.0–1.0 | `identity_confidence / 100` — kept only for backward compatibility with pre-identity_brain callers |
+
+**Business Rule:** Low-confidence identities (`identity_confidence` < 70, i.e. legacy `confidence` <
+0.7) may cause the system to create a draft for admin review rather than auto-send, even for
+normally safe intents.
 
 ---
 

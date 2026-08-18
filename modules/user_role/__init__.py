@@ -1,6 +1,14 @@
 """
 Fazle Core — User Role Detection (Phase 4A)
 
+DEPRECATED (2026-08-18, `HERMES_IDENTITY_ROLE_INTENT_CONTENT_CAPABILITY_AUDIT_2026-08-18.md`):
+superseded by `modules.identity_brain.detect_identity()`, which is what
+message_router/bridge_poller/app.main actually call in production. A
+repo-wide grep confirmed `detect_role()` has zero callers anywhere in this
+codebase. Kept only because `archive/deprecated/employee_utils` still
+imports it. Do not use this module for new code — use
+`modules.identity_brain.detect_identity()` instead.
+
 Detects who is sending a message by looking up their phone number
 against the company database. Returns a role context dict used by
 the reply engine to choose the right tone and DB facts.
