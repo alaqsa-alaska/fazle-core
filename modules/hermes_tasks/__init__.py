@@ -61,7 +61,7 @@ _TASK_TRANSITIONS: dict[str, frozenset[str]] = {
     "BACKLOG": frozenset({"READY", "BLOCKED", "FAILED"}),
     "READY": frozenset({"IN_PROGRESS", "BACKLOG", "BLOCKED", "FAILED"}),
     "IN_PROGRESS": frozenset({"WAITING_APPROVAL", "VERIFYING", "DONE", "BLOCKED", "FAILED"}),
-    "WAITING_APPROVAL": frozenset({"IN_PROGRESS", "BLOCKED", "FAILED"}),
+    "WAITING_APPROVAL": frozenset({"IN_PROGRESS", "VERIFYING", "BLOCKED", "FAILED"}),
     "VERIFYING": frozenset({"DONE", "IN_PROGRESS", "FAILED"}),
     "BLOCKED": frozenset({"READY", "IN_PROGRESS", "FAILED"}),
     "FAILED": frozenset({"READY", "BACKLOG"}),

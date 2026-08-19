@@ -155,6 +155,19 @@ class TestUpdateTaskStatus:
             result = await update_task_status(5, "READY")
         assert result["status"] == "READY"
 
+    async def test_full_happy_path_is_all_legal_edges(self):
+        """Live smoke-test regression (2026-08-19): record_execution_result()
+        tried WAITING_APPROVAL -> VERIFYING and it silently failed because
+        that edge was missing from _TASK_TRANSITIONS -- unit tests didn't
+        catch it because they mocked update_task_status() itself rather
+        than exercising the real transition table. This walks the entire
+        real happy path against _TASK_TRANSITIONS directly, so a future
+        edge omission fails loudly here instead of only in production."""
+        from modules.hermes_tasks import _TASK_TRANSITIONS
+        path = ["BACKLOG", "READY", "IN_PROGRESS", "WAITING_APPROVAL", "VERIFYING", "DONE"]
+        for current, nxt in zip(path, path[1:]):
+            assert nxt in _TASK_TRANSITIONS[current], f"{current} -> {nxt} must be legal (full happy path)"
+
 
 # ── propose_action / approve_action / reject_action ─────────────────────────
 
