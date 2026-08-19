@@ -88,6 +88,38 @@ class TestFlagTrueProducesWrite:
                 assert ex.call_count == 1
                 assert "hermes_decision_audit_log" in ex.call_args[0][0]
 
+    async def test_log_decision_binds_source_message_id_as_last_param(self):
+        """2026-08-19 (migration 067): source_message_id must be threaded
+        through as the final bound param, appended not renumbered."""
+        _fresh()
+        from modules.hermes_kernel.data_classes import DecisionRecord
+        from modules.hermes_kernel.shadow_logger import log_decision
+        rec = DecisionRecord(
+            sender_phone="8801700000001", source="bridge1",
+            raw_input_text="test", source_message_id="wa-msg-abc123",
+        )
+        with patch("app.config.get_settings") as m:
+            m.return_value.hermes_decision_audit_enabled = True
+            m.return_value.hermes_event_log_enabled = True
+            with patch("app.database.execute", new=AsyncMock()) as ex:
+                await log_decision(rec)
+                query_arg, *params = ex.call_args[0]
+                assert "source_message_id" in query_arg
+                assert params[-1] == "wa-msg-abc123"
+
+    async def test_log_decision_binds_none_when_source_message_id_absent(self):
+        """An empty source_message_id (the DecisionRecord default) must
+        bind as SQL NULL, not an empty string."""
+        _fresh()
+        from modules.hermes_kernel.shadow_logger import log_decision
+        with patch("app.config.get_settings") as m:
+            m.return_value.hermes_decision_audit_enabled = True
+            m.return_value.hermes_event_log_enabled = True
+            with patch("app.database.execute", new=AsyncMock()) as ex:
+                await log_decision(_rec())  # default source_message_id=""
+                params = ex.call_args[0][1:]
+                assert params[-1] is None
+
     async def test_log_event_calls_execute(self):
         _fresh()
         from modules.hermes_kernel.shadow_logger import log_event

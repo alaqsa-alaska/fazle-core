@@ -54,6 +54,7 @@ class TestLookupDecisions:
             "provider_used": "groq",
             "source": "bridge1",
             "raw_input_text": "amar betoner koto",
+            "source_message_id": "wa-msg-12345",
         }
         mock_fetch_all = AsyncMock(return_value=[fake_row])
         with patch("app.main.fetch_all", new=mock_fetch_all):
@@ -73,11 +74,33 @@ class TestLookupDecisions:
         assert row["chosen_action"] == "reply"
         assert row["explanation"] == "employee-payroll"
         assert row["intent_method"] == "llm"
+        # 2026-08-19 (migration 067): message->decision provenance -- the
+        # bridge's own message id must round-trip through the route.
+        assert row["source_message_id"] == "wa-msg-12345"
 
         query_arg = mock_fetch_all.call_args[0][0]
         assert "hermes_decision_audit_log" in query_arg
         assert "chosen_action" in query_arg
         assert "explanation" in query_arg
+        assert "source_message_id" in query_arg
+
+    async def test_source_message_id_is_response_field_not_a_filter(self, auth_headers):
+        """source_message_id is a response field only -- the route's filter
+        params stay phone/trace_id/chosen_action; adding a 4th filter is out
+        of this task's scope."""
+        mock_fetch_all = AsyncMock(return_value=[])
+        with patch("app.main.fetch_all", new=mock_fetch_all):
+            async with await _client() as ac:
+                response = await ac.get(
+                    "/api/hermes/decisions/lookup",
+                    params={"source_message_id": "wa-msg-99999"},
+                    headers=auth_headers,
+                )
+        assert response.status_code == 200
+        # unknown query param is silently ignored by FastAPI, not treated
+        # as a filter -- filters_applied stays False since no real filter
+        # (phone/trace_id/chosen_action) was supplied.
+        assert response.json()["filters_applied"] is False
 
     async def test_filters_are_bound_params_not_raw_sql(self, auth_headers):
         mock_fetch_all = AsyncMock(return_value=[])

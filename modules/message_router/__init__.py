@@ -373,11 +373,12 @@ async def process_message(
             sender_phone=sender,
             source=source,
             raw_input_text=(text or "")[:2000],
+            source_message_id=message_id or "",
         )
         _hk_evt001 = KernelEvent(
             trace_id=_hk_record.trace_id,
             event_name="EVT-001 message.received",
-            payload={"sender_phone": sender, "source": source},
+            payload={"sender_phone": sender, "source": source, "message_id": message_id},
         )
     except Exception:
         _hk_record = None  # type: ignore[assignment]

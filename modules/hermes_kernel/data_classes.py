@@ -67,6 +67,9 @@ class DecisionRecord:
     provider_fallback_path: str = ""
     source: str = ""
     raw_input_text: str = ""
+    source_message_id: str = ""    # the bridge's own message id, when known
+                                    # (see modules.message_router.process_message's
+                                    # own message_id param) -- 2026-08-19
     trust_evaluation: Optional[TrustEvaluation] = None
 
 

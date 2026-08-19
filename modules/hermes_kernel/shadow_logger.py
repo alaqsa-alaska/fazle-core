@@ -107,10 +107,10 @@ async def log_decision(record: "DecisionRecord") -> None:
                 identity_confidence, intent, intent_method,
                 evidence_coverage, confidence_score, confidence_band,
                 chosen_action, explanation, escalation_reason,
-                provider_used, source, raw_input_text
+                provider_used, source, raw_input_text, source_message_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16
+                $11, $12, $13, $14, $15, $16, $17
             )
             """,
             record.trace_id,
@@ -129,6 +129,7 @@ async def log_decision(record: "DecisionRecord") -> None:
             record.provider_used or None,
             record.source or None,
             (record.raw_input_text or "")[:2000],
+            record.source_message_id or None,
         )
     except Exception as exc:
         log.warning("[hermes_kernel] log_decision non-fatal: %s", exc)
