@@ -31,6 +31,7 @@ Identity mismatch:
 import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.database import fetch_one, fetch_val, execute
@@ -60,11 +61,28 @@ _IMAGE_MARKERS = frozenset([
 
 # ── Session CRUD ───────────────────────────────────────────────────────────────
 
+# 24h -- matches the same TTL policy already independently established
+# three times elsewhere in this codebase for the identical "resumable
+# conversation session" concept (modules.employee_conversation.
+# DRAFT_TTL_HOURS, modules.recruitment_flow.SESSION_TTL) -- not a new or
+# conflicting threshold.
+SESSION_TTL_HOURS = 24
+
+
 async def get_verification_session(phone: str) -> Optional[dict]:
-    """Return the active verification session for this employee, or None."""
+    """Return the active verification session for this employee, or None
+    if there isn't one or it's gone stale.
+
+    Staleness (2026-08-19, HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_
+    AUDIT_2026-08-19.md, Phase 2 of the follow-up plan): same bug class
+    fixed the same day in modules.employee_conversation.get_conversation_
+    session() -- a session left open (never reaching STEP_DONE/'rejected')
+    used to be resumed indefinitely regardless of age, so a stale
+    "waiting for selfie/slip/payment method" session could silently
+    absorb a later, completely unrelated message."""
     try:
         row = await fetch_one(
-            """SELECT id, status, reply_text, source
+            """SELECT id, status, reply_text, source, created_at
                FROM fazle_draft_replies
                WHERE recipient = $1
                  AND intent = 'verification'
@@ -72,17 +90,38 @@ async def get_verification_session(phone: str) -> Optional[dict]:
                ORDER BY created_at DESC LIMIT 1""",
             phone, STEP_DONE,
         )
-        if row:
-            try:
-                ctx = json.loads(row["reply_text"] or "{}")
-            except (json.JSONDecodeError, TypeError):
-                ctx = {}
-            return {
-                "session_id": row["id"],
-                "step": row["status"],
-                "context": ctx,
-                "source": row.get("source") or "",
-            }
+        if not row:
+            return None
+
+        created_at = row.get("created_at")
+        if created_at:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - created_at > timedelta(hours=SESSION_TTL_HOURS):
+                try:
+                    await execute(
+                        """UPDATE fazle_draft_replies SET status='rejected'
+                           WHERE id = $1 AND status NOT IN ($2, 'rejected')""",
+                        row["id"], STEP_DONE,
+                    )
+                except Exception as e:
+                    log.warning(f"[verification] stale session expiry error: {e}")
+                log.info(
+                    f"[verification] expired stale session id={row['id']} "
+                    f"phone={phone} created_at={created_at}"
+                )
+                return None
+
+        try:
+            ctx = json.loads(row["reply_text"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            ctx = {}
+        return {
+            "session_id": row["id"],
+            "step": row["status"],
+            "context": ctx,
+            "source": row.get("source") or "",
+        }
     except Exception as e:
         log.debug(f"[verification] session lookup error: {e}")
     return None
