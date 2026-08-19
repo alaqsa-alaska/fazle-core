@@ -68,10 +68,23 @@ Active duty age range: **১৮ – ৫৫ বছর** (management decision 2026
 This applies to all positions including escort, guard, supervisor, port roles.
 
 ### SR-05 — Joining Fee and Form Fee
-- জয়েনিং ফি: ৳৩,৫০০ (ঘুষ বা জামানত নয়; ৬ মাস চাকুরি পর ফেরত দেওয়া হয়)
-- ফর্ম ফি: ৳৩৩০ (এককালীন)
-- জয়েনের সময় কমপক্ষে: ৳১,০০০ + ৳৩৩০ = ৳১,৩৩০
-- বাকি টাকা মাসে ৳৫০০ করে বেতন থেকে কাটা হয়
+
+**Corrected 2026-08-19** (see `KB_SALARY_POLICY_DRIFT_CHECK_2026-08-19.md`):
+this section previously stated an upfront ৳1,330 joining/form fee
+collected at joining time. That framing was superseded 2026-07-21 by the
+canonical text below (`recruitment_business_rules.md`'s "Approved
+Deposit/Fee canonical text", also `fazle_knowledge_base` row
+`b11_no_fee`, and `modules/knowledge_base/__init__.py`'s live runtime
+fallback, Owner-approved) — no fee is ever collected upfront; any
+processing/joining fee is deducted from salary in installments only.
+
+- চাকরির জন্য কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না।
+- প্রসেসিং ফি, জয়েনিং ফি ইত্যাদি অন্যান্য প্রতিষ্ঠানের মত আমাদের এখানেও আছে,
+  তবে অগ্রীম গ্রহণের পরিবর্তে মাসিক বেতন থেকে কিস্তিতে কাটার ব্যবস্থা।
+- আর্থিক সমস্যার বিষয়ে আলোচনা করা যায় — টাকা নেই এজন্য কারো চাকরিতে জয়েন
+  বাঁধা হবে না।
+- নির্দিষ্ট মানি-রিসিট ছাড়া কেউ টাকা চাইলে তা প্রতারণা — সরাসরি অফিসে
+  যাচাই করুন বা 01958 122300 নম্বরে কল দিন।
 
 ### SR-06 — Proactive Outbound Restriction
 Salary complaint messages (`employee_salary_complaint` intent) must ALWAYS route to human review — never auto-replied. This is part of `ESCALATION_INTENTS` in `modules/social_auto_reply/risk_flagger.py`.
