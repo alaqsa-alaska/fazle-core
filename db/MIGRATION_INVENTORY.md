@@ -104,6 +104,7 @@
 062_candidate_conversation_message_identity.sql
 063_ai_read_cash_transactions.sql
 066_ai_read_employees_fpe_fallback.sql
+067_hermes_decision_source_message_id.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -212,7 +213,19 @@ FPE-only-active-unlinked rows = 333 resulting view rows, zero duplicate
 non-NULL `employee_id` groups. Full evidence trail:
 `HERMES_IDENTITY_GAP_FIX_PREDEPLOYMENT_ACCEPTANCE_2026-08-18.md`.
 
-**Next available number for new work: `067`.**
+**`067_hermes_decision_source_message_id.sql` (2026-08-19, Task 1 of
+HERMES_BUSINESS_EXECUTION_CAPABILITY_PROVENANCE_AUDIT_2026-08-19.md's
+4-task plan, APPLIED to production 2026-08-19 via `db/migrate.py`):**
+adds a single nullable `source_message_id VARCHAR(100)` column to
+`hermes_decision_audit_log` (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+Purely additive, no backfill (historical rows stay NULL), no index. Lets
+`DecisionRecord`/`GET /api/hermes/decisions/lookup` carry the bridge's
+own `message_id` through to Hermes, closing the message→decision
+provenance gap that audit found. Verified post-apply: column type/
+nullability correct, `schema_migrations` shows exactly one row for this
+name, all 454 pre-existing rows unchanged and NULL as expected.
+
+**Next available number for new work: `068`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
