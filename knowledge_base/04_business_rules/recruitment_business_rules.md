@@ -12,7 +12,7 @@ runtime_index: true
 
 **Management Decision (BR-25 RESOLVED 2026-06-22):**
 
-- **Age: 18–55 years** (Authoritative — production code `recruitment_flow._parse_age()`)
+- **Age: 18–55 years** (Authoritative default — production code `recruitment_flow._parse_age()`. 2026-08-19: the effective minimum is now directive-overridable — `recruitment_flow._get_effective_age_range()` checks for an active `fazle_admin_directives` row at `subject_key="recruitment_minimum_age"` before falling back to this 18 default; Earth's `remember_business_rule` tool or the `/admin/directives` endpoint sets it. Check `GET /admin/directives?subject_key=recruitment_minimum_age` for the live effective value rather than assuming this file's number is current.)
 - Physically fit.
 - Minimum class 8 preferred; certificate not mandatory if candidate can read/write Bangla.
 - No prior experience required for security guard or escort.

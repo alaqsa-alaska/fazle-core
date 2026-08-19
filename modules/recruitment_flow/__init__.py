@@ -152,12 +152,50 @@ UNKNOWN_SENDER_SOFT_ASK: str = (
 
 # ── Parsers ────────────────────────────────────────────────────────────────────
 
-def _parse_age(text: str) -> Optional[int]:
+_BENGALI_DIGITS_OUT = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
+
+
+def _bn_digits(n: int) -> str:
+    """ASCII int -> Bengali-numeral string, for candidate-facing replies
+    (2026-08-19) -- an admin-directive age override arrives as an ASCII
+    number (remember_business_rule's directive_text) but every other
+    number in this funnel's Bangla messages uses Bengali numerals; without
+    this the rejection reply would visibly mix "23" into an otherwise
+    Bengali-numeral sentence."""
+    return str(n).translate(_BENGALI_DIGITS_OUT)
+
+
+def _parse_age(text: str, age_range: tuple[int, int] = (18, 55)) -> Optional[int]:
     m = re.search(r"\b(\d{1,3})\b", text)
     if m:
         val = int(m.group(1))
-        return val if 18 <= val <= 55 else None
+        lo, hi = age_range
+        return val if lo <= val <= hi else None
     return None
+
+
+async def _get_effective_age_range() -> tuple[int, int]:
+    """Admin-directive override for the recruitment minimum age (2026-08-19,
+    Item 3 of the Hermes->Earth rename+autonomy pass). Mirrors the exact
+    fallback shape of social_auto_reply/reply_rules.py's
+    get_effective_office_numbers(): check the most recent active directive
+    for subject_key="recruitment_minimum_age" first, fall back to the
+    hardcoded 18-55 default on no row, a malformed value, or any error --
+    never let a bad directive value widen/invert the range or raise. Written
+    via Earth's remember_business_rule tool or the /admin/directives
+    endpoint (see core/.claude/CLAUDE.md's admin_directives bullet)."""
+    try:
+        from modules.admin_directives import list_directives
+        rows = await list_directives(subject_key="recruitment_minimum_age", status="active", limit=1)
+        if rows and rows[0].get("directive_text"):
+            m = re.search(r"\d{1,3}", rows[0]["directive_text"])
+            if m:
+                val = int(m.group())
+                if 0 < val <= 55:
+                    return (val, 55)
+    except Exception:
+        pass
+    return (18, 55)
 
 
 def _parse_job_preference(text: str) -> Optional[str]:
@@ -485,7 +523,8 @@ async def intake_message(
     if step == "name":
         update["full_name"] = text.strip()[:100]
     elif step == "age":
-        val = _parse_age(text)
+        age_range = await _get_effective_age_range()
+        val = _parse_age(text, age_range)
         if val:
             update["age"] = val
         else:
@@ -494,7 +533,7 @@ async def intake_message(
                     candidate_id, step, raw_message, source, message_id,
                 )
             return {
-                "reply": "সাধারণ বয়সসীমা ১৮–৫৫ বছর। দয়া করে সঠিক বয়স লিখুন (যেমন: 25)",
+                "reply": f"সাধারণ বয়সসীমা {_bn_digits(age_range[0])}–{_bn_digits(age_range[1])} বছর। দয়া করে সঠিক বয়স লিখুন (যেমন: 25)",
                 "action": "collecting",
                 "session_id": session["id"],
             }

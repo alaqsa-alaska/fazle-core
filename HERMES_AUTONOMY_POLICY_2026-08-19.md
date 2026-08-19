@@ -38,7 +38,19 @@ Hermes may call these freely, any time, without asking first.
 `get_system_health_report`, `get_whatsapp_ops_report`,
 `list_available_tasks`, `list_my_capabilities`, `list_roster`,
 `lookup_decisions`, `lookup_kernel_events`, `opencode_check`,
-`resolve_identity` — **54 tools.**
+`resolve_identity`, `search_employees`, `suggest_employees`,
+`get_directives` — **57 tools.**
+
+*(2026-08-19, later same day: `search_employees`/`suggest_employees` added,
+closing the exact `get_contacts`/`get_employees` no-search gap the
+agentic-behavior audit found live; `get_directives` added alongside Item 3's
+`remember_business_rule` below. All three appended here rather than
+renumbering — see that audit doc and
+`HERMES_MESSAGE_CONTEXT_REPLY_EXECUTION_GAP_AUDIT_2026-08-19.md` for
+context. This doc's own "80, zero unclassified" tally from earlier the same
+day was itself stale within hours — treat any tool-count claim as a
+point-in-time snapshot, verify against the live registry before relying on
+it.)*
 
 ## Tier B — Autonomous draft/preparation (no real mutation)
 
@@ -59,7 +71,18 @@ this tier is a usage policy on top of them, not a substitute.
 `update_attendance`, `delete_attendance`, `update_employee`,
 `approve_employee_edit_request`, `reject_employee_edit_request`,
 `approve_roster_change_request`, `reject_roster_change_request`,
-`create_roster_entry`, `recalculate_roster_entry` — **12 tools.**
+`create_roster_entry`, `recalculate_roster_entry`,
+`remember_business_rule`, `revoke_directive` — **14 tools.**
+
+*(2026-08-19, later same day: `remember_business_rule`/`revoke_directive`
+added — Item 3 of the Hermes->Earth rename+autonomy pass. Unlike every
+other admin_directives write path, this one is triggered by Earth's own
+recognition of the admin's explicit instruction rather than a literal typed
+command match — see `core/.claude/CLAUDE.md`'s updated admin_directives
+bullet for the narrow exception this represents. Still Tier C: same
+RUN+confirm+superadmin RBAC as every other entry in this tier, and "explicit,
+current instruction naming the exact rule" is the bar, not general
+inference.)*
 
 *(`update_employee`'s own backend route already forbids touching cash
 transactions or hard-deleting the employee — its Tier C placement relies
@@ -98,10 +121,12 @@ job (`daily_payroll_compute`, `payment_reconciliation`) as Tier D and
 everything else as Tier B-ish (informational/maintenance), per-call, not
 as one fixed bucket.
 
-**Tally: 54 (A) + 2 (B) + 12 (C) + 11 (D) + 1 (`run_scheduled_task`,
-internally tiered) = 80 — matches the live registry exactly, verified
-programmatically against the running process's tool list, zero
-unclassified, zero duplicates.**
+**Tally (updated 2026-08-19, later same day): 57 (A) + 2 (B) + 14 (C) +
+11 (D) + 1 (`run_scheduled_task`, internally tiered) = 85 — matches the
+live registry as of this update; the original same-day "80" tally above
+was verified programmatically at the time but is a point-in-time snapshot,
+not a static fact — re-verify against the live registry before trusting
+any tool-count claim in this doc.**
 
 ---
 
