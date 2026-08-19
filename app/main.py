@@ -1168,7 +1168,7 @@ async def whatsapp_messages_lookup(
             SELECT message_id, sender_number, canonical_phone, platform, direction,
                    message_type, is_processed, status, received_at, processed_at,
                    identity_role, identity_confidence, intent_detected,
-                   classification, workflow_triggered
+                   classification, workflow_triggered, message_body, extracted_text
               FROM wbom_whatsapp_messages
               {where_clause}
              ORDER BY received_at DESC
@@ -1203,11 +1203,106 @@ async def api_resolve_identity(phone: str, text: str = ""):
 
 @app.get("/api/intent/classify", dependencies=[Depends(require_api_key)])
 async def api_classify_intent(text: str):
-    """Classify a message's intent via the same deterministic
-    keyword/regex/fuzzy classifier message_router uses. No DB access, no
-    LLM call."""
+    """Classify a message's intent via the deterministic keyword/regex/fuzzy
+    classifier. Note: real message_router routing is LLM-first
+    (ai.classify_intent_llm()) and only falls back to this deterministic
+    classifier when the LLM returns "unknown" -- so this is an
+    approximation of live routing, not an exact replay of it. For the
+    actual intent+method a specific past message was routed with, use
+    /api/hermes/decisions/lookup instead. No DB access, no LLM call here."""
     from modules.intent import classify
     return {"intent": classify(text)}
+
+
+# ── 2026-08-19 — hermes_kernel decision/event log, exposed for Hermes ────────
+# Closes a second capability-exposure gap found in the same-day follow-up
+# audit to HERMES_IDENTITY_ROLE_INTENT_CONTENT_CAPABILITY_AUDIT_2026-08-18.md:
+# modules/hermes_kernel has been writing one hermes_decision_audit_log row
+# per real process_message() turn since HERMES_DECISION_AUDIT_ENABLED was
+# flipped true in .env (2026-08-17) -- chosen_action (reply/draft/
+# clarification/escalation/no_action, i.e. the actual reply-permission
+# decision) and explanation (a free-text workflow/domain tag) included --
+# but no route or MCP tool ever read it. Thin, read-only pass-throughs,
+# same pattern as /api/identity/resolve above -- no new logic, both tables
+# already exist (migration 060), no schema change.
+@app.get("/api/hermes/decisions/lookup", dependencies=[Depends(require_api_key)])
+async def api_lookup_decisions(
+    phone: str = "", trace_id: str = "", chosen_action: str = "", limit: int = 20
+):
+    """Look up past routing decisions from hermes_decision_audit_log -- the
+    same shadow record written for every real message turn. chosen_action
+    tells you whether a message was auto-replied, held as a draft for admin
+    approval, escalated, or ignored; explanation is a free-text tag for
+    which workflow handled it (e.g. "escort-slip-review",
+    "employee-payroll"); intent_method tells you whether intent came from
+    the LLM-first classifier or its deterministic fallback."""
+    try:
+        limit = min(max(int(limit or 20), 1), 100)
+        conditions = []
+        params = []
+
+        if phone:
+            params.append(phone)
+            conditions.append(f"sender_phone = ${len(params)}")
+
+        if trace_id:
+            params.append(trace_id)
+            conditions.append(f"trace_id = ${len(params)}::uuid")
+
+        if chosen_action:
+            params.append(chosen_action)
+            conditions.append(f"chosen_action = ${len(params)}")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        rows = await fetch_all(
+            f"""
+            SELECT trace_id, timestamp, sender_phone, identity_role,
+                   identity_confidence, intent, intent_method,
+                   chosen_action, explanation, escalation_reason,
+                   provider_used, source, raw_input_text
+              FROM hermes_decision_audit_log
+              {where_clause}
+             ORDER BY timestamp DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        return {"filters_applied": bool(conditions), "count": len(rows), "decisions": [dict(r) for r in rows], "ts": time.time()}
+    except Exception as exc:
+        log.warning("[hermes_kernel] /api/hermes/decisions/lookup error: %s", exc)
+        return {"count": 0, "decisions": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+@app.get("/api/hermes/kernel/events", dependencies=[Depends(require_api_key)])
+async def api_lookup_kernel_events(trace_id: str, limit: int = 50):
+    """Look up the standard kernel event trail (EVT-001 message.received,
+    etc.) for one decision's trace_id, from hermes_event_log."""
+    try:
+        limit = min(max(int(limit or 50), 1), 200)
+        rows = await fetch_all(
+            """
+            SELECT event_id, trace_id, event_name, timestamp, payload
+              FROM hermes_event_log
+             WHERE trace_id = $1::uuid
+             ORDER BY timestamp ASC
+             LIMIT $2
+            """,
+            trace_id, limit,
+        )
+        events = []
+        for r in rows:
+            e = dict(r)
+            if isinstance(e.get("payload"), str):
+                try:
+                    e["payload"] = json.loads(e["payload"])
+                except (TypeError, ValueError):
+                    pass
+            events.append(e)
+        return {"count": len(events), "events": events, "ts": time.time()}
+    except Exception as exc:
+        log.warning("[hermes_kernel] /api/hermes/kernel/events error: %s", exc)
+        return {"count": 0, "events": [], "error": str(exc)[:200], "ts": time.time()}
 
 
 # ── Phase 13D — Bridge orchestration diagnostics ──────────────────────────────
@@ -3196,17 +3291,37 @@ async def revoke_admin_directive(directive_id: int, key: str = Depends(require_a
 # was actually sent, so a mistake is traceable after the fact even though
 # there's no separate approval-click step (deliberate design choice -- see
 # project_hermes_unification_20260810.md, Capability Expansion Plan, Level 2).
+_VALID_SOURCE_BRIDGES = {"bridge1", "bridge2", "bridge3", "meta", "meta_whatsapp", "messenger", "facebook_comment"}
+
+
 @app.post("/admin/send-whatsapp", dependencies=[Depends(require_command("send_whatsapp_message"))])
 async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_key)):
     from modules import outbound, rbac
 
     recipient = (payload or {}).get("recipient", "").strip()
     body = (payload or {}).get("body", "").strip()
-    source_bridge = (payload or {}).get("source_bridge") or "bridge2"
+    # 2026-08-19 fix (HERMES_MESSAGE_CONTEXT_REPLY_EXECUTION_GAP_AUDIT_2026-08-19.md):
+    # this used to default to "bridge2" here (`source_bridge or "bridge2"`) when
+    # omitted -- the exact silent-default risk fazle-mcp/send_whatsapp_tools.py's
+    # own docstring already documents and rejects client-side (2026-08-15), but
+    # this HTTP route itself never enforced it, so any other caller of this
+    # endpoint (a script, a future tool, a manual call with the API key) could
+    # still silently send via the wrong bridge. Fail closed instead: require an
+    # explicit, known-valid source_bridge. _VALID_SOURCE_BRIDGES mirrors
+    # send_whatsapp_tools.py's _VALID_SOURCE_BRIDGES exactly (deliberately
+    # duplicated across the two repos, matching this codebase's existing
+    # convention -- see that file's own docstring for why) -- keep both in sync
+    # if either changes.
+    source_bridge = (payload or {}).get("source_bridge") or ""
     admin_instruction = (payload or {}).get("admin_instruction", "")
 
     if not recipient or not body:
         raise HTTPException(status_code=400, detail="recipient and body are required")
+    if not source_bridge or not source_bridge.strip():
+        raise HTTPException(status_code=400, detail="source_bridge is required -- specify the bridge this reply belongs to (e.g. \"bridge1\", \"bridge2\", \"bridge3\", \"meta\")")
+    source_bridge = source_bridge.strip()
+    if source_bridge not in _VALID_SOURCE_BRIDGES:
+        raise HTTPException(status_code=400, detail=f"unknown source_bridge {source_bridge!r}; expected one of {sorted(_VALID_SOURCE_BRIDGES)}")
 
     actor = await _rbac_actor_from_key(key)
     queue_id = await outbound.enqueue(

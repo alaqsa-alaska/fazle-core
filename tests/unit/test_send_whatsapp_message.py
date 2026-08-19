@@ -7,6 +7,15 @@ Expansion Level 2). Covers:
     pairing admin_instruction with the exact recipient+body sent
   - internal key (owner) bypasses the RBAC lookup entirely, same as every
     other require_command route
+
+2026-08-19 (HERMES_MESSAGE_CONTEXT_REPLY_EXECUTION_GAP_AUDIT_2026-08-19.md):
+this route used to silently default `source_bridge` to "bridge2" when
+omitted -- the exact silent-default risk fazle-mcp/send_whatsapp_tools.py's
+own docstring already documented and rejected client-side (2026-08-15), but
+this HTTP route itself never enforced it until now. `test_default_source_
+bridge_is_bridge2` below asserted that old, now-removed behavior and has
+been replaced with `test_missing_source_bridge_rejected` /
+`test_empty_source_bridge_rejected` / `test_unknown_source_bridge_rejected`.
 """
 import pytest
 from unittest.mock import AsyncMock
@@ -109,7 +118,7 @@ async def test_owner_internal_key_sends_and_audits_with_instruction_pairing(monk
     assert "Amar number e EKTA test message" in kwargs["result_summary"]
 
 
-async def test_default_source_bridge_is_bridge2(monkeypatch):
+async def test_missing_source_bridge_rejected(monkeypatch):
     from httpx import ASGITransport, AsyncClient
     from app.main import app
     from app.config import get_settings
@@ -126,6 +135,73 @@ async def test_default_source_bridge_is_bridge2(monkeypatch):
             headers={"X-Internal-Key": get_settings().internal_api_key},
         )
 
+    # No more silent "bridge2" default -- fail closed instead.
+    assert response.status_code == 400
+    assert "source_bridge" in response.json()["detail"]
+    mock_enqueue.assert_not_called()
+
+
+async def test_empty_source_bridge_rejected(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+    from app.config import get_settings
+    from modules import outbound, rbac
+
+    mock_enqueue = AsyncMock(return_value=1000)
+    monkeypatch.setattr(outbound, "enqueue", mock_enqueue)
+    monkeypatch.setattr(rbac, "record_audit", AsyncMock())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/admin/send-whatsapp",
+            json={"recipient": "8801999999998", "body": "hi", "source_bridge": "  "},
+            headers={"X-Internal-Key": get_settings().internal_api_key},
+        )
+
+    assert response.status_code == 400
+    assert "source_bridge" in response.json()["detail"]
+    mock_enqueue.assert_not_called()
+
+
+async def test_unknown_source_bridge_rejected(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+    from app.config import get_settings
+    from modules import outbound, rbac
+
+    mock_enqueue = AsyncMock(return_value=1000)
+    monkeypatch.setattr(outbound, "enqueue", mock_enqueue)
+    monkeypatch.setattr(rbac, "record_audit", AsyncMock())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/admin/send-whatsapp",
+            json={"recipient": "8801999999998", "body": "hi", "source_bridge": "carrier_pigeon"},
+            headers={"X-Internal-Key": get_settings().internal_api_key},
+        )
+
+    assert response.status_code == 400
+    assert "source_bridge" in response.json()["detail"]
+    mock_enqueue.assert_not_called()
+
+
+async def test_valid_explicit_source_bridge_reaches_enqueue(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+    from app.config import get_settings
+    from modules import outbound, rbac
+
+    mock_enqueue = AsyncMock(return_value=1001)
+    monkeypatch.setattr(outbound, "enqueue", mock_enqueue)
+    monkeypatch.setattr(rbac, "record_audit", AsyncMock())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/admin/send-whatsapp",
+            json={"recipient": "8801999999998", "body": "hi", "source_bridge": "bridge1"},
+            headers={"X-Internal-Key": get_settings().internal_api_key},
+        )
+
     assert response.status_code == 200
     _, kwargs = mock_enqueue.await_args
-    assert kwargs["source_bridge"] == "bridge2"
+    assert kwargs["source_bridge"] == "bridge1"

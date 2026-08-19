@@ -9,6 +9,10 @@ This test asserts the query now selects the real columns and that the route
 returns them in the response, without needing a real Postgres connection
 (fetch_all is monkeypatched, following the same httpx.AsyncClient +
 ASGITransport pattern as tests/unit/test_admin_directives_routes.py).
+
+2026-08-19 follow-up: the SELECT still omitted `message_body`/`extracted_text`
+-- Hermes could see that a message was processed but never what it said or
+what was replied. Widened again, same additive pattern.
 """
 from __future__ import annotations
 
@@ -54,6 +58,8 @@ class TestWhatsappMessagesLookup:
             "intent_detected": "salary_query",
             "classification": "unclassified",
             "workflow_triggered": "payroll",
+            "message_body": "amar betoner koto",
+            "extracted_text": None,
         }
         mock_fetch_all = AsyncMock(return_value=[fake_row])
         with patch("app.main.fetch_all", new=mock_fetch_all):
@@ -76,6 +82,9 @@ class TestWhatsappMessagesLookup:
         # Existing fields must still be present -- purely additive change.
         assert returned["classification"] == "unclassified"
         assert returned["workflow_triggered"] == "payroll"
+        # 2026-08-19: the content fields -- the whole point of this fix.
+        assert returned["message_body"] == "amar betoner koto"
+        assert returned["extracted_text"] is None
 
         # Assert the actual SQL sent to fetch_all requests the new columns --
         # guards against a future edit reverting the SELECT list silently.
@@ -83,3 +92,5 @@ class TestWhatsappMessagesLookup:
         assert "identity_role" in query_arg
         assert "identity_confidence" in query_arg
         assert "intent_detected" in query_arg
+        assert "message_body" in query_arg
+        assert "extracted_text" in query_arg
