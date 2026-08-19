@@ -2722,7 +2722,7 @@ async def api_scheduler_status():
     return await fazle_scheduler.get_status()
 
 
-@app.post("/scheduler/run/{job_name}", dependencies=[Depends(require_api_key)])
+@app.post("/scheduler/run/{job_name}", dependencies=[Depends(require_command("schedule_run"))])
 async def api_scheduler_run(job_name: str):
     if job_name not in fazle_scheduler.list_job_names():
         raise HTTPException(status_code=404,
