@@ -572,8 +572,60 @@ async def generate_rag_answer(
     return await ollama.generate_rag_answer(question=question, context=context, model=model)
 
 
+
+# HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_AUDIT_2026-08-19.md
+# Incident A: check_health() used to await 4 provider checks sequentially,
+# with no per-check timeout of its own. omniroute_provider.check_health()
+# does a real chat-completion round-trip with its own internal 10s
+# asyncio.wait_for -- already longer than ai_console_monitor.sh's 5s curl
+# --max-time on /chat/models, so a slow/hung OmniRoute alone (confirmed
+# live: >10s, no response) blew the monitor's budget every time,
+# regardless of the other 3 providers being healthy. Fixed by running all
+# 4 concurrently (asyncio.gather) AND capping each individual check at
+# CHECK_TIMEOUT_S -- well under the monitor's 5s window -- so one slow
+# provider can never make the whole function (and therefore /chat/models)
+# exceed it. Per-provider status/error reporting is preserved exactly;
+# only the execution strategy changed.
+CHECK_TIMEOUT_S = 3.0
+
+
+async def _bounded_check(coro) -> dict:
+    """Run one provider's check_health() coroutine, capped at
+    CHECK_TIMEOUT_S. Never raises -- always returns a status dict."""
+    try:
+        return await asyncio.wait_for(coro, timeout=CHECK_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return {"status": "timeout", "error": f"exceeded {CHECK_TIMEOUT_S}s"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def _check_omniroute() -> dict:
+    from app import omniroute_provider
+    return await omniroute_provider.check_health()
+
+
+async def _check_github_models() -> dict:
+    from app import github_models
+    return await github_models.check_health()
+
+
+async def _check_groq(settings) -> dict:
+    if not settings.groq_api_key:
+        return {"status": "disabled", "reason": "GROQ_API_KEY not set"}
+    from app import groq_provider
+    return await groq_provider.check_health()
+
+
+async def _check_ollama() -> dict:
+    from app import ollama
+    return await ollama.check_ollama_health()
+
+
 async def check_health() -> dict:
-    """Health check for all providers."""
+    """Health check for all providers. Runs all 4 provider probes
+    concurrently, each individually bounded at CHECK_TIMEOUT_S -- see the
+    module-level comment above for why."""
     settings = get_settings()
     result = {
         "primary_provider": settings.primary_ai_provider,
@@ -581,27 +633,14 @@ async def check_health() -> dict:
         "groq_configured": bool(settings.groq_api_key),
         "omniroute_configured": bool(settings.omniroute_api_key),
     }
-    try:
-        from app import omniroute_provider
-        result["omniroute"] = await omniroute_provider.check_health()
-    except Exception as e:
-        result["omniroute"] = {"status": "error", "error": str(e)}
-    try:
-        from app import github_models
-        result["github_models"] = await github_models.check_health()
-    except Exception as e:
-        result["github_models"] = {"status": "error", "error": str(e)}
-    if settings.groq_api_key:
-        try:
-            from app import groq_provider
-            result["groq"] = await groq_provider.check_health()
-        except Exception as e:
-            result["groq"] = {"status": "error", "error": str(e)}
-    else:
-        result["groq"] = {"status": "disabled", "reason": "GROQ_API_KEY not set"}
-    try:
-        from app import ollama
-        result["ollama"] = await ollama.check_ollama_health()
-    except Exception as e:
-        result["ollama"] = {"status": "error", "error": str(e)}
+    omniroute, github_models_r, groq, ollama_r = await asyncio.gather(
+        _bounded_check(_check_omniroute()),
+        _bounded_check(_check_github_models()),
+        _bounded_check(_check_groq(settings)),
+        _bounded_check(_check_ollama()),
+    )
+    result["omniroute"] = omniroute
+    result["github_models"] = github_models_r
+    result["groq"] = groq
+    result["ollama"] = ollama_r
     return result

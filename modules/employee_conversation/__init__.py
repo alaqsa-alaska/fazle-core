@@ -344,10 +344,22 @@ async def kb_inactive_employee_reply() -> str:
 # ── Conversation Session (stored in fazle_draft_replies) ──────────────────────
 
 async def get_conversation_session(phone: str) -> Optional[dict]:
-    """Return the active employee-conversation session for this phone, or None."""
+    """Return the active employee-conversation session for this phone, or
+    None if there isn't one or it's gone stale.
+
+    Staleness (2026-08-19, HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_
+    AUDIT_2026-08-19.md Incident B): a session left open (never reaching
+    STEP_DONE/rejected/cancelled) used to be resumed indefinitely,
+    regardless of age -- a session opened 25+ hours earlier silently
+    absorbed a later, completely unrelated message as if it were an
+    answer to the original question. Reuses this module's own existing
+    DRAFT_TTL_HOURS (already the 24h policy for the payment draft this
+    conversation produces, see :562) rather than inventing a second,
+    conflicting threshold -- matches the same TTL-expiry pattern already
+    used by modules.recruitment_flow.get_active_session()."""
     try:
         row = await fetch_one(
-            """SELECT id, status, reply_text, source
+            """SELECT id, status, reply_text, source, created_at
                FROM fazle_draft_replies
                WHERE recipient = $1
                  AND intent = 'employee_conversation'
@@ -355,17 +367,38 @@ async def get_conversation_session(phone: str) -> Optional[dict]:
                ORDER BY created_at DESC LIMIT 1""",
             phone, STEP_DONE,
         )
-        if row:
-            try:
-                ctx = json.loads(row["reply_text"] or "{}")
-            except (json.JSONDecodeError, TypeError):
-                ctx = {}
-            return {
-                "session_id": row["id"],
-                "step": row["status"],
-                "context": ctx,
-                "source": row.get("source") or "",
-            }
+        if not row:
+            return None
+
+        created_at = row.get("created_at")
+        if created_at:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - created_at > timedelta(hours=DRAFT_TTL_HOURS):
+                try:
+                    await execute(
+                        """UPDATE fazle_draft_replies SET status='cancelled'
+                           WHERE id = $1 AND status NOT IN ($2, 'rejected', 'cancelled')""",
+                        row["id"], STEP_DONE,
+                    )
+                except Exception as e:
+                    log.warning("[ec] stale session expiry error: %s", e)
+                log.info(
+                    "[ec] expired stale session id=%s phone=%s created_at=%s",
+                    row["id"], phone, created_at,
+                )
+                return None
+
+        try:
+            ctx = json.loads(row["reply_text"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            ctx = {}
+        return {
+            "session_id": row["id"],
+            "step": row["status"],
+            "context": ctx,
+            "source": row.get("source") or "",
+        }
     except Exception as e:
         log.debug("[ec] session lookup error: %s", e)
     return None

@@ -4,7 +4,8 @@
 #          2) /chat/models → ai_console_enabled=true
 #          3) Response latency
 #          4) Read-only policy guard (no mutation verbs in chat log)
-# Alerts:  WhatsApp via Bridge2 on CRITICAL (once per hour max)
+# Alerts:  WhatsApp via Fazle-Core's own canonical outbound pipeline on
+#          CRITICAL (once per hour max) -- see send_wa_alert() below.
 # Log:     /home/azim/core/logs/ai-console-monitor.log
 
 set -uo pipefail
@@ -17,7 +18,8 @@ ALERT_STAMP="/tmp/ai-console-alert.stamp"
 ALERT_COOLDOWN=3600   # seconds between WhatsApp alerts
 APP_PORT=8200
 BRIDGE_URL="http://localhost:8081"
-OWNER_JID="8801880446111@s.whatsapp.net"
+OWNER_PHONE="8801880446111"
+OWNER_SOURCE_BRIDGE="bridge1"   # confirmed live delivery bridge, 2026-08-16 investigation
 WARN_LATENCY_MS=3000
 CRIT_LATENCY_MS=8000
 
@@ -35,6 +37,25 @@ CRITS=()
 
 log() { echo "[$TS] $*" >> "$LOG_FILE"; }
 
+# HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_AUDIT_2026-08-19.md
+# Incident A / Priority 4: this alert used to POST directly to the
+# whatsapp-bridge process (${BRIDGE_URL}/api/send), completely bypassing
+# fazle-core's own outbound queue/audit log -- making the alert invisible
+# to every Hermes read tool (get_recent_messages, lookup_decisions,
+# audit_lookup_whatsapp_messages, ...). Fixed by routing through
+# fazle-core's own canonical POST /admin/send-whatsapp (queued, audited,
+# source_bridge-validated -- the same endpoint send_whatsapp_tools.py
+# uses) as the PRIMARY path, so the alert becomes traceable like any
+# other outbound message.
+#
+# Deliberately kept the OLD direct-bridge POST as a last-resort FALLBACK,
+# not a second parallel pipeline: this script's entire purpose is to
+# detect fazle-core itself being unhealthy, and /admin/send-whatsapp is
+# itself part of fazle-core -- if fazle-core is down badly enough (not
+# just OmniRoute being slow, the actually-observed case), the canonical
+# path would fail too, and silently losing the alert in exactly that
+# worst-case scenario would be worse than the traceability gap this fix
+# closes. The fallback only fires if the canonical call itself fails.
 send_wa_alert() {
     local msg="$1"
     # Rate-limit: skip if sent within cooldown window
@@ -47,15 +68,52 @@ send_wa_alert() {
             return
         fi
     fi
-    local json_msg
+
+    # 2026-08-19 (HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_AUDIT_2026-08-19.md,
+    # Phase 0): deterministic idempotency key derived from the cooldown
+    # window -- if the canonical send below actually succeeds server-side
+    # but this script never sees the ack (network blip on the response
+    # leg) and falls through to the direct-bridge fallback, this key stays
+    # the same for the whole cooldown window, so a retry of the canonical
+    # path within that window would dedup via enqueue()'s own ON CONFLICT
+    # (idempotency_key) DO NOTHING -- not relevant to the fallback path
+    # itself (that's a different, non-deduped send API), but prevents two
+    # canonical sends for what's really one incident.
+    local idem_key
+    idem_key="ai-console-alert:$(( $(date +%s) / ALERT_COOLDOWN ))"
+
+    local json_body http_code
+    if [[ -n "$INTERNAL_API_KEY" ]]; then
+        json_body=$(python3 -c 'import json,sys; print(json.dumps({
+            "recipient": sys.argv[1], "body": sys.argv[2],
+            "source_bridge": sys.argv[3],
+            "admin_instruction": "automated: ai_console_monitor.sh health check",
+            "idempotency_key": sys.argv[4],
+        }))' "$OWNER_PHONE" "$msg" "$OWNER_SOURCE_BRIDGE" "$idem_key")
+        http_code=$(curl -sf --max-time 5 -o /dev/null -w "%{http_code}" \
+            -X POST "http://127.0.0.1:${APP_PORT}/admin/send-whatsapp" \
+            -H "X-Internal-Key: ${INTERNAL_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$json_body" 2>/dev/null || echo "000")
+    else
+        http_code="000"
+    fi
+
+    if [[ "$http_code" == "200" ]]; then
+        date +%s > "$ALERT_STAMP"
+        log "[ALERT_SENT] via=canonical http=${http_code} | ${msg:0:80}"
+        return
+    fi
+
+    log "[ALERT_CANONICAL_FAILED] http=${http_code} -- falling back to direct bridge POST"
+    local json_msg fallback_code
     json_msg=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' <<< "$msg")
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    fallback_code=$(curl -s -o /dev/null -w "%{http_code}" \
         -X POST "${BRIDGE_URL}/api/send" \
         -H "Content-Type: application/json" \
-        -d "{\"recipient\": \"${OWNER_JID}\", \"message\": ${json_msg}}" 2>/dev/null || echo "000")
+        -d "{\"recipient\": \"${OWNER_PHONE}@s.whatsapp.net\", \"message\": ${json_msg}}" 2>/dev/null || echo "000")
     date +%s > "$ALERT_STAMP"
-    log "[ALERT_SENT] bridge_http=${http_code} | ${msg:0:80}"
+    log "[ALERT_SENT] via=fallback_bridge bridge_http=${fallback_code} | ${msg:0:80}"
 }
 
 mkdir -p "$(dirname "$LOG_FILE")"

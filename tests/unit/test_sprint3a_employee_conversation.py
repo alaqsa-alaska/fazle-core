@@ -695,6 +695,144 @@ class TestDraftValidation:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stale-session expiry (2026-08-19, HERMES_SYSTEM_MESSAGE_ROOTCAUSE_
+# AGENTIC_BEHAVIOR_AUDIT_2026-08-19.md Incident B): a session left open at
+# STEP_AMOUNT for longer than DRAFT_TTL_HOURS must not hijack a later,
+# unrelated message. Real production case: a session opened 2026-08-18
+# 06:28 UTC (25+ hours old) absorbed an unrelated "Ashbo, ektu pore" the
+# next day and replied with the amount-clarification text instead of
+# nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestStaleSessionExpiry:
+    async def test_stale_step_amount_session_does_not_hijack_unrelated_message(
+        self, test_db_pool, seed_employee
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.employee_conversation import (
+            get_conversation_session,
+            handle_employee_payment_request,
+        )
+
+        phone = seed_employee["employee_mobile"]
+        emp_id = seed_employee["employee_id"]
+
+        # Start a conversation -- leaves the session at STEP_AMOUNT waiting
+        # for a number.
+        await handle_employee_payment_request(phone, "অগ্রিম চাই", "bridge1", emp_id)
+        session = await get_conversation_session(phone)
+        assert session is not None
+        assert session["step"] == "ec_amount"
+        session_id = session["session_id"]
+
+        # Backdate it past DRAFT_TTL_HOURS (24h) -- simulates the real
+        # 25+ hour old stale session from the incident.
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE fazle_draft_replies SET created_at = NOW() - INTERVAL '25 hours' WHERE id = $1",
+                session_id,
+            )
+
+        # An unrelated later message must NOT be absorbed as a (failed)
+        # amount answer -- the real incident's exact reply text must never
+        # come back, and no reply at all should be generated (no session,
+        # no trigger match -- matches handle_employee_payment_request's own
+        # documented no-match contract).
+        reply, admin_note = await handle_employee_payment_request(
+            phone, "Ashbo, ektu pore", "bridge2", emp_id
+        )
+        assert "পরিমাণ বুঝতে পারিনি" not in reply
+        assert reply == ""
+        assert admin_note is None
+
+        # The stale session itself must be closed, not just ignored.
+        async with test_db_pool.acquire() as conn:
+            status = await conn.fetchval(
+                "SELECT status FROM fazle_draft_replies WHERE id = $1", session_id
+            )
+        assert status == "cancelled"
+
+    async def test_get_conversation_session_returns_none_for_stale_session(
+        self, test_db_pool, seed_employee
+    ):
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.employee_conversation import (
+            get_conversation_session,
+            handle_employee_payment_request,
+        )
+
+        phone = seed_employee["employee_mobile"]
+        emp_id = seed_employee["employee_id"]
+
+        await handle_employee_payment_request(phone, "অগ্রিম চাই", "bridge1", emp_id)
+        session = await get_conversation_session(phone)
+        session_id = session["session_id"]
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE fazle_draft_replies SET created_at = NOW() - INTERVAL '24 hours 1 minute' WHERE id = $1",
+                session_id,
+            )
+
+        assert await get_conversation_session(phone) is None
+
+    async def test_fresh_session_within_ttl_still_resumes_normally(
+        self, test_db_pool, seed_employee
+    ):
+        """Non-regression: a session well within DRAFT_TTL_HOURS must
+        continue to resume exactly as before -- the real amount-
+        clarification behavior for a genuinely unparseable amount answer
+        is untouched by this fix."""
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.employee_conversation import handle_employee_payment_request
+
+        phone = seed_employee["employee_mobile"]
+        emp_id = seed_employee["employee_id"]
+
+        await handle_employee_payment_request(phone, "অগ্রিম চাই", "bridge1", emp_id)
+        reply, admin_note = await handle_employee_payment_request(
+            phone, "not a number", "bridge1", emp_id
+        )
+        assert "পরিমাণ বুঝতে পারিনি" in reply
+        assert admin_note is None
+
+    async def test_session_just_under_ttl_still_active(
+        self, test_db_pool, seed_employee
+    ):
+        """Boundary check: a session created just under DRAFT_TTL_HOURS ago
+        must still be treated as active, not expired."""
+        import app.database as db_module
+        db_module._pool = test_db_pool
+
+        from modules.employee_conversation import (
+            get_conversation_session,
+            handle_employee_payment_request,
+        )
+
+        phone = seed_employee["employee_mobile"]
+        emp_id = seed_employee["employee_id"]
+
+        await handle_employee_payment_request(phone, "অগ্রিম চাই", "bridge1", emp_id)
+        session = await get_conversation_session(phone)
+        session_id = session["session_id"]
+
+        async with test_db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE fazle_draft_replies SET created_at = NOW() - INTERVAL '23 hours 59 minutes' WHERE id = $1",
+                session_id,
+            )
+
+        session = await get_conversation_session(phone)
+        assert session is not None
+        assert session["step"] == "ec_amount"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helper: run a full conversation to draft creation
 # ─────────────────────────────────────────────────────────────────────────────
 async def _run_full_conversation(

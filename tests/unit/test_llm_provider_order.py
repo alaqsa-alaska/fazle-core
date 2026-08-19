@@ -451,3 +451,108 @@ class TestLlmCheckHealthComposesGithubModelsStatus:
 
         assert result["omniroute_configured"] is False
         assert result["omniroute"]["status"] == "disabled"
+
+
+# ── 2026-08-19 HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_AUDIT --
+# Incident A: check_health() used to await omniroute/github_models/groq/
+# ollama sequentially with no per-check timeout. omniroute's own internal
+# health-check timeout (10s) already exceeds ai_console_monitor.sh's 5s
+# curl --max-time on /chat/models, so a slow/hung OmniRoute alone blew
+# the monitor's budget every time. Fixed: all 4 run concurrently
+# (asyncio.gather), each individually capped at CHECK_TIMEOUT_S (3.0s,
+# well under the monitor's 5s window).
+
+class TestCheckHealthConcurrencyAndTimeout:
+    @pytest.mark.asyncio
+    async def test_one_hanging_provider_does_not_block_the_others(self, monkeypatch):
+        """The real production failure mode: omniroute hangs past the
+        monitor's timeout while every other provider is healthy. The
+        whole check_health() call must still complete quickly, and every
+        OTHER provider's real status must still come through -- not get
+        swallowed because one provider was slow."""
+        import asyncio as _asyncio
+        import time as _time
+
+        _reset_settings(monkeypatch, omniroute=True)
+        from app import llm
+
+        async def _hangs_forever():
+            await _asyncio.sleep(3600)
+            return {"status": "ok"}  # pragma: no cover -- never reached
+
+        monkeypatch.setattr(llm, "_check_omniroute", lambda: _hangs_forever())
+
+        t0 = _time.monotonic()
+        result = await llm.check_health()
+        elapsed = _time.monotonic() - t0
+
+        assert elapsed < llm.CHECK_TIMEOUT_S + 1.0, (
+            f"check_health() took {elapsed:.1f}s -- a hanging provider must not "
+            f"block the whole function past CHECK_TIMEOUT_S"
+        )
+        assert result["omniroute"]["status"] == "timeout"
+        # ollama/groq/github_models still report their own real status --
+        # not swallowed by omniroute's hang.
+        assert result["github_models"]["status"] == "disabled"
+
+    @pytest.mark.asyncio
+    async def test_slow_provider_reports_timeout_status_not_error(self, monkeypatch):
+        import asyncio as _asyncio
+
+        _reset_settings(monkeypatch)
+        from app import llm
+
+        async def _slow():
+            await _asyncio.sleep(llm.CHECK_TIMEOUT_S + 5)
+            return {"status": "ok"}  # pragma: no cover
+
+        monkeypatch.setattr(llm, "_check_ollama", lambda: _slow())
+
+        result = await llm.check_health()
+        assert result["ollama"]["status"] == "timeout"
+        assert str(llm.CHECK_TIMEOUT_S) in result["ollama"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_all_four_checks_actually_run_concurrently(self, monkeypatch):
+        """Total latency must be close to the SLOWEST single check, not
+        the SUM of all four -- proves gather(), not sequential awaits."""
+        import asyncio as _asyncio
+        import time as _time
+
+        _reset_settings(monkeypatch, omniroute=True)
+        from app import llm
+
+        PER_CHECK_DELAY = 0.3
+
+        async def _delayed(status):
+            await _asyncio.sleep(PER_CHECK_DELAY)
+            return {"status": status}
+
+        monkeypatch.setattr(llm, "_check_omniroute", lambda: _delayed("ok"))
+        monkeypatch.setattr(llm, "_check_github_models", lambda: _delayed("ok"))
+        monkeypatch.setattr(llm, "_check_ollama", lambda: _delayed("ok"))
+
+        t0 = _time.monotonic()
+        await llm.check_health()
+        elapsed = _time.monotonic() - t0
+
+        # Sequential would be >= 3 * PER_CHECK_DELAY; concurrent should be
+        # close to 1 * PER_CHECK_DELAY plus overhead.
+        assert elapsed < PER_CHECK_DELAY * 2, (
+            f"check_health() took {elapsed:.2f}s for 3 checks each delayed "
+            f"{PER_CHECK_DELAY}s -- looks sequential, not concurrent"
+        )
+
+    @pytest.mark.asyncio
+    async def test_return_shape_unchanged(self, monkeypatch):
+        """Regression guard: callers (modules.ai_console.provider_registry,
+        app/main.py's /health/deep) only read these exact top-level keys."""
+        _reset_settings(monkeypatch)
+        from app import llm
+
+        result = await llm.check_health()
+        for key in (
+            "primary_provider", "ollama_reply_disabled", "groq_configured",
+            "omniroute_configured", "omniroute", "github_models", "groq", "ollama",
+        ):
+            assert key in result

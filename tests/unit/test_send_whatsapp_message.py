@@ -100,13 +100,14 @@ async def test_owner_internal_key_sends_and_audits_with_instruction_pairing(monk
 
     assert response.status_code == 200
     body = response.json()
-    assert body == {"ok": True, "queue_id": 999}
+    assert body == {"ok": True, "queue_id": 999, "deduped": False}
 
     mock_enqueue.assert_awaited_once_with(
         "8801999999999",
         "Amar number e EKTA test message",
         source_bridge="bridge2",
         purpose="hermes_admin_send",
+        idempotency_key=None,
     )
 
     mock_audit.assert_awaited_once()
@@ -205,3 +206,89 @@ async def test_valid_explicit_source_bridge_reaches_enqueue(monkeypatch):
     assert response.status_code == 200
     _, kwargs = mock_enqueue.await_args
     assert kwargs["source_bridge"] == "bridge1"
+
+
+async def test_idempotency_key_forwarded_when_present(monkeypatch):
+    """2026-08-19 (HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_AUDIT_
+    2026-08-19.md, Phase 0): idempotency_key must reach outbound.enqueue()
+    exactly as given -- enqueue() already has native ON CONFLICT dedup,
+    this route just needs to pass the value through."""
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+    from app.config import get_settings
+    from modules import outbound, rbac
+
+    mock_enqueue = AsyncMock(return_value=1002)
+    monkeypatch.setattr(outbound, "enqueue", mock_enqueue)
+    monkeypatch.setattr(rbac, "record_audit", AsyncMock())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/admin/send-whatsapp",
+            json={
+                "recipient": "8801999999998", "body": "hi",
+                "source_bridge": "bridge1",
+                "idempotency_key": "ai-console-alert:12345",
+            },
+            headers={"X-Internal-Key": get_settings().internal_api_key},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "queue_id": 1002, "deduped": False}
+    _, kwargs = mock_enqueue.await_args
+    assert kwargs["idempotency_key"] == "ai-console-alert:12345"
+
+
+async def test_idempotency_key_omitted_forwards_none(monkeypatch):
+    """No idempotency_key in the payload -- enqueue() must still be called
+    with idempotency_key=None (its own existing default), not an empty
+    string or omitted kwarg."""
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+    from app.config import get_settings
+    from modules import outbound, rbac
+
+    mock_enqueue = AsyncMock(return_value=1003)
+    monkeypatch.setattr(outbound, "enqueue", mock_enqueue)
+    monkeypatch.setattr(rbac, "record_audit", AsyncMock())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/admin/send-whatsapp",
+            json={"recipient": "8801999999998", "body": "hi", "source_bridge": "bridge1"},
+            headers={"X-Internal-Key": get_settings().internal_api_key},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["deduped"] is False
+    _, kwargs = mock_enqueue.await_args
+    assert kwargs["idempotency_key"] is None
+
+
+async def test_dedup_response_reports_deduped_true(monkeypatch):
+    """When enqueue() returns None because idempotency_key already matched
+    an existing row (a real dedup, not a failure), the route must report
+    ok=True with deduped=True -- not look like an error, and not like a
+    fresh send either."""
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+    from app.config import get_settings
+    from modules import outbound, rbac
+
+    mock_enqueue = AsyncMock(return_value=None)
+    monkeypatch.setattr(outbound, "enqueue", mock_enqueue)
+    monkeypatch.setattr(rbac, "record_audit", AsyncMock())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/admin/send-whatsapp",
+            json={
+                "recipient": "8801999999998", "body": "hi",
+                "source_bridge": "bridge1",
+                "idempotency_key": "ai-console-alert:12345",
+            },
+            headers={"X-Internal-Key": get_settings().internal_api_key},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "queue_id": None, "deduped": True}

@@ -3321,6 +3321,15 @@ async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_ke
     # if either changes.
     source_bridge = (payload or {}).get("source_bridge") or ""
     admin_instruction = (payload or {}).get("admin_instruction", "")
+    # 2026-08-19 (HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_AUDIT_2026-08-19.md,
+    # Phase 0): optional idempotency key, forwarded as-is to outbound.enqueue()
+    # -- that function already has native ON CONFLICT (idempotency_key) DO
+    # NOTHING dedup (modules/outbound/__init__.py), this route just never
+    # exposed the parameter. Closes a real gap found in
+    # ai_console_monitor.sh's new canonical-send path: without this, a lost
+    # response ack (server enqueued fine, client never saw the 200) would
+    # cause the caller's own fallback logic to send a genuine duplicate.
+    idempotency_key = (payload or {}).get("idempotency_key") or None
 
     if not recipient or not body:
         raise HTTPException(status_code=400, detail="recipient and body are required")
@@ -3336,7 +3345,9 @@ async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_ke
         body,
         source_bridge=source_bridge,
         purpose="hermes_admin_send",
+        idempotency_key=idempotency_key,
     )
+    deduped = idempotency_key is not None and queue_id is None
     await rbac.record_audit(
         channel="http",
         command="send_whatsapp_message",
@@ -3350,9 +3361,10 @@ async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_ke
             "body": body,
             "source_bridge": source_bridge,
             "queue_id": queue_id,
+            "deduped": deduped,
         }),
     )
-    return {"ok": True, "queue_id": queue_id}
+    return {"ok": True, "queue_id": queue_id, "deduped": deduped}
 
 
 # ── Batch 20 — Admin Dashboard aggregate endpoint ─────────────────────────────
