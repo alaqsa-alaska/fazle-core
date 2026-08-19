@@ -239,10 +239,17 @@ async def _upsert_ledger(
     period: str,
     amount: Decimal,
     category: TxnCategory,
+    conn: Optional[Any] = None,
 ) -> None:
     """
     Atomically increment the appropriate ledger bucket and recompute closing_balance.
     Uses INSERT ... ON CONFLICT DO UPDATE for atomicity.
+
+    conn: optional caller-supplied connection (e.g. from `async with
+    db_conn() as conn: async with conn.transaction(): ...`) so this write
+    can participate in a larger atomic sequence instead of always opening
+    its own implicit connection. Defaults to None, identical to prior
+    behavior, for every existing call site.
     """
     # Placeholder earnings model (until duty-day schema exists):
     # total_earned mirrors total_paid for non-advance transactions.
@@ -266,6 +273,7 @@ async def _upsert_ledger(
         """,
         employee_id,
         period,
+        conn=conn,
     )
     opening_balance = Decimal(str(opening_balance or 0))
 
@@ -298,6 +306,7 @@ async def _upsert_ledger(
         earned_delta,
         paid_delta,
         advance_delta,
+        conn=conn,
     )
 
     log.debug(

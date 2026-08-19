@@ -3106,7 +3106,7 @@ async def operator_approve(
         """
         SELECT id, review_status, detected_amount, detected_payout_phone,
                detected_employee_name, detected_payout_method, detected_txn_date,
-               raw_content
+               raw_content, promoted_txn_id
         FROM fpe_unmatched_messages WHERE id = $1
         """,
         pending_id,
@@ -3161,68 +3161,88 @@ async def operator_approve(
     if amount_override is not None and Decimal(amount_override) != Decimal(pending_txn["amount"]):
         raise HTTPException(400, "Amount override not allowed for operator approvals; reject and resubmit")
 
-    # Promote to final: update status and stamp approval
-    await execute(
-        """
-        UPDATE fpe_cash_transactions
-        SET transaction_status = 'final',
-            approval_status = 'approved',
-            approved_by = $2,
-            approved_at = NOW(),
-            review_status = 'reviewed',
-            updated_at = NOW()
-        WHERE id = $1
-        """,
-        pending_txn_id, reviewer,
-    )
-
-    # Update ledger now that the transaction is final
+    # C1B follow-up fix (2026-08-19, payment-mutation acceptance test):
+    # the four writes below are one financial event -- promote the
+    # existing pending transaction, update the ledger, record the
+    # approval audit row, and mark the pending submission promoted. They
+    # must succeed or fail together; previously each ran on its own
+    # implicit connection/autocommit, so a failure partway through (e.g.
+    # the after_state serialization bug fixed alongside this) left the
+    # transaction finalized and the ledger updated with no audit row and
+    # no promoted pending row -- a real, silently inconsistent state.
+    # Reuses the existing db_conn()+conn.transaction() pattern already
+    # used elsewhere in this module (see resolve_to_canonical() in
+    # normalization.py) rather than inventing a new abstraction.
     from .accounting import _upsert_ledger
-    await _upsert_ledger(
-        employee_id,
-        pending_txn["accounting_period"],
-        Decimal(pending_txn["amount"]),
-        TxnCategory(pending_txn["txn_category"]),
-    )
+    from app.database import db_conn as _db_conn
 
-    # Audit log for approval
-    await execute(
-        """
-        INSERT INTO fpe_accounting_audit_logs
-            (entity_type, entity_id, action, after_state, performed_by, reason)
-        VALUES ('transaction', $1, $2, $3, $4, $5)
-        """,
-        pending_txn_id,
-        "approve",
-        {
-            "txn_ref": pending_txn["txn_ref"],
-            "employee_id": employee_id,
-            "amount": str(pending_txn["amount"]),
-            "transaction_status": "final",
-            "approval_status": "approved",
-            "approved_by": reviewer,
-            "source": "operator",
-            "source_message_id": pending_txn["source_message_id"],
-        },
-        reviewer,
-        note,
-    )
+    async with _db_conn() as conn:
+        async with conn.transaction():
+            # Promote to final: update status and stamp approval
+            await execute(
+                """
+                UPDATE fpe_cash_transactions
+                SET transaction_status = 'final',
+                    approval_status = 'approved',
+                    approved_by = $2,
+                    approved_at = NOW(),
+                    review_status = 'reviewed',
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                pending_txn_id, reviewer,
+                conn=conn,
+            )
 
-    # Update pending row
-    await execute(
-        """
-        UPDATE fpe_unmatched_messages
-        SET review_status = 'promoted',
-            resolved_employee_id = $2,
-            promoted_txn_id = $3,
-            reviewer = $4,
-            review_note = COALESCE($5, review_note),
-            reviewed = TRUE,
-            reviewed_at = NOW()
-        WHERE id = $1
-        """,
-        pending_id, employee_id, pending_txn_id, reviewer, note,
-    )
+            # Update ledger now that the transaction is final
+            await _upsert_ledger(
+                employee_id,
+                pending_txn["accounting_period"],
+                Decimal(pending_txn["amount"]),
+                TxnCategory(pending_txn["txn_category"]),
+                conn=conn,
+            )
+
+            # Audit log for approval
+            await execute(
+                """
+                INSERT INTO fpe_accounting_audit_logs
+                    (entity_type, entity_id, action, after_state, performed_by, reason)
+                VALUES ('transaction', $1, $2, $3, $4, $5)
+                """,
+                pending_txn_id,
+                "approve",
+                json.dumps({
+                    "txn_ref": pending_txn["txn_ref"],
+                    "employee_id": employee_id,
+                    "amount": str(pending_txn["amount"]),
+                    "transaction_status": "final",
+                    "approval_status": "approved",
+                    "approved_by": reviewer,
+                    "source": "operator",
+                    "source_message_id": pending_txn["source_message_id"],
+                }),
+                reviewer,
+                note,
+                conn=conn,
+            )
+
+            # Update pending row
+            await execute(
+                """
+                UPDATE fpe_unmatched_messages
+                SET review_status = 'promoted',
+                    resolved_employee_id = $2,
+                    promoted_txn_id = $3,
+                    reviewer = $4,
+                    review_note = COALESCE($5, review_note),
+                    reviewed = TRUE,
+                    reviewed_at = NOW()
+                WHERE id = $1
+                """,
+                pending_id, employee_id, pending_txn_id, reviewer, note,
+                conn=conn,
+            )
 
     log.info(
         "[fpe.operator] approved pending=%d -> txn_id=%d ref=%s reviewer=%s",
