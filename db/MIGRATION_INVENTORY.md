@@ -105,6 +105,7 @@
 063_ai_read_cash_transactions.sql
 066_ai_read_employees_fpe_fallback.sql
 067_hermes_decision_source_message_id.sql
+068_hermes_task_execution_state.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -225,7 +226,28 @@ provenance gap that audit found. Verified post-apply: column type/
 nullability correct, `schema_migrations` shows exactly one row for this
 name, all 454 pre-existing rows unchanged and NULL as expected.
 
-**Next available number for new work: `068`.**
+**`068_hermes_task_execution_state.sql` (2026-08-19, Owner-directed follow-on
+to the BUILD/RUN/business-action capability audit, NOT YET APPLIED to
+production):** creates three new append-only-audit-style tables —
+`hermes_tasks` (persistent goal/task/subtask state with a self-referencing
+`parent_task_id`, an 8-value `status` CHECK constraint
+BACKLOG/READY/IN_PROGRESS/WAITING_APPROVAL/VERIFYING/DONE/FAILED/BLOCKED,
+`depends_on bigint[]`, `trace_id` linking by convention to
+`hermes_decision_audit_log.trace_id`), `hermes_task_events` (append-only
+per-task audit trail, before/after status + `performed_by` + JSONB detail —
+same shape as `fazle_draft_audit_log`), and `hermes_action_approvals` (the
+diff-level propose→approve→execute gate for file mutations/git commits/
+deploys/migrations/restarts/production writes/`opencode_dispatch` calls,
+mirroring `fazle_payment_drafts`' pending/approved/rejected/executed/expired
+state machine). Purely additive (`CREATE TABLE IF NOT EXISTS` x3, 6
+`CREATE INDEX IF NOT EXISTS`, no `ALTER`/`DROP` on any existing table);
+`hermes_tasks`/`hermes_task_events` have a real FK between them,
+`hermes_action_approvals.task_id` FKs to `hermes_tasks(id)` (nullable — an
+approval doesn't strictly require a parent task). To apply: standard
+`db/migrate.py` run (no destructive/cross-schema-touching statements, unlike
+063/066 which needed the manual direct-script path).
+
+**Next available number for new work: `069`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 

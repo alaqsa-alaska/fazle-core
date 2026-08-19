@@ -55,6 +55,7 @@ from modules.client_billing.routes import router as client_billing_router
 from modules.attendance.routes import router as attendance_router
 from modules.drafts.routes import router as drafts_router
 from modules.draft_approval.routes import router as draft_approval_router
+from modules.hermes_tasks.routes import router as hermes_tasks_router
 from modules.kb_upload.routes import router as kb_upload_router
 from modules.admin_employees import router as admin_employees_router
 from modules.admin_transactions import router as admin_transactions_router
@@ -487,6 +488,7 @@ app.include_router(admin_transactions_router) # Phase 19 — Admin Transaction C
 app.include_router(contact_roles_router)      # P2-4 — Contact roles CRUD
 app.include_router(drafts_router)             # /api/drafts/* — restored 2026-07-08, was imported but never mounted
 app.include_router(draft_approval_router)     # /api/payment-drafts/* — Task 2, 2026-08-19
+app.include_router(hermes_tasks_router)       # /api/tasks/*, /api/actions/* — persistent task-state + action approval, 2026-08-19
 app.include_router(social_auto_reply_router)  # /api/social/* — restored 2026-07-08, was imported but never mounted
 # NEW: preflight_guard routes - Phase 1 FG4
 app.include_router(preflight_guard_router)

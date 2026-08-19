@@ -82,6 +82,19 @@ COMMAND_ROLE: dict[str, str] = {
     # which would be too permissive for something that sends a real message
     # to a real person.
     "send_whatsapp_message": "superadmin",
+    # modules.hermes_tasks (2026-08-19, persistent Task/Execution State +
+    # diff-level Action Approval). task_write covers create/claim/status-
+    # update/propose_action/record_execution_result -- Earth's own planning
+    # bookkeeping, never itself an approved action being executed, same
+    # tier as the existing "operator" write commands above. task_approve
+    # is the one that actually authorizes a proposed file mutation/git
+    # commit/deploy/migration/restart/production write/opencode_dispatch
+    # call to proceed -- same superadmin tier as send_whatsapp_message,
+    # the closest existing precedent for "an AI-adjacent action with a
+    # real external effect."
+    "task_read":           "viewer",
+    "task_write":          "operator",
+    "task_approve":        "superadmin",
 }
 
 DEFAULT_REQUIRED_ROLE = "admin"  # unknown cmd defaults to admin
