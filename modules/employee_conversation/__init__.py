@@ -461,6 +461,49 @@ async def _close_session(session_id: int):
     )
 
 
+# ── Session-relevance guard (2026-08-19, P1a reliability-hardening pass) ───────
+# Real incident, live-traced: an open STEP_REASON session (created ~16:26
+# from an unrelated "টাকা লাগবে"/"আমাকে রিলিজ দিছে" exchange) was still open
+# 3 hours later when the same phone asked "Where is your office?" -- a
+# completely unrelated question. continue_employee_conversation() had no way
+# to tell "this doesn't parse but is trying to answer" apart from "this is
+# an unrelated message", so it re-fired the canned identity-failure
+# rejection regardless of what was actually asked. The existing 24h TTL fix
+# (see get_conversation_session(), committed same day) only bounds session
+# *age* -- it does nothing for a fresh, still-valid-by-age session that's
+# simply talking about something else.
+#
+# Two independent signals, either one is enough to release the session back
+# to message_router's normal routing instead of re-prompting: (1)
+# message_router's own already-computed intent (ai.classify_intent_llm(),
+# LLM-first per that module's Section 5) confidently placed this message in
+# a category structurally incompatible with a money/identity conversation,
+# or (2) the text is interrogative (contains a question word) -- a question
+# is never a valid answer to "what's your Employee ID/name". Deliberately
+# narrow and structural, not a new keyword-based topic classifier: it
+# reuses the intent value the caller already computed rather than deriving
+# a new one, and the question-marker check is a syntax signal, not a
+# semantic one.
+_INCOMPATIBLE_INTENTS = frozenset({
+    "recruitment", "escort_duty", "attendance", "greeting",
+    "client_order", "office_location", "complaint", "join",
+})
+_QUESTION_MARKERS = (
+    "where", "what", "why", "how", "when", "who",
+    "কোথায়", "কী", "কেন", "কীভাবে", "কবে", "কে",
+)
+
+
+def _looks_unrelated_to_flow(text: str, intent: Optional[str]) -> bool:
+    """True when a STEP_REASON/STEP_AMOUNT parse failure looks like an
+    unrelated message rather than a botched answer attempt -- see the
+    module-level comment above for the full rationale."""
+    if intent in _INCOMPATIBLE_INTENTS:
+        return True
+    lower = (text or "").lower()
+    return any(marker in lower for marker in _QUESTION_MARKERS)
+
+
 # ── Conversation context helpers ───────────────────────────────────────────────
 
 _AMOUNT_RE = re.compile(r"(\d[\d,]*\.?\d*)")
@@ -828,11 +871,22 @@ async def continue_employee_conversation(
     phone: str,
     text: str,
     source: str,
+    intent: Optional[str] = None,
 ) -> tuple[str, Optional[dict]]:
     """
     Continue an active employee conversation session.
 
-    Returns (reply_to_employee, admin_notification | None).
+    intent (2026-08-19, P1a): message_router's already-computed intent for
+    this message (ai.classify_intent_llm()'s result), passed through so
+    STEP_REASON/STEP_AMOUNT can tell an unrelated message apart from a
+    botched answer attempt -- see _looks_unrelated_to_flow(). Optional and
+    defaults to None (treated as ambiguous/could-be-an-answer) so existing
+    callers that don't pass it keep today's exact behavior.
+
+    Returns (reply_to_employee, admin_notification | None). An empty-string
+    reply means "release this session, not relevant" -- the caller
+    (handle_employee_payment_request) must let message_router fall through
+    to its next tier rather than treating an empty reply as success.
     admin_notification is set ONLY when a draft is created (STEP 8/9).
     """
     session = await get_conversation_session(phone)
@@ -862,6 +916,14 @@ async def continue_employee_conversation(
         )
 
         if not identity.get("employee_id"):
+            if _looks_unrelated_to_flow(text, intent):
+                log.info(
+                    "[ec] releasing STEP_REASON session id=%s phone=%s -- "
+                    "message looks unrelated (intent=%s), not an answer attempt",
+                    session_id, phone, intent,
+                )
+                await _close_session(session_id)
+                return "", None
             return (
                 "আপনার তথ্য পাওয়া যায়নি।\n"
                 "অনুগ্রহ করে সঠিক **Employee ID** বা **পূর্ণ নাম** লিখুন।",
@@ -891,6 +953,14 @@ async def continue_employee_conversation(
     if step == STEP_AMOUNT:
         amount = _extract_amount(text)
         if amount is None or amount <= 0:
+            if _looks_unrelated_to_flow(text, intent):
+                log.info(
+                    "[ec] releasing STEP_AMOUNT session id=%s phone=%s -- "
+                    "message looks unrelated (intent=%s), not an answer attempt",
+                    session_id, phone, intent,
+                )
+                await _close_session(session_id)
+                return "", None
             return (
                 "পরিমাণ বুঝতে পারিনি।\n"
                 "অনুগ্রহ করে সংখ্যায় লিখুন:\n"
@@ -1035,6 +1105,7 @@ async def handle_employee_payment_request(
     text: str,
     source: str,
     employee_id: Optional[int] = None,
+    intent: Optional[str] = None,
 ) -> tuple[str, Optional[dict]]:
     """
     Main entry point for employee payment-request conversations.
@@ -1042,7 +1113,17 @@ async def handle_employee_payment_request(
     Called by message_router when a payment-request trigger is detected
     OR an active conversation session exists.
 
-    Returns (reply_to_employee, admin_notification | None).
+    intent (2026-08-19, P1a): message_router's already-computed intent,
+    passed through to continue_employee_conversation() -- see that
+    function's own docstring. Optional; a caller that omits it gets
+    today's exact pre-2026-08-19 behavior (always re-prompt on a parse
+    failure, never release the session).
+
+    Returns (reply_to_employee, admin_notification | None). An empty-string
+    reply can now mean either "no trigger detected" (new-conversation path,
+    unchanged) or "an open session was just released as unrelated" (P1a) --
+    both cases mean the same thing to message_router: fall through to the
+    next tier, don't treat this as a handled turn.
 
     GUARANTEE: This function NEVER calls create_transaction(),
     _upsert_ledger(), or any financial-write function.
@@ -1050,7 +1131,7 @@ async def handle_employee_payment_request(
     # Check for existing active conversation
     session = await get_conversation_session(phone)
     if session:
-        return await continue_employee_conversation(phone, text, source)
+        return await continue_employee_conversation(phone, text, source, intent)
 
     # New conversation — detect trigger
     purpose = detect_payment_request_trigger(text)

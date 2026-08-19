@@ -400,6 +400,29 @@ async def process_message(
         except Exception as _hk_exc:
             log.warning("[hermes_kernel] _hk_fire non-fatal: %s", _hk_exc)
 
+    # P1b (2026-08-19, reliability-hardening pass): internal/system message
+    # provenance guard. scripts/ai_console_monitor.sh's health-check alert
+    # (own stable literal prefix, hardcoded in that script's send_wa_alert())
+    # was found live-generating a nonsensical customer-style draft
+    # ("AI Generated Reply: মোট রোস্টারে..." in response to a system health
+    # alert) -- the underlying trigger (a raw bridge POST invisible to every
+    # Hermes tool) was already fixed same-day (commit 532527d, routes
+    # through /admin/send-whatsapp now), but this guard is deliberate
+    # defense-in-depth against the whole *class* of system-generated text
+    # ever reaching identity/intent/draft/recruitment/employee-conversation
+    # logic, not just this one instance. Mirrors the existing, Owner-
+    # approved cross-bridge Hermes-echo guard below (exact content-signature
+    # match, narrow and local -- same precedent, not a new pattern).
+    if text.lstrip().startswith("🚨 AI Console ALERT"):
+        log.info(
+            "[system_provenance_guard] ignoring system-generated AI Console "
+            "alert text arriving as inbound (sender=%s, source=%s) -- not a "
+            "real customer/candidate/employee message",
+            sender, source,
+        )
+        _hk_fire("system", "system_alert", "no_action", "ai-console-alert-provenance-guard")
+        return "", None
+
     # TASK 2: Silent-skip excluded contacts before any processing or draft creation.
     # Escort work messages are operational inputs, so they must still create
     # admin-review drafts even when the contact name contains "client/escort".
@@ -850,7 +873,7 @@ async def process_message(
         ec_session = await ec_get_session(sender)
         if ec_session:
             reply, admin_note = await ec_handle_payment_request(
-                sender, text, source, emp_id
+                sender, text, source, emp_id, intent=intent
             )
             if reply:
                 _hk_fire(role_str, intent, "reply", "employee-sprint3a-session")
@@ -991,7 +1014,7 @@ async def process_message(
         ec_trigger = ec_detect_trigger(text)
         if ec_trigger:
             reply, admin_note = await ec_handle_payment_request(
-                sender, text, source, emp_id
+                sender, text, source, emp_id, intent=intent
             )
             if reply:
                 _hk_fire(role_str, intent, "reply", "employee-sprint3a-trigger")
@@ -1009,7 +1032,7 @@ async def process_message(
     ec_session_catchall = await ec_get_session(sender)
     if ec_session_catchall:
         reply, admin_note = await ec_handle_payment_request(
-            sender, text, source, identity.get("employee_id")
+            sender, text, source, identity.get("employee_id"), intent=intent
         )
         if reply:
             _hk_fire(role_str, intent, "reply", "catchall-sprint3a-session")
@@ -1018,7 +1041,7 @@ async def process_message(
     ec_trigger_catchall = ec_detect_trigger(text)
     if ec_trigger_catchall and role_str != "admin":
         reply, admin_note = await ec_handle_payment_request(
-            sender, text, source, identity.get("employee_id")
+            sender, text, source, identity.get("employee_id"), intent=intent
         )
         if reply:
             _hk_fire(role_str, intent, "reply", "catchall-sprint3a-trigger")
