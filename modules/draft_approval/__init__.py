@@ -276,7 +276,31 @@ async def _resolve_fpe_employee_id(wbom_employee_id: Optional[int],
             if row:
                 return row["id"]
 
-    # Fall back to match_or_create_employee
+    # 2026-08-19 fix (HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_
+    # AUDIT_2026-08-19.md, Phase 3): the three lookups above already
+    # correctly exclude inactive fpe_employees rows (status='active' on
+    # every branch) -- a known-inactive record can never receive money
+    # through this path. What used to happen next, though: if the draft
+    # already names a specific wbom_employee_id (i.e. the system already
+    # believes it knows who this is) but no ACTIVE fpe_employees
+    # counterpart can be found, this silently fell through to
+    # match_or_create_employee() below -- which can create a brand-new
+    # employee record (or loosely match an unrelated one) with zero
+    # admin visibility that this just happened. That's the exact
+    # mechanism that produced employee_id=695's "Unknown" fpe_employees
+    # row. Block it here instead of guessing: surface a clear error so
+    # approve_draft()'s own existing exception handler rolls the draft
+    # back to 'pending' and audits the reason, rather than silently
+    # creating/matching an employee mid-approval.
+    if wbom_employee_id is not None:
+        raise ValueError(
+            f"wbom employee_id={wbom_employee_id} has no active FPE record "
+            f"-- resolve the employee link manually before approving this draft"
+        )
+
+    # No wbom_employee_id was ever provided (e.g. some escort-linked
+    # drafts) -- there's no known identity to contradict here, so the
+    # existing match-or-create fallback is unchanged.
     try:
         from modules.fazle_payroll_engine.employee import match_or_create_employee
         result = await match_or_create_employee(

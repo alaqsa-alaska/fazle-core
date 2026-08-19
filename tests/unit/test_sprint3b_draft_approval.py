@@ -240,6 +240,70 @@ class Test5ApprovedWorkflow:
         assert "not pending" in result["error"].lower()
 
 
+# ── Test-5b: Unresolved Active Employee (2026-08-19 follow-up fix) ────────────
+
+class Test5bUnresolvedActiveEmployee:
+    """A draft that names a specific wbom employee_id, but that employee has
+    no active fpe_employees counterpart, must be blocked -- not silently
+    routed through match_or_create_employee() into a newly-created/loosely-
+    matched fpe_employees row with no admin visibility."""
+
+    @pytest.mark.asyncio
+    async def test_approve_blocked_when_no_active_fpe_match(
+        self, test_db_pool, seed_sprint3b_draft
+    ):
+        # Deliberately no seed_fpe_employee fixture here -- this employee_id
+        # has zero fpe_employees row at all, active or otherwise.
+        db_module._pool = test_db_pool
+        from modules.draft_approval import approve_draft
+
+        result = await approve_draft(
+            seed_sprint3b_draft["id"], 2000.0, "bkash", "8801700000001",
+        )
+        assert result["ok"] is False
+        assert "active FPE record" in result["error"]
+
+        # No financial write must have happened.
+        txn_count = await fetch_val("SELECT COUNT(*) FROM fpe_cash_transactions")
+        assert txn_count == 0
+        ledger_count = await fetch_val("SELECT COUNT(*) FROM fpe_employee_ledger")
+        assert ledger_count == 0
+
+        # No employee must have been silently created either.
+        emp_count = await fetch_val("SELECT COUNT(*) FROM fpe_employees")
+        assert emp_count == 0
+
+    @pytest.mark.asyncio
+    async def test_draft_rolled_back_to_pending_on_block(
+        self, test_db_pool, seed_sprint3b_draft
+    ):
+        db_module._pool = test_db_pool
+        from modules.draft_approval import approve_draft, retrieve_draft
+
+        await approve_draft(
+            seed_sprint3b_draft["id"], 2000.0, "bkash", "8801700000001",
+        )
+
+        draft = await retrieve_draft(seed_sprint3b_draft["id"])
+        assert draft["status"] == "pending"
+        assert draft["transaction_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_approve_still_works_when_active_fpe_match_exists(
+        self, test_db_pool, seed_sprint3b_draft, seed_fpe_employee
+    ):
+        """Non-regression: an employee WITH an active fpe_employees match
+        must still approve exactly as before."""
+        db_module._pool = test_db_pool
+        from modules.draft_approval import approve_draft
+
+        result = await approve_draft(
+            seed_sprint3b_draft["id"], 2000.0, "bkash", "8801700000001",
+        )
+        assert result["ok"] is True
+        assert result["status"] == "completed"
+
+
 # ── Test-6: Accountant Forward (STEP 6) ────────────────────────────────────────
 
 class Test6AccountantForward:
