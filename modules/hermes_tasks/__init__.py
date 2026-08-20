@@ -259,6 +259,22 @@ async def authorize_build(
             row = await conn.fetchrow("SELECT id, status FROM hermes_tasks WHERE id = $1 FOR UPDATE", task_id)
             if not row:
                 raise TaskError(f"task #{task_id} not found")
+            if row["status"] in ("DONE", "FAILED"):
+                # 2026-08-20, live-discovered bug: DONE/FAILED are terminal in
+                # _TASK_TRANSITIONS (DONE has zero outbound edges) -- a grant
+                # here would set build_authorized=true and return {"ok": True}
+                # while find_authorizing_task_for_path's own WHERE clause
+                # (`status NOT IN ('DONE', 'FAILED')`) can never see it, so
+                # the plugin's gate silently rejects a caller the API just
+                # told "yes" to. Reject early and honestly instead -- found via
+                # live smoke testing (task #2, already DONE from an earlier
+                # session, re-authorized without error, then blocked at the
+                # gate with no way for the caller to tell why).
+                raise TaskError(
+                    f"task #{task_id} is {row['status']} -- BUILD authorization can't be granted on a "
+                    "terminal task (it would never satisfy the enforcement gate). Create a new task for "
+                    "this work instead."
+                )
             await conn.execute(
                 """UPDATE hermes_tasks
                    SET build_authorized=true, build_authorized_at=NOW(), build_authorized_by=$1,

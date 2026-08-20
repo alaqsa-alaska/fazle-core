@@ -127,6 +127,33 @@ class TestAuthorizeBuild:
             with pytest.raises(TaskError):
                 await authorize_build(999, ["/home/azim/core"], "8801700000001")
 
+    @pytest.mark.parametrize("status", ["DONE", "FAILED"])
+    async def test_terminal_task_rejected(self, status):
+        """2026-08-20, live-discovered bug: DONE has zero outbound edges in
+        _TASK_TRANSITIONS, and find_authorizing_task_for_path's own WHERE
+        clause excludes status IN ('DONE', 'FAILED') -- granting build
+        authorization here used to succeed at the API layer while being
+        permanently unusable at the enforcement layer, with no error telling
+        the caller why. Found via live smoke testing (task #2, already DONE,
+        re-authorized without error, then silently blocked at the gate)."""
+        from modules.hermes_tasks import authorize_build, TaskError
+        conn = _make_conn(row={"id": 5, "status": status})
+        with patch("modules.hermes_tasks.get_pool", return_value=_mock_pool(conn)):
+            with pytest.raises(TaskError, match=status):
+                await authorize_build(5, ["/home/azim/core"], "8801700000001")
+        conn.execute.assert_not_awaited()
+
+    async def test_non_terminal_statuses_still_allowed(self):
+        """Confirm the fix didn't over-tighten -- every real working status
+        must still be authorizable."""
+        from modules.hermes_tasks import authorize_build
+        for status in ("BACKLOG", "READY", "IN_PROGRESS", "WAITING_APPROVAL", "VERIFYING", "BLOCKED"):
+            conn = _make_conn(row={"id": 5, "status": status})
+            with patch("modules.hermes_tasks.get_pool", return_value=_mock_pool(conn)), \
+                 patch("modules.hermes_tasks._event", new=AsyncMock()):
+                result = await authorize_build(5, ["/home/azim/core"], "8801700000001")
+            assert result["ok"] is True, f"status {status} should still be authorizable"
+
 
 class TestFindAuthorizingTaskForPath:
     async def test_matches_within_authorized_scope(self):
