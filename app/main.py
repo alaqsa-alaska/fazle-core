@@ -1017,6 +1017,31 @@ async def get_dead_letter_queue(limit: int = 50, offset: int = 0):
     }
 
 
+@app.get("/api/outbound/dead-letters", dependencies=[Depends(require_api_key)])
+async def get_outbound_dead_letters(limit: int = 20):
+    """Real dead-lettered OUTBOUND WhatsApp sends (fazle_outbound_queue,
+    status='dlq') -- distinct from /api/queue/dead-letters above, which is
+    shared.queue_arbiter's INBOUND-processing lease table, an unrelated
+    concern (confirmed live 2026-08-15: that endpoint reported "DLQ empty"
+    while a real approved-draft WhatsApp send had genuinely exhausted its
+    retries and failed). 2026-08-20: this route itself was missing --
+    fazle-mcp's get_dlq_status has called this exact path since 2026-08-15
+    expecting it to exist; every call 404'd until now."""
+    from modules import outbound as outbound_queue
+    limit = max(1, min(limit, 100))
+    items = await outbound_queue.list_dlq_entries(limit=limit)
+    total = await outbound_queue.dlq_count()
+    actionable = await outbound_queue.actionable_dlq_count()
+    return {
+        "items": items,
+        "count": len(items),
+        "total": total,
+        "actionable": actionable,
+        "limit": limit,
+        "ts": time.time(),
+    }
+
+
 @app.get("/api/queue/arbiter-metrics", dependencies=[Depends(require_api_key)])
 async def get_arbiter_metrics_endpoint():
     """

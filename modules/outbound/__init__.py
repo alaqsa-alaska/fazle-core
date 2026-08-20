@@ -84,6 +84,33 @@ async def actionable_dlq_count() -> int:
     ) or 0)
 
 
+_ALERT_PIPELINE_PURPOSES = ("dlq-alert", "health-summary", "circuit-alert")
+
+
+async def list_dlq_entries(limit: int = 20) -> list[dict]:
+    """Real dead-lettered outbound WhatsApp sends -- the same table
+    dlq_count()/actionable_dlq_count() above already summarize, now with
+    actual rows for diagnosis (2026-08-20 fix: fazle-mcp's get_dlq_status
+    has called GET /api/outbound/dead-letters since 2026-08-15 expecting
+    exactly this, but no fazle-core route backed it -- 404 every time).
+    `actionable` flags the same "recent, not an alert-pipeline artifact"
+    distinction actionable_dlq_count() already uses, per-row, so a caller
+    can tell a real stuck business message apart from the alert pipeline's
+    own historical noise without re-deriving the filter itself."""
+    rows = await fetch_all(
+        """SELECT id, recipient, purpose, source_bridge, attempts, max_attempts,
+                  last_error, created_at, updated_at,
+                  (created_at >= NOW() - INTERVAL '24 hours'
+                   AND COALESCE(purpose, '') NOT IN ($1, $2, $3)) AS actionable
+           FROM fazle_outbound_queue
+           WHERE status = 'dlq'
+           ORDER BY updated_at DESC
+           LIMIT $4""",
+        *_ALERT_PIPELINE_PURPOSES, limit,
+    )
+    return [dict(r) for r in rows]
+
+
 async def _send_with_channel(source_bridge: str, recipient: str, body: str) -> str:
     """Send through a supported channel and return an external delivery id."""
     if source_bridge in {"meta", "meta_whatsapp", "messenger", "facebook_comment"}:
