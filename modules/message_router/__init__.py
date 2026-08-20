@@ -28,6 +28,7 @@ from typing import Optional
 from app.config import get_settings
 from app.database import fetch_one, fetch_all, fetch_val, execute
 from shared.draft_reply import create_draft_reply
+from shared.greeting import sender_used_salam
 from modules.intent import classify
 from modules.phone_normalizer import normalize_phone
 from modules.identity_brain import detect_identity, ROUTE_B_ROLES, is_registered_employee_phone
@@ -349,6 +350,20 @@ def _is_safe_autosend_intent(intent: str, role: str) -> bool:  # noqa: ARG001
     return intent in _SAFE_AUTOSEND_INTENTS
 
 
+def _family_deflection_reply(name: str, text: str) -> str:
+    """The fixed personal-message deflection sent to a 'family' role
+    (someone using the office line for personal contact). Extracted as its
+    own function (2026-08-20) so its salam-gating is independently
+    testable without mocking the rest of process_message()'s pipeline.
+
+    Used to prepend salam unconditionally regardless of what the sender
+    actually said -- the exact root cause of a real regression (reply to
+    "Uthlam ghum theke", which has no salam in it). Gated on the sender's
+    actual text now via shared.greeting.sender_used_salam()."""
+    opening = f"আস-সালামু আলাইকুম {name}! 😊\n" if sender_used_salam(text) else f"হ্যালো {name}। 😊\n"
+    return f"{opening}এটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন।"
+
+
 async def process_message(
     sender: str, text: str, source: str, *, message_id: Optional[str] = None
 ) -> tuple[str, Optional[dict]]:
@@ -469,11 +484,7 @@ async def process_message(
     if role_str == "family":
         name = identity.get("display_name") or "আপনি"
         _hk_fire("family", "greeting", "reply", "family-personal")
-        return (
-            f"আস-সালামু আলাইকুম {name}! 😊\n"
-            f"এটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন।",
-            None,
-        )
+        return (_family_deflection_reply(name, text), None)
 
     if role_str != "admin" and _looks_like_slip_or_complaint(text):
         title = "⚠️ ESCORT REVIEW DRAFT — ORDER নয়"
