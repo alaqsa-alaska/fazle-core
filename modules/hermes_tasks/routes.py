@@ -86,6 +86,11 @@ class ClaimTaskBody(BaseModel):
     owner: str = "earth"
 
 
+class AuthorizeBuildBody(BaseModel):
+    repos: list[str]
+    ttl_hours: int = 4
+
+
 class ProposeActionBody(BaseModel):
     task_id: Optional[int] = None
     action_type: str
@@ -100,6 +105,18 @@ class ProposeActionBody(BaseModel):
 
 class RejectActionBody(BaseModel):
     reason: Optional[str] = None
+
+
+class AuthorizeActionBody(BaseModel):
+    task_id: Optional[int] = None
+    action_type: str
+    summary: str
+    files_changed: Optional[list[str]] = None
+    diff: Optional[str] = None
+    command: Optional[str] = None
+    risk: str = "medium"
+    expected_effect: Optional[str] = None
+    rollback_plan: Optional[str] = None
 
 
 class ExecutionResultBody(BaseModel):
@@ -133,6 +150,17 @@ async def list_tasks_route(
     return {"tasks": await list_tasks(status, owner, parent_task_id, limit)}
 
 
+@router.get("/api/tasks/authorizing-path", dependencies=[Depends(_require_command("task_read"))])
+async def find_authorizing_task_route(path: str):
+    """Read-only: the check the CLI plugin calls before allowing a
+    WORKSPACE_MUTATION (file edit) via Earth's own direct file tool.
+    Registered before /api/tasks/{task_id} so this fixed path is never
+    shadowed by the int-typed parameter route."""
+    from modules.hermes_tasks import find_authorizing_task_for_path
+    result = await find_authorizing_task_for_path(path)
+    return {"authorized": result is not None, "task": result}
+
+
 @router.get("/api/tasks/{task_id}", dependencies=[Depends(_require_command("task_read"))])
 async def get_task_route(task_id: int):
     from modules.hermes_tasks import get_task
@@ -147,6 +175,16 @@ async def claim_task_route(task_id: int, body: ClaimTaskBody):
     from modules.hermes_tasks import claim_task, TaskError
     try:
         return await claim_task(task_id, body.owner)
+    except TaskError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/tasks/{task_id}/authorize-build", dependencies=[Depends(_require_command("task_write"))])
+async def authorize_build_route(task_id: int, body: AuthorizeBuildBody, key: str = Depends(_API_KEY_HEADER)):
+    from modules.hermes_tasks import authorize_build, TaskError
+    actor = await _resolve_admin_identity(key)
+    try:
+        return await authorize_build(task_id, body.repos, actor, body.ttl_hours)
     except TaskError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -179,10 +217,30 @@ async def propose_action_route(body: ProposeActionBody):
     return {"ok": True, "action_id": action_id}
 
 
+@router.post("/api/actions/authorize", dependencies=[Depends(_require_command("task_approve"))])
+async def authorize_action_route(body: AuthorizeActionBody, key: str = Depends(_API_KEY_HEADER)):
+    """Fused propose+approve -- task_approve (superadmin) tier since this IS
+    the actual authorization-granting call, same gate as approve_action.
+    Registered before /api/actions/{action_id} so this fixed path is never
+    shadowed."""
+    from modules.hermes_tasks import authorize_action, TaskError
+    actor = await _resolve_admin_identity(key)
+    try:
+        action_id = await authorize_action(
+            body.task_id, body.action_type, body.summary, actor, body.files_changed,
+            body.diff, body.command, body.risk, body.expected_effect, body.rollback_plan,
+        )
+    except TaskError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "action_id": action_id, "status": "approved"}
+
+
 @router.get("/api/actions", dependencies=[Depends(_require_command("task_read"))])
-async def get_pending_actions_route(task_id: Optional[int] = None):
-    from modules.hermes_tasks import get_pending_actions
-    return {"actions": await get_pending_actions(task_id)}
+async def list_actions_route(
+    task_id: Optional[int] = None, status: Optional[str] = "pending", action_type: Optional[str] = None,
+):
+    from modules.hermes_tasks import list_actions
+    return {"actions": await list_actions(status, task_id, action_type)}
 
 
 @router.get("/api/actions/{action_id}", dependencies=[Depends(_require_command("task_read"))])

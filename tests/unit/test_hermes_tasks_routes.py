@@ -107,6 +107,78 @@ class TestApproveActionRoute:
         assert response.status_code == 400
 
 
+class TestAuthorizeBuildRoute:
+    async def test_operator_tier_key_allowed(self, internal_key_headers):
+        mock_authorize = AsyncMock(return_value={"ok": True, "task_id": 5, "build_authorized": True})
+        with patch("modules.hermes_tasks.authorize_build", new=mock_authorize):
+            async with await _client() as ac:
+                response = await ac.post(
+                    "/api/tasks/5/authorize-build",
+                    json={"repos": ["/home/azim/core"], "ttl_hours": 4},
+                    headers=internal_key_headers,
+                )
+        assert response.status_code == 200
+        mock_authorize.assert_awaited_once_with(5, ["/home/azim/core"], "owner-internal-key", 4)
+
+
+class TestAuthorizeActionRoute:
+    async def test_requires_superadmin_not_just_operator(self):
+        """Same tier as approve_action -- this IS the authorization-granting
+        call, not a lower-bar planning action."""
+        mock_check = AsyncMock(return_value={
+            "allowed": False, "required_role": "superadmin", "reason": "Insufficient role",
+        })
+        with patch("modules.rbac.check_permission", new=mock_check):
+            async with await _client() as ac:
+                response = await ac.post(
+                    "/api/actions/authorize",
+                    json={"action_type": "git_commit", "summary": "commit the fix"},
+                    headers={"X-Internal-Key": "operator-test-key"},
+                )
+        assert response.status_code == 403
+
+    async def test_internal_key_authorizes_and_resolves_actor_server_side(self, internal_key_headers):
+        mock_authorize = AsyncMock(return_value=9)
+        with patch("modules.hermes_tasks.authorize_action", new=mock_authorize):
+            async with await _client() as ac:
+                response = await ac.post(
+                    "/api/actions/authorize",
+                    json={"action_type": "git_commit", "summary": "commit the fix", "task_id": 5},
+                    headers=internal_key_headers,
+                )
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "action_id": 9, "status": "approved"}
+        # actor resolved server-side from the key, never a client-supplied field
+        args = mock_authorize.await_args.args
+        assert args[3] == "owner-internal-key"
+
+
+class TestFindAuthorizingTaskRoute:
+    async def test_authorized_path_returns_true(self, internal_key_headers):
+        mock_find = AsyncMock(return_value={"task_id": 5, "repos": ["/home/azim/core"]})
+        with patch("modules.hermes_tasks.find_authorizing_task_for_path", new=mock_find):
+            async with await _client() as ac:
+                response = await ac.get(
+                    "/api/tasks/authorizing-path",
+                    params={"path": "/home/azim/core/app/main.py"},
+                    headers=internal_key_headers,
+                )
+        assert response.status_code == 200
+        assert response.json()["authorized"] is True
+
+    async def test_unauthorized_path_returns_false(self, internal_key_headers):
+        mock_find = AsyncMock(return_value=None)
+        with patch("modules.hermes_tasks.find_authorizing_task_for_path", new=mock_find):
+            async with await _client() as ac:
+                response = await ac.get(
+                    "/api/tasks/authorizing-path",
+                    params={"path": "/etc/passwd"},
+                    headers=internal_key_headers,
+                )
+        assert response.status_code == 200
+        assert response.json() == {"authorized": False, "task": None}
+
+
 class TestProposeActionRoute:
     async def test_operator_tier_key_allowed(self, internal_key_headers):
         """propose_action is task_write (operator) tier, not task_approve --

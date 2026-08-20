@@ -241,13 +241,13 @@ class TestApproveRejectAction:
 class TestIsActionApproved:
     async def test_approved_action_returns_true(self):
         from modules.hermes_tasks import is_action_approved
-        row = {"status": "approved", "action_type": "opencode_dispatch"}
+        row = {"status": "approved", "action_type": "opencode_dispatch", "expires_at": None}
         with patch("modules.hermes_tasks.fetch_one", new=AsyncMock(return_value=row)):
             assert await is_action_approved(7, expected_action_type="opencode_dispatch") is True
 
     async def test_pending_action_returns_false(self):
         from modules.hermes_tasks import is_action_approved
-        row = {"status": "pending", "action_type": "opencode_dispatch"}
+        row = {"status": "pending", "action_type": "opencode_dispatch", "expires_at": None}
         with patch("modules.hermes_tasks.fetch_one", new=AsyncMock(return_value=row)):
             assert await is_action_approved(7) is False
 
@@ -261,7 +261,7 @@ class TestIsActionApproved:
         opencode_dispatch call -- the id and the action_type must both
         match, not just an approved status somewhere."""
         from modules.hermes_tasks import is_action_approved
-        row = {"status": "approved", "action_type": "file_mutation"}
+        row = {"status": "approved", "action_type": "file_mutation", "expires_at": None}
         with patch("modules.hermes_tasks.fetch_one", new=AsyncMock(return_value=row)):
             assert await is_action_approved(7, expected_action_type="opencode_dispatch") is False
 
@@ -269,7 +269,7 @@ class TestIsActionApproved:
 class TestRecordExecutionResult:
     async def test_approved_action_records_result_and_advances_task(self):
         from modules.hermes_tasks import record_execution_result
-        conn = _make_conn(row={"id": 7, "status": "approved", "task_id": 5})
+        conn = _make_conn(row={"id": 7, "status": "approved", "task_id": 5, "expires_at": None})
         with patch("modules.hermes_tasks.get_pool", return_value=_mock_pool(conn)), \
              patch("modules.hermes_tasks._event", new=AsyncMock()), \
              patch("modules.hermes_tasks.update_task_status", new=AsyncMock()) as mock_update:

@@ -106,6 +106,7 @@
 066_ai_read_employees_fpe_fallback.sql
 067_hermes_decision_source_message_id.sql
 068_hermes_task_execution_state.sql
+069_hermes_tasks_build_authorization.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -247,7 +248,16 @@ approval doesn't strictly require a parent task). To apply: standard
 `db/migrate.py` run (no destructive/cross-schema-touching statements, unlike
 063/066 which needed the manual direct-script path).
 
-**Next available number for new work: `069`.**
+**`069_hermes_tasks_build_authorization.sql` (2026-08-19, Owner-directed revision of the same-day
+task/action-approval pass, NOT YET APPLIED to production):** adds 5 columns to `hermes_tasks` —
+`build_authorized BOOLEAN`, `build_authorized_at`, `build_authorized_by`, `build_scope JSONB`,
+`build_expires_at` — a broader, task-scoped authorization grant (distinct from the per-action
+`hermes_action_approvals` gate migration 068 added) so a single admin instruction like "fix it" can
+authorize many subsequent file edits within an approved repo scope, instead of requiring a separate
+approval per edit. Purely additive (5 `ADD COLUMN IF NOT EXISTS` on one existing table, no other
+table touched). To apply: standard `db/migrate.py` run.
+
+**Next available number for new work: `070`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
