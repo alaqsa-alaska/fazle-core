@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import re
 
-from app.database import fetch_all, fetch_one
+from app.database import fetch_all
 from .date_parser import parse_date_range
 from .nl_router import extract_phone
 
@@ -234,24 +234,39 @@ async def intent_employee_totals(text: str, admin_phone: str) -> str:
         return "❌ কর্মীর নাম বা ফোন নম্বর পাইনি।"
 
     # ── Resolve employee_id from phone OR name ────────────────────────────────
+    # 2026-08-20: every tier below used to silently collapse 2+ matching
+    # employees to one arbitrary row (LIMIT 1 / ORDER BY ... LIMIT 1) --
+    # an admin asking "কত টাকা নিয়েছে" for an ambiguous phone/name got a
+    # confidently-wrong single total with no indication it might be the
+    # wrong person. Every tier now refuses to guess when more than one
+    # distinct employee matches, following the same "collect all distinct
+    # candidates, only proceed on a unique match" shape already used by
+    # fazle_payroll_engine/routes.py::_resolve_review_employee_candidate().
     emp_row = None
     if phone:
         local = phone[2:] if phone.startswith("88") else phone
-        emp_row = await fetch_one(
+        phone_rows = await fetch_all(
             "SELECT employee_id, employee_name, employee_mobile FROM wbom_employees"
-            " WHERE employee_mobile = $1 OR employee_mobile = $2 LIMIT 1",
+            " WHERE employee_mobile = $1 OR employee_mobile = $2",
             phone, local,
         )
-        if not emp_row:
-            # Also try payment_mobile match in transactions
-            pass  # will do phone-based tx query below
+        distinct_ids = {r["employee_id"] for r in phone_rows}
+        if len(distinct_ids) > 1:
+            names = ", ".join(sorted({r["employee_name"] or "?" for r in phone_rows}))
+            return f"❌ একাধিক কর্মী এই নম্বরের সাথে মিলছে ({names}) — সঠিক employee ID উল্লেখ করুন।"
+        emp_row = phone_rows[0] if phone_rows else None
     else:
         # Direct ILIKE (works for Latin names and exact Bengali matches)
-        emp_row = await fetch_one(
+        name_rows = await fetch_all(
             "SELECT employee_id, employee_name, employee_mobile FROM wbom_employees"
-            " WHERE employee_name ILIKE $1 LIMIT 1",
+            " WHERE employee_name ILIKE $1",
             f"%{name}%",
         )
+        distinct_ids = {r["employee_id"] for r in name_rows}
+        if len(distinct_ids) > 1:
+            names = ", ".join(sorted({r["employee_name"] or "?" for r in name_rows}))
+            return f"❌ একাধিক কর্মী '{name}' নামের সাথে মিলছে ({names}) — ফোন নম্বর বা সম্পূর্ণ নাম দিয়ে আবার জিজ্ঞাসা করুন।"
+        emp_row = name_rows[0] if name_rows else None
         if not emp_row:
             # Fallback: transliterate Bengali → Latin, use trgm similarity
             has_bn = bool(re.search(r"[\u0980-\u09FF]", name))
@@ -263,16 +278,20 @@ async def intent_employee_totals(text: str, admin_phone: str) -> str:
                     f"similarity(LOWER(employee_name), ${i + 1})"
                     for i in range(len(latin_words))
                 )
-                emp_row = await fetch_one(
+                sim_rows = await fetch_all(
                     f"""SELECT employee_id, employee_name, employee_mobile,
                                ({sim_expr}) AS sim_score
                           FROM wbom_employees
                          ORDER BY sim_score DESC
-                         LIMIT 1""",
+                         LIMIT 10""",
                     *[w.lower() for w in latin_words],
                 )
-                if emp_row and float(emp_row.get("sim_score", 0)) < 0.25:
-                    emp_row = None  # too weak a match
+                strong = [r for r in sim_rows if float(r.get("sim_score", 0)) >= 0.25]
+                distinct_strong_ids = {r["employee_id"] for r in strong}
+                if len(distinct_strong_ids) > 1:
+                    names = ", ".join(sorted({r["employee_name"] or "?" for r in strong}))
+                    return f"❌ একাধিক কর্মী '{name}' নামের সাথে মিলছে ({names}) — ফোন নম্বর বা সম্পূর্ণ নাম দিয়ে আবার জিজ্ঞাসা করুন।"
+                emp_row = strong[0] if strong else None  # too weak a match if empty
 
     # ── Build transaction query ───────────────────────────────────────────────
     sql_args: list

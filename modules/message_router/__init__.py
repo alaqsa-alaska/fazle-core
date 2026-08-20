@@ -28,7 +28,6 @@ from typing import Optional
 from app.config import get_settings
 from app.database import fetch_one, fetch_all, fetch_val, execute
 from shared.draft_reply import create_draft_reply
-from shared.greeting import sender_used_salam
 from modules.intent import classify
 from modules.phone_normalizer import normalize_phone
 from modules.identity_brain import detect_identity, ROUTE_B_ROLES, is_registered_employee_phone
@@ -356,12 +355,15 @@ def _family_deflection_reply(name: str, text: str) -> str:
     own function (2026-08-20) so its salam-gating is independently
     testable without mocking the rest of process_message()'s pipeline.
 
-    Used to prepend salam unconditionally regardless of what the sender
-    actually said -- the exact root cause of a real regression (reply to
-    "Uthlam ghum theke", which has no salam in it). Gated on the sender's
-    actual text now via shared.greeting.sender_used_salam()."""
-    opening = f"আস-সালামু আলাইকুম {name}! 😊\n" if sender_used_salam(text) else f"হ্যালো {name}। 😊\n"
-    return f"{opening}এটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন।"
+    2026-08-20 (2nd pass): the first fix here only gated salam on whether
+    the SENDER said salam first (echo it back if so) -- that was the OLD
+    rule. The business rule has since been sharpened by explicit Owner
+    directive: Hermes/Fazle Core customer replies must NEVER open with
+    Wa Alaikum Salam, even when the customer said salam first. Both
+    branches now use the same neutral opening; `text` is kept in the
+    signature (existing callers pass it) even though this function no
+    longer branches on its salam content."""
+    return f"হ্যালো {name}। 😊\nএটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন।"
 
 
 async def process_message(

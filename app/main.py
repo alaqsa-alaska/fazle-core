@@ -1230,6 +1230,27 @@ async def api_resolve_identity(phone: str, text: str = ""):
     return {k: v for k, v in result.items() if k not in ("bkash_number", "basic_salary")}
 
 
+@app.get("/api/identity/verify-claim", dependencies=[Depends(require_api_key)])
+async def api_verify_employee_claim(
+    claimed_name: str = "", claimed_role: str = "",
+    sender_phone: str = "", employee_id: Optional[int] = None,
+):
+    """Verify a claim like "Karim is supervisor" against fpe_employees --
+    thin pass-through to modules.identity_brain.claim_verification.
+    verify_employee_claim(). Read-only. This is deliberately NOT the same
+    thing as /api/identity/resolve above -- that resolves the message
+    SENDER's own phone-backed identity; this resolves an arbitrary
+    THIRD-PARTY name/role claim mentioned inside message content. See that
+    module's docstring for the exact outcome contract (not_found/
+    ambiguous/role_mismatch/verified/verified_inactive) -- never guesses
+    on ambiguity."""
+    from modules.identity_brain.claim_verification import verify_employee_claim
+    return await verify_employee_claim(
+        claimed_name=claimed_name or None, claimed_role=claimed_role or None,
+        sender_phone=sender_phone or None, employee_id=employee_id,
+    )
+
+
 @app.get("/api/intent/classify", dependencies=[Depends(require_api_key)])
 async def api_classify_intent(text: str):
     """Classify a message's intent via the deterministic keyword/regex/fuzzy

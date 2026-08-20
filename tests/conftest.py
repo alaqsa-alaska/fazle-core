@@ -1236,6 +1236,38 @@ async def seed_fpe_employee(test_db_pool, seed_employee) -> dict:
 
 
 @pytest_asyncio.fixture
+async def seed_fpe_karim_supervisor(test_db_pool) -> dict:
+    """A standalone fpe_employees row (no wbom_employees link needed) with
+    a designation, for modules.identity_brain.claim_verification tests.
+    Named distinctly from the pre-existing seed_fpe_employee fixture above
+    (which is wbom-linked and has no designation) to avoid collision."""
+    async with test_db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO fpe_employees
+                (full_name, name_normalized, primary_phone, designation, status)
+            VALUES
+                ('Karim Uddin', 'karim uddin', '01811111199', 'Ghat Supervisor', 'active')
+            RETURNING *
+        """)
+    return dict(row)
+
+
+@pytest_asyncio.fixture
+async def seed_fpe_karim_duplicate(test_db_pool) -> dict:
+    """A second, distinct employee sharing the same normalized name as
+    seed_fpe_karim_supervisor -- for the ambiguous-claim regression test."""
+    async with test_db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO fpe_employees
+                (full_name, name_normalized, primary_phone, designation, status)
+            VALUES
+                ('Karim Uddin', 'karim uddin', '01822222299', 'Security Guard', 'active')
+            RETURNING *
+        """)
+    return dict(row)
+
+
+@pytest_asyncio.fixture
 async def seed_sprint3b_draft(test_db_pool, seed_employee) -> dict:
     """A pending Sprint-3B payment draft (from Sprint-3A employee conversation)."""
     async with test_db_pool.acquire() as conn:

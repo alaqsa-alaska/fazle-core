@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from app.database import execute
 
 from modules.identity_brain import detect_identity
-from shared.greeting import sender_used_salam
 
 from . import reply_rules as rules
 from .classifier import Classification, classify_comment, classify_message
@@ -281,15 +280,11 @@ def _combined_rule_reply(platform: str, text: str, intents: list[str], history: 
     already = set((state or {}).get("answered_intents") or [])
     parts: list[str] = []
     if "greeting" in intents and not already:
-        # 2026-08-20: used to prepend salam unconditionally for ANY
-        # "greeting" intent (which classifier.py also assigns to a bare
-        # "hi"/"hello"/"start") -- gated on the sender's actual text now,
-        # matching the Owner's regression case (salam-leading replies to
-        # senders who never said salam).
-        if sender_used_salam(text):
-            parts.append("আসসালামু আলাইকুম। Al-Rifa'i Integrated Services-এ যোগাযোগ করার জন্য ধন্যবাদ।")
-        else:
-            parts.append("হ্যালো। Al-Rifa'i Integrated Services-এ যোগাযোগ করার জন্য ধন্যবাদ।")
+        # 2026-08-20 (2nd pass): the OLD rule echoed salam back only if the
+        # sender said it first. The current rule (Owner-directed,
+        # 2026-08-20) is stricter -- never open with Wa Alaikum Salam,
+        # period, even when the sender said it first.
+        parts.append("হ্যালো। Al-Rifa'i Integrated Services-এ যোগাযোগ করার জন্য ধন্যবাদ।")
     if "interested" in intents and "applicant_info_complete" not in intents and "interested" not in already:
         parts.append(rules.INTERESTED_REPLY)
     if "applicant_info_complete" in intents:

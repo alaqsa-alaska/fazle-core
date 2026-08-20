@@ -123,7 +123,7 @@ def persona_for_role(role: str) -> str:
     persona_key = SOCIAL_ROLE_TO_PERSONA.get(role, _DEFAULT_SOCIAL_PERSONA)
     return SOCIAL_PERSONAS[persona_key]
 
-WELCOME_REPLY = f"""আসসালামু আলাইকুম।
+WELCOME_REPLY = f"""হ্যালো।
 
 {COMPANY_NAME}-এ যোগাযোগ করার জন্য ধন্যবাদ।
 
@@ -141,7 +141,7 @@ WELCOME_REPLY = f"""আসসালামু আলাইকুম।
 4. Interested
 5. Required Documents"""
 
-LOCATION_REPLY = f"""আসসালামু আলাইকুম।
+LOCATION_REPLY = f"""হ্যালো।
 
 আমাদের অফিস:
 

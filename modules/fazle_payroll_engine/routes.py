@@ -777,16 +777,21 @@ async def search_employees(
             phone_norm, limit,
         ):
             _add(r["employee_id"], "alias_phone", 3)
+    # 2026-08-20: name_exact/alias_name now filter status='active', matching
+    # the fuzzy_name tier below (which already did) -- previously an
+    # inactive/former employee could surface via exact/alias name match
+    # with no distinction, inconsistent with every other tier here.
     if name_norm and len(matches) < limit:
         for r in await fetch_all(
-            "SELECT id FROM fpe_employees WHERE name_normalized = $1 LIMIT $2",
+            "SELECT id FROM fpe_employees WHERE name_normalized = $1 AND status = 'active' LIMIT $2",
             name_norm, limit,
         ):
             _add(r["id"], "name_exact", 4)
     if name_norm and len(matches) < limit:
         for r in await fetch_all(
-            "SELECT employee_id FROM fpe_employee_aliases "
-            "WHERE alias_type = 'name' AND alias_value = $1 LIMIT $2",
+            "SELECT a.employee_id FROM fpe_employee_aliases a "
+            "JOIN fpe_employees e ON e.id = a.employee_id "
+            "WHERE a.alias_type = 'name' AND a.alias_value = $1 AND e.status = 'active' LIMIT $2",
             name_norm, limit,
         ):
             _add(r["employee_id"], "alias_name", 5)
