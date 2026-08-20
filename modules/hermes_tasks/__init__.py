@@ -72,6 +72,12 @@ _TASK_TRANSITIONS: dict[str, frozenset[str]] = {
 ACTION_TYPES = frozenset({
     "file_mutation", "git_commit", "deploy", "migration", "restart",
     "production_write", "opencode_dispatch",
+    # 2026-08-21, migration 070 (Phase 4 coverage-audit P1-A/P1-B): dedicated
+    # types for Hermes's real dispatch-assignment and client-billing
+    # mutation tools, matching opencode_dispatch's own precedent of one
+    # dedicated type per class of high-stakes action rather than sharing
+    # the generic 'production_write' bucket across unrelated domains.
+    "dispatch_assignment", "billing_mutation",
 })
 ACTION_RISKS = frozenset({"low", "medium", "high", "critical"})
 

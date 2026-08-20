@@ -107,6 +107,7 @@
 067_hermes_decision_source_message_id.sql
 068_hermes_task_execution_state.sql
 069_hermes_tasks_build_authorization.sql
+070_hermes_action_approvals_dispatch_billing_types.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -257,7 +258,21 @@ authorize many subsequent file edits within an approved repo scope, instead of r
 approval per edit. Purely additive (5 `ADD COLUMN IF NOT EXISTS` on one existing table, no other
 table touched). To apply: standard `db/migrate.py` run.
 
-**Next available number for new work: `070`.**
+**`070_hermes_action_approvals_dispatch_billing_types.sql` (2026-08-21, Phase 4 business-domain
+coverage-audit follow-on, P1-A/P1-B, APPLIED to production):** widens `hermes_action_approvals`
+.action_type's CHECK constraint (added by migration 068) with two new values --
+`dispatch_assignment` (gates fazle-mcp's new dispatch_assign_program/dispatch_unassign_program/
+dispatch_replace_escort tools, wrapping modules/dispatch's existing real assignment engine) and
+`billing_mutation` (gates the new generate_bill/mark_bill_paid/create_update_delete_client_billing_
+profile tools, wrapping modules/client_billing). Same widen-then-add-constraint shape as migration
+051. Mirrors opencode_dispatch's own precedent of one dedicated action_type per class of
+high-stakes action rather than sharing the generic `production_write` bucket across unrelated
+domains. Purely additive: no default change, no existing row rewritten. `modules/hermes_tasks/
+__init__.py`'s `ACTION_TYPES` frozenset was widened in lockstep (both layers must agree, per
+migration 051's own precedent of the app-level whitelist and the DB CHECK constraint being
+separate, both-must-pass gates).
+
+**Next available number for new work: `071`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
