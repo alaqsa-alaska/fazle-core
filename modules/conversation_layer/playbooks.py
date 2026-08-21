@@ -60,6 +60,18 @@ SAFE_RECRUITMENT_MARKERS = (
 FOCUS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("salary", ("salary", "বেতন", "মাসে", "কত পাব", "টাকা", "বেতন কাঠামো", "প্যাকেজ")),
     ("fee", ("fee", "ফি", "জামানত", "joining fee", "টাকা লাগবে", "ট্রেনিং ফি", "ডিপোজিট")),
+    # 2026-08-21 addition (Owner Correction 2 / regression case 9694):
+    # candidate asked "আমি HSC শেষ করেছি, এই শিক্ষাগত যোগ্যতায় কোন পদ আছে" --
+    # no bucket existed for education-based position eligibility at all, so
+    # this fell through to the LLM, which inferred "HSC -> Assistant
+    # Supervisor eligible" from seeing that position in the menu -- a fact
+    # nowhere in the KB. Must come BEFORE "documents"/"positions" below so
+    # this specific question shape doesn't get mis-classified as either.
+    ("education_eligibility", (
+        "এই যোগ্যতায়", "এই শিক্ষাগত যোগ্যতায়", "যোগ্যতায় কোন পদ",
+        "কোন পদে যোগ্য", "যোগ্য কিনা", "eligible for", "qualify for",
+        "শিক্ষাগত যোগ্যতা লাগবে", "কোন পদে আবেদন করতে পারব",
+    )),
     ("documents", ("কাগজ", "document", "nid", "ছবি", "সার্টিফিকেট", "কি লাগবে")),
     ("office_location", ("ঠিকানা", "location", "অফিস", "কোথায়", "address", "একে খান")),
     ("training", ("training", "ট্রেনিং", "শিখ", "অভিজ্ঞতা", "experience", "প্রশিক্ষণ")),
@@ -98,6 +110,18 @@ CANONICAL_FACTS: dict[str, str] = {
         "প্রয়োজনীয়: নিজের NID/জন্ম নিবন্ধন, ২ কপি ছবি, "
         "মা-বাবার NID কপি, সার্টিফিকেট (থাকলে), "
         "চেয়ারম্যান/কমিশনার সনদ (সম্ভব হলে)।"
+    ),
+    # 2026-08-21: deliberately does NOT name a specific position as
+    # "eligible" for a given education level beyond what's actually
+    # documented (Operation Officer's স্নাতক/বাচেলর requirement is the one
+    # exception with a real source, see "operation_officer" below) --
+    # regression case 9694 was the LLM inferring "HSC -> Assistant
+    # Supervisor" from the position menu alone, which no KB source states.
+    "education_eligibility": (
+        "সাধারণ ন্যূনতম শিক্ষাগত যোগ্যতা: ক্লাস ৮ (SSC/মাদ্রাসা দাখিল-আলিমসহ গ্রহণযোগ্য); "
+        "সার্টিফিকেট না থাকলেও বাংলা পড়তে-লিখতে পারলে এবং শারীরিকভাবে সুস্থ হলে আবেদন করা যায়। "
+        "ব্যতিক্রম: অপারেশন অফিসার পদে স্নাতক ডিগ্রি প্রয়োজন। "
+        "নির্দিষ্ট পদে আপনার যোগ্যতা প্রযোজ্য কিনা তা অফিসে সরাসরি যাচাই করে জানানো হবে।"
     ),
     "office_location": (
         "অফিস: Al-Rifa'i Integrated Services, আগ্রপাড়া, ভিক্টোরিয়া গেইট নং ১, "

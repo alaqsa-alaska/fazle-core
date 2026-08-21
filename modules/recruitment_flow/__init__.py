@@ -198,6 +198,39 @@ async def _get_effective_age_range() -> tuple[int, int]:
     return (18, 55)
 
 
+_NAME_REJECT_KEYWORDS: tuple[str, ...] = (
+    "hsc", "ssc", "এইচএসসি", "এসএসসি", "শিক্ষাগত", "যোগ্যতা", "ডিগ্রি",
+    "অনার্স", "মাস্টার্স", "পাস করেছি", "শেষ করেছি", "কোন পদ", "পদ আছে",
+    "চাকরি আছে", "চাকরি খুঁজছি", "বেতন কত", "কত টাকা", "বেতন কি",
+)
+
+
+def _looks_like_name(text: str) -> bool:
+    """Reject obvious non-name free text at the 'name' collection step
+    (2026-08-21, Owner Correction 2 / regression case 9694: a candidate's
+    education statement/question -- "আমি HSC শেষ করেছি, এই শিক্ষাগত
+    যোগ্যতায় কোন পদ আছে" -- was stored verbatim as full_name because this
+    step accepted ANY text unconditionally, corrupting the field). Wired
+    the same way as the existing age/job_preference validate-or-reask
+    steps below -- not a new mechanism.
+
+    Deliberately conservative: a real name is short, plain, and has no
+    question mark or education/position/salary vocabulary. Anything
+    ambiguous still passes (fails OPEN toward accepting a real name) --
+    this only catches text that unmistakably is not a name. The raw text
+    is never lost even when rejected: _audit_candidate_conversation()
+    still records it verbatim in wbom_candidate_conversations, which is
+    the "structured conversation/context metadata" this fact belongs in
+    instead of full_name."""
+    stripped = text.strip()
+    if not stripped or len(stripped) > 60:
+        return False
+    if "?" in stripped or "؟" in stripped:
+        return False
+    lower = stripped.lower()
+    return not any(kw in lower for kw in _NAME_REJECT_KEYWORDS)
+
+
 def _parse_job_preference(text: str) -> Optional[str]:
     norm = text.strip().lower()
     for key, val in sorted(VALID_POSITIONS.items(), key=lambda item: len(item[0]), reverse=True):
@@ -535,6 +568,16 @@ async def intake_message(
     update: dict = {}
 
     if step == "name":
+        if not _looks_like_name(text):
+            if candidate_id is not None:
+                await _audit_candidate_conversation(
+                    candidate_id, step, raw_message, source, message_id,
+                )
+            return {
+                "reply": "দুঃখিত, বুঝতে পারিনি। দয়া করে শুধু আপনার পুরো নাম লিখুন (যেমনঃ Md Karim)।",
+                "action": "collecting",
+                "session_id": session["id"],
+            }
         update["full_name"] = text.strip()[:100]
     elif step == "age":
         age_range = await _get_effective_age_range()

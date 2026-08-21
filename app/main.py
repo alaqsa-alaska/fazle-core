@@ -1211,6 +1211,135 @@ async def whatsapp_messages_lookup(
         return {"count": 0, "messages": [], "error": str(exc)[:200], "ts": time.time()}
 
 
+@app.get("/api/recruitment/interested-candidates", dependencies=[Depends(require_api_key)])
+async def recruitment_interested_candidates(start: str, end: str = ""):
+    """Exhaustive, date-range job-interest search (2026-08-21, Owner
+    Correction 2 / regression case ...1609). Answers "who messaged about a
+    job between X and Y" without relying on get_recent_messages(limit=N)'s
+    silent truncation, and without a per-bridge cap: wbom_whatsapp_messages
+    is the single unified inbound store across every ingest path this
+    system has (bridge1, bridge2, bridge3, meta/WhatsApp Cloud, and the
+    legacy 'whatsapp' platform value -- verified live, 2026-08-21: all 5
+    coexist in this one table, there is no separate per-bridge or archived
+    store to also query). No LIMIT is applied to the underlying scan within
+    the requested window -- every inbound row in range is evaluated, not a
+    sample.
+
+    Job-interest detection reuses modules.recruitment_flow.
+    is_recruitment_trigger() -- the exact same function recruitment_
+    eligibility() itself uses to decide "explicit_recruitment" -- so this
+    tool's notion of "job interest" can never silently diverge from what
+    the live funnel actually treats as one.
+
+    start/end: ISO 8601 date or datetime (e.g. "2026-08-20" or
+    "2026-08-20T00:00:00Z"). end defaults to now if omitted. Bounded to a
+    92-day window (about one quarter) to keep this a safe, boundable scan
+    rather than an unbounded full-table one.
+    """
+    from datetime import datetime, timezone
+    from modules.recruitment_flow import is_recruitment_trigger
+
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00")) if end else datetime.now(timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        return {"error": f"invalid start/end date: {exc}", "candidates": [], "ts": time.time()}
+
+    if end_dt <= start_dt:
+        return {"error": "end must be after start", "candidates": [], "ts": time.time()}
+    if (end_dt - start_dt).days > 92:
+        return {"error": "window too wide — max 92 days, narrow the range", "candidates": [], "ts": time.time()}
+
+    try:
+        rows = await fetch_all(
+            """
+            SELECT canonical_phone, sender_number, platform, received_at, message_body
+              FROM wbom_whatsapp_messages
+             WHERE direction = 'inbound'
+               AND received_at >= $1 AND received_at < $2
+             ORDER BY received_at ASC
+            """,
+            start_dt, end_dt,
+        )
+    except Exception as exc:
+        log.warning("[recruitment] /api/recruitment/interested-candidates scan error: %s", exc)
+        return {"error": str(exc)[:200], "candidates": [], "ts": time.time()}
+
+    unresolved_identity_count = 0
+    by_phone: dict[str, dict] = {}
+    for r in rows:
+        phone = r["canonical_phone"] or r["sender_number"]
+        if not phone:
+            continue
+        if str(phone).startswith("unresolved:"):
+            unresolved_identity_count += 1
+        text = r["message_body"] or ""
+        if not is_recruitment_trigger(text):
+            continue
+        bucket = by_phone.setdefault(phone, {
+            "phone": phone,
+            "sources": set(),
+            "first_message_at": r["received_at"],
+            "last_message_at": r["received_at"],
+            "job_interest_evidence": text[:300],
+            "message_count": 0,
+        })
+        bucket["sources"].add(r["platform"])
+        bucket["last_message_at"] = r["received_at"]
+        bucket["message_count"] += 1
+
+    candidates = []
+    for phone, bucket in by_phone.items():
+        lead = await fetch_one(
+            """
+            SELECT c.candidate_id, c.full_name, c.job_preference, c.area,
+                   c.funnel_stage, c.age, c.experience_years,
+                   s.id AS session_id, s.collection_step
+              FROM wbom_candidates c
+              LEFT JOIN fazle_recruitment_sessions s ON s.phone = c.phone
+             WHERE c.phone = $1
+            """,
+            phone,
+        )
+        missing = []
+        for field in ("full_name", "age", "area", "job_preference", "experience_years"):
+            if not (lead and lead.get(field)):
+                missing.append(field)
+        candidates.append({
+            "phone": bucket["phone"],
+            "sources": sorted(bucket["sources"]),
+            "first_message_at": bucket["first_message_at"].isoformat(),
+            "last_message_at": bucket["last_message_at"].isoformat(),
+            "message_count": bucket["message_count"],
+            "job_interest_evidence": bucket["job_interest_evidence"],
+            "lead_id": lead["candidate_id"] if lead else None,
+            "session_id": lead["session_id"] if lead else None,
+            "position_interest": lead["job_preference"] if lead else None,
+            "known_qualification": None,  # not a tracked field yet — see report
+            "known_location": lead["area"] if lead else None,
+            "missing_information": missing if lead else [
+                "full_name", "age", "area", "job_preference", "experience_years",
+            ],
+            "conversation_status": (lead["funnel_stage"] if lead else "no_lead_yet"),
+        })
+
+    candidates.sort(key=lambda c: c["last_message_at"], reverse=True)
+    return {
+        "completeness": "exhaustive_within_requested_window",
+        "window": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+        "sources_covered": ["bridge1", "bridge2", "bridge3", "meta", "whatsapp"],
+        "inbound_messages_scanned": len(rows),
+        "unresolved_identity_messages_in_window": unresolved_identity_count,
+        "count": len(candidates),
+        "candidates": candidates,
+        "ts": time.time(),
+    }
+
+
 # ── 2026-08-18 — Identity/Intent resolution, exposed for Hermes ──────────────
 # Closes the capability-exposure gap found in
 # HERMES_IDENTITY_ROLE_INTENT_CONTENT_CAPABILITY_AUDIT_2026-08-18.md: Hermes
