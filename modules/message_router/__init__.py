@@ -1051,8 +1051,26 @@ async def process_message(
             _hk_fire(role_str, intent, "reply", "catchall-sprint3a-session")
             return reply, admin_note
 
+    # 2026-08-21 (Salary context-routing bug, live-reproduced against
+    # "Abuhanif"): ec_detect_trigger() is a bare keyword scan (TRIGGER_GROUPS
+    # includes plain "salary"/"বেতন") that used to fire here for ANY
+    # non-admin role, completely blind to recruitment context -- even when
+    # §7/8 above had ALREADY determined this sender is recruitment-eligible
+    # (active session, explicit trigger, detector hit, or bridge3's
+    # dedicated-channel rule) and simply produced no reply text that turn
+    # (e.g. a dedup/cooldown-suppressed enqueue). That let a recruitment
+    # candidate's own salary/pay/duty question fall through into
+    # ec_handle_payment_request()'s employee flow and get an
+    # "Employee ID যাচাই" verification prompt instead. recruit_decision is
+    # already computed once, above (§7/8) -- reusing it here (rather than a
+    # second keyword check) means: an employee's real payment trigger is
+    # completely unaffected (recruit_decision is unconditionally
+    # {"eligible": False} for role_str=="employee", see line ~838), while a
+    # sender §7/8 already judged recruitment-eligible never gets silently
+    # re-routed into the employee-verification flow just because that
+    # turn's recruitment reply happened to be empty.
     ec_trigger_catchall = ec_detect_trigger(text)
-    if ec_trigger_catchall and role_str != "admin":
+    if ec_trigger_catchall and role_str != "admin" and not recruit_decision.get("eligible"):
         reply, admin_note = await ec_handle_payment_request(
             sender, text, source, identity.get("employee_id"), intent=intent
         )
