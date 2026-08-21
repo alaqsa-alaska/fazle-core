@@ -1211,6 +1211,65 @@ async def whatsapp_messages_lookup(
         return {"count": 0, "messages": [], "error": str(exc)[:200], "ts": time.time()}
 
 
+@app.get("/api/outbound/status", dependencies=[Depends(require_api_key)])
+async def get_outbound_status(queue_id: int | None = None, recipient: str = "", limit: int = 10):
+    """Real delivery-status lookup for one or more fazle_outbound_queue rows
+    (2026-08-21, urgent bridge3 recruitment-reply recovery pass, Task 5).
+
+    Root cause this closes: send_whatsapp_message's underlying POST /admin/
+    send-whatsapp returns {"ok": true} the instant a message is QUEUED, not
+    when it's actually delivered -- outbound.enqueue()/sweep_once() send
+    asynchronously in the background, with real retries and DLQ transitions
+    happening after that response is already sent. Confirmed live: Hermes
+    reported "Sent. Done." for a message whose actual queue row shows
+    status='failed' (later moved to 'dlq'), because it treated queue-
+    acceptance as delivery confirmation.
+
+    Pass queue_id for one specific row (the id returned by send-whatsapp),
+    or recipient for the most recent rows to that phone (useful when the
+    queue_id wasn't captured). status is one of: pending, sending, sent,
+    failed, dlq -- pending/sending are still in flight (not yet resolved
+    either way); sent means the bridge/outbound layer confirmed delivery;
+    failed/dlq mean it did not go out and IS an error, not a success."""
+    if not queue_id and not recipient:
+        return {"error": "queue_id or recipient is required", "items": [], "ts": time.time()}
+    limit = max(1, min(limit, 50))
+    conditions = []
+    params: list = []
+    if queue_id is not None:
+        params.append(queue_id)
+        conditions.append(f"id = ${len(params)}")
+    if recipient:
+        params.append(recipient)
+        conditions.append(f"recipient = ${len(params)}")
+    where_clause = " OR ".join(conditions)
+    params.append(limit)
+    rows = await fetch_all(
+        f"""
+        SELECT id, recipient, source_bridge, purpose, status, attempts,
+               max_attempts, last_error, created_at, sent_at, updated_at
+          FROM fazle_outbound_queue
+         WHERE {where_clause}
+         ORDER BY created_at DESC
+         LIMIT ${len(params)}
+        """,
+        *params,
+    )
+    items = [dict(r) for r in rows]
+    for item in items:
+        item["delivered"] = item["status"] == "sent"
+        item["in_flight"] = item["status"] in ("pending", "sending")
+        # 'dlq' alone already means "will never retry" regardless of how
+        # attempts compares to max_attempts (a row can reach dlq with
+        # attempts < max_attempts via a manual/administrative stop, not
+        # just by exhausting retries) -- confirmed live 2026-08-21, queue
+        # id 2371, attempts=1/max_attempts=3 but genuinely never retrying.
+        item["definitively_failed"] = item["status"] == "dlq" or (
+            item["status"] == "failed" and item["attempts"] >= item["max_attempts"]
+        )
+    return {"items": items, "count": len(items), "ts": time.time()}
+
+
 @app.get("/api/recruitment/interested-candidates", dependencies=[Depends(require_api_key)])
 async def recruitment_interested_candidates(start: str, end: str = ""):
     """Exhaustive, date-range job-interest search (2026-08-21, Owner
