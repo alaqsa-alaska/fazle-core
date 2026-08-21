@@ -99,6 +99,7 @@ async def test_cooldown_suppressed_reply_still_opens_recruitment_funnel():
 
     intake_mock.assert_awaited_once_with(
         "8801966011609", "আমি কাজ করতে চাই", "bridge3", role="unknown", message_id="msg-1609",
+        trigger_text="চাকরি",
     )
     # Cooldown must still fully suppress the reply/send path.
     process_message_mock.assert_not_awaited()

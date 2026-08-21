@@ -833,7 +833,7 @@ async def process_message(
     # ── 7/8. Recruitment — one eligibility decision for every unknown/candidate ─
     if role_str in ("candidate", "new_lead", "unknown"):
         recruit_decision = await recruitment_eligibility(
-            sender, text, role=role_str, intent=intent,
+            sender, text, role=role_str, intent=intent, source=source,
         )
     else:
         recruit_decision = {"eligible": False}

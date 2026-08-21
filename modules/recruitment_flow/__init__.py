@@ -763,8 +763,44 @@ async def recruitment_eligibility(
     *,
     role: str = "unknown",
     intent: str = "unknown",
+    source: str = "",
 ) -> dict:
-    """Return the single recruitment routing/delivery decision."""
+    """Return the single recruitment routing/delivery decision.
+
+    source (2026-08-21, urgent Facebook-boost recovery pass): the bridge
+    this message arrived on, e.g. "bridge3". Two real gaps found live
+    against today's actual Facebook-ad traffic:
+
+    1. Once a candidate has an active collecting session, their next reply
+       is very often free text answering the funnel's own question (a
+       district name, "Any post", a bare age/height line) -- it will never
+       match is_recruitment_trigger() or looks_like_recruitment_followup()'s
+       keyword hints, so it silently fell out of the funnel mid-conversation
+       and got answered by Route B's generic LLM reply instead, with no
+       lead/session update at all. Confirmed live: a candidate ("Abuhanif")
+       held a complete real conversation -- name, age, height, phone,
+       district, education, position preference, all given -- entirely
+       outside the funnel, zero lead/session rows, because no single reply
+       after the first matched a keyword. Fix: ANY message from a phone
+       with an active collecting/new session is eligible, unconditionally
+       -- they already explicitly entered the funnel once; a session
+       existing at all is a far stronger signal than any keyword.
+
+    2. bridge3 (config label "REC2") is a dedicated, single-purpose
+       recruitment channel -- not a general inquiry line -- confirmed by
+       its own no-cross-bridge-fallback design elsewhere in this codebase.
+       Its actual live traffic today is dominated by Meta/Facebook Click-
+       to-WhatsApp ad opener text ("Hello! Can I get more info on this?"),
+       which is a Meta-generated template, not the candidate's own words,
+       and matches no recruitment keyword or detector layer -- yet on this
+       specific number it is, for all practical purposes, always a
+       recruitment inquiry. Fix: for a brand-new (no active session)
+       unknown/new_lead/candidate sender on bridge3 specifically, treat
+       the message as recruitment-eligible even with no keyword/detector
+       match. Scoped to bridge3 only -- this does NOT change eligibility
+       on bridge1/bridge2/meta, where "Hello, can you help me" is a
+       genuinely ambiguous general inquiry, not a recruitment-line signal.
+    """
     role = (role or "unknown").lower()
     intent = (intent or "unknown").lower()
     explicit = is_recruitment_trigger(text)
@@ -776,18 +812,23 @@ async def recruitment_eligibility(
     if intent in OPERATIONAL_INTENTS:
         return {"eligible": False, "autosend": False, "reason": "operational_intent",
                 "active_session": active_session}
+    if active_session:
+        # Superset of the old "session_followup_draft" keyword-hint check --
+        # a session already existing is itself the strong signal; still
+        # draft-only (autosend=False) so an established candidate's free-
+        # text answer never bypasses the normal review posture, only the
+        # explicit-trigger/detector-entity paths below autosend.
+        return {"eligible": True, "autosend": False, "reason": "active_session_continuation",
+                "active_session": active_session}
     if explicit:
         return {"eligible": True, "autosend": True, "reason": "explicit_recruitment",
-                "active_session": active_session}
-    if active_session and looks_like_recruitment_followup(text):
-        return {"eligible": True, "autosend": False, "reason": "session_followup_draft",
                 "active_session": active_session}
 
     # 3-layer detector (2026-07-11): catches natural phrasing the flat
     # is_recruitment_trigger() keyword set above misses (e.g. "ভাই সুযোগ
     # দেন", "আমি available"). Conservative: only the fast, deterministic
     # entity layer autosends; the intent/context layers are lower-confidence
-    # and go to draft review instead, same as session_followup_draft above.
+    # and go to draft review instead, same as active_session_continuation.
     from modules.recruitment_detector import detect_recruitment_intent
 
     detector = await detect_recruitment_intent(text=text, phone=phone, intent=intent)
@@ -799,6 +840,10 @@ async def recruitment_eligibility(
             "active_session": active_session,
             "detector": detector,
         }
+
+    if source == "bridge3":
+        return {"eligible": True, "autosend": True, "reason": "bridge3_dedicated_channel",
+                "active_session": active_session}
 
     return {"eligible": False, "autosend": False, "reason": "no_recruitment_context",
             "active_session": active_session}
@@ -839,7 +884,7 @@ async def route_recruitment_message(
     contact_context: str = "",
 ) -> dict:
     """Canonical recruitment route: eligibility + live reply in one place."""
-    decision = await recruitment_eligibility(phone, text, role=role, intent=intent)
+    decision = await recruitment_eligibility(phone, text, role=role, intent=intent, source=source)
     if not decision.get("eligible"):
         return {
             "eligible": False,
@@ -990,6 +1035,24 @@ async def route_recruitment_message(
             history=history,
         )
 
+    # 2026-08-21 (urgent Facebook-boost recovery pass): route_recruitment_
+    # message() only ever reaches this point after recruitment_eligibility()
+    # already authoritatively decided decision["eligible"] is True (checked
+    # at the top of this function) -- but intake_message()'s own "New
+    # visitor" gate independently re-derives eligibility from the raw text
+    # via is_recruitment_trigger(), a NARROWER check than what
+    # recruitment_eligibility() itself now supports (active-session
+    # continuation, bridge3's dedicated-channel rule, the context/intent
+    # detector layers). Confirmed live: a bridge3 candidate's real, complete
+    # conversation (name/age/height/education/position all given) held
+    # entirely outside the funnel -- zero lead/session rows -- because no
+    # single message ever happened to contain a bare recruitment keyword,
+    # even though every one of those messages was correctly judged eligible
+    # upstream. Passing this forcing trigger_text makes intake_message()
+    # trust the eligibility decision this function's caller already made,
+    # instead of re-deriving (and disagreeing with) it from raw text.
+    _FORCE_RECRUITMENT_TRIGGER_TEXT = "চাকরি"
+
     if not reply:
         step = active_session.get("collection_step") if isinstance(active_session, dict) else None
         if step:
@@ -997,6 +1060,7 @@ async def route_recruitment_message(
         else:
             intake = await intake_message(
                 phone, text, source, role=role, message_id=message_id,
+                trigger_text=_FORCE_RECRUITMENT_TRIGGER_TEXT,
             )
             reply = (intake.get("reply") or "").strip() or STEP_QUESTIONS["name"]
     elif not active_session and decision.get("autosend"):
@@ -1007,13 +1071,15 @@ async def route_recruitment_message(
         # the NEXT message to continue via the branch above, and the
         # candidate never enters the real data-collection funnel at all.
         # Best-effort only: never overrides the informational reply already
-        # computed above, and intake_message()'s own INTAKE_KEYWORDS check
-        # means this is a no-op for eligibility reached only via the
-        # detector layers (context/intent), which is the correct, more
-        # conservative behavior for lower-confidence matches.
+        # computed above. (2026-08-21: no longer gated a second time by
+        # intake_message()'s own INTAKE_KEYWORDS/is_recruitment_trigger()
+        # check -- see _FORCE_RECRUITMENT_TRIGGER_TEXT above -- this branch
+        # only runs when decision.get("autosend") is already True, i.e.
+        # recruitment_eligibility() already made the high-confidence call.)
         try:
             await intake_message(
                 phone, text, source, role=role, message_id=message_id,
+                trigger_text=_FORCE_RECRUITMENT_TRIGGER_TEXT,
             )
         except Exception as e:
             log.debug(f"[recruit] background session-open failed: {e}")

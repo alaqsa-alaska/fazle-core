@@ -1986,7 +1986,7 @@ async def process_bridge_inbound(
     # eligibility check for msg_intent/draft-gate purposes as it always did.
     msg_intent = classify_intent(text)
     recruit_decision = await recruitment_eligibility(
-        phone, text, role=id_role, intent=msg_intent,
+        phone, text, role=id_role, intent=msg_intent, source=bridge_name,
     )
     if recruit_decision["eligible"]:
         msg_intent = "recruitment"
@@ -2001,8 +2001,18 @@ async def process_bridge_inbound(
         ):
             try:
                 from modules.recruitment_flow import intake_message
+                # 2026-08-21: force-pass intake_message()'s own narrower
+                # gate -- reaching this line already required recruit_
+                # decision["eligible"] and ["autosend"] to be True, i.e.
+                # recruitment_eligibility() already made the authoritative
+                # call (possibly via bridge3's dedicated-channel rule or
+                # the detector layers, neither of which intake_message()'s
+                # bare-keyword gate recognizes on its own). See the
+                # identical fix + full rationale in
+                # modules.recruitment_flow.route_recruitment_message().
                 await intake_message(
                     phone, text, bridge_name, role=id_role, message_id=message_id or None,
+                    trigger_text="চাকরি",
                 )
                 log.info(
                     "[%s] cooldown suppressed reply but opened recruitment funnel for %s "
