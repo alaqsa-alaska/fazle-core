@@ -100,8 +100,15 @@ CANONICAL_FACTS: dict[str, str] = {
         "ইনচার্জ: ১৬,০০০-৩২,০০০+; ঘাট সুপারভাইজার: ১৫,০০০-৩০,০০০+। "
         "বেতন মাসের ১০-১২ তারিখে nগদ/bKash/Nagad/ব্যাংকে দেওয়া হয়।"
     ),
+    # 2026-08-21: byte-aligned with fazle_knowledge_base row b11_no_fee /
+    # recruitment_business_rules.md's "Approved Deposit/Fee canonical
+    # text" / resources/ops/recruitment_source_of_truth.txt (previously a
+    # loose paraphrase missing the leading "চাকরির জন্য" -- harmless on its
+    # own, but not exactly one canonical text across every grounding
+    # source, which is the point of the 2026-07-21 decision this
+    # implements).
     "fee": (
-        "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না। প্রসেসিং/জয়েনিং ফি অন্যান্য "
+        "চাকরির জন্য কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না। প্রসেসিং/জয়েনিং ফি অন্যান্য "
         "প্রতিষ্ঠানের মত এখানেও আছে, তবে অগ্রিম নেওয়ার বদলে মাসিক বেতন থেকে "
         "কিস্তিতে কাটা হয় — টাকার অভাবে কারো জয়েন বাঁধাগ্রস্ত হয় না। "
         "নির্দিষ্ট মানি-রিসিট ছাড়া কেউ টাকা চাইলে তা প্রতারণা, অফিসে যাচাই করুন।"

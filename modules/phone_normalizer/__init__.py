@@ -9,6 +9,28 @@ from typing import Optional
 BANGLADESH_COUNTRY_CODE = "880"
 VALID_OPERATORS = {"11", "12", "13", "14", "15", "16", "17", "18", "19"}
 
+# 2026-08-21 fix (Bengali-numeral phone parsing, real candidate case: a
+# recruitment reply of "০১৭১৬০৮১৯২৫" -- a genuinely valid number, just
+# typed in Bengali digits -- was never recognized). Root cause: Python's
+# `\D`/`\d` already treat Bengali digits (০-৯, Unicode category Nd) as
+# digits, so `re.sub(r"\D", "", raw)` below correctly LEFT them in place
+# rather than stripping them -- but every check after that point compares
+# against ASCII literals ("0", "880", VALID_OPERATORS's "11".."19"), which
+# a Bengali "০"/"১" character can never equal even though it's the same
+# digit semantically. Translating to ASCII first (this is "the existing
+# canonical phone normalizer" the Bengali-numeral fix is meant to reuse,
+# per Owner instruction) fixes every caller of normalize_phone() at once,
+# not just recruitment -- no separate Bengali-phone code path invented.
+_BENGALI_TO_ASCII_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+
+def to_ascii_digits(text: str) -> str:
+    """Transliterate Bengali numerals (০-৯) to ASCII (0-9); anything else
+    passes through unchanged. Safe to call on mixed or all-ASCII input."""
+    if not text:
+        return text
+    return text.translate(_BENGALI_TO_ASCII_DIGITS)
+
 
 def normalize_phone(raw: str) -> Optional[str]:
     """
@@ -19,12 +41,14 @@ def normalize_phone(raw: str) -> Optional[str]:
         01812345678                    (11 digits, leading 0)
         1812345678                     (10 digits, no prefix)
         01812-345678                   (hyphenated)
+        Bengali-numeral forms of all of the above (০১৮১২৩৪৫৬৭৮)
 
     Returns None for unrecognized or invalid numbers.
     """
     if not raw:
         return None
 
+    raw = to_ascii_digits(raw)
     digits = re.sub(r"\D", "", raw)
 
     if digits.startswith("880") and len(digits) == 13:

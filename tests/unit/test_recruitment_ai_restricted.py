@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from modules.recruitment_ai import (
     _RECRUITMENT_SOURCE,
+    _SAFE_FALLBACK,
     build_recruitment_source_context,
     enforce_recruitment_reply_policy,
 )
@@ -61,20 +62,46 @@ def test_recruitment_source_has_no_retired_conflicting_facts():
 
 
 def test_fee_policy_is_only_loaded_for_fee_questions():
-    context = build_recruitment_source_context("জয়েনিং ফি কত?")
-    assert "জয়েনিং ফি ৳৩,৫০০" in context
+    # 2026-08-21 (recruitment fee/source-of-truth conflict closure): the
+    # fee section no longer states a specific figure at all -- it was
+    # rewritten to the same canonical, no-specific-numbers policy text
+    # already live in fazle_knowledge_base row b11_no_fee /
+    # recruitment_business_rules.md's "Approved Deposit/Fee canonical
+    # text" (2026-07-21 Owner decision) / modules.conversation_layer.
+    # playbooks.CANONICAL_FACTS["fee"] -- the old "জয়েনিং ফি ৳৩,৫০০" figure
+    # this test used to assert was present had already been superseded
+    # elsewhere and was simply never propagated to this file. See
+    # test_recruitment_fee_canonical_text.py for dedicated coverage.
+    context = build_recruitment_source_context("জয়েনিং ফি কত?")
+    assert "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না" in context
+    assert "৳৩,৫০০" not in context
     non_fee_context = build_recruitment_source_context("অফিস কখন খোলা?")
-    assert "জয়েনিং ফি ৳৩,৫০০" not in non_fee_context
+    assert "ঘুষ বা অবৈধ জামানত" not in non_fee_context
 
 
-def test_fee_question_allows_only_source_supported_amounts():
-    context = build_recruitment_source_context("জয়েনিং ফি কত?")
+def test_fee_question_reply_with_unsupported_number_is_blocked():
+    # 2026-08-21: the canonical fee policy states no specific figure, so
+    # ANY numeric fee reply is now unsupported by the source context and
+    # must fail closed -- a strengthening of the old behavior (which
+    # allowed the taka-3,500 figure specifically only because that stale
+    # figure used to be present in the source file).
+    context = build_recruitment_source_context("জয়েনিং ফি কত?")
     reply = enforce_recruitment_reply_policy(
-        "জয়েনিং ফি কত টাকা?",
+        "জয়েনিং ফি কত টাকা?",
         "জয়েনিং ফি ৳৩,৫০০।",
         context,
     )
-    assert reply == "জয়েনিং ফি ৳৩,৫০০।"
+    assert reply == _SAFE_FALLBACK
+
+
+def test_fee_question_reply_matching_canonical_policy_is_allowed():
+    context = build_recruitment_source_context("জয়েনিং ফি কত?")
+    reply = enforce_recruitment_reply_policy(
+        "জয়েনিং ফি কত টাকা?",
+        "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না, বেতন থেকে কিস্তিতে কাটা হয়।",
+        context,
+    )
+    assert reply == "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না, বেতন থেকে কিস্তিতে কাটা হয়।"
 
 
 def test_non_fee_reply_is_cleaned_normally():

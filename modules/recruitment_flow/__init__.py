@@ -245,7 +245,17 @@ def _parse_experience(text: str) -> Optional[int]:
 
 
 def _parse_phone(text: str) -> Optional[str]:
-    m = re.search(r"(0?1[3-9]\d{8})", re.sub(r"\D", "", text))
+    # 2026-08-21 fix: transliterate Bengali numerals to ASCII first, reusing
+    # modules.phone_normalizer's canonical transliteration helper (real
+    # candidate case: "০১৭১৬০৮১৯২৫" -- a valid number, just Bengali digits
+    # -- previously never parsed here, repeatedly re-asking for a phone
+    # number the candidate had already given). Output format/contract is
+    # unchanged (still an 11-digit 01XXXXXXXXX-shaped string, not the
+    # normalizer's own 13-digit 8801XXXXXXXXX canonical form) -- this only
+    # reuses the digit-transliteration step, not the full normalizer, so
+    # every existing caller of this function keeps seeing the same shape.
+    from modules.phone_normalizer import to_ascii_digits
+    m = re.search(r"(0?1[3-9]\d{8})", re.sub(r"\D", "", to_ascii_digits(text)))
     return m.group(1) if m else None
 
 
