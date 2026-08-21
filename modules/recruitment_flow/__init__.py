@@ -472,7 +472,21 @@ async def intake_message(
 
     # ── New visitor ────────────────────────────────────────────────────────────
     if session is None:
-        if not any(kw in lower for kw in INTAKE_KEYWORDS):
+        # 2026-08-21 fix (Owner Correction 1 / regression case ...1609): this
+        # used to check only the bare INTAKE_KEYWORDS set, which is NARROWER
+        # than RECRUITMENT_TRIGGER_PHRASES — e.g. "কাজ করতে চাই" ("I want to
+        # work") matches RECRUITMENT_TRIGGER_PHRASES (so recruitment_
+        # eligibility() correctly calls this "explicit_recruitment", highest
+        # confidence) but contains no INTAKE_KEYWORDS substring at all, so a
+        # brand-new session here silently returned action="ignored" for
+        # exactly the message type that should most reliably open a lead.
+        # is_recruitment_trigger() is the superset (INTAKE_KEYWORDS OR
+        # RECRUITMENT_TRIGGER_PHRASES) — using it here instead keeps this
+        # gate at least as permissive as every caller that already decided
+        # this message is a genuine recruitment trigger, and callers that
+        # only relied on the narrower bare-keyword match still pass (it's a
+        # superset, never narrower).
+        if not is_recruitment_trigger(lower):
             return {"reply": "", "action": "ignored", "session_id": None}
 
         sid = await _create_session(phone, text, source)

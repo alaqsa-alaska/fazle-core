@@ -1962,9 +1962,55 @@ async def process_bridge_inbound(
 
     Does NOT save the inbound message — callers must do that beforehand.
     """
+    # 0. Recruitment eligibility + best-effort funnel entry (2026-08-21,
+    # Owner Correction 1 / regression case ...1609): this used to be step 3,
+    # AFTER the cooldown early-return below. A candidate's SECOND message
+    # (e.g. an explicit "আমি কাজ করতে চাই" arriving less than
+    # REPLY_COOLDOWN=60s after their first) never reached recruitment_
+    # eligibility() at all — the cooldown `return` at old step 1 exited the
+    # whole function first, so no fazle_recruitment_sessions/wbom_candidates
+    # row was ever opened for them, only a silent DEBUG log line. Live-
+    # confirmed 2026-08-21: sender 8801966011609's "আমি কাজ করতে চাই"
+    # (received 1s after their first message, well inside the cooldown
+    # window) produced zero reply and zero lead — this is the generic bug
+    # behind that case, not specific to that phone number.
+    #
+    # Fix: compute recruitment eligibility unconditionally, and — mirroring
+    # route_recruitment_message()'s own existing best-effort session-open
+    # pattern for a new, high-confidence job inquiry (explicit trigger or
+    # entity-layer detector) — open the funnel here too when cooldown is
+    # about to suppress the reply that would otherwise have done it. This
+    # never touches the reply/send path: cooldown still fully governs
+    # whether anything is actually sent, exactly as before. If cooldown
+    # does NOT block, step 3 below still runs its own (idempotent, cheap)
+    # eligibility check for msg_intent/draft-gate purposes as it always did.
+    msg_intent = classify_intent(text)
+    recruit_decision = await recruitment_eligibility(
+        phone, text, role=id_role, intent=msg_intent,
+    )
+    if recruit_decision["eligible"]:
+        msg_intent = "recruitment"
+
     # 1. Cooldown
     if not await _can_reply(phone):
         log.debug("[%s] cooldown active for %s", bridge_name, phone)
+        if (
+            recruit_decision.get("eligible")
+            and recruit_decision.get("autosend")
+            and not recruit_decision.get("active_session")
+        ):
+            try:
+                from modules.recruitment_flow import intake_message
+                await intake_message(
+                    phone, text, bridge_name, role=id_role, message_id=message_id or None,
+                )
+                log.info(
+                    "[%s] cooldown suppressed reply but opened recruitment funnel for %s "
+                    "(explicit job-interest, reply=%s)",
+                    bridge_name, phone, recruit_decision.get("reason"),
+                )
+            except Exception as e:
+                log.debug("[recruit] best-effort cooldown-path session-open failed phone=%s: %s", phone, e)
         return
 
     # 2. Keyword flood
@@ -1972,13 +2018,10 @@ async def process_bridge_inbound(
         log.warning("[KW_FLOOD] suppressed reply bridge=%s phone=%s", bridge_name, phone)
         return
 
-    # 3. Intent classification (router re-classifies internally; this copy drives draft gates)
-    msg_intent = classify_intent(text)
-    recruit_decision = await recruitment_eligibility(
-        phone, text, role=id_role, intent=msg_intent,
-    )
-    if recruit_decision["eligible"]:
-        msg_intent = "recruitment"
+    # 3. Intent classification / recruitment eligibility already computed at
+    # step 0 above (kept as one step there so both cooldown-blocked and
+    # normal paths see the identical decision; msg_intent/recruit_decision
+    # are reused here unchanged, not recomputed).
 
     # 4. Prompt injection defense
     _inj = _detect_prompt_injection(text)
