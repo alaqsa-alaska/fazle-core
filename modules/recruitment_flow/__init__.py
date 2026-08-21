@@ -656,7 +656,22 @@ async def intake_message(
     # ── Collection complete — score ────────────────────────────────────────────
     merged = {**dict(session), **update}
     score, bucket = _compute_score(merged)
-    update["collection_step"] = None
+    # 2026-08-21 fix: fazle_recruitment_sessions.collection_step is NOT NULL
+    # (default 'name') -- setting it to None here has always violated that
+    # constraint, silently rolling back the entire completion transition
+    # (caught by _apply_audited_transition's own except-and-log-warning, or
+    # by _update_session's identical fail-open behavior in the no-candidate
+    # branch below). Confirmed live, 2026-08-21: no candidate has ever
+    # actually reached funnel_stage='scored' via this path -- every
+    # completion attempt fell back to STEP_QUESTIONS.get(step, ...),
+    # silently re-asking the LAST question forever instead of finishing.
+    # 'complete' is a non-null sentinel, never treated as a real collection
+    # step: every read site (`session.get("collection_step") or "name"`) is
+    # only ever reached while funnel_stage is still 'collecting'/'new' --
+    # once funnel_stage='scored', the ALREADY_APPLIED_MSG branch returns
+    # before any of those reads happen, so the sentinel's exact value is
+    # never interpreted as a step name in practice.
+    update["collection_step"] = "complete"
     update["funnel_stage"] = "scored"
     update["score"] = score
     update["score_bucket"] = bucket
