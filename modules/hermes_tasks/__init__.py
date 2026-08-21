@@ -78,6 +78,10 @@ ACTION_TYPES = frozenset({
     # dedicated type per class of high-stakes action rather than sharing
     # the generic 'production_write' bucket across unrelated domains.
     "dispatch_assignment", "billing_mutation",
+    # 2026-08-21, migration 071 (Phase 4 P1-C): a genuinely distinct action
+    # from 'dispatch_assignment' -- creating a new duty/program is a
+    # different decision than assigning an employee to an existing one.
+    "escort_program_creation",
 })
 ACTION_RISKS = frozenset({"low", "medium", "high", "critical"})
 

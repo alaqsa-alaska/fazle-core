@@ -108,6 +108,7 @@
 068_hermes_task_execution_state.sql
 069_hermes_tasks_build_authorization.sql
 070_hermes_action_approvals_dispatch_billing_types.sql
+071_hermes_action_approvals_escort_program_creation.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -272,7 +273,17 @@ __init__.py`'s `ACTION_TYPES` frozenset was widened in lockstep (both layers mus
 migration 051's own precedent of the app-level whitelist and the DB CHECK constraint being
 separate, both-must-pass gates).
 
-**Next available number for new work: `071`.**
+**`071_hermes_action_approvals_escort_program_creation.sql` (2026-08-21, Phase 4 coverage-audit
+follow-on, P1-C, APPLIED to production):** widens `hermes_action_approvals.action_type` again,
+adding `escort_program_creation` -- a genuinely distinct action from migration 070's
+`dispatch_assignment` (creating a new duty/program is a different decision than assigning an
+employee to one that already exists). Gates fazle-mcp's new `create_escort_program` tool, which
+wraps the new `POST /api/escort/programs` route (`modules/escort/routes.py`) -- itself a thin
+structured-input wrapper over the EXISTING `modules.escort.save_escort_programs()`, no new
+program-creation logic. Same widen-then-add-constraint shape as migrations 051/070.
+`modules/hermes_tasks/__init__.py`'s `ACTION_TYPES` frozenset widened in lockstep.
+
+**Next available number for new work: `072`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 

@@ -267,3 +267,81 @@ async def defer(item_id: int, body: DeferRequest, key: str = Depends(_API_KEY_HE
         )
     except Exception as e:
         raise _map_review_error(e) from None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Structured escort-program creation (2026-08-21, Phase 4 coverage-audit
+# P1-C -- see HERMES_ESCORT_PROGRAM_ROSTER_LIFECYCLE_AUDIT memory).
+#
+# Forensic finding this closes: the only production path that creates a
+# wbom_escort_programs row was modules.escort.save_escort_programs(), fed
+# by parse_escort_message()'s free-text parser -- there was no structured/
+# API way to create a program for an admin-initiated instruction that
+# didn't originate as inbound WhatsApp text (e.g. Hermes acting on
+# "MV X / lighter Y-এর জন্য নতুন escort program তৈরি করো"). This endpoint
+# is a THIN wrapper: it builds the exact same EscortOrder shape the text
+# parser produces and calls save_escort_programs() directly -- same dedup
+# check, same INSERT, same immediate _sync_roster_draft() call, same
+# audit trail. No business logic duplicated or reimplemented.
+#
+# master_mobile is REQUIRED (not optional) -- save_escort_programs()'s own
+# dedup query does `remarks::text ILIKE '%' || sender_phone || '%'`; an
+# empty sender_phone turns that into `ILIKE '%%'`, which matches every row
+# and risks a false-positive dedup skip against an unrelated existing
+# program on the same vessel/date. Every real escort order has a real
+# client/master contact number, so requiring it here just matches the
+# real business shape, not an arbitrary restriction.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CreateEscortProgramIn(BaseModel):
+    mother_vessel: str
+    lighter_vessel: str
+    master_mobile: str
+    destination: Optional[str] = None
+    capacity: Optional[str] = None
+    cargo_type: Optional[str] = None
+    importer: Optional[str] = None
+    date_hint: Optional[str] = None
+    shift: Optional[str] = "D"
+
+
+@router.post("/programs", dependencies=[Depends(_require_admin_or_above)])
+async def api_create_escort_program(body: CreateEscortProgramIn, key: str = Depends(_API_KEY_HEADER)):
+    """Create a new authoritative wbom_escort_programs row (status='draft')
+    through the SAME service the real WhatsApp client-order intake uses --
+    save_escort_programs(). Immediately roster-synced (draft), exactly like
+    every other real order. This is the canonical program-creation path for
+    an admin/Hermes-initiated instruction; it is NOT a substitute for
+    escort_roster's create_roster_entry (see that tool's own docstring --
+    raw roster maintenance only, never business program creation)."""
+    performed_by = await _resolve_performed_by(key)
+    order: escort_svc.EscortOrder = {
+        "mother_vessel": body.mother_vessel,
+        "importer": body.importer,
+        "cargo_type": body.cargo_type,
+        "lighters": [{
+            "lighter_vessel": body.lighter_vessel,
+            "master_mobile": body.master_mobile,
+            "capacity": body.capacity,
+            "destination": body.destination,
+            "shift": body.shift,
+        }],
+        "date_hint": body.date_hint,
+        "shift": body.shift,
+        "raw_text": f"[admin_direct] created by {performed_by}",
+    }
+    if not escort_svc.is_minimum_escort_order(order):
+        raise HTTPException(
+            status_code=422,
+            detail="mother_vessel, lighter_vessel, and master_mobile are all required",
+        )
+    program_ids = await escort_svc.save_escort_programs(
+        order, body.master_mobile, source="admin_direct", is_verified=True,
+    )
+    if not program_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Program was not created -- check server logs (parser rejected the "
+                    "order, or an unexpected save error occurred).",
+        )
+    return {"program_ids": program_ids, "created_by": performed_by}
