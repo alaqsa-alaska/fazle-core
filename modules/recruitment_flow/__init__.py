@@ -919,14 +919,19 @@ async def route_recruitment_message(
     # below does not apply unconditionally; every non-allowlisted phone
     # (i.e. everyone, while the allowlist is empty) is completely
     # unaffected by this block.
+    # Task 13 (2026-08-22): the Task-13 semantic-gate call site in
+    # modules.message_router.process_message is SHADOW-ONLY -- it computes
+    # and logs a SemanticDecision for observability but never calls
+    # route_recruitment_message() or any other handler (see that module's
+    # own Task-13 block comment). This function therefore has exactly the
+    # same two callers, and the same behavior, it had before Task 13:
+    # the legacy recruitment-role branch further down in message_router.
+    # The `_is_llm_priority_phone` allowlist below is restored unchanged
+    # from its Phase 1B (2026-08-06, Owner-approved) original -- it is
+    # always empty by default, so in production this block never runs for
+    # any real sender; it is intentionally dead-by-design until the Owner
+    # populates the allowlist.
     if active_session and _is_llm_priority_phone(phone):
-        # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal
-        # Modification Plan item 2): flag-gated substitution, default
-        # OFF, same fall-through contract as the other three migrated
-        # call sites — see modules/hermes_dispatch.py's own docstring.
-        # The deterministic session/candidate bookkeeping below is
-        # completely unaffected either way, since it only consumes
-        # whatever `priority_reply` text ends up here.
         priority_reply = None
         from modules.preflight_guard import is_feature_active
         if is_feature_active("hermes_customer_recruitment", default=False):

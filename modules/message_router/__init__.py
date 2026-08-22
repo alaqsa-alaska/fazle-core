@@ -838,6 +838,85 @@ async def process_message(
     else:
         recruit_decision = {"eligible": False}
 
+    # ── Task 13 (2026-08-22): SHADOW-ONLY semantic gate for the Recruitment +
+    # Employee conversational target. Runs AFTER all high-confidence
+    # business-action consumers (admin/accountant/escort/cash/attendance/
+    # slip) have had the chance to claim the message and either returned
+    # (admin/accountant) or been gated by their intent. Identity, keywords,
+    # and recruitment_detector are EVIDENCE inside the gate; they do NOT
+    # select the domain on their own.
+    #
+    # This block is NOT authoritative yet -- it computes what
+    # semantic_gate()/validate_semantic_decision() WOULD decide and records
+    # it on the DecisionRecord (via _hk_record.semantic_decision, persisted
+    # by whichever _hk_fire() call further down actually fires for this
+    # turn) purely for offline comparison against the legacy deterministic
+    # router's real decision. Regardless of sem_decision.domain, this block
+    # MUST NOT call route_recruitment_message(), MUST NOT call
+    # task13_handle_unresolved_employee_question() or any other handler,
+    # MUST NOT set ai_reply/return a reply, MUST NOT trigger an identity-
+    # clarification reply, and MUST NOT create a draft or write any
+    # business data. Execution always falls through unconditionally to the
+    # pre-existing (pre-Task-13) §7→§15 dispatch chain below. The whole
+    # block is wrapped in try/except so a shadow-logging failure can never
+    # affect the real reply path.
+    try:
+        from modules.hermes_dispatch import (
+            semantic_gate as _semantic_gate,
+            validate_semantic_decision as _validate_semantic_decision,
+        )
+        from modules.hermes_kernel.data_classes import SemanticDecision as _SemanticDecision
+        recruitment_detector_result = {}
+        try:
+            from modules.recruitment_detector import (
+                detect_recruitment_intent as _detect_recruitment_intent,
+            )
+            recruitment_detector_result = await _detect_recruitment_intent(
+                text=text, phone=sender, intent=intent,
+            ) or {}
+        except Exception as _det_exc:
+            log.debug("[router] recruitment_detector skipped: %s", _det_exc)
+        db_ctx_pre = await get_contact_context(sender)
+        history_pre = "\n".join(await get_recent_history(sender))
+        gate_input = {
+            "text": text,
+            "sender_phone": sender,
+            "identity_reference": dict(identity or {}),
+            "intent_hint": intent,
+            "recruitment_detector_result": recruitment_detector_result,
+            "keyword_hints": [],
+            "history": history_pre,
+            "db_ctx": db_ctx_pre,
+            "kb_ctx": "",
+            "business_data": {},
+            "source": source,
+            "language": "",
+        }
+        raw_decision = await _semantic_gate(gate_input)
+        sem_decision = _validate_semantic_decision(
+            raw_decision,
+            identity_reference=gate_input["identity_reference"],
+            intent_hint=intent,
+        )
+        if _hk_record is not None:
+            _hk_record.semantic_decision = sem_decision
+        # SHADOW LOGGING ONLY, below this line. sem_decision.domain is
+        # deliberately never inspected to make a routing choice here -- no
+        # branch below this point may call a handler, build a reply, or
+        # write business data for ANY domain value (recruitment_conversation
+        # / employee_conversation / no_match / identity_unresolved variant).
+        # The legacy §7→§15 dispatch chain that follows this try/except is
+        # the only code path in this function that can still do those
+        # things, exactly as it did before Task 13 existed.
+        log.info(
+            "[router] task13_shadow sender=%s domain=%s confidence=%.2f "
+            "rationale=%s requested_action=%s (non-authoritative, no side effect)",
+            sender, sem_decision.domain, sem_decision.confidence,
+            sem_decision.rationale, sem_decision.requested_action,
+        )
+    except Exception as _sem_exc:
+        log.warning("[router] semantic_gate skipped (non-fatal): %s", _sem_exc)
+
     if recruit_decision["eligible"]:
         db_ctx = await get_contact_context(sender)
         history = "\n".join(await get_recent_history(sender))

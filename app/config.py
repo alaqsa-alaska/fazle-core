@@ -7,7 +7,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import field_validator, Field
 import re
 
 
@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     # Get key at: https://console.groq.com/keys
     groq_api_key: str = ""
     groq_model_name: str = "llama-3.1-8b-instant"
+
+    # MiniMax (2026-08-22, Phase 2A isolated — NOT wired into llm.py chain yet).
+    # Reuses the AsyncOpenAI client pattern from groq_provider.py. Real
+    # base_url and model name must be supplied via .env before any caller can
+    # invoke the provider; defaults intentionally empty so a misconfigured
+    # deployment fails closed (see minimax_provider._make_client).
+    minimax_api_key: str = ""
+    minimax_base_url: str = ""
+    minimax_model_name: str = Field("", alias="MINIMAX_MODEL")
 
     # OmniRoute (2026-08-05, Owner decision: new provider order for AI
     # generation/polish — OmniRoute → Groq → local Ollama/Hermes → Kimi).
@@ -425,11 +434,15 @@ class Settings(BaseSettings):
                     result[phone] = level
         return result
 
-    class Config:
+    model_config = {
         # Prefer repo-local `.env` by default (production path is /home/azim/core/.env).
         # BaseSettings still reads from real environment variables if provided by systemd/Docker.
-        env_file = str(Path(__file__).resolve().parents[1] / ".env")
-        extra = "ignore"
+        "env_file": str(Path(__file__).resolve().parents[1] / ".env"),
+        "extra": "ignore",
+        # Allow both field name and env-var alias to construct/validate Settings.
+        # Required by MINIMAX_MODEL env-var alias used by minimax_provider.
+        "populate_by_name": True,
+    }
 
 
 @lru_cache
@@ -439,7 +452,7 @@ def get_settings() -> Settings:
 
 def update_repo_env_value(key: str, value: str) -> None:
     """Update one key in the repo-local `.env` file and clear cached settings."""
-    env_path = Path(Settings.Config.env_file)
+    env_path = Path(Settings.model_config.get("env_file") or "")
     text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
     new_line = f"{key}={value}"

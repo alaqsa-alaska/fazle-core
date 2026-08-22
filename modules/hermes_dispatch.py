@@ -49,12 +49,13 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import httpx
 
 from app.config import get_settings
 from shared.reply_policy import build_whatsapp_reply_policy, build_whatsapp_recruitment_policy
+from modules.hermes_kernel.data_classes import SemanticDecision
 
 log = logging.getLogger("fazle.hermes_dispatch")
 
@@ -223,8 +224,16 @@ def _configured():
     """Returns (base_url, secret) or (None, None) if either is unset —
     the one, single "is this feature usable at all" check every public
     function below shares, mirroring fazle_core_client.configured()'s own
-    shape in fazle-mcp."""
-    settings = get_settings()
+    shape in fazle-mcp. Resilient to Settings construction failure
+    (e.g. required database_url missing in a unit-test sandbox) — treats
+    that exactly the same as "feature not configured" so callers can
+    fall through to NO_MATCH or the legacy chain.
+    """
+    try:
+        settings = get_settings()
+    except Exception as exc:  # noqa: BLE001 — fail closed, not raise
+        log.debug("[hermes_dispatch] _configured settings unavailable: %s", exc)
+        return None, None
     base_url = (getattr(settings, "hermes_runner_url", "") or "").rstrip("/")
     secret = getattr(settings, "hermes_runner_customer_secret", "") or ""
     if not base_url or not secret:
@@ -362,3 +371,205 @@ async def generate_recruitment_reply(
     if reply and not _recruitment_reply_matches_source(reply, kb_context):
         return None
     return reply
+
+
+# ---------------------------------------------------------------------------
+# Semantic gate (Task 13, 2026-08-22 — Recruitment + Employee conversational
+# semantic routing). Identity / keywords / recruitment_detector are EVIDENCE
+# inside the gate input; they do NOT select the domain on their own. Hermes
+# produces a structured SemanticDecision used by message_router to dispatch
+# to the Recruitment handler, the Employee handler (or identity
+# clarification when unresolved), or NO_MATCH (fall through to the existing
+# deterministic router unchanged).
+# ---------------------------------------------------------------------------
+
+_SEMANTIC_GATE_POLICY = (
+    "You are a domain classifier for an inbound WhatsApp message.\n"
+    "Reply with EXACTLY ONE LINE of JSON and nothing else, in this shape:\n"
+    '{"domain":"recruitment_conversation"|"employee_conversation"|"no_match",'
+    '"subject":"...","intent":"...","entities":{},"requested_action":null|"...",'
+    '"confidence":0.0-1.0,"rationale":"..."}\n\n'
+    "RULES:\n"
+    "- 'recruitment_conversation' ONLY when the message is a job-applicant /\n"
+    "  vacancy / salary-for-a-position / interview / joining-process question,\n"
+    "  EVEN if the sender is a known employee asking about someone else.\n"
+    "- 'employee_conversation' ONLY when the message is an existing-employee /\n"
+    "  salary-payment / advance / release / duty-status / leave question about\n"
+    "  the SENDER THEMSELVES. NEVER if identity is unresolved and the subject\n"
+    "  is salary/payment/advance/release — return no_match with a clarification\n"
+    "  rationale so the system can ask for identity first.\n"
+    "- 'no_match' when the message is an operations/location/admin/accountant\n"
+    "  question, an escort client order, an attendance/slip submission, or any\n"
+    "  other business-action message that should go to the deterministic router.\n"
+    "- Confidence MUST reflect how certain you are about the DOMAIN choice,\n"
+    "  not about the answer.\n"
+    "- If identity is unresolved AND the subject implies private employee data,\n"
+    "  prefer no_match with rationale='identity_unresolved'."
+)
+
+
+def _parse_semantic_decision(raw: str) -> SemanticDecision:
+    """Best-effort JSON parse of the gate's one-line JSON reply. Fails closed
+    to a `no_match` decision with zero confidence on any parse/validation error
+    so the caller falls through to the existing deterministic router."""
+    if not raw:
+        return SemanticDecision(domain="no_match", confidence=0.0, rationale="empty_response")
+    text = raw.strip()
+    # Strip ``` fences if a model adds them.
+    if text.startswith("```"):
+        text = text.strip("`")
+        if "\n" in text:
+            text = text.split("\n", 1)[1]
+        if text.endswith("```"):
+            text = text[:-3]
+    text = text.strip()
+    try:
+        import json
+        obj = json.loads(text)
+    except Exception as exc:  # noqa: BLE001 — gate must never raise
+        log.warning("[hermes_dispatch] semantic_gate JSON parse failed: %s; raw=%r", exc, raw[:200])
+        return SemanticDecision(domain="no_match", confidence=0.0, rationale="json_parse_failed")
+    if not isinstance(obj, dict):
+        return SemanticDecision(domain="no_match", confidence=0.0, rationale="non_object_response")
+    domain = obj.get("domain")
+    if domain not in ("recruitment_conversation", "employee_conversation", "no_match"):
+        return SemanticDecision(domain="no_match", confidence=0.0, rationale="invalid_domain")
+    try:
+        confidence = float(obj.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    return SemanticDecision(
+        domain=domain,
+        subject=str(obj.get("subject") or ""),
+        intent=str(obj.get("intent") or ""),
+        entities=dict(obj.get("entities") or {}) if isinstance(obj.get("entities"), dict) else {},
+        requested_action=obj.get("requested_action") if obj.get("requested_action") else None,
+        confidence=confidence,
+        rationale=str(obj.get("rationale") or ""),
+    )
+
+
+async def semantic_gate(input_context: Dict[str, Any]) -> SemanticDecision:
+    """Hermes-driven semantic decision for the Recruitment/Employee
+    conversational target. The gate is OPT-IN: callers must pre-flight
+    that the message was NOT conclusively claimed by a high-confidence
+    business-action consumer (admin/escort/cash/attendance/slip/etc.).
+
+    Returns a SemanticDecision. Never raises. On any hermes-runner failure,
+    missing configuration, low confidence, or invalid response, returns
+    `no_match` so message_router falls through to its existing dispatch
+    chain unchanged.
+
+    MiniMax is NOT used here in Task 13 — uses the existing Hermes /
+    hermes-runner path exactly as currently configured.
+    """
+    base_url, secret = _configured()
+    if not base_url or not secret:
+        log.debug("[hermes_dispatch] semantic_gate not configured; returning no_match")
+        return SemanticDecision(domain="no_match", confidence=0.0, rationale="not_configured")
+
+    evidence = {
+        "text": (input_context or {}).get("text", ""),
+        "identity_reference": (input_context or {}).get("identity_reference", {}),
+        "intent_hint": (input_context or {}).get("intent_hint", ""),
+        "recruitment_detector_result": (input_context or {}).get("recruitment_detector_result", {}),
+        "keyword_hints": (input_context or {}).get("keyword_hints", []),
+        "history": (input_context or {}).get("history", ""),
+        "db_ctx": (input_context or {}).get("db_ctx", ""),
+        "kb_ctx": (input_context or {}).get("kb_ctx", ""),
+        "business_data": (input_context or {}).get("business_data", {}),
+        "source": (input_context or {}).get("source", ""),
+        "language": (input_context or {}).get("language", ""),
+    }
+    import json as _json
+    payload_text = (
+        _SEMANTIC_GATE_POLICY
+        + "\n\nEVIDENCE (JSON):\n" + _json.dumps(evidence, ensure_ascii=False, default=str)
+    )
+
+    sender_phone = (input_context or {}).get("sender_phone", "") or ""
+    raw_reply = await _call_hermes(
+        payload_text,
+        sender_phone=sender_phone,
+        log_label=f"semantic_gate source={evidence['source']}",
+    )
+    decision = _parse_semantic_decision(raw_reply or "")
+    decision.identity_reference = evidence["identity_reference"]
+    log.info(
+        "[hermes_dispatch] semantic_gate domain=%s confidence=%.2f rationale=%s",
+        decision.domain, decision.confidence, decision.rationale,
+    )
+    return decision
+
+
+# Fazle-Core business-rule validation layer (Task 13). Identity, keyword
+# hints, and recruitment_detector output are EVIDENCE that has already been
+# consumed by semantic_gate; this layer enforces the policy that no single
+# evidence source independently selects the domain, and that protected
+# business intents are routed to NO_MATCH so the deterministic handlers
+# continue to own them.
+_PROTECTED_ROLES = ("admin", "accountant", "escort_client")
+_PROTECTED_INTENT_HINTS = {
+    "escort_order",
+    "payment",
+    "attendance",
+    "slip_submission",
+    "admin_command",
+    "accountant_command",
+    "cash_transaction",
+}
+
+
+def validate_semantic_decision(
+    decision: SemanticDecision,
+    *,
+    identity_reference: Dict[str, Any],
+    intent_hint: str = "",
+) -> SemanticDecision:
+    """Apply Fazle-Core policy to the gate's SemanticDecision. Returns a
+    possibly-mutated decision (typically downgrading to `no_match`) without
+    raising. The caller (message_router) treats the returned value as the
+    routing authority."""
+    role = str((identity_reference or {}).get("role") or "")
+    if role in _PROTECTED_ROLES:
+        # Admin / Accountant / Escort Client: their traffic is owned by
+        # business-action handlers, not the conversational semantic layer.
+        return SemanticDecision(
+            domain="no_match",
+            confidence=decision.confidence,
+            identity_reference=identity_reference,
+            rationale=f"protected_role:{role}",
+        )
+    if intent_hint in _PROTECTED_INTENT_HINTS:
+        return SemanticDecision(
+            domain="no_match",
+            confidence=decision.confidence,
+            identity_reference=identity_reference,
+            rationale=f"protected_intent:{intent_hint}",
+        )
+    if decision.confidence < 0.6:
+        return SemanticDecision(
+            domain="no_match",
+            confidence=decision.confidence,
+            identity_reference=identity_reference,
+            rationale="low_confidence",
+        )
+    if decision.domain == "employee_conversation":
+        linked_employee_id = (identity_reference or {}).get("employee_id") or (identity_reference or {}).get("linked_employee_id")
+        is_unresolved = not linked_employee_id and role not in ("employee", "admin", "accountant")
+        # When identity is unresolved but Hermes correctly inferred an
+        # employee-context question, return no_match with rationale
+        # 'identity_unresolved' so message_router routes to the existing
+        # employee identity clarification (NOT to recruitment). The
+        # clarification path asks for name/known-mobile/duty before any
+        # financial data is disclosed.
+        if is_unresolved:
+            return SemanticDecision(
+                domain="no_match",
+                confidence=decision.confidence,
+                identity_reference=identity_reference,
+                requested_action="identity_clarification",
+                rationale="identity_unresolved",
+            )
+    return decision

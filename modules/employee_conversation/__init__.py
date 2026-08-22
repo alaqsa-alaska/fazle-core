@@ -1098,6 +1098,52 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ── Task 13 (2026-08-22): identity-clarification helper ───────────────────────
+# When hermes_dispatch.semantic_gate returns no_match with rationale
+# 'identity_unresolved' for an employee-context question, message_router
+# routes here so the existing resolve_employee_identity() pipeline asks
+# for name/known-mobile/duty BEFORE any financial disclosure. Reuses the
+# existing clarification logic; this wrapper exists so the audit hook is
+# explicit and a single import surface in message_router.
+
+async def task13_handle_unresolved_employee_question(
+    phone: str,
+    text: str,
+    source: str,
+) -> tuple[str, Optional[dict]]:
+    """Identity-unresolved + semantic 'employee_conversation' branch.
+
+    NEVER discloses salary / advance / release / private employee data.
+    Invokes the existing resolve_employee_identity() so the worker asks
+    for name / known-mobile / duty / project evidence safely.
+    """
+    log.info(
+        "[ec/task13] unresolved employee question phone=%s source=%s",
+        phone[-4:] if phone else "?", source,
+    )
+    identity = await resolve_employee_identity(phone)
+    if identity.get("employee_id"):
+        # Clarification successfully resolved — defer to the existing
+        # payment-request pipeline so verification/confirmation lifecycle
+        # continues to be owned by start_employee_conversation().
+        return await handle_employee_payment_request(
+            phone=phone, text=text, source=source,
+            employee_id=identity.get("employee_id"),
+        )
+    # Identity still unresolved — return a clarification reply with NO
+    # private financial data. The caller (message_router) sends this
+    # reply verbatim; no draft, no DB write.
+    clarification = (
+        "আপনার পরিচয় নিশ্চিত করতে হবে — আপনার নাম, নিবন্ধিত মোবাইল নম্বর "
+        "এবং পোস্ট/ডিউটির তথ্য দিন।"
+    )
+    log.info(
+        "[ec/task13] clarification sent, no disclosure phone=%s",
+        phone[-4:] if phone else "?",
+    )
+    return clarification, None
+
+
 # ── Public entry point (called by message_router) ─────────────────────────────
 
 async def handle_employee_payment_request(
