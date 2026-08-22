@@ -1,12 +1,21 @@
 """
-Fazle Core — MiniMax AI Client (Isolated)
+Fazle Core — MiniMax AI Client
 
 Pattern: follows app/groq_provider.py for caller-compatible interface,
 AsyncOpenAI usage, and error handling.
 
-Isolated: NOT wired into app/llm.py's active generation chain in Phase 2A.
-Provider file exists so the implementation, error paths, and unit tests
-can be verified without affecting OmniRoute/Groq/local/Kimi behavior.
+Phase 2A (2026-08-19..21): isolated, NOT wired into app/llm.py's active
+generation chain -- provider file existed so the implementation, error
+paths, and unit tests could be verified without affecting
+OmniRoute/Groq/local/Kimi behavior.
+
+Task 13 MiniMax-primary promotion (2026-08-22, BUILD+VERIFY, flag-gated):
+now called from modules/hermes_dispatch.py's semantic_gate()/generate_reply()/
+generate_recruitment_reply(), gated behind the `minimax_customer_primary`
+feature flag (default OFF) -- see that module for the primary-then-fallback
+wiring. Still not wired into app/llm.py's own chain; that remains
+out of scope. This file's own functions are unchanged in their own
+call/return contract.
 """
 import asyncio
 import json
@@ -144,6 +153,61 @@ async def generate_recruitment_reply(
             log.warning("[minimax] generate_recruitment_reply config missing: %s", type(e).__name__)
         except Exception as e:
             log.error("[minimax] generate_recruitment_reply unexpected: %s: %s", type(e).__name__, e)
+    return None
+
+
+async def generate_raw_completion(
+    prompt: str,
+    *,
+    max_tokens: int = 300,
+    temperature: float = 0.0,
+) -> Optional[str]:
+    """Task 13 (2026-08-22, MiniMax-primary promotion): a raw, unwrapped
+    single-turn completion -- no shared.reply_policy prompt-building, the
+    caller supplies the complete prompt text itself (e.g. hermes_dispatch's
+    own _SEMANTIC_GATE_POLICY + evidence JSON for the semantic classifier,
+    which is not a "customer reply" and must not be run through
+    build_whatsapp_reply_policy()/build_whatsapp_recruitment_policy()).
+
+    Same client construction, semaphore, timeout, and error-handling shape
+    as generate_reply()/generate_recruitment_reply() above -- this is
+    still the isolated, tool-less MiniMax client; it gains no tool access,
+    no admin/system prompt, no privileged session just because the prompt
+    text differs. Returns None on any failure (never raises), exactly like
+    every other function in this module -- callers must fall through to
+    their own existing fallback path unchanged."""
+    settings = get_settings()
+    model = settings.minimax_model_name
+
+    t0 = time.monotonic()
+    async with _minimax_sem:
+        try:
+            client = _make_client()
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                ),
+                timeout=25.0,
+            )
+            reply_text = (resp.choices[0].message.content or "").strip()
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            log.info("[minimax] generate_raw_completion OK latency=%dms", latency_ms)
+            return reply_text
+        except asyncio.TimeoutError as e:
+            log.warning("[minimax] generate_raw_completion timeout: %s", type(e).__name__)
+        except APITimeoutError as e:
+            log.warning("[minimax] generate_raw_completion api timeout: %s", e)
+        except RateLimitError as e:
+            log.warning("[minimax] generate_raw_completion rate limit: %s", e)
+        except APIError as e:
+            log.warning("[minimax] generate_raw_completion api error: %s", e)
+        except ValueError as e:
+            log.warning("[minimax] generate_raw_completion config missing: %s", type(e).__name__)
+        except Exception as e:
+            log.error("[minimax] generate_raw_completion unexpected: %s: %s", type(e).__name__, e)
     return None
 
 

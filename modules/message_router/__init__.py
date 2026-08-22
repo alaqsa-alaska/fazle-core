@@ -366,6 +366,88 @@ def _family_deflection_reply(name: str, text: str) -> str:
     return f"হ্যালো {name}। 😊\nএটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন।"
 
 
+# ── Task 13 authoritative dispatch (2026-08-22, flag-gated by
+# task13_semantic_authoritative, default OFF) ──────────────────────────────
+# Translates a validated SemanticDecision into an actual reply via EXISTING
+# deterministic handlers / the new narrowly-scoped recruitment delivery
+# path (modules.hermes_dispatch.deliver_authoritative_recruitment_reply) —
+# this function itself never decides business facts, never writes, and
+# never talks to a model. It returns (None, None) for any domain/condition
+# it does not own, so process_message()'s caller falls through to the
+# unchanged legacy §7-15 dispatch chain exactly as shadow mode already
+# guaranteed. Never raises — every branch below is a pure dispatch, and the
+# functions it calls already fail closed on their own.
+async def _task13_authoritative_dispatch(
+    sem_decision,
+    *,
+    sender: str,
+    text: str,
+    source: str,
+    role_str: str,
+    intent: str,
+    db_ctx: str,
+    history: str,
+) -> tuple[Optional[str], Optional[dict]]:
+    domain = sem_decision.domain
+    identity_reference = sem_decision.identity_reference or {}
+
+    if domain == "recruitment_conversation" and sem_decision.confidence >= 0.6:
+        # Scoped precisely to the OPERATIONAL_ROLES bug this path exists to
+        # fix (Example A: a known-employee sender asking about someone
+        # else's job) — recruitment_eligibility()/route_recruitment_message()
+        # already own delivery for every role they were ALREADY eligible
+        # for (candidate/new_lead/unknown), including active-session funnel
+        # continuation, step collection, and the priority-phone allowlist —
+        # none of that richer, well-tested logic may be shortcut by this
+        # new path. Only a sender OPERATIONAL_ROLES would categorically
+        # reject reaches the new delivery path below.
+        from modules.recruitment_flow import OPERATIONAL_ROLES as _OPERATIONAL_ROLES
+        if role_str not in _OPERATIONAL_ROLES:
+            return None, None
+        from modules.hermes_dispatch import deliver_authoritative_recruitment_reply
+        reply = await deliver_authoritative_recruitment_reply(
+            phone=sender, text=text, source=source,
+            contact_context=db_ctx, history=history,
+        )
+        return (reply or None), None
+
+    if domain == "employee_conversation" and sem_decision.confidence >= 0.6:
+        emp_id = identity_reference.get("employee_id") or identity_reference.get("linked_employee_id")
+        if not emp_id:
+            # validate_semantic_decision() already downgrades an
+            # unresolved-identity employee_conversation decision to
+            # no_match/identity_unresolved before this point is ever
+            # reached — this is a defensive fail-closed guard, not the
+            # normal path. Never guess an identity here.
+            return None, None
+        # 2026-08-21 salary/keyword-trigger context-routing fix and the
+        # existing release-intent admin-review branch (both in the legacy
+        # §10 EMPLOYEE chain) are order-dependent protections this
+        # function must not shortcut around — see this session's own
+        # "never repeat that guard-widening class of mistake" instruction.
+        # Both are deliberately left to the legacy chain via an
+        # unconditional (None, None) fall-through; only genuinely
+        # conversational triggers (advance/food/conveyance/emergency, or
+        # an already-open Sprint-3A session) are delegated to the module
+        # literally named for this domain.
+        if intent in ("salary_query", "payment_due"):
+            return None, None
+        from modules.escort_lifecycle import is_release_intent
+        if is_release_intent(text):
+            return None, None
+        return await ec_handle_payment_request(sender, text, source, emp_id, intent=intent)
+
+    if (
+        domain == "no_match"
+        and sem_decision.rationale == "identity_unresolved"
+        and sem_decision.requested_action == "identity_clarification"
+    ):
+        from modules.employee_conversation import task13_handle_unresolved_employee_question
+        return await task13_handle_unresolved_employee_question(sender, text, source)
+
+    return None, None
+
+
 async def process_message(
     sender: str, text: str, source: str, *, message_id: Optional[str] = None
 ) -> tuple[str, Optional[dict]]:
@@ -925,6 +1007,40 @@ async def process_message(
         )
     except Exception as _sem_exc:
         log.warning("[router] semantic_gate skipped (non-fatal): %s", _sem_exc)
+
+    # ── Task 13 AUTHORITATIVE DISPATCH (flag-gated, 2026-08-22) ────────────────
+    # `sem_decision` is bound only when the shadow try/except block above
+    # completed without raising — the "sem_decision" in locals() guard means
+    # a semantic_gate failure (caught above) makes this section a complete
+    # no-op too, the same fail-open guarantee the shadow block already has.
+    # Gated end-to-end by task13_semantic_authoritative (default OFF): when
+    # OFF, is_feature_active() returns False and this section never calls
+    # _task13_authoritative_dispatch() or returns anything — process_message()
+    # falls through to the unchanged section-7-through-15 chain below exactly
+    # as it did before this section existed. When ON, a reply produced here
+    # is returned immediately (duplicate-reply guard: this is the ONLY
+    # return point in this section, and it short-circuits before the legacy
+    # recruitment-eligibility dispatch immediately below — let alone any
+    # later section — can ever run for this turn).
+    if "sem_decision" in locals():
+        try:
+            from modules.preflight_guard import is_feature_active as _task13_flag_active
+            if _task13_flag_active("task13_semantic_authoritative", default=False):
+                _t13_reply, _t13_admin_note = await _task13_authoritative_dispatch(
+                    sem_decision,
+                    sender=sender,
+                    text=text,
+                    source=source,
+                    role_str=role_str,
+                    intent=intent,
+                    db_ctx=db_ctx_pre,
+                    history=history_pre,
+                )
+                if _t13_reply:
+                    _hk_fire(role_str, intent, "reply", f"task13-authoritative-{sem_decision.domain}")
+                    return _t13_reply, _t13_admin_note
+        except Exception as _t13_auth_exc:
+            log.warning("[router] task13 authoritative dispatch skipped (non-fatal): %s", _t13_auth_exc)
 
     if recruit_decision["eligible"]:
         db_ctx = await get_contact_context(sender)

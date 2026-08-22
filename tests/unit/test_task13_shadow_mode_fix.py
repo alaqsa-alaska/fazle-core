@@ -20,10 +20,26 @@ Covers the reviewed regression (persistent task #13, repo /home/azim/core):
 
 This file proves:
   (a) the guard is restored verbatim (source-level + behavioral),
-  (b) the Task-13 router block is now genuinely non-authoritative for
-      every SemanticDecision.domain outcome -- no handler call, no reply,
-      no clarification, no business write -- and always falls through to
-      the pre-existing deterministic router unchanged.
+  (b) the Task-13 SHADOW block (the original try/except that calls
+      semantic_gate()/validate_semantic_decision() and only logs) is
+      genuinely non-authoritative for every SemanticDecision.domain
+      outcome -- no handler call, no reply, no clarification, no business
+      write -- and always falls through to the pre-existing deterministic
+      router unchanged, WITH task13_semantic_authoritative left at its
+      default (OFF).
+
+2026-08-22 (Task-13 MiniMax-primary + authoritative-mode promotion,
+BUILD+VERIFY): message_router.process_message() gained a SECOND,
+separately flag-gated section immediately after the shadow block --
+"Task 13 AUTHORITATIVE DISPATCH" -- gated by task13_semantic_authoritative
+(default OFF). That section legitimately calls handlers and returns, but
+ONLY when the flag is explicitly active; with the flag at its default this
+file's own shadow-block assertions (never calls a handler, never returns)
+remain true and are still checked here, now scoped precisely to the
+original shadow block via _task13_block_source()'s updated end boundary.
+See tests/unit/test_task13_authoritative_mode.py for the promoted
+section's own behavioral (flag ON) coverage -- Required Tests A-S from the
+promotion's spec.
 """
 from __future__ import annotations
 
@@ -46,9 +62,23 @@ from modules.hermes_kernel.data_classes import SemanticDecision
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _task13_block_source(strip_comments: bool = True) -> str:
-    """Return just the Task-13 try/except block's source text, isolated
-    from the rest of process_message(), so structural assertions can't be
-    fooled by a call elsewhere in the (very long) function.
+    """Return just the Task-13 SHADOW COMPUTATION/LOGGING block's source
+    text (the try/except that calls semantic_gate()/validate_semantic_
+    decision() and only logs), isolated from the rest of process_message(),
+    so structural assertions can't be fooled by a call elsewhere in the
+    (very long) function.
+
+    2026-08-22 (Task-13 authoritative-mode promotion): this helper's END
+    boundary was moved from "if recruit_decision[\"eligible\"]:" to the new
+    "# ── Task 13 AUTHORITATIVE DISPATCH" section marker that now sits
+    between the shadow block and that line -- promotion added a NEW,
+    separately flag-gated section (task13_semantic_authoritative, default
+    OFF) that legitimately DOES call handlers and DOES return, by design,
+    only when that flag is explicitly turned on. This helper now isolates
+    just the original always-runs, log-only shadow section so its own
+    "never calls a handler / never returns" invariant remains checked and
+    true; see _task13_authoritative_block_source() below for the promoted
+    section's own (deliberately different) assertions.
 
     strip_comments=True (default) removes full-line `#` comments before
     returning, so an assertion like "call X is absent" can't be defeated
@@ -57,7 +87,29 @@ def _task13_block_source(strip_comments: bool = True) -> str:
     an actual code reference."""
     src = inspect.getsource(router)
     start = src.index("# ── Task 13 (2026-08-22): SHADOW-ONLY semantic gate")
-    # The block ends at the next top-level section marker after it.
+    end = src.index("# ── Task 13 AUTHORITATIVE DISPATCH", start)
+    block = src[start:end]
+    if not strip_comments:
+        return block
+    code_lines = [
+        line for line in block.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return "\n".join(code_lines)
+
+
+def _task13_authoritative_block_source(strip_comments: bool = True) -> str:
+    """Return the Task-13 AUTHORITATIVE DISPATCH section's source text
+    (2026-08-22 promotion) -- the new code that runs ONLY when
+    task13_semantic_authoritative is active. Unlike the shadow block
+    above, this section legitimately contains a `return` and calls into
+    _task13_authoritative_dispatch() (which itself may call
+    deliver_authoritative_recruitment_reply() / ec_handle_payment_request()
+    / task13_handle_unresolved_employee_question() depending on the
+    decision) -- see tests/unit/test_task13_authoritative_mode.py for the
+    behavioral proof that all of this is unreachable with the flag OFF."""
+    src = inspect.getsource(router)
+    start = src.index("# ── Task 13 AUTHORITATIVE DISPATCH")
     end = src.index("if recruit_decision[\"eligible\"]:", start)
     block = src[start:end]
     if not strip_comments:
@@ -202,6 +254,39 @@ def test_2c_task13_block_has_no_return_statement():
     authoritative for at least one domain -- must never happen."""
     block = _task13_block_source()
     assert "return" not in block
+
+
+# ── 2d-2f. Authoritative section (2026-08-22 promotion) -- deliberately
+# different invariants: it MAY call handlers and MAY return, but ONLY
+# behind an is_feature_active() check, and that check must gate the
+# return, not merely coexist with it. ─────────────────────────────────────
+
+def test_2d_authoritative_block_is_gated_by_feature_flag_check():
+    block = _task13_authoritative_block_source()
+    assert 'is_feature_active as _task13_flag_active' in block
+    assert '_task13_flag_active("task13_semantic_authoritative"' in block
+
+
+def test_2e_authoritative_block_flag_check_precedes_dispatch_and_return():
+    """Structural proof the flag check actually GATES the dispatch call
+    and the return -- not just that both happen to appear somewhere in the
+    same block."""
+    block = _task13_authoritative_block_source()
+    flag_idx = block.index('_task13_flag_active("task13_semantic_authoritative"')
+    dispatch_idx = block.index("await _task13_authoritative_dispatch(")
+    return_idx = block.index("return _t13_reply, _t13_admin_note")
+    assert flag_idx < dispatch_idx < return_idx
+
+
+def test_2f_authoritative_block_references_all_three_handoff_targets():
+    """The promoted section's OWN dispatch call (_task13_authoritative_
+    dispatch, tested in isolation in test_task13_authoritative_mode.py)
+    is what actually references the three handoff targets -- confirms the
+    call site itself is present and unconditional-once-flagged, i.e. no
+    domain is silently dropped at the message_router call site."""
+    block = _task13_authoritative_block_source()
+    assert "_task13_authoritative_dispatch(" in block
+    assert "sem_decision," in block
 
 
 # ── 3. Example A: employee sender + other person's job → recruitment_conversation ──
