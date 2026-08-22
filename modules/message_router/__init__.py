@@ -787,7 +787,16 @@ async def process_message(
         # this branch). process_admin_command() additionally re-checks RBAC
         # permission for the caller's own phone before running anything --
         # this call is not a bypass of that check.
-        from modules.admin_commands import is_report_command, process_admin_command
+        # process_admin_command is already imported at module level (top of
+        # file) -- re-importing it here as a local name would shadow that
+        # module-level binding for this function's ENTIRE scope (Python
+        # treats any name assigned anywhere in a function, including via a
+        # local `import`, as local throughout the whole function), which
+        # breaks the unrelated Admin branch's own `await
+        # process_admin_command(...)` call above with UnboundLocalError --
+        # confirmed via bytecode disassembly (LOAD_FAST before any STORE_FAST
+        # on that path). Only is_report_command is genuinely new here.
+        from modules.admin_commands import is_report_command
         if is_report_command(text):
             return await process_admin_command(text, admin_phone=sender), None
 
