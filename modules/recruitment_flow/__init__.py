@@ -897,9 +897,37 @@ async def route_recruitment_message(
     intent: str = "unknown",
     history: str = "",
     contact_context: str = "",
+    force_eligible: bool = False,
 ) -> dict:
-    """Canonical recruitment route: eligibility + live reply in one place."""
+    """Canonical recruitment route: eligibility + live reply in one place.
+
+    force_eligible (2026-08-22, Task-14B, keyword-only, default False):
+    when True, skips the deterministic recruitment_eligibility() ineligible
+    early-return below and proceeds as though decision["eligible"] were
+    True (reason overridden to "semantic_gate_override" for auditability).
+    recruitment_eligibility() is still called normally either way -- only
+    its "eligible" verdict is overridden; decision["active_session"] is
+    still the real active-session row, so active-session continuation,
+    candidate/session lifecycle (intake_message()), and the fact-checked
+    LLM informational reply below are entirely UNCHANGED for this call.
+    The only caller of this flag is
+    modules.message_router._task13_authoritative_dispatch()'s
+    candidate/new_lead/unknown branch, itself gated by the separate
+    task13_candidate_recruitment_authoritative flag (default OFF) and used
+    only when a validated central SemanticDecision(domain=
+    "recruitment_conversation", confidence>=0.6) exists for a message the
+    deterministic keyword/detector layer alone did not already recognize
+    as eligible. Every pre-existing caller (message_router's legacy §7/8
+    branch, modules.route_b_handoff) is completely unaffected -- neither
+    passes this kwarg, so their behavior is byte-identical to before this
+    parameter existed. This does NOT build a second Recruitment funnel --
+    every session/candidate/reply mechanism below is the same one
+    force_eligible=False callers already use."""
     decision = await recruitment_eligibility(phone, text, role=role, intent=intent, source=source)
+    if force_eligible and not decision.get("eligible"):
+        decision = dict(decision)
+        decision["eligible"] = True
+        decision["reason"] = "semantic_gate_override"
     if not decision.get("eligible"):
         return {
             "eligible": False,

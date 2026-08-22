@@ -25,21 +25,27 @@ This file proves:
       genuinely non-authoritative for every SemanticDecision.domain
       outcome -- no handler call, no reply, no clarification, no business
       write -- and always falls through to the pre-existing deterministic
-      router unchanged, WITH task13_semantic_authoritative left at its
+      router unchanged, WITH both authoritative flags left at their
       default (OFF).
 
 2026-08-22 (Task-13 MiniMax-primary + authoritative-mode promotion,
 BUILD+VERIFY): message_router.process_message() gained a SECOND,
 separately flag-gated section immediately after the shadow block --
-"Task 13 AUTHORITATIVE DISPATCH" -- gated by task13_semantic_authoritative
-(default OFF). That section legitimately calls handlers and returns, but
-ONLY when the flag is explicitly active; with the flag at its default this
-file's own shadow-block assertions (never calls a handler, never returns)
-remain true and are still checked here, now scoped precisely to the
-original shadow block via _task13_block_source()'s updated end boundary.
-See tests/unit/test_task13_authoritative_mode.py for the promoted
-section's own behavioral (flag ON) coverage -- Required Tests A-S from the
-promotion's spec.
+"Task 13 AUTHORITATIVE DISPATCH" -- originally gated by a single
+task13_semantic_authoritative flag, then SAME-DAY split into two
+independent flags, task13_recruitment_authoritative and
+task13_employee_authoritative (both default OFF, the single-flag name
+removed entirely) so recruitment-domain and employee-domain authoritative
+routing can be activated independently. That section legitimately calls
+handlers and returns, but only for the domain(s) whose flag is explicitly
+active; with both flags at their default this file's own shadow-block
+assertions (never calls a handler, never returns) remain true and are
+still checked here, now scoped precisely to the original shadow block via
+_task13_block_source()'s updated end boundary. See
+tests/unit/test_task13_authoritative_mode.py for the promoted section's
+own behavioral (flag ON) coverage -- Required Tests A-S from the
+promotion's spec, plus the flag-split's own cross-domain-independence
+tests.
 """
 from __future__ import annotations
 
@@ -72,9 +78,10 @@ def _task13_block_source(strip_comments: bool = True) -> str:
     boundary was moved from "if recruit_decision[\"eligible\"]:" to the new
     "# ── Task 13 AUTHORITATIVE DISPATCH" section marker that now sits
     between the shadow block and that line -- promotion added a NEW,
-    separately flag-gated section (task13_semantic_authoritative, default
-    OFF) that legitimately DOES call handlers and DOES return, by design,
-    only when that flag is explicitly turned on. This helper now isolates
+    separately flag-gated section (task13_recruitment_authoritative /
+    task13_employee_authoritative, both default OFF) that legitimately DOES
+    call handlers and DOES return, by design, only when the relevant flag
+    is explicitly turned on. This helper now isolates
     just the original always-runs, log-only shadow section so its own
     "never calls a handler / never returns" invariant remains checked and
     true; see _task13_authoritative_block_source() below for the promoted
@@ -100,9 +107,12 @@ def _task13_block_source(strip_comments: bool = True) -> str:
 
 def _task13_authoritative_block_source(strip_comments: bool = True) -> str:
     """Return the Task-13 AUTHORITATIVE DISPATCH section's source text
-    (2026-08-22 promotion) -- the new code that runs ONLY when
-    task13_semantic_authoritative is active. Unlike the shadow block
-    above, this section legitimately contains a `return` and calls into
+    (2026-08-22 promotion, split into two independent flags same-day) --
+    the new code that runs and reads task13_recruitment_authoritative /
+    task13_employee_authoritative (both default OFF; domain-specific
+    gating happens inside _task13_authoritative_dispatch() itself). Unlike
+    the shadow block above, this section legitimately contains a `return`
+    and calls into
     _task13_authoritative_dispatch() (which itself may call
     deliver_authoritative_recruitment_reply() / ec_handle_payment_request()
     / task13_handle_unresolved_employee_question() depending on the
@@ -261,21 +271,35 @@ def test_2c_task13_block_has_no_return_statement():
 # behind an is_feature_active() check, and that check must gate the
 # return, not merely coexist with it. ─────────────────────────────────────
 
-def test_2d_authoritative_block_is_gated_by_feature_flag_check():
+def test_2d_authoritative_block_reads_both_split_feature_flags():
+    """2026-08-22 same-day split: task13_semantic_authoritative (single
+    flag) was replaced by two independent flags -- confirm both are read
+    via is_feature_active(), and the old combined flag name is gone."""
     block = _task13_authoritative_block_source()
     assert 'is_feature_active as _task13_flag_active' in block
-    assert '_task13_flag_active("task13_semantic_authoritative"' in block
+    assert '_task13_flag_active("task13_recruitment_authoritative"' in block
+    assert '_task13_flag_active("task13_employee_authoritative"' in block
+    assert "task13_semantic_authoritative" not in block
 
 
-def test_2e_authoritative_block_flag_check_precedes_dispatch_and_return():
-    """Structural proof the flag check actually GATES the dispatch call
-    and the return -- not just that both happen to appear somewhere in the
-    same block."""
+def test_2e_authoritative_block_flag_reads_precede_dispatch_and_return():
+    """Structural proof both flags are read and threaded through to
+    _task13_authoritative_dispatch() BEFORE the section can return --
+    domain-specific gating itself lives inside that function (each domain
+    is gated by exactly one of the two flags, proven by the cross-domain-
+    independence test in tests/unit/test_task13_authoritative_mode.py);
+    this only proves the call site plumbs both flags through, in order,
+    rather than silently dropping one."""
     block = _task13_authoritative_block_source()
-    flag_idx = block.index('_task13_flag_active("task13_semantic_authoritative"')
+    recruitment_flag_idx = block.index('_task13_flag_active("task13_recruitment_authoritative"')
+    employee_flag_idx = block.index('_task13_flag_active("task13_employee_authoritative"')
     dispatch_idx = block.index("await _task13_authoritative_dispatch(")
     return_idx = block.index("return _t13_reply, _t13_admin_note")
-    assert flag_idx < dispatch_idx < return_idx
+    assert recruitment_flag_idx < dispatch_idx
+    assert employee_flag_idx < dispatch_idx
+    assert dispatch_idx < return_idx
+    assert "recruitment_authoritative=_t13_recruitment_flag" in block
+    assert "employee_authoritative=_t13_employee_flag" in block
 
 
 def test_2f_authoritative_block_references_all_three_handoff_targets():

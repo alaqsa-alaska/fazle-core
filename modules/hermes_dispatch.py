@@ -448,7 +448,10 @@ async def deliver_authoritative_recruitment_reply(
     history: str = "",
 ) -> Optional[str]:
     """Task 13 authoritative recruitment delivery (2026-08-22, flag-gated
-    by `task13_semantic_authoritative`, message_router-only call site).
+    by `task13_recruitment_authoritative` [split same-day from the original
+    single `task13_semantic_authoritative` flag], message_router-only call
+    site — the flag check itself lives in message_router's
+    _task13_authoritative_dispatch(), not in this function).
 
     Bypasses ONLY modules.recruitment_flow.recruitment_eligibility()'s
     OPERATIONAL_ROLES sender-role restriction, for a sender the semantic

@@ -366,8 +366,23 @@ def _family_deflection_reply(name: str, text: str) -> str:
     return f"হ্যালো {name}। 😊\nএটা অফিসের নম্বর — ব্যক্তিগত কথা ফোনে বলুন।"
 
 
-# ── Task 13 authoritative dispatch (2026-08-22, flag-gated by
-# task13_semantic_authoritative, default OFF) ──────────────────────────────
+# ── Task 13 authoritative dispatch (2026-08-22, flag-gated by TWO
+# independent flags — task13_recruitment_authoritative and
+# task13_employee_authoritative, both default OFF) ─────────────────────────
+# Split (2026-08-22, same-day) from the original single
+# task13_semantic_authoritative flag so recruitment_conversation delivery
+# and employee_conversation delivery (both the verified-identity handoff
+# AND the unresolved-identity clarification-only branch) can be activated
+# independently — recruitment has accumulated live-shadow evidence and is
+# READY; employee has none yet and must stay in shadow until it earns its
+# own. task13_recruitment_authoritative governs ONLY the
+# recruitment_conversation branch below; task13_employee_authoritative
+# governs BOTH employee_conversation branches (resolved handoff AND
+# unresolved clarification-only) — never the other way around. The caller
+# (process_message()) reads both flags once via is_feature_active() and
+# passes them in as plain bools so this function never has to re-check a
+# flag mid-dispatch.
+#
 # Translates a validated SemanticDecision into an actual reply via EXISTING
 # deterministic handlers / the new narrowly-scoped recruitment delivery
 # path (modules.hermes_dispatch.deliver_authoritative_recruitment_reply) —
@@ -377,6 +392,47 @@ def _family_deflection_reply(name: str, text: str) -> str:
 # unchanged legacy §7-15 dispatch chain exactly as shadow mode already
 # guaranteed. Never raises — every branch below is a pure dispatch, and the
 # functions it calls already fail closed on their own.
+async def _dispatch_candidate_recruitment_semantic(
+    *,
+    sender: str,
+    text: str,
+    source: str,
+    role_str: str,
+    intent: str,
+    db_ctx: str,
+    history: str,
+    message_id: Optional[str],
+) -> tuple[Optional[str], Optional[dict]]:
+    """Task-14B (2026-08-22): candidate/new_lead/unknown semantic-
+    authoritative Recruitment dispatch. Called only from
+    _task13_authoritative_dispatch()'s recruitment_conversation branch,
+    only when task13_candidate_recruitment_authoritative is ON, only for
+    role_str in ("candidate","new_lead","unknown"), and only when the
+    LEGACY deterministic recruit_decision the caller already computed
+    (§7/8) was NOT already eligible — i.e. exactly the gap this Phase
+    exists to close: the semantic gate recognized a recruitment-shaped
+    message the deterministic keyword/detector layer alone did not.
+
+    Reuses modules.recruitment_flow.route_recruitment_message() unchanged
+    (force_eligible=True is the ONLY difference from the legacy §7/8 call
+    shape below) — same active-session continuation, same fact-checked
+    LLM informational reply, same intake_message()/candidate-creation
+    fallback, same source-of-truth guard. This function builds no new
+    funnel and makes no business decision itself; it only decides WHETHER
+    to call the existing canonical function with the override, based on
+    the already-validated SemanticDecision. Returns (None, None) — never a
+    reply — if route_recruitment_message() itself produces nothing, so the
+    caller falls through to the unchanged legacy chain exactly as section
+    4 requires."""
+    rec_route = await route_recruitment_message(
+        phone=sender, text=text, source=source, message_id=message_id,
+        role=role_str, intent=intent, contact_context=db_ctx, history=history,
+        force_eligible=True,
+    )
+    reply = (rec_route.get("reply") or "").strip()
+    return (reply or None), None
+
+
 async def _task13_authoritative_dispatch(
     sem_decision,
     *,
@@ -387,31 +443,80 @@ async def _task13_authoritative_dispatch(
     intent: str,
     db_ctx: str,
     history: str,
+    recruitment_authoritative: bool,
+    employee_authoritative: bool,
+    candidate_recruitment_authoritative: bool = False,
+    legacy_recruitment_eligible: bool = False,
+    message_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[dict]]:
     domain = sem_decision.domain
     identity_reference = sem_decision.identity_reference or {}
 
     if domain == "recruitment_conversation" and sem_decision.confidence >= 0.6:
-        # Scoped precisely to the OPERATIONAL_ROLES bug this path exists to
-        # fix (Example A: a known-employee sender asking about someone
-        # else's job) — recruitment_eligibility()/route_recruitment_message()
-        # already own delivery for every role they were ALREADY eligible
-        # for (candidate/new_lead/unknown), including active-session funnel
-        # continuation, step collection, and the priority-phone allowlist —
-        # none of that richer, well-tested logic may be shortcut by this
-        # new path. Only a sender OPERATIONAL_ROLES would categorically
-        # reject reaches the new delivery path below.
         from modules.recruitment_flow import OPERATIONAL_ROLES as _OPERATIONAL_ROLES
-        if role_str not in _OPERATIONAL_ROLES:
-            return None, None
-        from modules.hermes_dispatch import deliver_authoritative_recruitment_reply
-        reply = await deliver_authoritative_recruitment_reply(
-            phone=sender, text=text, source=source,
-            contact_context=db_ctx, history=history,
-        )
-        return (reply or None), None
+
+        if role_str in _OPERATIONAL_ROLES:
+            # Gated ONLY by task13_recruitment_authoritative — never by the
+            # employee flag, and never by a combined/OR check. This is the
+            # single most important line in this function to get right (see
+            # test_cross_domain_flag_independence* in
+            # tests/unit/test_task13_authoritative_mode.py).
+            if not recruitment_authoritative:
+                return None, None
+            # Scoped precisely to the OPERATIONAL_ROLES bug this path exists
+            # to fix (Example A: a known-employee sender asking about
+            # someone else's job) — recruitment_eligibility()/
+            # route_recruitment_message() already own delivery for every
+            # role they were ALREADY eligible for (candidate/new_lead/
+            # unknown), including active-session funnel continuation, step
+            # collection, and the priority-phone allowlist — none of that
+            # richer, well-tested logic may be shortcut by this path.
+            from modules.hermes_dispatch import deliver_authoritative_recruitment_reply
+            reply = await deliver_authoritative_recruitment_reply(
+                phone=sender, text=text, source=source,
+                contact_context=db_ctx, history=history,
+            )
+            return (reply or None), None
+
+        if role_str in ("candidate", "new_lead", "unknown"):
+            # Task-14B (2026-08-22): NEW, SEPARATE flag
+            # (task13_candidate_recruitment_authoritative) — deliberately
+            # never task13_recruitment_authoritative, which has its own
+            # existing rollout/evidence scoped to OPERATIONAL_ROLES only.
+            # Default OFF; with it OFF this branch is a complete no-op and
+            # process_message() falls through to the unchanged legacy
+            # recruit_decision/route_recruitment_message() chain exactly as
+            # before Task-14B existed.
+            if not candidate_recruitment_authoritative:
+                return None, None
+            if legacy_recruitment_eligible:
+                # The legacy deterministic recruit_decision (§7/8,
+                # unchanged) already claims this turn — never invoke the
+                # semantic-gate-triggered path a second time for the same
+                # message; let the existing, already-eligible legacy path
+                # run exactly as it did before Task-14B existed (this also
+                # keeps active-session continuation, test E, on its
+                # original code path whenever the legacy layer already
+                # recognizes the session).
+                return None, None
+            return await _dispatch_candidate_recruitment_semantic(
+                sender=sender, text=text, source=source, role_str=role_str,
+                intent=intent, db_ctx=db_ctx, history=history, message_id=message_id,
+            )
+
+        # Any other role should not realistically reach recruitment_conversation
+        # here — validate_semantic_decision() already downgrades admin/
+        # accountant/escort_client to no_match via _PROTECTED_ROLES. Defensive
+        # fail-closed no-op for anything unanticipated.
+        return None, None
 
     if domain == "employee_conversation" and sem_decision.confidence >= 0.6:
+        # Gated ONLY by task13_employee_authoritative — never by the
+        # recruitment flag. Employee-domain authoritative routing has zero
+        # live evidence yet (Owner decision, 2026-08-22) and must stay in
+        # true shadow until this flag is explicitly turned on for it.
+        if not employee_authoritative:
+            return None, None
         emp_id = identity_reference.get("employee_id") or identity_reference.get("linked_employee_id")
         if not emp_id:
             # validate_semantic_decision() already downgrades an
@@ -442,6 +547,13 @@ async def _task13_authoritative_dispatch(
         and sem_decision.rationale == "identity_unresolved"
         and sem_decision.requested_action == "identity_clarification"
     ):
+        # Still the employee flag, not the recruitment flag — this branch
+        # is an employee_conversation decision that validate_semantic_
+        # decision() downgraded to no_match/identity_unresolved because the
+        # sender's identity couldn't be resolved; it is NOT a recruitment
+        # decision and must never be gated on task13_recruitment_authoritative.
+        if not employee_authoritative:
+            return None, None
         from modules.employee_conversation import task13_handle_unresolved_employee_question
         return await task13_handle_unresolved_employee_question(sender, text, source)
 
@@ -845,15 +957,49 @@ async def process_message(
         _hk_record.intent = intent
         _hk_record.intent_method = _intent_method
 
-    # Trusted operational identities must never enter any recruitment reply
-    # fallback, even if the message text itself looks recruitment-related.
+    # G6 (predates Task-13; 2026-06-19 fix; NARROWED 2026-08-22, Task-14B).
+    # This guard used to hard-return "" here for EVERY operational-role
+    # sender whose intent classified as "recruitment", before ANY
+    # downstream logic — including the Task-13 semantic gate below — ever
+    # ran. Its documented purpose was preventing an operational sender from
+    # being auto-routed into the candidate/recruitment FUNNEL purely
+    # because intent=="recruitment" (the 2026-06-19 fix for a narrower
+    # OR-condition bug). That specific protection is already, independently,
+    # guaranteed by two later, narrower checks that don't depend on this
+    # line at all: (a) the recruit_decision computation below (§7/8) only
+    # ever calls recruitment_eligibility()/route_recruitment_message() for
+    # role_str in ("candidate","new_lead","unknown") — every other role is
+    # unconditionally {"eligible": False} regardless of intent; and (b)
+    # _task13_authoritative_dispatch()'s own OPERATIONAL_ROLES/candidate
+    # role split, itself additionally gated by task13_recruitment_
+    # authoritative / task13_candidate_recruitment_authoritative (both
+    # default OFF). The AND-condition below had over-corrected into a
+    # silent full-message drop for every operational sender — including a
+    # known employee's genuine recruitment-shaped question about someone
+    # else's job (Example A: "আমার ভাইয়ের Guard-এর চাকরি হবে? বেতন কত?") —
+    # that never even reached the semantic gate to be classified, let alone
+    # any other legitimate downstream handler (accountant/§6, employee/§10,
+    # Route B/§11.5, KB/§13, generic AI fallback/§15). Narrowed here: no
+    # longer returns — only logs — so the real funnel-entry protection
+    # above still applies while every other tier gets the same fair chance
+    # to process this message that any other intent value would get.
+    #
+    # A residual, real risk this narrowing exposes on its own: tier §10's
+    # ec_detect_trigger() bare "বেতন"/salary keyword scan would otherwise
+    # now see messages like the Example A text above (which contains
+    # "বেতন") and misroute them into an advance/payment-request workflow —
+    # guarded separately at both of its call sites below via
+    # `intent != "recruitment"` (same "precise classification wins over a
+    # generic keyword trigger" principle the existing 2026-07-22 salary_
+    # query/payment_due check right above them already established).
     if intent == "recruitment" and role_str not in ("candidate", "new_lead", "unknown"):
         log.info(
-            "[RECRUITMENT_BLOCKED_OPERATIONAL] sender=%s role=%s source=%s",
+            "[RECRUITMENT_INTENT_OPERATIONAL] sender=%s role=%s source=%s -- "
+            "continuing to downstream dispatch (funnel entry remains role-gated "
+            "at recruit_decision/§7-8 and _task13_authoritative_dispatch's own "
+            "OPERATIONAL_ROLES/candidate-population split)",
             sender, role_str, identity.get("identity_source"),
         )
-        _hk_fire(role_str, intent, "no_action", "recruitment-blocked-operational")
-        return "", None
 
     # ── 6. ACCOUNTANT ─────────────────────────────────────────────────────────
     if role_str == "accountant":
@@ -1008,37 +1154,67 @@ async def process_message(
     except Exception as _sem_exc:
         log.warning("[router] semantic_gate skipped (non-fatal): %s", _sem_exc)
 
-    # ── Task 13 AUTHORITATIVE DISPATCH (flag-gated, 2026-08-22) ────────────────
+    # ── Task 13 AUTHORITATIVE DISPATCH (flag-gated, 2026-08-22; split into
+    # two independent flags same-day) ───────────────────────────────────────
     # `sem_decision` is bound only when the shadow try/except block above
     # completed without raising — the "sem_decision" in locals() guard means
     # a semantic_gate failure (caught above) makes this section a complete
     # no-op too, the same fail-open guarantee the shadow block already has.
-    # Gated end-to-end by task13_semantic_authoritative (default OFF): when
-    # OFF, is_feature_active() returns False and this section never calls
-    # _task13_authoritative_dispatch() or returns anything — process_message()
-    # falls through to the unchanged section-7-through-15 chain below exactly
-    # as it did before this section existed. When ON, a reply produced here
-    # is returned immediately (duplicate-reply guard: this is the ONLY
-    # return point in this section, and it short-circuits before the legacy
-    # recruitment-eligibility dispatch immediately below — let alone any
-    # later section — can ever run for this turn).
+    #
+    # Gated end-to-end by THREE independent flags, all default OFF:
+    # task13_recruitment_authoritative (recruitment_conversation delivery
+    # for OPERATIONAL_ROLES senders only — unchanged scope),
+    # task13_employee_authoritative (both employee_conversation branches —
+    # verified-identity handoff AND unresolved-identity clarification-
+    # only), and task13_candidate_recruitment_authoritative (Task-14B,
+    # 2026-08-22 — recruitment_conversation delivery for candidate/
+    # new_lead/unknown senders only, a SEPARATE flag from
+    # task13_recruitment_authoritative by design — see that flag's own
+    # rollout/evidence note). All three flags are read ONCE here and
+    # handed to _task13_authoritative_dispatch() as plain bools; that
+    # function is the single place that maps a domain+role to the flag
+    # that governs it (see its own docstring/comments) — this call site
+    # never itself decides which flag applies to which domain/role, so
+    # there is exactly one place a cross-domain/cross-population gating
+    # bug could hide, and it is covered by test_cross_domain_flag_
+    # independence* and test_candidate_population_flag_independence* in
+    # tests/unit/test_task13_authoritative_mode.py.
+    #
+    # With ALL THREE flags OFF, _task13_authoritative_dispatch() returns
+    # (None, None) for every domain — process_message() falls through to
+    # the unchanged section-7-through-15 chain below exactly as it did
+    # before this section existed. When any flag is ON, a reply produced
+    # for the domain/population it governs is returned immediately
+    # (duplicate-reply guard: this is the ONLY return point in this
+    # section, and it short-circuits before the legacy recruitment-
+    # eligibility dispatch immediately below — let alone any later
+    # section — can ever run for this turn).
     if "sem_decision" in locals():
         try:
             from modules.preflight_guard import is_feature_active as _task13_flag_active
-            if _task13_flag_active("task13_semantic_authoritative", default=False):
-                _t13_reply, _t13_admin_note = await _task13_authoritative_dispatch(
-                    sem_decision,
-                    sender=sender,
-                    text=text,
-                    source=source,
-                    role_str=role_str,
-                    intent=intent,
-                    db_ctx=db_ctx_pre,
-                    history=history_pre,
-                )
-                if _t13_reply:
-                    _hk_fire(role_str, intent, "reply", f"task13-authoritative-{sem_decision.domain}")
-                    return _t13_reply, _t13_admin_note
+            _t13_recruitment_flag = _task13_flag_active("task13_recruitment_authoritative", default=False)
+            _t13_employee_flag = _task13_flag_active("task13_employee_authoritative", default=False)
+            _t13_candidate_recruitment_flag = _task13_flag_active(
+                "task13_candidate_recruitment_authoritative", default=False
+            )
+            _t13_reply, _t13_admin_note = await _task13_authoritative_dispatch(
+                sem_decision,
+                sender=sender,
+                text=text,
+                source=source,
+                role_str=role_str,
+                intent=intent,
+                db_ctx=db_ctx_pre,
+                history=history_pre,
+                recruitment_authoritative=_t13_recruitment_flag,
+                employee_authoritative=_t13_employee_flag,
+                candidate_recruitment_authoritative=_t13_candidate_recruitment_flag,
+                legacy_recruitment_eligible=bool(recruit_decision.get("eligible")),
+                message_id=message_id,
+            )
+            if _t13_reply:
+                _hk_fire(role_str, intent, "reply", f"task13-authoritative-{sem_decision.domain}")
+                return _t13_reply, _t13_admin_note
         except Exception as _t13_auth_exc:
             log.warning("[router] task13 authoritative dispatch skipped (non-fatal): %s", _t13_auth_exc)
 
@@ -1228,7 +1404,22 @@ async def process_message(
         # This replaces the legacy start_advance_verification with a full
         # multi-step conversation that collects reason, amount, payout, and
         # produces a validated draft (NO transaction).
-        ec_trigger = ec_detect_trigger(text)
+        #
+        # Task-14B (2026-08-22): intent=="recruitment" is a more precise
+        # classification than ec_detect_trigger()'s bare "বেতন"/salary
+        # keyword substring match — same "precise classification wins over
+        # a generic keyword trigger" principle the salary_query/payment_due
+        # check just above already established (2026-07-22, Final
+        # Instruction Section 5). Without this, G6's 2026-08-22 narrowing
+        # (no longer silently dropping an operational sender's
+        # recruitment-shaped message before this tier could ever run) would
+        # let a message like "আমার ভাইয়ের Guard-এর চাকরি হবে? বেতন কত?" fall
+        # through this bare keyword scan into an advance/payment-request
+        # workflow instead. Does not affect a genuine advance request
+        # (those classify as advance_request/payment_issue, not
+        # recruitment) or any unchanged salary_query/payment_due behavior
+        # above.
+        ec_trigger = ec_detect_trigger(text) if intent != "recruitment" else None
         if ec_trigger:
             reply, admin_note = await ec_handle_payment_request(
                 sender, text, source, emp_id, intent=intent
@@ -1273,7 +1464,14 @@ async def process_message(
     # sender §7/8 already judged recruitment-eligible never gets silently
     # re-routed into the employee-verification flow just because that
     # turn's recruitment reply happened to be empty.
-    ec_trigger_catchall = ec_detect_trigger(text)
+    # Task-14B (2026-08-22): same "precise classification wins over a bare
+    # keyword trigger" guard as the tier §10 ec_trigger check above,
+    # extended to this catchall for the same G6-narrowing-exposure reason
+    # (an employee/other-operational sender whose message classified
+    # intent=="recruitment" is not covered by recruit_decision, which is
+    # unconditionally {"eligible": False} for any role_str outside
+    # candidate/new_lead/unknown).
+    ec_trigger_catchall = ec_detect_trigger(text) if intent != "recruitment" else None
     if ec_trigger_catchall and role_str != "admin" and not recruit_decision.get("eligible"):
         reply, admin_note = await ec_handle_payment_request(
             sender, text, source, identity.get("employee_id"), intent=intent
@@ -1318,8 +1516,19 @@ async def process_message(
             log.info("[NO_REPLY_NAME_MATCH] %s → no reply, no draft (display_name=%r)", sender, identity.get("display_name"))
             return "", None
         from modules.route_b import handle_route_b_message
+        # Task-14B (2026-08-22) dedup: pass the already-computed central
+        # SemanticDecision (sem_decision, from the shadow block above) into
+        # Route B so its own handoff evaluation can reuse it instead of
+        # making a second, independent recruitment-domain LLM
+        # classification for the same turn — see
+        # modules.route_b_handoff.evaluate_handoff()'s own comment for the
+        # exact dedup condition. None when the shadow block failed/raised
+        # (same "sem_decision" in locals() guard used above), in which case
+        # Route B's existing classify_route_b_category() fallback runs
+        # completely unchanged.
         reply, admin_note = await handle_route_b_message(
             sender, text, source, identity, intent, message_id=message_id,
+            central_semantic_decision=sem_decision if "sem_decision" in locals() else None,
         )
         if reply:
             _hk_fire(role_str, intent, "reply", "route-b")

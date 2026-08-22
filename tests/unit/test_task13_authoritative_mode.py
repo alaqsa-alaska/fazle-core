@@ -9,8 +9,14 @@ Covers Required Tests A-S from the promotion spec for:
   - modules.hermes_dispatch.deliver_authoritative_recruitment_reply() (new,
     narrowly-scoped recruitment delivery bypassing ONLY OPERATIONAL_ROLES)
   - modules.message_router._task13_authoritative_dispatch() and the
-    process_message() call site that gates it behind
-    task13_semantic_authoritative (default OFF)
+    process_message() call site that gates it behind TWO independent
+    flags (2026-08-22, same-day split from the original single
+    task13_semantic_authoritative flag): task13_recruitment_authoritative
+    (recruitment_conversation delivery only) and
+    task13_employee_authoritative (both employee_conversation branches --
+    verified-identity handoff and unresolved-identity clarification-only),
+    both default OFF. See the "2x2 MATRIX" and "CROSS-DOMAIN INDEPENDENCE"
+    sections below for the split's own dedicated coverage.
 
 No live network call. No production DB write. Mocked hermes-runner and
 MiniMax clients only.
@@ -84,7 +90,7 @@ async def test_A_example_a_end_to_end_authoritative_delivery(monkeypatch):
         patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=decision)),
         patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
         patch("modules.hermes_dispatch.deliver_authoritative_recruitment_reply", deliver_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=True)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=True)),
         patch.object(router, "ec_handle_payment_request", ec_mock),
     ):
         reply, admin_note = await router.process_message(
@@ -111,6 +117,11 @@ async def test_A_dispatch_helper_bypasses_only_operational_roles(monkeypatch):
         reply, note = await router._task13_authoritative_dispatch(
             decision, sender="880171", text="x", source="bridge1",
             role_str="unknown", intent="unknown", db_ctx="", history="",
+            # recruitment flag ON on purpose: proves the OPERATIONAL_ROLES
+            # guard blocks this sender even when authoritative delivery is
+            # active for the domain -- it's the role check, not the flag,
+            # doing the blocking here.
+            recruitment_authoritative=True, employee_authoritative=False,
         )
     assert (reply, note) == (None, None)
     deliver_mock.assert_not_awaited()
@@ -133,7 +144,7 @@ async def test_B_unresolved_identity_clarification_only_no_disclosure(monkeypatc
         patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=raw_decision)),
         patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
         patch("modules.employee_conversation.task13_handle_unresolved_employee_question", clarify_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=True)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_employee_authoritative=True)),
         patch.object(router, "ec_handle_payment_request", ec_mock),
     ):
         reply, admin_note = await router.process_message(
@@ -162,7 +173,7 @@ async def test_C_no_match_falls_through_to_legacy_both_flag_states(monkeypatch, 
         patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=decision)),
         patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
         patch("modules.hermes_dispatch.deliver_authoritative_recruitment_reply", deliver_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=flag_on)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=flag_on, task13_employee_authoritative=flag_on)),
     ):
         reply, _ = await router.process_message("8801733333333", "আমাদের Operation Officer কোথায়?", "bridge1")
     assert reply == "kb-fallback-reply"
@@ -182,7 +193,7 @@ async def test_D_recruitment_for_already_eligible_sender_uses_legacy_path(monkey
         patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=decision)),
         patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
         patch("modules.hermes_dispatch.deliver_authoritative_recruitment_reply", deliver_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=True)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=True)),
     ):
         reply, _ = await router.process_message("8801744444444", "Operation Officer-এর বেতন কত?", "bridge1")
     assert reply == "LEGACY_RECRUITMENT_REPLY"
@@ -214,6 +225,10 @@ async def test_E_release_travel_expense_semantic_layer_creates_nothing(monkeypat
             role_str="employee",
             intent="release_travel",
             db_ctx="", history="",
+            # employee flag ON: proves the release-intent guard blocks this
+            # even when authoritative employee delivery is active -- it's
+            # the intent/keyword guard, not the flag, doing the blocking.
+            recruitment_authoritative=False, employee_authoritative=True,
         )
     assert (reply, note) == (None, None)
     ec_mock.assert_not_awaited()
@@ -228,6 +243,7 @@ async def test_E_salary_query_intent_also_deferred_to_legacy(monkeypatch):
         reply, note = await router._task13_authoritative_dispatch(
             decision, sender="880171", text="আমার বেতন কবে দিবেন?", source="bridge1",
             role_str="employee", intent="salary_query", db_ctx="", history="",
+            recruitment_authoritative=False, employee_authoritative=True,
         )
     assert (reply, note) == (None, None)
     ec_mock.assert_not_awaited()
@@ -244,6 +260,7 @@ async def test_E_genuine_advance_trigger_is_delegated_to_deterministic_handler(m
         reply, note = await router._task13_authoritative_dispatch(
             decision, sender="880171", text="আমার অগ্রিম টাকা দরকার", source="bridge1",
             role_str="employee", intent="advance_request", db_ctx="", history="",
+            recruitment_authoritative=False, employee_authoritative=True,
         )
     assert reply == "draft created — pending admin review"
     ec_mock.assert_awaited_once()
@@ -267,7 +284,7 @@ async def test_F_confirmed_escort_order_never_reaches_semantic_gate(monkeypatch,
     gate_mock = AsyncMock(return_value=SemanticDecision(domain="no_match"))
     with (
         patch("modules.hermes_dispatch.semantic_gate", gate_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=flag_on)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=flag_on, task13_employee_authoritative=flag_on)),
     ):
         reply, _ = await router.process_message(
             "8801766666666", "lighter vessel chittagong 5 guards tomorrow", "bridge1",
@@ -314,7 +331,7 @@ async def test_H_accountant_report_never_reaches_semantic_gate(monkeypatch, flag
         patch("modules.admin_commands.is_report_command", MagicMock(return_value=True)),
         patch("modules.admin_commands.process_admin_command", AsyncMock(return_value="report handled")),
         patch("modules.hermes_dispatch.semantic_gate", gate_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=flag_on)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=flag_on, task13_employee_authoritative=flag_on)),
     ):
         reply, _ = await router.process_message("8801788888888", "report cash 30", "bridge1")
     assert reply == "report handled"
@@ -331,7 +348,7 @@ async def test_I_attendance_never_reaches_semantic_gate(monkeypatch, flag_on):
     gate_mock = AsyncMock(return_value=SemanticDecision(domain="no_match"))
     with (
         patch("modules.hermes_dispatch.semantic_gate", gate_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=flag_on)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=flag_on, task13_employee_authoritative=flag_on)),
     ):
         reply, _ = await router.process_message("8801799999999", "আজকের হাজিরা: ৫ জন উপস্থিত", "bridge1")
     assert reply == "attendance drafted"
@@ -486,7 +503,7 @@ async def test_O_no_disclosure_before_verification_either_flag_state(monkeypatch
         patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=raw_decision)),
         patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
         patch("modules.employee_conversation.task13_handle_unresolved_employee_question", clarify_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=flag_on)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_employee_authoritative=flag_on)),
         patch.object(router, "ec_handle_payment_request", ec_mock),
     ):
         reply, _ = await router.process_message("8801700000000", "আমার বেতন কত?", "bridge1")
@@ -539,7 +556,7 @@ async def test_P_no_double_reply_when_authoritative_path_succeeds(monkeypatch):
         patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=decision)),
         patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
         patch("modules.hermes_dispatch.deliver_authoritative_recruitment_reply", deliver_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=True)),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=True)),
         patch.object(router, "ec_handle_payment_request", ec_mock),
     ):
         # NOTE: intentionally reusing test_A's exact literal message text
@@ -587,7 +604,7 @@ def test_Q_deliver_authoritative_recruitment_reply_source_has_no_write_function_
         assert token not in src
 
 
-# ── R. task13_semantic_authoritative OFF → exact legacy/shadow routing ──────
+# ── R. task13_recruitment_authoritative OFF → exact legacy/shadow routing ───
 
 async def test_R_flag_off_recruitment_decision_never_delivers_authoritatively(monkeypatch):
     identity = _identity(role="employee", employee_id=42)
@@ -600,10 +617,179 @@ async def test_R_flag_off_recruitment_decision_never_delivers_authoritatively(mo
         patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=decision)),
         patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
         patch("modules.hermes_dispatch.deliver_authoritative_recruitment_reply", deliver_mock),
-        patch("modules.preflight_guard.is_feature_active", _flags(task13_semantic_authoritative=False)),
+        # Recruitment flag OFF, employee flag ON: proves the recruitment
+        # branch is gated by its own flag independent of the employee one.
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=False, task13_employee_authoritative=True)),
     ):
         await router.process_message("8801711111111", "আমার ভাইয়ের Guard-এর চাকরি হবে?", "bridge1")
     deliver_mock.assert_not_awaited()
+
+
+async def test_R_flag_off_employee_decision_never_delivers_authoritatively(monkeypatch):
+    """Mirror of the above for the employee domain: recruitment flag ON,
+    employee flag OFF -> the employee_conversation (resolved) branch must
+    not deliver via the Task-13 path. (The legacy §10/§11 EMPLOYEE chain it
+    falls through to is intentionally faked out here with DB-touching
+    dependencies mocked -- this test's only interest is that the Task-13
+    authoritative path itself never fires, not what the legacy chain does
+    next; that's covered by its own pre-existing tests.)"""
+    identity = _identity(role="employee", employee_id=42)
+    _base_router_mocks(monkeypatch, identity=identity, recruit_eligible=False)
+    decision = SemanticDecision(domain="employee_conversation", confidence=0.95, identity_reference={"employee_id": 42})
+    ec_mock = AsyncMock(return_value=("SHOULD_NOT_BE_CALLED", None))
+    monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=""))
+    monkeypatch.setattr(router, "get_payroll_summary", AsyncMock(return_value={}))
+    monkeypatch.setattr(router, "format_payroll_context", MagicMock(return_value=""))
+    monkeypatch.setattr("modules.route_b.handle_route_b_message", AsyncMock(return_value=("", None)))
+    with (
+        patch("modules.hermes_dispatch.semantic_gate", AsyncMock(return_value=decision)),
+        patch("modules.recruitment_detector.detect_recruitment_intent", AsyncMock(return_value={})),
+        patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=True, task13_employee_authoritative=False)),
+        patch.object(router, "ec_handle_payment_request", ec_mock),
+    ):
+        await router.process_message("8801711111111", "আমার অগ্রিম টাকা দরকার", "bridge1")
+    ec_mock.assert_not_awaited()
+
+
+# ── CROSS-DOMAIN INDEPENDENCE (2026-08-22 flag split) — the single most
+#      important property of this split: each flag governs ONLY its own
+#      domain, never the other, and never via any combined/OR check. ───────
+
+async def test_cross_domain_independence_employee_flag_does_not_unlock_recruitment(monkeypatch):
+    """employee flag ON + recruitment flag OFF must NOT deliver a
+    recruitment_conversation reply."""
+    decision = SemanticDecision(domain="recruitment_conversation", confidence=0.9)
+    deliver_mock = AsyncMock(return_value="SHOULD_NOT_BE_CALLED")
+    with patch("modules.hermes_dispatch.deliver_authoritative_recruitment_reply", deliver_mock):
+        reply, note = await router._task13_authoritative_dispatch(
+            decision, sender="880171", text="x", source="bridge1",
+            role_str="employee", intent="unknown", db_ctx="", history="",
+            recruitment_authoritative=False, employee_authoritative=True,
+        )
+    assert (reply, note) == (None, None)
+    deliver_mock.assert_not_awaited()
+
+
+async def test_cross_domain_independence_recruitment_flag_does_not_unlock_employee_resolved(monkeypatch):
+    """recruitment flag ON + employee flag OFF must NOT deliver a resolved
+    employee_conversation handoff reply."""
+    decision = SemanticDecision(domain="employee_conversation", confidence=0.9, identity_reference={"employee_id": 42})
+    ec_mock = AsyncMock(return_value=("SHOULD_NOT_BE_CALLED", None))
+    with patch.object(router, "ec_handle_payment_request", ec_mock):
+        reply, note = await router._task13_authoritative_dispatch(
+            decision, sender="880171", text="আমার অগ্রিম টাকা দরকার", source="bridge1",
+            role_str="employee", intent="advance_request", db_ctx="", history="",
+            recruitment_authoritative=True, employee_authoritative=False,
+        )
+    assert (reply, note) == (None, None)
+    ec_mock.assert_not_awaited()
+
+
+async def test_cross_domain_independence_recruitment_flag_does_not_unlock_employee_unresolved(monkeypatch):
+    """recruitment flag ON + employee flag OFF must NOT deliver the
+    unresolved-identity clarification-only reply either -- the third
+    branch (domain=no_match/identity_unresolved) is still governed by the
+    employee flag, never the recruitment one."""
+    decision = SemanticDecision(
+        domain="no_match", confidence=0.85,
+        rationale="identity_unresolved", requested_action="identity_clarification",
+    )
+    clarify_mock = AsyncMock(return_value=("SHOULD_NOT_BE_CALLED", None))
+    with patch("modules.employee_conversation.task13_handle_unresolved_employee_question", clarify_mock):
+        reply, note = await router._task13_authoritative_dispatch(
+            decision, sender="880171", text="x", source="bridge1",
+            role_str="unknown", intent="unknown", db_ctx="", history="",
+            recruitment_authoritative=True, employee_authoritative=False,
+        )
+    assert (reply, note) == (None, None)
+    clarify_mock.assert_not_awaited()
+
+
+# ── 2x2 MATRIX — full behavior matrix from the promotion spec, unit-level
+#      against _task13_authoritative_dispatch() directly for precision.
+#      (recruitment_flag, employee_flag, expect_recruitment_delivered,
+#       expect_employee_resolved_delivered, expect_employee_unresolved_delivered)
+_MATRIX = [
+    (False, False, False, False, False),  # OFF/OFF -> shadow everywhere
+    (True, False, True, False, False),    # ON/OFF  -> recruitment only
+    (False, True, False, True, True),     # OFF/ON  -> employee only (both branches)
+    (True, True, True, True, True),       # ON/ON   -> everything authoritative
+]
+
+
+@pytest.mark.parametrize(
+    "recruitment_flag,employee_flag,expect_recruitment,expect_employee_resolved,expect_employee_unresolved",
+    _MATRIX,
+)
+async def test_matrix_recruitment_conversation(
+    monkeypatch, recruitment_flag, employee_flag,
+    expect_recruitment, expect_employee_resolved, expect_employee_unresolved,
+):
+    decision = SemanticDecision(domain="recruitment_conversation", confidence=0.9)
+    deliver_mock = AsyncMock(return_value="RECRUITMENT_REPLY")
+    with patch("modules.hermes_dispatch.deliver_authoritative_recruitment_reply", deliver_mock):
+        reply, note = await router._task13_authoritative_dispatch(
+            decision, sender="880171", text="x", source="bridge1",
+            role_str="employee", intent="unknown", db_ctx="", history="",
+            recruitment_authoritative=recruitment_flag, employee_authoritative=employee_flag,
+        )
+    if expect_recruitment:
+        assert reply == "RECRUITMENT_REPLY"
+        deliver_mock.assert_awaited_once()
+    else:
+        assert (reply, note) == (None, None)
+        deliver_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "recruitment_flag,employee_flag,expect_recruitment,expect_employee_resolved,expect_employee_unresolved",
+    _MATRIX,
+)
+async def test_matrix_employee_conversation_resolved(
+    monkeypatch, recruitment_flag, employee_flag,
+    expect_recruitment, expect_employee_resolved, expect_employee_unresolved,
+):
+    decision = SemanticDecision(domain="employee_conversation", confidence=0.9, identity_reference={"employee_id": 42})
+    ec_mock = AsyncMock(return_value=("EMPLOYEE_REPLY", None))
+    with patch.object(router, "ec_handle_payment_request", ec_mock):
+        reply, note = await router._task13_authoritative_dispatch(
+            decision, sender="880171", text="আমার অগ্রিম টাকা দরকার", source="bridge1",
+            role_str="employee", intent="advance_request", db_ctx="", history="",
+            recruitment_authoritative=recruitment_flag, employee_authoritative=employee_flag,
+        )
+    if expect_employee_resolved:
+        assert reply == "EMPLOYEE_REPLY"
+        ec_mock.assert_awaited_once()
+    else:
+        assert (reply, note) == (None, None)
+        ec_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "recruitment_flag,employee_flag,expect_recruitment,expect_employee_resolved,expect_employee_unresolved",
+    _MATRIX,
+)
+async def test_matrix_employee_conversation_unresolved(
+    monkeypatch, recruitment_flag, employee_flag,
+    expect_recruitment, expect_employee_resolved, expect_employee_unresolved,
+):
+    decision = SemanticDecision(
+        domain="no_match", confidence=0.85,
+        rationale="identity_unresolved", requested_action="identity_clarification",
+    )
+    clarify_mock = AsyncMock(return_value=("CLARIFY_REPLY", None))
+    with patch("modules.employee_conversation.task13_handle_unresolved_employee_question", clarify_mock):
+        reply, note = await router._task13_authoritative_dispatch(
+            decision, sender="880171", text="x", source="bridge1",
+            role_str="unknown", intent="unknown", db_ctx="", history="",
+            recruitment_authoritative=recruitment_flag, employee_authoritative=employee_flag,
+        )
+    if expect_employee_unresolved:
+        assert reply == "CLARIFY_REPLY"
+        clarify_mock.assert_awaited_once()
+    else:
+        assert (reply, note) == (None, None)
+        clarify_mock.assert_not_awaited()
 
 
 # ── S. minimax_customer_primary OFF → exact previous hermes-runner-only

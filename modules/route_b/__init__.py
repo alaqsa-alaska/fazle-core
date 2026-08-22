@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Optional
+from typing import Any, Optional
 
 from app.config import get_settings
 from app.database import fetch_all, fetch_one, fetch_val
@@ -235,7 +235,7 @@ _UNKNOWN_SENDER_PROBE = (
 
 async def handle_route_b_message(
     sender: str, text: str, source: str, identity: dict, intent: str = "",
-    *, message_id: Optional[str] = None,
+    *, message_id: Optional[str] = None, central_semantic_decision: Optional[Any] = None,
 ) -> tuple[str, Optional[dict]]:
     """Route B entry point — called from message_router.process_message()
     for roles in identity_brain.ROUTE_B_ROLES, and for a money/advance
@@ -244,6 +244,17 @@ async def handle_route_b_message(
     message_id: threaded through from process_message() (2026-07-22) for the
     conversation-handoff audit record (modules.route_b_handoff) -- optional,
     only used when the handoff feature flag is on.
+
+    central_semantic_decision (2026-08-22, Task-14B, keyword-only,
+    optional): message_router's own already-computed
+    modules.hermes_kernel.data_classes.SemanticDecision for this exact
+    turn (shadow-block result), when available. Passed straight through to
+    modules.route_b_handoff.evaluate_handoff() so it can dedup its own
+    recruitment-domain classify_route_b_category() call against a valid
+    central decision instead of making a second LLM call — see that
+    function's own comment for the exact reuse condition. None (the
+    default) makes this call byte-identical to before this parameter
+    existed.
     """
     role = identity.get("identity_role") or identity.get("role") or "unknown"
 
@@ -352,6 +363,7 @@ async def handle_route_b_message(
         handoff = await evaluate_handoff(
             sender=sender, text=text, source=source, identity=identity,
             intent=(intent or "unknown"), history=history, message_id=message_id,
+            central_semantic_decision=central_semantic_decision,
         )
     except Exception as e:
         # Handoff evaluation must never be able to take down Route B itself
