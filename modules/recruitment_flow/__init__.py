@@ -96,6 +96,98 @@ COLLECTION_STEPS: list[str] = [
     "name", "age", "area", "job_preference", "experience", "phone_confirm",
 ]
 
+# ── Turn-intent classification (2026-08-23, see ──────────────────────────────
+# RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md): let
+# route_recruitment_message() recognize when an inbound message is an
+# informational question instead of a pure intake-field answer, so the
+# answer-first flow can fire BEFORE intake_message() consumes the turn.
+# Pure keyword heuristic only — the existing recruitment semantic analysis
+# (analyze_recruitment_signals / is_recruitment_trigger) remains the
+# authoritative domain check; this just splits "is this turn asking for
+# information" from "is this turn providing an intake value".
+
+# Informational question markers — single token/ punctuation check.
+# Intentionally conservative: a question mark OR one of the canonical
+# question particles is enough to mark a turn as PURE_QUESTION or MIXED.
+_QUESTION_MARK_RE = re.compile(r"[?？]|(?:\?|।)$")
+_QUESTION_WORDS_RE = re.compile(
+    r"(?:কি|কী|কত|কোথায়|কোথায়|কখন|কিভাবে|কীভাবে|কেন|কোনটি|কোনটা|"
+    r"কি কাজ|কি সুবিধা|কি কাজ|কোথায় অফিস|অফিস কোথায়|"
+    r"salary|salary koto|what|where|how|when|why|which|"
+    r"ঠিকানা কোথায়|ভর্তি ফি|জয়েনিং ফি|ডিপোজিট|"
+    r"থাকা|খাওয়া|বেতন কত|training|duty|join)",
+    re.IGNORECASE,
+)
+
+# Intake step expected-format patterns. Used to detect "this turn is
+# answering the current intake field" without invoking intake_message().
+_STEP_HAS_VALUE_RE = {
+    "name": re.compile(r"[A-Za-zঀ-৿]{2,}", re.UNICODE),
+    "age": re.compile(r"(?:\d{1,2}|০|১|২|৩|৪|৫|৬|৭|৮|৯)"),
+    "area": re.compile(r"[A-Za-zঀ-৿]{2,}", re.UNICODE),
+    "job_preference": re.compile(
+        r"(?:\d|escort|guard|supervisor|officer|marketer|ghat|security|"
+        r"সিকিউরিটি|এসকর্ট|গার্ড|সুপারভাইজার|অফিসার|মার্কেটিং|ঘাট|"
+        r"operation|marketing|assistant|survey)",
+        re.IGNORECASE,
+    ),
+    "experience": re.compile(r"(?:\d|০|১|২|৩|৪|৫|৬|৭|৮|৯|নতুন|কোন)"),
+    "phone_confirm": re.compile(r"(?:\d{8,}|০|১|২|৩|৪|৫|৬|৭|৮|৯)"),
+}
+
+
+def classify_turn_intent(text: str, current_step: Optional[str]) -> str:
+    """Classify an inbound recruitment turn for answer-first routing.
+
+    Returns ONE of:
+        "pure_question"   — turn contains a question marker; no intake value
+        "mixed"           — turn has both an intake value AND a question
+        "pure_intake"     — turn is just an intake-field answer / continuation
+        "unrelated"       — empty / single-character / off-domain
+
+    This is intentionally a lightweight heuristic (one pass over the
+    string). The authoritative semantic gate already proved the message
+    is recruitment-domain upstream — here we only need to decide whether
+    the LLM/Hermes layer should ALSO be invoked this turn, not whether
+    to route to recruitment at all.
+
+    Add new question-word triggers conservatively (prefer false-negative
+    on "mixed" — better to under-detect questions than to misclassify a
+    real intake answer and lose the field value).
+    """
+    if not text or not text.strip():
+        return "unrelated"
+    stripped = text.strip()
+    # Very short messages without any question marker are almost always
+    # intake answers, never informational questions.
+    has_question = bool(
+        _QUESTION_MARK_RE.search(stripped)
+        or _QUESTION_WORDS_RE.search(stripped)
+    )
+    if not has_question:
+        # No question detected — even if it contains a value, the answer
+        # layer has nothing to say, so treat as a pure intake turn.
+        return "pure_intake"
+    # Question detected — now check whether the same turn ALSO contains
+    # a value matching the current intake step's expected format.
+    if current_step and current_step in _STEP_HAS_VALUE_RE:
+        if _STEP_HAS_VALUE_RE[current_step].search(stripped):
+            return "mixed"
+    return "pure_question"
+
+
+# Safe fee response — used until Owner resolves the source-of-truth
+# contradiction between "no fee" (line 54) and "processing fee exists"
+# (line 56) of resources/ops/recruitment_source_of_truth.txt. PENDING
+# OWNER DECISION (2026-08-23). States only the confirmed claim and
+# defers the contradictory part to the office contact number, avoiding
+# either fabrication or silent selection of one side.
+SAFE_FEE_PENDING_OWNER_DECISION = (
+    "চাকরির জন্য কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না। "
+    "নির্দিষ্ট প্রসেসিং/জয়েনিং ফি সংক্রান্ত তথ্যের জন্য অনুগ্রহ করে "
+    "অফিসে যোগাযোগ করুন: 01958-122300।"
+)
+
 STEP_QUESTIONS: dict[str, str] = {
     "name": (
         "স্বাগতম। আমাদের কাছে আবেদন করার জন্য আপনাকে ধন্যবাদ।\n"
@@ -1033,11 +1125,129 @@ async def route_recruitment_message(
     # informational text) -- so collection_step effectively never advanced
     # past the first question in practice, even with an active session.
     if active_session:
+        # 2026-08-23 (Answer-First, gated by recruitment_answer_first_enabled
+        # — see RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md):
+        # when the candidate's inbound turn contains an informational
+        # question (PURE_QUESTION or MIXED), the LLM/Hermes layer is
+        # consulted FIRST so the candidate gets a real answer; intake
+        # still advances on the same turn for MIXED turns (the answer is
+        # appended with a natural continuation prompt, never replaces the
+        # intake-field save). When the flag is OFF, this branch is a
+        # no-op and the original intake-first behavior is preserved
+        # byte-identically.
+        _answer_first_active = False
+        _turn_intent = "pure_intake"
+        try:
+            from app.config import get_settings
+            _answer_first_active = bool(get_settings().recruitment_answer_first_enabled)
+        except Exception:  # noqa: BLE001 — fail closed to legacy behavior
+            _answer_first_active = False
+
+        current_step = active_session.get("collection_step") if isinstance(active_session, dict) else None
+        _turn_intent = classify_turn_intent(text, current_step) if _answer_first_active else "pure_intake"
+
+        if _answer_first_active and _turn_intent in ("pure_question", "mixed"):
+            # Try the informational reply first — KB/Hermes/conversation_layer
+            # (in the same precedence order as the non-active-session branch
+            # further down). If they produce something, wrap it with the
+            # intake continuation prompt and ALSO save the intake field (MIXED
+            # only) before returning. If they produce nothing, fall through
+            # to the original intake_message()-first logic below.
+            _info_reply = None
+            _fact_check_pass = True
+            from modules.preflight_guard import is_feature_active
+            if is_feature_active("hermes_customer_recruitment", default=False):
+                from modules.hermes_dispatch import (
+                    generate_recruitment_reply as _hermes_recruitment_reply,
+                    build_recruitment_context as _build_recruitment_context,
+                )
+                _kb_context = _build_recruitment_context(text)
+                _info_reply = await _hermes_recruitment_reply(
+                    phone=phone, text=text, source=source,
+                    kb_context=_kb_context, contact_context=contact_context, history=history,
+                )
+            if not _info_reply:
+                from modules.conversation_layer import generate_recruitment_reply
+                _info_reply = await generate_recruitment_reply(
+                    phone=phone, text=text, source=source,
+                    contact_context=contact_context, history=history,
+                )
+            if _info_reply and _info_reply.strip():
+                # 2026-08-23: safe-fee override while Owner resolves
+                # source-of-truth contradiction (see SAFE_FEE_PENDING_OWNER_
+                # DECISION above and the plan). Only when the candidate's
+                # turn itself looks like a fee question — never volunteer.
+                from modules.hermes_dispatch import _looks_like_fee_question as _looks_fee
+                if _looks_fee(text):
+                    _info_reply = SAFE_FEE_PENDING_OWNER_DECISION
+                    _fact_check_pass = False  # bypassed by owner-decision gate
+                # For MIXED turns we still need to advance intake so the
+                # candidate's provided value is saved. intake_message()
+                # below handles that — we don't short-circuit here.
+                if _turn_intent == "pure_question":
+                    # Append the natural continuation prompt — current
+                    # intake state is preserved by intake_message()
+                    # regardless; we only add a soft ask so the candidate
+                    # knows the application can still continue.
+                    if current_step and current_step in STEP_QUESTIONS:
+                        _next_q = STEP_QUESTIONS[current_step]
+                        _info_reply = (
+                            _info_reply.rstrip()
+                            + "\n\nআপনি আবেদন চালিয়ে যেতে চাইলে — "
+                            + _next_q.split("\n")[0]
+                        )
+                    # Structured observability log (no PII — phone hashed).
+                    try:
+                        from app.config import get_settings as _gs
+                        if _gs().recruitment_structured_logging_enabled:
+                            import hashlib as _hl
+                            log.info(
+                                "[recruitment_turn] thread=%s msg=%s sender=%s step_before=%s intent=%s question=yes reply_path=answer_first fact_check=%s step_after=%s",
+                                (active_session.get("id") if isinstance(active_session, dict) else None),
+                                (message_id or "none"),
+                                _hl.sha1(phone.encode("utf-8")).hexdigest()[:10],
+                                current_step or "none",
+                                _turn_intent,
+                                "pass" if _fact_check_pass else "owner_gate",
+                                current_step or "none",
+                            )
+                    except Exception:  # noqa: BLE001 — logging is best-effort
+                        pass
+                    return {
+                        "eligible": True,
+                        "autosend": bool(decision.get("autosend")),
+                        "reason": "answer_first_question",
+                        "reply": _info_reply,
+                    }
+
         intake = await intake_message(
             phone, text, source, role=role, message_id=message_id,
         )
         intake_reply = (intake.get("reply") or "").strip()
         if intake_reply:
+            # MIXED turns already had their informational answer prepared
+            # above — append it to the intake reply so the candidate gets
+            # BOTH the field saved AND their question answered.
+            if _answer_first_active and _turn_intent == "mixed" and "_info_reply" in locals() and _info_reply and _info_reply.strip():
+                intake_reply = _info_reply.rstrip() + "\n\n" + intake_reply
+            # Structured observability log (no PII — phone hashed).
+            try:
+                from app.config import get_settings as _gs2
+                if _gs2().recruitment_structured_logging_enabled:
+                    import hashlib as _hl2
+                    log.info(
+                        "[recruitment_turn] thread=%s msg=%s sender=%s step_before=%s intent=%s question=%s reply_path=%s fact_check=pass step_after=%s",
+                        (active_session.get("id") if isinstance(active_session, dict) else None),
+                        (message_id or "none"),
+                        _hl2.sha1(phone.encode("utf-8")).hexdigest()[:10],
+                        current_step or "none",
+                        _turn_intent,
+                        "yes" if _turn_intent in ("pure_question", "mixed") else "no",
+                        "mixed_with_answer" if _turn_intent == "mixed" else "intake_only",
+                        current_step or "none",
+                    )
+            except Exception:  # noqa: BLE001 — logging is best-effort
+                pass
             return {
                 "eligible": True,
                 "autosend": bool(decision.get("autosend")),

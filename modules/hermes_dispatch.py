@@ -164,6 +164,45 @@ _PLACE_RE = re.compile(
 )
 _PLACE_INFLECTION_SUFFIXES = ("য়ে", "য়", "তে", "র", "ে", "এ")
 
+# Bangla→ASCII digit map for number normalization (2026-08-23, see
+# RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md "Fact-Check
+# False Positives"): lets an approved salary of "১০,০০০" in the source
+# validate against "10,000" or "১০০০০" in the reply, and vice versa.
+_BANGLA_DIGITS = "০১২৩৪৫৬৭৮৯"
+_BANGLA_TO_ASCII = str.maketrans(_BANGLA_DIGITS, "0123456789")
+_NON_DIGIT_RE = re.compile(r"[^\d]")
+
+
+def _normalize_number_token(token: str) -> str:
+    """Strip punctuation and normalize Bangla↔ASCII digits.
+
+    "01958-122300."  → "01958122300"
+    "১০,০০০"         → "১০০০০"    (then ASCII mapping if any Bangla) → "10000"
+    "" (after strip) → ""
+    """
+    if not token:
+        return ""
+    ascii_form = token.translate(_BANGLA_TO_ASCII)
+    digits_only = _NON_DIGIT_RE.sub("", ascii_form)
+    return digits_only
+
+
+def _normalize_place_token(token: str) -> str:
+    """Strip inflection suffixes + lowercase for stem comparison.
+
+    "আগ্রপাড়া"     → "আগ্রপাড়া"
+    "আগ্রপাড়ায়"   → "আগ্রপাড়া"
+    "আগ্রপাড়ার"    → "আগ্রপাড়া"
+    """
+    if not token:
+        return ""
+    stripped = token
+    for sfx in _PLACE_INFLECTION_SUFFIXES:
+        if stripped.endswith(sfx) and len(stripped) > len(sfx):
+            stripped = stripped[: -len(sfx)]
+            break
+    return stripped.lower()
+
 
 def _place_stem(token: str) -> str:
     for sfx in _PLACE_INFLECTION_SUFFIXES:
@@ -181,7 +220,52 @@ def _recruitment_reply_matches_source(reply: str, kb_context: str) -> bool:
     fabricated) and invented locations (a hiring claim for a place the
     candidate mentioned but the source never did). Empty kb_context makes
     every number/place "unsupported" by construction, which is correct:
-    no context means no fact should have been stated at all."""
+    no context means no fact should have been stated at all.
+
+    2026-08-23 normalization (gated by recruitment_factcheck_normalized
+    setting, see app/config.py): when enabled, numbers are compared
+    after stripping punctuation and normalizing Bangla↔ASCII digits, so
+    equivalent formatting of APPROVED source-of-truth validates. Invented
+    numbers/locations are still rejected. Default behavior unchanged
+    when flag is off (substring matching as before).
+    """
+    # Lazy import to avoid circular imports at module load.
+    try:
+        from app.config import get_settings
+        normalized_mode = bool(get_settings().recruitment_factcheck_normalized)
+    except Exception:  # noqa: BLE001 — fail closed, no behavioral change
+        normalized_mode = False
+
+    if normalized_mode:
+        reply_numbers = {
+            _normalize_number_token(t) for t in _NUMBER_RE.findall(reply)
+        }
+        source_numbers = {
+            _normalize_number_token(t) for t in _NUMBER_RE.findall(kb_context)
+        }
+        reply_numbers.discard("")
+        if not reply_numbers.issubset(source_numbers):
+            log.warning(
+                "[hermes_dispatch] recruitment reply blocked -- unsupported numbers: %s",
+                sorted(reply_numbers - source_numbers),
+            )
+            return False
+        place_hits = _PLACE_RE.findall(reply)
+        kb_lower = kb_context.lower()
+        unsupported_places = [
+            p for p in place_hits
+            if _normalize_place_token(p) not in kb_lower
+            and _place_stem(p).lower() not in kb_lower
+        ]
+        if unsupported_places:
+            log.warning(
+                "[hermes_dispatch] recruitment reply blocked -- unsupported places: %s",
+                unsupported_places,
+            )
+            return False
+        return True
+
+    # Legacy path — preserved unchanged for staged rollout / rollback.
     reply_numbers = set(_NUMBER_RE.findall(reply))
     source_numbers = set(_NUMBER_RE.findall(kb_context))
     if not reply_numbers.issubset(source_numbers):

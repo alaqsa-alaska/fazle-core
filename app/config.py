@@ -286,6 +286,30 @@ class Settings(BaseSettings):
     # Example: "bridge1,bridge2,meta"
     escort_trusted_sources: str = "bridge1,bridge2,meta"
 
+    # ── Recruitment reply-quality improvements (2026-08-23) ─────────────────
+    # When True, route_recruitment_message() answers the candidate's
+    # informational question FIRST (from KB/Hermes) and then naturally
+    # continues intake with the next collection field — instead of
+    # unconditionally advancing intake first (which was ignoring real
+    # candidate questions). Default OFF for staged rollout; turn ON only
+    # after regression tests pass. See RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md.
+    recruitment_answer_first_enabled: bool = False
+
+    # When True, _recruitment_reply_matches_source() uses normalized
+    # comparison (Bangla↔ASCII digits, stripped punctuation, hyphenated
+    # vs non-hyphenated phones) instead of strict substring matching.
+    # Equivalent formatting of APPROVED facts validates; invented numbers
+    # and places are still rejected. Default OFF for staged rollout.
+    # See RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md.
+    recruitment_factcheck_normalized: bool = False
+
+    # When True, emit structured [recruitment_turn] log lines with
+    # thread_id, collection_step, question_detected, intake_fields_extracted,
+    # reply_path, fact_check_pass — for reproducible audits. No PII;
+    # phone numbers are SHA-hashed. Default ON (logging has no behavioral
+    # impact).
+    recruitment_structured_logging_enabled: bool = True
+
     # 2026-07-22: the one WhatsApp group whose ADMIN OUTBOUND messages (via
     # bridge2 only) are a trusted source of escort orders/confirmations --
     # "Al-Aqsa Escort Program Group", resolved from bridge2's own messages.db
