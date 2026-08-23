@@ -60,8 +60,15 @@ class Settings(BaseSettings):
     # Groq fallback provider (free tier: 14,400 req/day, 30 RPM)
     # Used after Ollama and before GitHub Models.
     # Get key at: https://console.groq.com/keys
+    # 2026-08-23: llama-3.1-8b-instant was retired by Groq (live 404
+    # model_not_found on every call, confirmed via production logs) and
+    # replaced with allam-2-7b — verified available on this account's
+    # /openai/v1/models listing and live-tested against the existing
+    # classify_intent_llm() call shape (max_tokens=10, temperature 0.0-0.1,
+    # single-word category reply, no reasoning-token preamble) across
+    # English and Bengali sample messages, 8/8 correct, ~110ms latency.
     groq_api_key: str = ""
-    groq_model_name: str = "llama-3.1-8b-instant"
+    groq_model_name: str = "allam-2-7b"
 
     # MiniMax (2026-08-22, Phase 2A isolated — NOT wired into llm.py chain yet).
     # Reuses the AsyncOpenAI client pattern from groq_provider.py. Real

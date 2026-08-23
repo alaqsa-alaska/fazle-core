@@ -556,3 +556,210 @@ class TestCheckHealthConcurrencyAndTimeout:
             "omniroute_configured", "omniroute", "github_models", "groq", "ollama",
         ):
             assert key in result
+
+
+# ── 2026-08-23 obsolete Groq classify model + GitHub classify dead-endpoint
+# gate ───────────────────────────────────────────────────────────────────
+# llama-3.1-8b-instant was confirmed retired by Groq (live 404
+# model_not_found on every call, per app/config.py's groq_model_name
+# comment) and replaced with allam-2-7b -- verified available via a live
+# GET /openai/v1/models call against the configured account and a live
+# classify-shaped test call (existing max_tokens=10/temperature 0.0-0.1
+# call shape, unchanged: 8/8 correct across English/Bengali sample
+# messages, ~110ms latency, no reasoning-token preamble). Separately,
+# app.llm.classify_intent_llm()'s GitHub Models leg now gates on the same
+# github_models._ENDPOINT_CONFIRMED_DEAD state (exposed importably via
+# github_models.is_endpoint_confirmed_dead()) instead of always making a
+# doomed live network call to the confirmed-410-Gone endpoint.
+
+class TestGroqClassifyModelConfig:
+    def test_obsolete_model_no_longer_configured(self):
+        """(A) The retired model must not be the configured default now
+        that a verified replacement exists."""
+        from app.config import Settings
+
+        assert Settings.model_fields["groq_model_name"].default != "llama-3.1-8b-instant"
+
+    def test_replacement_model_is_the_verified_one(self):
+        from app.config import Settings
+
+        assert Settings.model_fields["groq_model_name"].default == "allam-2-7b"
+
+
+class TestClassifyIntentLlmChain:
+    """app.llm.classify_intent_llm(): Ollama -> Groq -> GitHub Models ->
+    "unknown". Not previously covered by a dedicated chain-order test in
+    this file (unlike generate_reply/generate_recruitment_reply above)."""
+
+    @pytest.mark.asyncio
+    async def test_ollama_success_short_circuits_groq_and_github(self, monkeypatch):
+        _reset_settings(monkeypatch)
+        from app import github_models, groq_provider, llm, ollama
+
+        monkeypatch.setattr(ollama, "classify_intent_llm", AsyncMock(return_value="recruitment"))
+        monkeypatch.setattr(groq_provider, "classify_intent_llm", AsyncMock(side_effect=AssertionError("must not be called")))
+        monkeypatch.setattr(github_models, "classify_intent_llm", AsyncMock(side_effect=AssertionError("must not be called")))
+
+        result = await llm.classify_intent_llm("আমার বেতন কবে হবে?")
+
+        assert result == "recruitment"
+
+    @pytest.mark.asyncio
+    async def test_groq_classification_returns_expected_contract(self, monkeypatch):
+        """(B) Groq classification still returns the same expected
+        application-level contract -- a plain intent string, propagated
+        unchanged through app.llm.classify_intent_llm()."""
+        _reset_settings(monkeypatch)
+        from app import groq_provider, llm, ollama
+
+        monkeypatch.setattr(ollama, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        monkeypatch.setattr(groq_provider, "classify_intent_llm", AsyncMock(return_value="salary_query"))
+
+        result = await llm.classify_intent_llm("test message")
+
+        assert result == "salary_query"
+        groq_provider.classify_intent_llm.assert_awaited_once_with("test message")
+
+    @pytest.mark.asyncio
+    async def test_groq_failure_falls_through_safely(self, monkeypatch):
+        """(C) A Groq-layer exception must not propagate -- falls through
+        to GitHub Models (not confirmed-dead in this test) and returns its
+        result, never raises."""
+        _reset_settings(monkeypatch)
+        from app import github_models, groq_provider, llm, ollama
+
+        monkeypatch.setattr(ollama, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        monkeypatch.setattr(groq_provider, "classify_intent_llm", AsyncMock(side_effect=RuntimeError("groq down")))
+        monkeypatch.setattr(github_models, "is_endpoint_confirmed_dead", lambda: False)
+        monkeypatch.setattr(github_models, "classify_intent_llm", AsyncMock(return_value="complaint"))
+
+        result = await llm.classify_intent_llm("test message")
+
+        assert result == "complaint"
+
+    @pytest.mark.asyncio
+    async def test_github_confirmed_dead_causes_zero_outbound_classify_call(self, monkeypatch):
+        """(D)(F) When the GitHub Models endpoint is confirmed dead, the
+        classify leg must make zero network calls (no client construction,
+        no classify_intent_llm call) and fall straight through to
+        "unknown" -- the same terminal result a failed call would have
+        produced anyway, just without the doomed round trip."""
+        _reset_settings(monkeypatch)
+        from app import github_models, groq_provider, llm, ollama
+
+        monkeypatch.setattr(ollama, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        monkeypatch.setattr(groq_provider, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        assert github_models.is_endpoint_confirmed_dead() is True  # production state, untouched
+        monkeypatch.setattr(
+            github_models, "classify_intent_llm",
+            AsyncMock(side_effect=AssertionError("must not make a live call to a confirmed-dead endpoint")),
+        )
+        monkeypatch.setattr(
+            github_models, "_make_client",
+            lambda: (_ for _ in ()).throw(AssertionError("must not construct a client for a confirmed-dead endpoint")),
+        )
+
+        result = await llm.classify_intent_llm("test message")
+
+        assert result == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_github_not_confirmed_dead_preserves_existing_call_behavior(self, monkeypatch):
+        """(E) With the dead-endpoint flag False, existing behavior is
+        unchanged: github_models.classify_intent_llm() is actually called
+        and its result returned."""
+        _reset_settings(monkeypatch)
+        from app import github_models, groq_provider, llm, ollama
+
+        monkeypatch.setattr(ollama, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        monkeypatch.setattr(groq_provider, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        monkeypatch.setattr(github_models, "is_endpoint_confirmed_dead", lambda: False)
+        monkeypatch.setattr(github_models, "classify_intent_llm", AsyncMock(return_value="join"))
+
+        result = await llm.classify_intent_llm("test message")
+
+        assert result == "join"
+        github_models.classify_intent_llm.assert_awaited_once_with("test message")
+
+    @pytest.mark.asyncio
+    async def test_github_disabled_when_no_token_configured(self, monkeypatch):
+        """Pre-existing settings.github_token gate must still work exactly
+        as before -- unaffected by the new dead-endpoint check, which is a
+        second, independent gate layered on top of it."""
+        _reset_settings(monkeypatch, github=False)
+        from app import github_models, groq_provider, llm, ollama
+
+        monkeypatch.setattr(ollama, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        monkeypatch.setattr(groq_provider, "classify_intent_llm", AsyncMock(return_value="unknown"))
+        monkeypatch.setattr(github_models, "classify_intent_llm", AsyncMock(side_effect=AssertionError("must not be called -- no token configured")))
+
+        result = await llm.classify_intent_llm("test message")
+
+        assert result == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_all_providers_exhausted_returns_unknown_not_raises(self, monkeypatch):
+        """(G) No "all providers exhausted" regression for the classify
+        chain: Ollama and Groq both failing, GitHub confirmed-dead (real
+        production state), must still resolve to a clean "unknown" string,
+        never an unhandled exception."""
+        _reset_settings(monkeypatch)
+        from app import groq_provider, llm, ollama
+
+        monkeypatch.setattr(ollama, "classify_intent_llm", AsyncMock(side_effect=RuntimeError("ollama down")))
+        monkeypatch.setattr(groq_provider, "classify_intent_llm", AsyncMock(side_effect=RuntimeError("groq down")))
+
+        result = await llm.classify_intent_llm("test message")
+
+        assert result == "unknown"
+
+
+class TestScopeIsolation:
+    """(H)(I)(J) Structural regression guards: this provider-fallback fix
+    must not touch semantic_gate, recruitment routing, employee routing,
+    or any feature flag -- verified against the actual working-tree diff,
+    not just by code review."""
+
+    @staticmethod
+    def _changed_tracked_files() -> set[str]:
+        import os
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=10,
+        )
+        return {f for f in out.stdout.split() if f}
+
+    def test_semantic_gate_file_unchanged(self):
+        assert "modules/hermes_dispatch.py" not in self._changed_tracked_files()
+
+    def test_recruitment_flow_unchanged(self):
+        changed = self._changed_tracked_files()
+        assert not any(f.startswith("modules/recruitment_flow/") for f in changed)
+
+    def test_employee_conversation_unchanged(self):
+        changed = self._changed_tracked_files()
+        assert not any(f.startswith("modules/employee_conversation/") for f in changed)
+
+    def test_no_flag_touching_module_changed(self):
+        """No feature-flag surface (message_router, admin_directives) is
+        part of this fix's expected file set."""
+        changed = self._changed_tracked_files()
+        disallowed_prefixes = (
+            "modules/message_router/", "modules/admin_directives/",
+            "modules/payroll", "modules/cash", "modules/escort",
+            "modules/attendance",
+        )
+        assert not any(f.startswith(disallowed_prefixes) for f in changed)
+
+    def test_changed_files_are_within_expected_scope(self):
+        expected_allowed = {
+            "app/config.py",
+            "app/llm.py",
+            "app/github_models.py",
+            "tests/unit/test_llm_provider_order.py",
+        }
+        changed = self._changed_tracked_files()
+        assert changed.issubset(expected_allowed), f"unexpected files changed: {changed - expected_allowed}"

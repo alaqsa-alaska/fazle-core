@@ -165,8 +165,14 @@ async def classify_intent_llm(text: str) -> str:
 
     2026-08-05: intent classification is out of scope for the reply-
     generation/polish chain change — left untouched deliberately, still
-    references github_models (which itself still functions if reached;
-    only its health-check ping was disabled, see app/github_models.py).
+    references github_models.
+    2026-08-23: the GitHub Models leg now skips its live network call
+    entirely when github_models.is_endpoint_confirmed_dead() is True
+    (currently: yes, models.github.ai/inference confirmed retired) and
+    falls straight through to "unknown" instead of waiting out a
+    guaranteed-failing 15s-timeout request. Groq's classification model
+    was also updated the same day (see app/config.py's groq_model_name)
+    after llama-3.1-8b-instant was confirmed retired by Groq.
     """
     settings = get_settings()
 
@@ -188,13 +194,22 @@ async def classify_intent_llm(text: str) -> str:
             log.warning("[llm] groq classify failed, falling back to github_models: %s", e)
 
     if settings.github_token:
-        try:
-            from app import github_models
-            result = await github_models.classify_intent_llm(text)
-            if result != "unknown":
-                return result
-        except Exception as e:
-            log.warning("[llm] github_models classify failed: %s", e)
+        from app import github_models
+        if github_models.is_endpoint_confirmed_dead():
+            # 2026-08-23: models.github.ai/inference is confirmed retired
+            # (410 Gone on every request -- see github_models.py's own
+            # _ENDPOINT_CONFIRMED_DEAD note). Skip the guaranteed-failing
+            # live call (and its 15s timeout budget) and fall through to
+            # the same "unknown" result a failed call would have produced
+            # anyway -- return shape/behavior for callers is unchanged.
+            log.debug("[llm] github_models classify skipped -- endpoint confirmed dead")
+        else:
+            try:
+                result = await github_models.classify_intent_llm(text)
+                if result != "unknown":
+                    return result
+            except Exception as e:
+                log.warning("[llm] github_models classify failed: %s", e)
 
     return "unknown"
 
