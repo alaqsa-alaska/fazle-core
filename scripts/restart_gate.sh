@@ -106,6 +106,50 @@ check4() {
     fi
 }
 
+# ── Check 4b: Bridge3 Recruitment Golden Regression ─────────────────────────
+# 2026-08-25 P0 closure (commit b7a302d — cooldown silently dropped
+# active-session recruitment answers, live-confirmed against 38 real
+# candidates). This is the permanent deployment gate for the Owner
+# directive "future behavior may improve, but must not regress below the
+# currently proven production capability." Scoped to the golden suite
+# itself plus the existing suites that already exercise the same call
+# path (bridge_poller cooldown gate, recruitment_flow intake/answer-first,
+# Phase C decision contract) — not the entire test tree, so an unrelated
+# change elsewhere in the repo doesn't pay this cost. A change that
+# genuinely touches any of these files/behaviors must pass this check;
+# nothing here should ever be weakened to make a failure go away — see
+# tests/unit/test_bridge3_recruitment_golden_baseline.py's own docstring.
+check4b() {
+    local py="venv/bin/python"
+    [[ -x "$py" ]] || py="python3"
+    local suites=(
+        tests/unit/test_bridge3_recruitment_golden_baseline.py
+        tests/unit/test_recruitment_cooldown_lead_creation_fix.py
+        tests/unit/test_recruitment_answer_first.py
+        tests/unit/test_recruitment_salary_context_routing_fix.py
+        tests/unit/test_recruitment_age_override.py
+        tests/unit/test_recruitment_phone_confirm_bengali_digits.py
+    )
+    local tdp
+    tdp=$(grep -oP '(?<=^DATABASE_URL_TEMPLATE=postgresql://postgres:)[^@]+' "$ENV_FILE" 2>/dev/null)
+    if TEST_DB_PASSWORD="$tdp" "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4b.log 2>&1; then
+        summary=$(tail -1 /tmp/restart_gate_check4b.log)
+        pass "4b. Bridge3 recruitment golden . ${summary}"
+    else
+        block "4b. Bridge3 recruitment golden . FAILED, see /tmp/restart_gate_check4b.log"
+    fi
+    # Deterministic 14-case Phase C corpus — same "known-good baseline
+    # must not regress" principle, offline/no-LLM-required.
+    if [[ -f tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py ]]; then
+        if "$py" tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py >/tmp/restart_gate_check4b_corpus.log 2>&1 \
+            && grep -q "deterministic_legs_pass: 14/14" /tmp/restart_gate_check4b_corpus.log; then
+            pass "4c. Phase C regression corpus . 14/14 deterministic legs pass"
+        else
+            block "4c. Phase C regression corpus . did not confirm 14/14, see /tmp/restart_gate_check4b_corpus.log"
+        fi
+    fi
+}
+
 # ── Check 5: migration inventory + path enforcement ─────────────────────────
 check5() {
     missing=()
@@ -171,7 +215,7 @@ check7() {
 
 echo "Restart Gate — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "──────────────────────────────────────────────────────────"
-check1; check2; check3; check4; check5; check6; check7
+check1; check2; check3; check4; check4b; check5; check6; check7
 for r in "${RESULTS[@]}"; do echo "$r"; done
 echo "──────────────────────────────────────────────────────────"
 if [[ "$BLOCKED" -gt 0 ]]; then
