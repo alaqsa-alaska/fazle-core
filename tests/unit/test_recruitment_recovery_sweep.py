@@ -24,7 +24,7 @@ CANDIDATE_ROW = {
     "received_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
     "message_body": "সুপারভাইজার পদের বেতন কত?",
     "workflow_triggered": None,
-    "source_bridge": "bridge3",
+    "platform": "bridge3",
 }
 
 

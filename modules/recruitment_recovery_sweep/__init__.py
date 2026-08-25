@@ -78,7 +78,7 @@ async def _find_stale_unanswered(limit: int) -> list[dict]:
         """
         SELECT DISTINCT ON (i.sender_number)
             i.sender_number, i.message_id, i.received_at, i.message_body,
-            i.workflow_triggered, i.source_bridge
+            i.workflow_triggered, i.platform
         FROM wbom_whatsapp_messages i
         WHERE i.direction = 'inbound'
           AND i.received_at > $1
@@ -105,7 +105,10 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
     text = (row.get("message_body") or "").strip()
     msg_id = row.get("message_id")
     received_at = row.get("received_at")
-    source_bridge = row.get("source_bridge") or "bridge3"
+    # 2026-08-25 live-restart-caught bug fix: wbom_whatsapp_messages has
+    # no source_bridge column -- the bridge name is stored in `platform`
+    # (see modules.bridge_poller._save_raw_core_copy's own INSERT).
+    source_bridge = row.get("platform") or "bridge3"
     decision: dict[str, Any] = {"phone": phone, "message_id": msg_id, "action": "skip"}
     if not phone or not text:
         decision["reason"] = "empty_phone_or_text"
