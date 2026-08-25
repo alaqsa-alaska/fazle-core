@@ -769,6 +769,118 @@ async def deliver_authoritative_recruitment_reply(
     return reply or None
 
 
+# ── WS1 / Phase C real-LLM bridge (2026-08-25, Owner-Authority recovery
+# pass) ─────────────────────────────────────────────────────────────────────
+# recruitment_turn_decision.decide() needs a real DecisionLLMCall closure
+# when the recruitment_turn_decision_v2_real_llm flag is on. To honor the
+# directive's "do not create a parallel recruitment-decision AI stack that
+# bypasses Hermes" rule, this module exposes make_decision_llm_call() —
+# which routes through the SAME _call_hermes() call shape every other
+# customer-facing Hermes call uses (caller_scope="customer", bearer
+# HERMES_RUNNER_CUSTOMER_SECRET). Hermes (via hermes-runner) in turn
+# forwards the structured decision prompt to the OmniRoute gateway
+# (http://127.0.0.1:20128/v1), which is the EXACT same endpoint
+# app.omniroute_provider talks to in fallback mode and the EXACT same
+# endpoint the existing _SEMANTIC_GATE_POLICY semantic_gate() send uses.
+# The model under the hood is the same. Failure modes (None-return
+# timeout/config/error, fail-closed) match every other Hermes call site
+# here. NEVER raises.
+async def call_decision_llm(
+    *,
+    system_prompt: str,
+    user_payload: str,
+    sender_phone: str = "",
+) -> Optional[str]:
+    """Hermes-routed structured decision call (WS1, 2026-08-25).
+
+    Returns Hermes's raw response text or None on any failure. The
+    caller (modules.recruitment_turn_decision.decide) owns JSON parsing
+    and the fail-closed AMBIGUOUS fallback. Bounded by the same
+    _TIMEOUT_SECONDS as every other hermes-runner customer call.
+
+    The system_prompt is the caller's responsibility (it is the
+    DecisionLLMCall signature's `system` arg, sourced from
+    recruitment_turn_decision.prompts.DECISION_SYSTEM_PROMPT). The
+    user_payload is the multi-section structured payload the same
+    prompts module builds. Together they form the full instruction.
+
+    NOTE on chat-shape vs prompt-shape: hermes-runner's own prompt
+    stacking in run_hermes() keys off caller_scope="customer" and adds
+    the customer-facing system preamble upstream of whatever message
+    string is supplied via `/run`'s `message` field, so
+    caller-supplied 'system_prompt' must be passed THROUGH (not
+    prepended), to avoid conflicting preamble layers. We pass a
+    structured labeled payload (the same shape semantic_gate() uses
+    with its [_SEMANTIC_GATE_POLICY] + "EVIDENCE (JSON):" + json).
+    DecisionCaller handles its own prompt layering upstream of this
+    function."""
+    base_url, secret = _configured()
+    if not base_url or not secret:
+        log.debug("[hermes_dispatch] decision_llm not configured (missing hermes_runner_url or hermes_runner_customer_secret)")
+        return None
+    # Compose a single message string the same way semantic_gate()
+    # composes its evidence payload -- the hermes-runner /run endpoint
+    # takes ONE 'message' field; system instruction is folded into that
+    # field with explicit separators so the LLM sees a labeled system-
+    # instruction then a labeled evidence block.
+    composed = (
+        "[SYSTEM_INSTRUCTION]\n"
+        f"{system_prompt}\n"
+        "[/SYSTEM_INSTRUCTION]\n\n"
+        "[TURN_PAYLOAD]\n"
+        f"{user_payload}\n"
+        "[/TURN_PAYLOAD]"
+    )
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{base_url}/run",
+                headers={"Authorization": f"Bearer {secret}"},
+                json={
+                    "message": composed,
+                    "caller_scope": "customer",
+                    "readonly_key": (f"customer:decision:{sender_phone}"
+                                     if sender_phone else "customer:decision"),
+                    # Decision path is structured classification only --
+                    # caller-supplied persona/system is already in the
+                    # composed message, so tell hermes-runner not to
+                    # prepend any additional user-facing preamble.
+                    "decision_only": True,
+                },
+            )
+    except httpx.TimeoutException:
+        log.warning("[hermes_dispatch] decision_llm timed out after %.1fs", time.monotonic() - started)
+        return None
+    except Exception as exc:  # noqa: BLE001 -- never raise into decide()
+        log.warning("[hermes_dispatch] decision_llm request failed: %s", exc)
+        return None
+
+    if resp.status_code != 200:
+        log.warning("[hermes_dispatch] decision_llm hermes-runner returned %s", resp.status_code)
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        log.warning("[hermes_dispatch] decision_llm non-JSON response")
+        return None
+    reply = (data.get("reply") or "").strip()
+    if not reply:
+        log.info("[hermes_dispatch] decision_llm empty reply")
+        return None
+    log.info(
+        "[hermes_dispatch] decision_llm reply_len=%d elapsed=%.1fs",
+        len(reply), time.monotonic() - started,
+    )
+    return reply
+
+
+__all__ = [
+    "SemanticDecision",
+    "call_decision_llm",
+]
+
+
 # ---------------------------------------------------------------------------
 # Semantic gate (Task 13, 2026-08-22 — Recruitment + Employee conversational
 # semantic routing). Identity / keywords / recruitment_detector are EVIDENCE

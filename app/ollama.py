@@ -16,6 +16,8 @@ import asyncio
 import json
 import logging
 import time
+from typing import Optional
+
 from app.config import get_settings
 from app import ollama_daemon
 from shared.reply_policy import (
@@ -549,6 +551,71 @@ Admin-এর প্রশ্ন: {question[:400]}
                         r.status_code, r.text)
         except Exception as e:
             log.error("Ollama chat reply error: %s: %s", type(e).__name__, e)
+    return None
+
+
+# ── Raw decision-call shape (2026-08-25, WS1 of the Hermes Owner-Authority
+# recovery pass) ──────────────────────────────────────────────────────
+# Local-Ollama raw decision call. Same contract as
+# omniroute_provider.decision_call / groq_provider.decision_call: takes a
+# system+user prompt, returns raw text or None, never raises. The `model=`
+# kwarg lets app/llm.decision_call() reach the Kimi cloud-model proxy by
+# passing settings.kimi_model_name through to this same client, matching
+# how app/llm.py's existing reply chain already reuses this same local
+# client for Kimi (see app/llm.py "Kimi: reached through the SAME local
+# Ollama client" note).
+async def decision_call(
+    *,
+    system_prompt: str,
+    user_payload: str,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
+    timeout: float = 12.0,
+    model: Optional[str] = None,
+) -> Optional[str]:
+    """Raw local-Ollama decision call. Returns raw model text or None on
+    any failure. Used only via app/llm.decision_call()."""
+    settings = get_settings()
+    use_model = model or settings.ollama_model
+    if settings.ollama_reply_disabled:
+        # Decision path mirrors app/llm.py's customer-facing policy: when
+        # the Owner's "Ollama disabled" toggle is on, we skip the local
+        # provider entirely (so the chain correctly continues to Kimi).
+        return None
+    t0 = time.monotonic()
+    # Same bounded-reply settings as existing reply generation paths.
+    bounded_num_predict = max(64, min(max_tokens, 1024))
+    bounded_temperature = max(0.0, min(temperature, 1.0))
+    payload = {
+        "model": use_model,
+        "system": system_prompt,
+        "prompt": user_payload,
+        "stream": False,
+        "options": {
+            "temperature": bounded_temperature,
+            "num_predict": bounded_num_predict,
+            "num_ctx": _bounded_int(
+                settings.ollama_num_ctx_default,
+                minimum=256,
+                maximum=8192,
+                default=512,
+            ),
+        },
+    }
+    if _is_qwen3(use_model):
+        payload["think"] = False
+    async with _ollama_sem:
+        try:
+            r = await ollama_daemon.post_generate(payload, timeout=max(timeout, 1.0))
+            if r.status_code == 200:
+                text = (r.json().get("response", "") or "").strip()
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                log.info("[ollama] decision_call OK latency=%dms model=%s", latency_ms, use_model)
+                return text or None
+            log.warning("[ollama] decision_call non-200: status=%d body=%.100s",
+                        r.status_code, r.text)
+        except Exception as e:
+            log.warning("[ollama] decision_call error: %s: %s", type(e).__name__, e)
     return None
 
 

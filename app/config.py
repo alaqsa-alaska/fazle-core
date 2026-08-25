@@ -336,6 +336,43 @@ class Settings(BaseSettings):
     recruitment_actor_provenance_writeback: bool = False
     # --- end Phase C v2 flags ---
 
+    # --- WS1 real-LLM wiring flag (2026-08-25) ---
+    # Independent gate from recruitment_turn_decision_v2_enabled above.
+    # When recruitment_turn_decision_v2_enabled AND
+    # recruitment_turn_decision_v2_real_llm are BOTH True, the
+    # recruitment_flow + message_router V2 decide() calls stop falling
+    # through to recruitment_turn_decision.decide._default_no_llm() and
+    # instead use a real provider-chain call (OmniRoute -> Groq -> local
+    # Ollama/Hermes -> Kimi, same chain as app/llm.generate_reply()).
+    # Either flag alone leaves the previous behavior byte-identical.
+    # Default OFF -- kept separate so it can be turned on (and off)
+    # without touching the v2-enabled gate that already controls routing.
+    # Bounded by the per-call attempt trace recorded in
+    # app/llm.decision_call(); never silently retries; provider failures
+    # resolve to the same AMBIGUOUS fallback decide() already returns,
+    # preserving all current fall-through semantics.
+    recruitment_turn_decision_v2_real_llm: bool = False
+    # Hard cap on a single decision-call's wall-clock budget. The
+    # decide() helper's flag-enabled branch respects this by passing
+    # timeout=settings.recruitment_decision_call_timeout_seconds when
+    # constructing the LLM call. Default 12s -- well under the typical
+    # inbound SLA budget.
+    recruitment_decision_call_timeout_seconds: float = 12.0
+
+    # recruitment_turn_decision_v2_direct_provider_fallback: when ON,
+    # the llm_bridge for recruitment_turn_decision.decide() is allowed
+    # to call app/llm.decision_call()'s OmniRoute -> Groq -> Ollama ->
+    # Kimi chain directly after Hermes returns None (Hermes not
+    # configured OR Hermes failed/empty/timeout). Default OFF so a
+    # production customer semantic-decision never silently bypasses
+    # Hermes merely because Hermes timed out. When OFF, decide() falls
+    # back to its existing _default_no_llm -> AMBIGUOUS path the moment
+    # Hermes is unreachable, preserving byte-identical current routing.
+    # Tests/dev/shadow experiments can flip this on explicitly; the
+    # production .env must keep it OFF.
+    recruitment_turn_decision_v2_direct_provider_fallback: bool = False
+    # --- end WS1 real-LLM wiring flag ---
+
     # 2026-07-22: the one WhatsApp group whose ADMIN OUTBOUND messages (via
     # bridge2 only) are a trusted source of escort orders/confirmations --
     # "Al-Aqsa Escort Program Group", resolved from bridge2's own messages.db

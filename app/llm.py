@@ -587,6 +587,132 @@ async def generate_rag_answer(
     return await ollama.generate_rag_answer(question=question, context=context, model=model)
 
 
+# ── Decision-call orchestrator (2026-08-25, WS1 of the Hermes Owner-Authority
+# recovery pass) ──────────────────────────────────────────────────────
+# Walks the SAME provider chain as generate_reply() / generate_recruitment_
+# reply() (OmniRoute -> Groq -> local Ollama/Hermes -> Kimi), but with a
+# raw system+user prompt shape so the caller (modules.recruitment_turn_
+# decision.decide, via llm_bridge.make_decision_llm_call) supplies its own
+# structured-decision instructions instead of having shared.reply_policy
+# build a free-form customer-reply prompt. Returns raw model text or None;
+# the caller owns JSON parsing, validation, and the fail-closed AMBIGUOUS
+# fallback.
+#
+# Per-call attempt trace is recorded via the same _record_attempt()/
+# get_last_attempts() mechanism generate_reply() uses, so shadow-mode
+# observers can inspect decision-attempt history via get_last_attempts()
+# the same way they currently inspect reply-attempt history.
+async def decision_call(
+    *,
+    system_prompt: str,
+    user_payload: str,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
+    timeout: float = 12.0,
+) -> Optional[str]:
+    """Walk OmniRoute -> Groq -> local Ollama/Hermes -> Kimi with a raw
+    (system, user) prompt pair, returning the first non-empty raw model
+    text. None if every provider returned empty/errored. Never raises.
+
+    Bounded client-side: max_tokens and temperature are clamped to a
+    safe range inside each provider's own decision_call wrapper, so this
+    orchestrator simply forwards callers' intent. Timeout is per-provider
+    call, ALSO bounded to <=25s inside each provider's decision_call.
+    """
+    settings = get_settings()
+    _LAST_ATTEMPTS.set([])
+
+    # 1. OmniRoute
+    if settings.omniroute_api_key:
+        try:
+            from app import omniroute_provider
+            text = await omniroute_provider.decision_call(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+            )
+            if text:
+                _record_attempt("omniroute", settings.omniroute_model_name, "success")
+                return text
+            _record_attempt("omniroute", settings.omniroute_model_name, "empty_reply")
+            log.warning("[llm] decision_call omniroute returned empty, falling back")
+        except Exception as e:
+            _record_attempt("omniroute", settings.omniroute_model_name, "error", str(e))
+            log.warning("[llm] decision_call omniroute error, falling back: %s: %s", type(e).__name__, e)
+    else:
+        _record_attempt("omniroute", settings.omniroute_model_name, "skipped_not_configured")
+
+    # 2. Groq
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            text = await groq_provider.decision_call(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+            )
+            if text:
+                _record_attempt("groq", settings.groq_model_name, "success")
+                return text
+            _record_attempt("groq", settings.groq_model_name, "empty_reply")
+            log.warning("[llm] decision_call groq returned empty, falling back")
+        except Exception as e:
+            _record_attempt("groq", settings.groq_model_name, "error", str(e))
+            log.warning("[llm] decision_call groq error, falling back: %s", e)
+    else:
+        _record_attempt("groq", settings.groq_model_name, "skipped_not_configured")
+
+    # 3. local Ollama / Hermes — same model-resolution rule as generate_reply
+    if not settings.ollama_reply_disabled:
+        try:
+            from app import ollama
+            local_model = await _resolve_local_ollama_model()
+            text = await ollama.decision_call(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+                model=local_model,
+            )
+            if text:
+                _record_attempt("ollama", local_model, "success")
+                return text
+            _record_attempt("ollama", local_model, "empty_reply")
+            log.warning("[llm] decision_call ollama returned empty, falling back to kimi")
+        except Exception as e:
+            _record_attempt("ollama", settings.ollama_model, "error", str(e))
+            log.warning("[llm] decision_call ollama error, falling back to kimi: %s", e)
+    else:
+        _record_attempt("ollama", settings.ollama_model, "skipped_disabled")
+
+    # 4. Kimi (same local Ollama client, different model tag)
+    try:
+        from app import ollama
+        text = await ollama.decision_call(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            model=settings.kimi_model_name,
+        )
+        if text:
+            _record_attempt("kimi", settings.kimi_model_name, "success")
+            return text
+        _record_attempt("kimi", settings.kimi_model_name, "empty_reply")
+        log.warning("[llm] decision_call kimi returned empty — all providers exhausted")
+    except Exception as e:
+        _record_attempt("kimi", settings.kimi_model_name, "error", str(e))
+        log.error("[llm] decision_call kimi failed — all providers exhausted: %s", e)
+
+    return None
+
+
 
 # HERMES_SYSTEM_MESSAGE_ROOTCAUSE_AGENTIC_BEHAVIOR_AUDIT_2026-08-19.md
 # Incident A: check_health() used to await 4 provider checks sequentially,

@@ -28,6 +28,18 @@ supplies an `llm_call` function so the decision path is testable in
 isolation. Production wiring (modules/hermes_dispatch) supplies a
 function that calls the existing _call_hermes with a decision-only
 policy and parses JSON.
+
+WS1 (2026-08-25): the call-supplied `llm_call` kwarg is OPTIONAL. When
+the caller does not supply one AND recruitment_turn_decision_v2_real_
+llm is True (app/config.py), decide() pulls a real bridge closure from
+modules.recruitment_turn_decision.llm_bridge.make_decision_llm_call()
+which walks the canonical provider chain (OmniRoute -> Groq -> local
+Ollama/Hermes -> Kimi). When BOTH v2_enabled AND v2_real_llm are True
+AND the bridge reports a reachable chain, the decision is genuinely
+LLM-generated. When either flag is off OR the bridge is unreachable,
+decide() falls through to its existing _default_no_llm stub
+(AMBIGUOUS) — production routing is byte-identical unless the Owner
+explicitly opts in.
 """
 from __future__ import annotations
 
@@ -163,7 +175,34 @@ async def decide(
         )
 
     # Call LLM
-    call = llm_call or _default_no_llm
+    #
+    # Resolution order for which `llm_call` is invoked:
+    #   1. Caller-supplied llm_call (test injection or explicit production
+    #      wiring) — wins unconditionally.
+    #   2. WS1 real-LLM bridge (modules.recruitment_turn_decision.
+    #      llm_bridge.make_decision_llm_call()) — used when the caller
+    #      did not supply one AND the recruitment_turn_decision_v2_real_
+    #      llm config flag is on.
+    #   3. _default_no_llm stub — returns None, drives decide() into the
+    #      AMBIGUOUS branch (existing pre-WS1 behavior; preserves
+    #      byte-identical routing when neither flag is on).
+    if llm_call is not None:
+        call = llm_call
+    else:
+        try:
+            from .llm_bridge import is_real_llm_enabled, make_decision_llm_call
+            if is_real_llm_enabled():
+                try:
+                    from app.config import get_settings
+                    timeout = float(get_settings().recruitment_decision_call_timeout_seconds)
+                except Exception:
+                    timeout = 12.0
+                call = make_decision_llm_call(timeout=timeout)
+            else:
+                call = _default_no_llm
+        except Exception as exc:  # noqa: BLE001 -- bridge import must never raise
+            log.warning("[recruitment_decision] llm_bridge resolution failed: %s", exc)
+            call = _default_no_llm
     try:
         raw = await call(DECISION_SYSTEM_PROMPT, user_payload)
     except Exception as exc:
@@ -185,6 +224,7 @@ async def decide(
             text=text,
             intake_proposals=intake_proposals,
             history=history,
+            identity=identity,
         )
     except Exception as exc:
         log.warning("[recruitment_decision] decision construction failed: %s", exc)
@@ -238,6 +278,7 @@ def _decision_from_llm_json(
     text: str,
     intake_proposals: List[IntakeProposal],
     history: List[HistoryEntry],
+    identity: Optional[dict] = None,
 ) -> RecruitmentTurnDecision:
     semantic_domain = _coerce_domain(obj.get("semantic_domain"))
     turn_type = _coerce_turn_type(obj.get("turn_type"))

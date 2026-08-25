@@ -21,9 +21,15 @@ Public entry points:
   decide(phone, text, current_step, session, identity, history, intake_proposals, source_of_truth)
       -> RecruitmentTurnDecision
 
-Activation flag (default OFF in app/config.py):
+Activation flags (default OFF in app/config.py):
 
-  recruitment_turn_decision_v2_enabled  (False)
+  recruitment_turn_decision_v2_enabled       (False)
+  recruitment_turn_decision_v2_real_llm      (False, WS1, 2026-08-25)
+
+When BOTH flags are True, decide() resolves a real provider-chain
+LLM call via llm_bridge.make_decision_llm_call() unless the caller
+explicitly supplied an llm_call. Either flag off -> byte-identical
+pre-WS1 behavior.
 """
 from .contract import (
     RecruitmentTurnDecision,
@@ -37,6 +43,11 @@ from .contract import (
 )
 from .extract import propose
 from .decide import decide
+from .llm_bridge import (
+    DecisionLLMCall,
+    make_decision_llm_call,
+    is_real_llm_enabled,
+)
 from .state_rules import apply_state_rules, validate_decision
 
 __all__ = [
@@ -50,6 +61,9 @@ __all__ = [
     "PROVENANCE_AUTHORITATIVE_FLOOR",
     "propose",
     "decide",
+    "DecisionLLMCall",
+    "make_decision_llm_call",
+    "is_real_llm_enabled",
     "apply_state_rules",
     "validate_decision",
 ]
