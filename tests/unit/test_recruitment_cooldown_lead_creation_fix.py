@@ -107,8 +107,9 @@ async def test_cooldown_suppressed_reply_still_opens_recruitment_funnel():
 
 async def test_cooldown_suppressed_reply_does_not_open_funnel_when_session_already_active():
     """If a session is already open for this phone, the cooldown-path
-    best-effort intake_message() call must not fire again (idempotency —
-    repeated messages must not create duplicate leads/sessions)."""
+    best-effort intake_message(trigger_text="চাকরি") FORCE-OPEN call must
+    not fire again (idempotency — repeated messages must not create
+    duplicate leads/sessions via that specific force-open mechanism)."""
     from modules.bridge_poller import process_bridge_inbound
 
     decision = {
@@ -118,17 +119,112 @@ async def test_cooldown_suppressed_reply_does_not_open_funnel_when_session_alrea
         "active_session": {"id": 202, "collection_step": "age"},
     }
     intake_mock = AsyncMock()
+    # 2026-08-25 P0 fix: an active session now falls through to full
+    # processing instead of returning early — process_message() must be
+    # mocked here too so this test still only exercises the gate itself.
+    process_message_mock = AsyncMock(return_value=("...", None))
 
     with patch("modules.bridge_poller._can_reply", new=AsyncMock(return_value=False)), \
          patch("modules.bridge_poller.recruitment_eligibility", new=AsyncMock(return_value=decision)), \
          patch("modules.bridge_poller.classify_intent", return_value="unknown"), \
-         patch("modules.recruitment_flow.intake_message", new=intake_mock):
+         patch("modules.recruitment_flow.intake_message", new=intake_mock), \
+         patch("modules.bridge_poller.process_message", new=process_message_mock):
         await process_bridge_inbound(
             "bridge3", "8801966011609", "২৫",
             id_role="unknown", id_conf=0, id_name="", message_id="msg-1609-2",
         )
 
+    # The force-open trigger_text="চাকরি" path is specifically for opening
+    # a NEW funnel and must not fire again for an already-active session.
     intake_mock.assert_not_awaited()
+
+
+# ─── P0 production incident (2026-08-25): cooldown was dropping a direct  ──
+# ─── answer to an active recruitment session entirely, not just its send ──
+
+async def test_cooldown_blocked_active_session_still_gets_full_processing():
+    """Real production bug: a candidate answering an active intake
+    question (e.g. "আপনার বয়স কত বছর?" -> "32") within REPLY_COOLDOWN=60s
+    of being asked previously got silently dropped — no field saved, no
+    step advance, no reply, ever, for that turn. Live-confirmed: every
+    checked real bridge3 case replied 13-50s after the question. This is
+    a direct expected answer, not spam — full processing (which is what
+    actually saves the field, advances the step, and sends the reply)
+    must still run, not be skipped."""
+    from modules.bridge_poller import process_bridge_inbound
+
+    decision = {
+        "eligible": True,
+        "autosend": True,
+        "reason": "active_session_continuation",
+        "active_session": {"id": 202, "collection_step": "age"},
+    }
+    process_message_mock = AsyncMock(return_value=("ধন্যবাদ। আপনার বয়স নোট করা হয়েছে।", None))
+
+    with patch("modules.bridge_poller._can_reply", new=AsyncMock(return_value=False)), \
+         patch("modules.bridge_poller.recruitment_eligibility", new=AsyncMock(return_value=decision)), \
+         patch("modules.bridge_poller.classify_intent", return_value="unknown"), \
+         patch("modules.bridge_poller.process_message", new=process_message_mock):
+        await process_bridge_inbound(
+            "bridge3", "8801966011609", "৩২",
+            id_role="unknown", id_conf=0, id_name="", message_id="msg-age-1",
+        )
+
+    # The whole point of the fix: full processing (field save + step
+    # advance + reply generation) must run instead of being skipped.
+    process_message_mock.assert_awaited_once()
+
+
+async def test_cooldown_blocked_no_session_still_returns_early_unchanged():
+    """The exact prior behavior (no active session yet) must be completely
+    unaffected by this fix — process_message() must still be skipped."""
+    from modules.bridge_poller import process_bridge_inbound
+
+    decision = {
+        "eligible": True,
+        "autosend": True,
+        "reason": "explicit_recruitment",
+        "active_session": None,
+    }
+    intake_mock = AsyncMock(return_value={"reply": "...", "action": "created", "session_id": 202})
+    process_message_mock = AsyncMock(return_value=("should not be reached", None))
+
+    with patch("modules.bridge_poller._can_reply", new=AsyncMock(return_value=False)), \
+         patch("modules.bridge_poller.recruitment_eligibility", new=AsyncMock(return_value=decision)), \
+         patch("modules.bridge_poller.classify_intent", return_value="unknown"), \
+         patch("modules.recruitment_flow.intake_message", new=intake_mock), \
+         patch("modules.bridge_poller.process_message", new=process_message_mock):
+        await process_bridge_inbound(
+            "bridge3", "8801700000099", "আমি কাজ করতে চাই",
+            id_role="unknown", id_conf=0, id_name="", message_id="msg-no-session",
+        )
+
+    process_message_mock.assert_not_awaited()
+
+
+async def test_no_cooldown_active_session_unaffected():
+    """When cooldown is NOT active at all, behavior (full processing) is
+    completely unchanged by this fix regardless of active_session."""
+    from modules.bridge_poller import process_bridge_inbound
+
+    decision = {
+        "eligible": True,
+        "autosend": True,
+        "reason": "active_session_continuation",
+        "active_session": {"id": 202, "collection_step": "age"},
+    }
+    process_message_mock = AsyncMock(return_value=("...", None))
+
+    with patch("modules.bridge_poller._can_reply", new=AsyncMock(return_value=True)), \
+         patch("modules.bridge_poller.recruitment_eligibility", new=AsyncMock(return_value=decision)), \
+         patch("modules.bridge_poller.classify_intent", return_value="unknown"), \
+         patch("modules.bridge_poller.process_message", new=process_message_mock):
+        await process_bridge_inbound(
+            "bridge3", "8801966011609", "৩২",
+            id_role="unknown", id_conf=0, id_name="", message_id="msg-age-2",
+        )
+
+    process_message_mock.assert_awaited_once()
 
 
 async def test_cooldown_suppressed_reply_does_not_open_funnel_when_not_eligible():

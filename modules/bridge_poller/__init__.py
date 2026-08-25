@@ -2046,12 +2046,35 @@ async def process_bridge_inbound(
         msg_intent = "recruitment"
 
     # 1. Cooldown
-    if not await _can_reply(phone):
+    _cooldown_blocked = not await _can_reply(phone)
+    if _cooldown_blocked and recruit_decision.get("active_session"):
+        # 2026-08-25 (P0 production incident): an active recruitment intake
+        # session is a direct, expected answer to a question THIS system
+        # just asked (e.g. "আপনার বয়স কত বছর?" -> "32") -- not spam risk,
+        # so it must not be silently dropped by the same 60s cooldown that
+        # exists to stop flooding a human with unsolicited replies. Live-
+        # confirmed against real bridge3 candidates: every checked case
+        # replied 13-50s after the question (well inside REPLY_COOLDOWN),
+        # and the candidate's answer was dropped entirely -- no field
+        # saved, no step advance, no reply ever sent for that turn, which
+        # then caused the exact same question to be re-asked on their next
+        # message (the "asks the same question repeatedly" / "no reply
+        # after a valid age" symptom). Scoped narrowly to
+        # active_session=True (an existing fazle_recruitment_sessions row
+        # already open for this phone) -- every other cooldown-blocked
+        # message (no session yet, or a non-recruitment sender) keeps the
+        # exact prior behavior below unchanged.
+        log.info(
+            "[%s] cooldown would have blocked %s but an active recruitment "
+            "session is a direct answer, not spam -- proceeding to full "
+            "processing instead of dropping it",
+            bridge_name, phone,
+        )
+    elif _cooldown_blocked:
         log.debug("[%s] cooldown active for %s", bridge_name, phone)
         if (
             recruit_decision.get("eligible")
             and recruit_decision.get("autosend")
-            and not recruit_decision.get("active_session")
         ):
             try:
                 from modules.recruitment_flow import intake_message
