@@ -861,6 +861,13 @@ async def _poll_bridge(config: dict):
                     continue
 
                 _extracted_text = ""  # filled by media processors below; stored in extracted_text column
+                # 2026-08-25 recovery-pass (cf_W001 narrow mitigation): set
+                # True only when `text` below ends up being raw OCR/STT
+                # output that couldn't be classified as a known slip/
+                # document type (i.e. it falls through to general routing
+                # instead of being handled by its own dedicated, already-
+                # safe branch). See process_message()'s docstring.
+                _is_extracted_media = False
                 core_message_id = await _save_raw_core_copy(bridge_name, msg, phone, text)
 
                 # Bridge-side OCR may already populate processed_text. Previously
@@ -1049,6 +1056,7 @@ async def _poll_bridge(config: dict):
                             # escort slip (assignment, not release) — use extracted text for routing
                             text = ocr_result.get("raw_ocr_text") or f"[image: {doc_type}]"
                             _extracted_text = ocr_result.get("raw_ocr_text") or ""
+                            _is_extracted_media = True
                     finally:
                         await _mark_processed(msg_id, bridge_name, phone)
                         log.info("[IMG_MARK_PROCESSED_FINAL] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
@@ -1063,6 +1071,7 @@ async def _poll_bridge(config: dict):
                             if voice_result["confident"]:
                                 text = voice_result["transcript"]
                                 _extracted_text = voice_result["transcript"]
+                                _is_extracted_media = True
                                 log.info("[AUDIO_TRANSCRIBED] bridge=%s msg_id=%s words=%d", bridge_name, msg_id, voice_result["word_count"])
                             else:
                                 text = "[audio: unclear]"
@@ -1111,6 +1120,13 @@ async def _poll_bridge(config: dict):
                             _extracted_text = extracted
                             # Store extracted text as the routing text
                             text = extracted[:300] or f"[document:{doc_type}:{filename}]"
+                            if not (doc_type != "unknown" and doc_result.get("auto_send_safe")):
+                                # Not a cleanly-classified candidate document
+                                # (falls through to general routing below,
+                                # not auto-acked+continue) -- see
+                                # process_message()'s is_extracted_media
+                                # docstring, cf_W001.
+                                _is_extracted_media = True
 
                             if doc_type != "unknown" and doc_result.get("auto_send_safe"):
                                 # Part H: candidate docs → auto-send acknowledgement
@@ -1272,6 +1288,7 @@ async def _poll_bridge(config: dict):
                         message_id=str(msg.get("id") or msg.get("message_id") or ""),
                         chat_jid=msg.get("chat_jid") or "",
                         msg_timestamp=_parse_source_timestamp(msg.get("timestamp")),
+                        is_extracted_media=_is_extracted_media,
                     )
                     await _mark_core_queue_status(bridge_name, msg, "done")
                 except Exception as route_err:
@@ -1974,6 +1991,7 @@ async def process_bridge_inbound(
     message_id: str = "",
     chat_jid: str = "",
     msg_timestamp=None,
+    is_extracted_media: bool = False,
 ) -> None:
     """Unified bridge inbound processing pipeline.
 
@@ -1991,6 +2009,12 @@ async def process_bridge_inbound(
     these two kwargs get the prior behavior unchanged (check skipped, fail-
     open). msg_timestamp should be the actual inbound message's timestamp
     (tz-aware or naive-UTC datetime), not the current time.
+
+    is_extracted_media (2026-08-25 recovery-pass, narrow cf_W001
+    mitigation): threaded straight through to modules.message_router.
+    process_message() -- see that function's docstring for the full
+    rationale. True only when `text` is raw OCR/STT output that could not
+    be classified as a known slip/document type.
     """
     # 0. Recruitment eligibility + best-effort funnel entry (2026-08-21,
     # Owner Correction 1 / regression case ...1609): this used to be step 3,
@@ -2080,7 +2104,10 @@ async def process_bridge_inbound(
         return
 
     # 5. Full routing
-    reply, admin_note = await process_message(phone, text, bridge_name, message_id=message_id or None)
+    reply, admin_note = await process_message(
+        phone, text, bridge_name, message_id=message_id or None,
+        is_extracted_media=is_extracted_media,
+    )
 
     # Write intent back to the most recent inbound row for this sender+source
     if msg_intent:

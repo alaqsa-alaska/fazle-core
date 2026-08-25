@@ -583,7 +583,8 @@ async def _task13_authoritative_dispatch(
 
 
 async def process_message(
-    sender: str, text: str, source: str, *, message_id: Optional[str] = None
+    sender: str, text: str, source: str, *, message_id: Optional[str] = None,
+    is_extracted_media: bool = False,
 ) -> tuple[str, Optional[dict]]:
     """
     Route one inbound message and return (reply_text, admin_notification | None).
@@ -593,6 +594,25 @@ async def process_message(
     (see modules.bridge_poller.process_bridge_inbound). Threaded through to
     handle_admin_escort_completion() for the draft-confirmation review queue's
     dedup identity (migration 052) — optional, only that one path uses it.
+
+    is_extracted_media (2026-08-25 recovery-pass, narrow cf_W001 mitigation):
+    True when `text` is raw OCR/STT output that bridge_poller could NOT
+    classify as a known slip/document type (i.e. it fell through to
+    general routing rather than being handled by its own dedicated,
+    already-safe branch -- a recognized escort/release slip or candidate
+    document never sets this). Real incident (cf_W001, regression corpus,
+    2026-08-23): a candidate photographed unrelated notes describing this
+    system's own architecture; OCR'd text containing "টাকা"/"পেমেন্ট" tripped
+    a bare-keyword operational trigger and produced a nonsensical
+    "send your Employee ID" reply. This flag only suppresses the specific
+    bare-keyword ec_trigger* checks below (see their own comments) --
+    it does NOT touch precise intent-classifier-driven routing
+    (salary_query/payment_due+emp_id, recruitment, etc.), and it is NOT a
+    general "distrust OCR text" mechanism. The project's own regression
+    corpus documents the full fix as "Phase D: multi-signal domain
+    routing redesign" (not yet built) -- this is a deliberately narrow,
+    contained guard against the one concrete failure mode that already
+    broke live, not that redesign.
     """
     settings = get_settings()
     sender = normalize_phone(sender) or sender.strip()
@@ -1502,7 +1522,13 @@ async def process_message(
         # (those classify as advance_request/payment_issue, not
         # recruitment) or any unchanged salary_query/payment_due behavior
         # above.
-        ec_trigger = ec_detect_trigger(text) if intent != "recruitment" else None
+        # is_extracted_media guard (see process_message docstring, cf_W001):
+        # don't let unclassified OCR/STT text trip this bare-keyword scan.
+        ec_trigger = (
+            ec_detect_trigger(text)
+            if (intent != "recruitment" and not is_extracted_media)
+            else None
+        )
         if ec_trigger:
             reply, admin_note = await ec_handle_payment_request(
                 sender, text, source, emp_id, intent=intent
@@ -1554,7 +1580,13 @@ async def process_message(
     # intent=="recruitment" is not covered by recruit_decision, which is
     # unconditionally {"eligible": False} for any role_str outside
     # candidate/new_lead/unknown).
-    ec_trigger_catchall = ec_detect_trigger(text) if intent != "recruitment" else None
+    # is_extracted_media guard (see process_message docstring, cf_W001):
+    # don't let unclassified OCR/STT text trip this bare-keyword scan.
+    ec_trigger_catchall = (
+        ec_detect_trigger(text)
+        if (intent != "recruitment" and not is_extracted_media)
+        else None
+    )
     if ec_trigger_catchall and role_str != "admin" and not recruit_decision.get("eligible"):
         reply, admin_note = await ec_handle_payment_request(
             sender, text, source, identity.get("employee_id"), intent=intent
