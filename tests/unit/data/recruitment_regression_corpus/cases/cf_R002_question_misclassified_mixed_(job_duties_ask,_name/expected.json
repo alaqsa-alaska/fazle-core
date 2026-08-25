@@ -1,0 +1,37 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R002",
+  "source_case_type": "C",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "pure_question",
+  "expected_intake_step_before": "name",
+  "expected_intake_fields_proposed": {
+    "name": null,
+    "question_markers": [
+      "জানতে চাই",
+      "কাজের"
+    ]
+  },
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {
+    "name": "phrasing was a question, not a name"
+  },
+  "expected_should_advance_intake": true,
+  "expected_intake_step_after": "job_preference",
+  "expected_questions": [
+    {
+      "topic": "job_duties_per_post",
+      "must_answer_from_source_of_truth": true,
+      "evidence": "candidate asks about duties per post; 4 posts have detailed duty sections in source-of-truth"
+    }
+  ],
+  "expected_should_answer_question": true,
+  "expected_needs_clarification": true,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": true,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "ask which post if ambiguous; or summarise duties per post from source-of-truth",
+  "phase_that_must_close_this": "C",
+  "reason_evidence": "EXPECTED: cite duty sections of source-of-truth (Operation Officer, Security Guard, Marketing Officer, Escort/Survey Scout); ask which post if ambiguous; advance step on provided answer."
+}

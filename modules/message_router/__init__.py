@@ -74,6 +74,28 @@ from modules.fazle_payroll_engine.normalizer import normalize_bd_phone
 
 log = logging.getLogger("fazle.router")
 
+# Phase C v2 (2026-08-23) cross-reference gate. When the V2 flag is OFF
+# (default), this returns False and the entire shadow block is a single
+# boolean check. The legacy §7->§15 dispatch below is byte-identical.
+_V2_ENABLED_CACHE: dict[bool] = {}
+
+
+def _v2_cross_ref_enabled() -> bool:
+    """Cached read of recruitment_turn_decision_v2_enabled.
+
+    The cache is reset only when the running process restarts. A flipped
+    flag therefore takes effect on the next service restart, which is
+    the standard pattern for production safety gates.
+    """
+    if _V2_ENABLED_CACHE:
+        return next(iter(_V2_ENABLED_CACHE))
+    try:
+        from app.config import get_settings as _gs_v2
+        _V2_ENABLED_CACHE[bool(_gs_v2().recruitment_turn_decision_v2_enabled)] = True
+        return bool(_gs_v2().recruitment_turn_decision_v2_enabled)
+    except Exception:  # noqa: BLE001
+        return False
+
 # Roles that trigger the escort client flow
 _ESCORT_ROLES = frozenset({"escort_client", "client_escort_buyer", "vip_client", "repeat_client"})
 _ESCORT_ORDER_PREFIXES: tuple[str, ...] = ("escort", "client", "tcis", "gms")
@@ -1137,6 +1159,67 @@ async def process_message(
         )
         if _hk_record is not None:
             _hk_record.semantic_decision = sem_decision
+        # Phase C v2 (2026-08-23) cross-reference: when
+        # recruitment_turn_decision_v2_enabled is True (default OFF), compute
+        # a V2 decision in shadow and annotate the existing DecisionRecord
+        # with non-decision-affecting fields (multi_domain_review_required,
+        # reason_codes, turn_type, semantic_domain, confidence). NO routing
+        # effect. The legacy §7→§15 dispatch chain below is byte-identical.
+        if _v2_cross_ref_enabled():
+            try:
+                _v2_thread_phone = (
+                    gate_input.get("phone_normalized")
+                    or gate_input.get("phone")
+                )
+                if _v2_thread_phone:
+                    from modules.recruitment_turn_decision import (
+                        decide as _rtd_decide_v2,
+                        propose as _rtd_propose_v2,
+                    )
+                    from modules.conversation_canonical import (
+                        build_canonical_history as _build_history_v2,
+                    )
+                    from modules.hermes_dispatch import (
+                        build_recruitment_context as _build_sot_v2,
+                    )
+                    _v2_history = await _build_history_v2(_v2_thread_phone, n=10)
+                    _v2_proposals = _rtd_propose_v2(
+                        gate_input.get("text") or "",
+                        gate_input.get("current_step"),
+                        gate_input.get("session") or {},
+                    )
+                    _v2_sot = _build_sot_v2(gate_input.get("text") or "")
+                    _v2_dec = await _rtd_decide_v2(
+                        text=gate_input.get("text") or "",
+                        current_step=gate_input.get("current_step"),
+                        session=gate_input.get("session") or {},
+                        identity=gate_input.get("identity_reference") or {},
+                        history=_v2_history,
+                        intake_proposals=_v2_proposals,
+                        source_of_truth=_v2_sot,
+                        flag_enabled=True,
+                    )
+                    if _v2_dec is not None and _hk_record is not None:
+                        # Phase C directive correction 11: expose only via
+                        # structured logs (not DecisionRecord attributes --
+                        # DecisionRecord is owned by hermes_kernel and is
+                        # out of Phase C's authorized modification surface).
+                        log.info(
+                            "[message_router_v2_shadow] phone=%s sem_domain=%s "
+                            "v2_turn_type=%s v2_multi_domain=%s v2_reason_codes=%s "
+                            "v2_confidence=%.3f",
+                            _v2_thread_phone,
+                            _v2_dec.semantic_domain,
+                            _v2_dec.turn_type,
+                            _v2_dec.multi_domain_review_required,
+                            list(_v2_dec.reason_codes),
+                            float(_v2_dec.confidence),
+                        )
+            except Exception as _v2_exc:  # noqa: BLE001
+                log.warning(
+                    "[message_router] V2 cross-reference failed (non-fatal): %s",
+                    _v2_exc,
+                )
         # SHADOW LOGGING ONLY, below this line. sem_decision.domain is
         # deliberately never inspected to make a routing choice here -- no
         # branch below this point may call a handler, build a reply, or

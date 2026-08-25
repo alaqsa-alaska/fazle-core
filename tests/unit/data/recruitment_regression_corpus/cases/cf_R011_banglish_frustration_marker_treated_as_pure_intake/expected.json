@@ -1,0 +1,25 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R011",
+  "source_case_type": "C",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "frustration",
+  "expected_intake_step_before": "experience",
+  "expected_intake_fields_proposed": {
+    "frustration_marker": "Koibar bolsi"
+  },
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {},
+  "expected_should_advance_intake": false,
+  "expected_intake_step_after": "experience",
+  "expected_questions": [],
+  "expected_should_answer_question": false,
+  "expected_needs_clarification": true,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": false,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "treat as Banglish frustration; offer recap of intake state + clear instruction on next step (job_preference is still missing, NOT experience)",
+  "phase_that_must_close_this": "C",
+  "reason_evidence": "EXPECTED: recap that name=?, age=24, area=Mymensingh, job_preference=? -- ask the missing field, not the experience field (which would be the next step after job_preference)."
+}

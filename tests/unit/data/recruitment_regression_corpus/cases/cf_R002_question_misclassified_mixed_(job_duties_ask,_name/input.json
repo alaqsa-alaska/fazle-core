@@ -1,0 +1,15 @@
+{
+  "_schema": "recruitment-regression-case-input/v1",
+  "case_id": "cf_R002",
+  "thread_phone_masked": "88013899d3c",
+  "inbound_step_at_turn": "name",
+  "session_fields_at_turn": {
+    "name": null,
+    "age": null,
+    "area": null,
+    "job_preference": null,
+    "experience": null,
+    "phone_confirm": null
+  },
+  "inbound_message": "কাজের দায়িত্ব ও ডিটেইলস জানতে চায়"
+}

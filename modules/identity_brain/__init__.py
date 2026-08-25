@@ -41,19 +41,34 @@ from app.database import fetch_one
 log = logging.getLogger("fazle.identity_brain")
 
 # ── Role priority table ────────────────────────────────────────────────────────
+# Owner directive v4.1 (2026-08-24): the CSV roles below are ADDITIVE only.
+# Existing keys (admin, family, accountant, etc.) are untouched. New CSV
+# roles live BELOW existing seed priorities so an existing DB seed always
+# wins over a CSV-pattern match (Step 4.5 runs AFTER seed lookup, so a
+# CSV contact that ALSO has a fazle_contact_roles entry returns the seed
+# role; CSV-pattern is the fallback for the "unknown" gap only).
 _ROLE_PRIORITY: dict[str, int] = {
     "admin":               200,
     "family":              100,
+    "family_ceo":           98,  # Alim — Owner sibling + company CEO (DB seed still wins if set)
     "accountant":           95,
+    "friend_relative":      95,  # CSV-pattern default for personal contacts
     "internal_coordinator": 93,  # dispatch/payroll/paperwork coordinator — Route A, seed_rule sourced
+    "internal_operation":   92,  # Al-Aqsa offices, I S A T L, Office X
     "vip_client":           92,
+    "security_service_client": 90,  # Client X in CSV (complaint pipeline already handles; Hermes skips)
     "client_escort_buyer":  90,
-    "repeat_client":        75,
-    "vendor":               70,
+    "escort_client":        90,  # Escort X in CSV (escort-roster module handles; Hermes skips)
     "employee":             88,
     "escort":               88,  # same tier as employee — a wbom_employees row with an escort designation
     "security_guard":       88,  # same tier as employee — a wbom_employees row with a guard designation
     "supervisor":           80,
+    "employee_internal":    75,  # Operation X, Office/Officer X in CSV
+    "repeat_client":        75,
+    "vendor":               70,
+    "political_contact":    65,
+    "government_contact":   65,
+    "personal_business":    60,  # bkash agents, gas/etc. with personal-payment link
     "candidate":            30,
     "unknown":               0,
 }
@@ -80,6 +95,95 @@ def _designation_to_role(designation: Optional[str]) -> str:
     if _GUARD_DESIGNATION_RE.search(d):
         return "security_guard"
     return "employee"
+
+
+# ── v4.1 (2026-08-24) CSV-pattern role categorizer ──────────────────────────────
+# Used by detect_identity() Step 4.5 to give every CSV contact a meaningful role
+# instead of returning 'unknown'. Pure name-pattern heuristics; intentionally
+# broad-brush (Owner clarification: "Role misclassification WITHIN known
+# categories is acceptable"). All paths return one of the ADDITIVE roles
+# added to _ROLE_PRIORITY — never 'unknown', never an existing seed role
+# (those are reserved for the DB-seeded lookup, which always wins).
+def _categorize_csv_contact(name: str) -> str:
+    """Pattern-based role for a CSV owner-managed contact.
+
+    Returns one of: family, family_ceo, internal_operation,
+    security_service_client, escort_client, employee_internal,
+    political_contact, government_contact, vendor,
+    personal_business, friend_relative. Never returns 'unknown'.
+
+    Tries DB-known special-case names FIRST so they map consistently
+    with their existing identity_brain seed roles (e.g. Alim →
+    family_ceo, since Owner clarified he is Owner's brother AND
+    Company CEO). The CSV check runs AFTER seed lookup so this only
+    fires for contacts that have no DB seed entry.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return "friend_relative"
+    n = raw.lower()
+
+    # ── Known special-cases by exact name (Owner directive v4.1 Section 2.3) ──
+    if raw == "Alim":
+        return "family_ceo"
+    if raw == "Baba":
+        return "family"
+    if "Ashik Siddiquee" in raw:
+        return "family"  # Owner-confirmed cousin
+    if "Shilpi Apa" in raw:
+        return "family"  # Owner-confirmed cousin (Apa = elder sister)
+    # 'A' and 'Aa' are bare-symbol entries for Owner-managed contacts —
+    # Owner clarification: never 'unknown'; default to friend_relative.
+    if raw in ("A", "Aa"):
+        return "friend_relative"
+
+    # ── Prefix patterns (most specific first) ────────────────────────────────
+    # Internal establishment offices
+    if n.startswith("al-aqsa") or n.startswith("i s a t l"):
+        return "internal_operation"
+    # Security-service Clients (handled by existing complaint pipeline)
+    if n.startswith("client"):
+        return "security_service_client"
+    # Escort Clients (handled by existing escort-roster module)
+    if n.startswith("escort"):
+        return "escort_client"
+    # Internal Operation team and Office/Officer staff
+    if n.startswith("operation"):
+        return "employee_internal"
+    if n.startswith("office") or n.startswith("officer"):
+        return "employee_internal"
+    # Family / relatives
+    if (n.startswith("baba") or n.startswith("aunty") or n.startswith("mami")
+            or n.startswith("munni") or n.startswith("abu mama") or " mama" in n
+            or n == "chorpara raju majhe"):
+        return "family"
+    # Political contacts
+    if "bnp" in n:
+        return "political_contact"
+    # Government contacts
+    if n.startswith("bd "):
+        return "government_contact"
+    # Vendors (explicit prefix list + business-name substrings).
+    # "bkash"/"nagod" must be checked BEFORE "bkash"-alone-vendor because
+    # bkash-agent/personal-payment contacts are personal_business, not vendor.
+    if "nagod" in n:
+        return "personal_business"
+    if "bkash" in n:
+        return "personal_business"
+    if (n.startswith("bike") or n.startswith("banglalink") or n.startswith("bbc")
+            or n.startswith("modern") or n.startswith("touch") or n.startswith("dalal")
+            or " gas" in n or "travels" in n or n.endswith(" bar")
+            or n.startswith("tcis") or n.startswith("ts ")):
+        return "vendor"
+    # Personal-business contacts (bkash agents, payment handlers) — secondary
+    # defense; the bkash/nagod branches above already handled the known
+    # bkash/payment names so this branch is mostly a safety net.
+
+    # ── Safe default — never 'unknown' for a CSV contact ──────────────────────
+    # Per Owner v4.1 Section 2.3: "DEFAULT → friend_relative (NEVER 'unknown'
+    # for CSV)". Catches bare personal names like "Alamgir Arafat", "Hannan Vai",
+    # "Mamun Vai", "Masud Mama" (already caught above), "Sunny", "Samir", etc.
+    return "friend_relative"
 
 # ── Candidate keyword triggers ─────────────────────────────────────────────────
 _CANDIDATE_KEYWORDS = [
@@ -291,6 +395,32 @@ async def detect_identity(phone: str, text: str = "") -> dict:
             log.info("[identity] %s → %s (db_contact, relation=%s)", norm, role, relation)
             return _build_contact(_phone=norm, role=role, confidence=80, source="db_contact",
                                   priority=pri, contact=contact)
+
+        # ── Step 4.5 (Owner directive v4.1, 2026-08-24): CSV owner-managed ────
+        # If the phone is in the Owner-managed contact CSV but no DB seed or
+        # db_contact lookup matched above, classify by name pattern instead of
+        # returning 'unknown'. Fail-safe: any error here returns silently and
+        # the existing flow (Step 5 text-hint, Step 6 escort-content, or the
+        # bottom 'unknown' return) takes over unchanged. CSV-pattern NEVER
+        # overrides an existing seed — the seed lookups above (Steps 2, 3,
+        # 3.5, 3.7, 4) all run BEFORE this and short-circuit if matched.
+        try:
+            from modules.owner_contact_registry import is_owner_managed_contact
+            if is_owner_managed_contact(norm):
+                from modules.contact_sync import get_display_name
+                csv_name = await get_display_name(norm)
+                csv_role = _categorize_csv_contact(csv_name)
+                csv_pri = _ROLE_PRIORITY.get(csv_role, 70)
+                log.info(
+                    "[identity] %s → %s (csv_pattern, name=%r)",
+                    norm, csv_role, csv_name,
+                )
+                return _build(
+                    _phone=norm, role=csv_role, confidence=95,
+                    source="csv_pattern", priority=csv_pri,
+                )
+        except Exception as _csv_exc:  # noqa: BLE001
+            log.warning("[identity] Step 4.5 CSV check failed for %s: %s", norm, _csv_exc)
 
         # ── Step 5: text-hint candidate detection ─────────────────────────────
         if text and _is_candidate_text(text):

@@ -141,6 +141,57 @@ def _looks_like_fee_question(text: str) -> bool:
     return bool(_FEE_WORD_RE.search(lower))
 
 
+def build_decision_context(decision) -> str:
+    """Phase C (2026-08-23) Decision->LLM-context adapter.
+
+    Converts a RecruitmentTurnDecision (modules.recruitment_turn_decision)
+    into a short policy block the LLM uses to compose a fact-checked
+    reply. The decision itself NEVER gets embedded verbatim into the
+    outbound text -- the LLM is told what the candidate meant, what
+    questions to answer, and which intake field was accepted.
+    """
+    lines = []
+    lines.append("[decision_v2] turn_type=" + str(getattr(decision, "turn_type", "AMBIGUOUS")))
+    lines.append("[decision_v2] semantic_domain=" + str(getattr(decision, "semantic_domain", "ambiguous")))
+    lines.append("[decision_v2] confidence=" + str(round(float(getattr(decision, "confidence", 0.0) or 0.0), 3)))
+    acc = getattr(decision, "accepted_proposals", []) or []
+    rej = getattr(decision, "rejected_proposals", []) or []
+    if acc:
+        lines.append("[decision_v2] accepted_intake_fields=" + ",".join(
+            str(getattr(p, "field", "?")) + "=" + str(getattr(p, "value", "")) for p in acc
+        ))
+    if rej:
+        lines.append("[decision_v2] rejected_intake_fields=" + ",".join(
+            str(getattr(p, "field", "?")) for p in rej
+        ))
+    qs = getattr(decision, "questions", []) or []
+    for q in qs:
+        topic = str(getattr(q, "topic", "?"))
+        must = bool(getattr(q, "must_answer_from_source_of_truth", False))
+        lines.append(
+            "[decision_v2] question_topic=" + topic
+            + " must_answer_from_source_of_truth=" + str(must)
+        )
+    if getattr(decision, "candidate_correction", False):
+        lines.append("[decision_v2] candidate_correction=true (requires confirmation per state_rules)")
+    if getattr(decision, "candidate_frustration", False):
+        lines.append("[decision_v2] candidate_frustration=true (recap only; no intake advance)")
+    if getattr(decision, "references_previous_answer", False):
+        lines.append("[decision_v2] references_previous_answer=true")
+    if getattr(decision, "manual_reply_already_answered", False):
+        lines.append("[decision_v2] manual_reply_already_answered=true (skip duplicate answer)")
+    if getattr(decision, "needs_clarification", False):
+        lines.append("[decision_v2] needs_clarification=true")
+    if getattr(decision, "needs_human_review", False):
+        lines.append("[decision_v2] needs_human_review=true")
+    if getattr(decision, "multi_domain_review_required", False):
+        lines.append("[decision_v2] multi_domain_review_required=true")
+    rcs = getattr(decision, "reason_codes", ()) or ()
+    if rcs:
+        lines.append("[decision_v2] reason_codes=" + ",".join(str(rc) for rc in rcs))
+    return "\n".join(lines)
+
+
 def build_recruitment_context(message: str) -> str:
     """recruitment_source_of_truth.txt content for a specific inbound
     message: the fee/deposit section is included ONLY when the message

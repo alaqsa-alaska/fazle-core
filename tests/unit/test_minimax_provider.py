@@ -18,9 +18,30 @@ import app.config as app_config
 # Pydantic BaseSettings reads .env via Settings.model_config["env_file"] at
 # __init__ time. To bypass the production .env in tests, monkey-patch the
 # env_file key before any Settings() is constructed.
+#
+# 2026-08-24: Save and restore the original env_file value. The prior version
+# of this module permanently mutated Settings.model_config["env_file"] at
+# import time, which leaked into subsequent tests (e.g., test_phase_c_wireins.py
+# ::test_existing_recruitment_flags_unchanged asserted recruitment_answer_first_enabled
+# is True from .env, but the mutated env_file made Settings fall back to
+# code defaults — False). The pytest fixture below restores the original
+# env_file at teardown so the global Settings class is unchanged.
+_ORIGINAL_ENV_FILE = app_config.Settings.model_config.get("env_file")
 app_config.Settings.model_config["env_file"] = os.path.join(
     "/tmp", "nonexistent_for_tests_" + str(os.getpid()) + ".env"
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_env_file():
+    """Restore the original Settings.model_config['env_file'] after each test
+    in this module so the global mutation above does not leak."""
+    yield
+    if _ORIGINAL_ENV_FILE is None:
+        app_config.Settings.model_config.pop("env_file", None)
+    else:
+        app_config.Settings.model_config["env_file"] = _ORIGINAL_ENV_FILE
+
 
 # Make sure the app package is importable when pytest is invoked from /home/azim/core.
 if "/home/azim/core" not in sys.path:

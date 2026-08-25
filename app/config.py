@@ -305,10 +305,36 @@ class Settings(BaseSettings):
 
     # When True, emit structured [recruitment_turn] log lines with
     # thread_id, collection_step, question_detected, intake_fields_extracted,
-    # reply_path, fact_check_pass — for reproducible audits. No PII;
+    # reply_path, fact_check_pass -- for reproducible audits. No PII;
     # phone numbers are SHA-hashed. Default ON (logging has no behavioral
     # impact).
     recruitment_structured_logging_enabled: bool = True
+
+    # --- Phase C v2 (2026-08-23) flags ---
+    # All default OFF. Activated only after the 14-case Phase A corpus
+    # replay passes (Owner directive correction 1: implementation ->
+    # unit tests -> 14-case offline regression -> shadow -> live shadow ->
+    # Owner review -> authoritative activation).
+    #
+    # recruitment_turn_decision_v2_enabled: when ON, the recruitment_flow
+    # shadow path computes a RecruitmentTurnDecision via the
+    # modules.recruitment_turn_decision.decide() layer, logs it, and
+    # exposes semantic_domain/multi_domain_review_required/reason_codes
+    # for downstream Phase D consumers. The legacy classify_turn_intent
+    # path remains byte-identical and authoritative when this is OFF.
+    recruitment_turn_decision_v2_enabled: bool = False
+
+    # recruitment_respect_manual_reply: when ON, the manual-reply dedup
+    # gate may silence a candidate answer when historical actor provenance
+    # is sufficiently explicit (provenance_confidence >= 0.70). Default
+    # OFF until Owner has audited 50 sample historical labels.
+    recruitment_respect_manual_reply: bool = False
+
+    # recruitment_actor_provenance_writeback: when ON, every new outbound
+    # message has its meta_json['actor_type'] populated at creation time.
+    # Default OFF until Owner has reviewed 50 sample labels.
+    recruitment_actor_provenance_writeback: bool = False
+    # --- end Phase C v2 flags ---
 
     # 2026-07-22: the one WhatsApp group whose ADMIN OUTBOUND messages (via
     # bridge2 only) are a trusted source of escort orders/confirmations --

@@ -1,0 +1,15 @@
+{
+  "_schema": "recruitment-regression-case-input/v1",
+  "case_id": "cf_R006",
+  "thread_phone_masked": "8801393d879",
+  "inbound_step_at_turn": "done",
+  "session_fields_at_turn": {
+    "name": "Mohd Ashikur Rahman",
+    "age": 30,
+    "area": "Narayanganj",
+    "job_preference": null,
+    "experience": null,
+    "phone_confirm": null
+  },
+  "inbound_message": "-ধন্যবাদ 🌹🌹"
+}

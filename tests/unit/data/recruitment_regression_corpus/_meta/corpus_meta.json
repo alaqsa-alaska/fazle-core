@@ -1,0 +1,60 @@
+{
+  "_schema": "fazle-recruitment-regression-corpus-meta/v1",
+  "_note": "Deterministic privacy mask + general metadata for the regression corpus. See /home/azim/core/tests/unit/data/recruitment_regression_corpus/README.md for the privacy + schema spec.",
+  "mask_salt": "fazle_recruitment_corpus_v1_2026_08_23",
+  "mask_algorithm": "masked = '8801' + SHA1(salt + '|' + last9_of_real_phone)[:7]",
+  "mask_invertible": false,
+  "expected_json_schema_version": "v1",
+  "expected_required_fields": [
+    "case_id",
+    "source_case_type",
+    "expected_domain",
+    "expected_turn_type",
+    "expected_intake_step_before",
+    "expected_intake_fields_proposed",
+    "expected_intake_fields_accepted",
+    "expected_intake_fields_rejected",
+    "expected_should_advance_intake",
+    "expected_intake_step_after",
+    "expected_questions",
+    "expected_should_answer_question",
+    "expected_needs_clarification",
+    "expected_changes_or_corrections",
+    "expected_outbound_count",
+    "expected_factcheck_required",
+    "expected_no_fabricated_fact",
+    "expected_protected_domain_behavior",
+    "phase_that_must_close_this",
+    "reason_evidence"
+  ],
+  "phase_labels": {
+    "A": "deterministic parser corrections only (Phase B of the rollout plan)",
+    "B": "preserve as regression corpus only (semantic TurnDecision v2 required)",
+    "C": "semantic TurnDecision v2 required (Phase C of the rollout plan)",
+    "D": "multi-signal domain routing redesign required (Phase D of the rollout plan)"
+  },
+  "real_corpus": {
+    "case_count": 14,
+    "case_ids": [
+      "cf_R001",
+      "cf_R002",
+      "cf_R003",
+      "cf_R004",
+      "cf_R005",
+      "cf_R006",
+      "cf_R007",
+      "cf_R008",
+      "cf_R009",
+      "cf_R010",
+      "cf_R011",
+      "cf_R012",
+      "cf_R013",
+      "cf_W001"
+    ]
+  },
+  "synthetic_corpus": {
+    "exists": false,
+    "note": "Synthetic cases will be added in a SEPARATE directory (recruitment_synthetic_corpus/) only after every real case passes, per the planner's instruction."
+  },
+  "phone_mask_examples_pointer": "see _tools/author_corpus.py for the salt-based mapping; do NOT reintroduce the real->masked map in this file (PII)."
+}

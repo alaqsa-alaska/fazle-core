@@ -56,17 +56,34 @@ async def generate_recruitment_reply(
     source: str,
     contact_context: str = "",
     history: str = "",
+    decision_context: str = "",  # Phase C (2026-08-23) optional: pre-decided semantic context
 ) -> Optional[str]:
     """
-    Full-mode recruitment reply: KB → RAG → Ollama LLM → safety filter.
+    Full-mode recruitment reply: KB -> RAG -> Ollama LLM -> safety filter.
     Replaces modules.recruitment_ai.generate_recruitment_reply in the live router.
+
+    Phase C (2026-08-23) extension: when decision_context is non-empty,
+    it is prepended to the prompt the LLM consumes. This is the path
+    by which RecruitmentTurnDecision's structured output (turn_type,
+    questions, accepted fields, etc.) reaches the LLM. The decision
+    itself is purely descriptive; the LLM does NOT generate salary/fee
+    facts that aren't in source-of-truth. When decision_context is the
+    empty string, behavior is byte-identical to before.
     """
     del contact_context  # not used by conversation_layer (same as recruitment_ai)
+    effective_history = history or None
+    if decision_context:
+        # Decision-context is an additive policy block; history remains
+        # the conversation log. Both reach the LLM.
+        if effective_history:
+            effective_history = decision_context + "\n\n" + effective_history
+        else:
+            effective_history = decision_context
     result = await _generate_recruitment_reply(
         sender=phone,
         text=text,
         source=source,
-        history=history or None,
+        history=effective_history,
         use_llm=True,
     )
     reply = (result.get("reply") or "").strip()

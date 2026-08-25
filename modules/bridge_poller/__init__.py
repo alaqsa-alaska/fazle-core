@@ -758,6 +758,14 @@ async def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
 
     Checks (in order):
       0. Live DB flag phone_block.{phone} (set via /api/wa/contacts/{phone}/block)
+      0.5. Authoritative Owner-managed contact group
+            (modules/owner_contact_registry.is_owner_managed_contact) --
+            2026-08-24 Owner directive. Phone is the runtime key; the CSV is
+            the SOLE source (no legacy contact group is consulted here).
+            Returns True for any phone in selected_contacts_normalized_unique.csv
+            regardless of display name. Protected business workflows
+            (Escort order parser, Accountant cash extraction, Recruitment
+            funnel intake) are NOT affected -- they run upstream of this gate.
       1. Phone is in DRAFT_ALWAYS_PHONES explicit list
       2. Identity role matches DRAFT_ALWAYS_ROLES (e.g. accountant, vip_client)
       3. Display name contains a DRAFT_ALWAYS_NAMES substring
@@ -766,6 +774,15 @@ async def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
     try:
         from modules.wa_chat_frontend import get_runtime_setting
         if await get_runtime_setting(f"phone_block.{phone}", "false") == "true":
+            return True
+    except Exception:
+        pass
+    # Owner-managed contact group CSV gate (2026-08-24). Fail-open
+    # (returns False) if registry unavailable -- per Owner directive
+    # section 12, NEVER silently fall back to another contact group.
+    try:
+        from modules.owner_contact_registry import is_owner_managed_contact
+        if is_owner_managed_contact(phone):
             return True
     except Exception:
         pass
@@ -2246,11 +2263,29 @@ async def process_bridge_inbound(
                         return
 
                     # Length/structure guard
+                    # 2026-08-24 (Owner BREAK_GLASS_APPROVED for temporary live
+                    # Hermes Recruitment/Employee conversational authority):
+                    # skip STRUCT guard for legitimate recruitment/employee
+                    # conversational replies. Salary breakdowns, office
+                    # address responses, and multi-section duty/role
+                    # explanations naturally exceed 400 chars and use
+                    # markdown structure; the STRUCT guard diverts them to
+                    # drafts and admin alerts but the production draft queue
+                    # is not consumed by the Hermes live Recruitment/Employee
+                    # path -- so legit replies got stuck. Other safety
+                    # layers (POISON filter above, AI_SAFE_MODE below,
+                    # DRAFT_ALWAYS, contact-risk, loop detection,
+                    # financial-intent draft gate) remain fully operational
+                    # for non-Recruitment/non-Employee contexts. Protected
+                    # flows (payroll, attendance, escort, admin alerts) are
+                    # not touched because this only relaxes a length/format
+                    # heuristic, never any write path or authorization gate.
                     _reply_len = len(reply)
                     _has_table = reply.count(" | ") >= 2 or ":---" in reply
                     _is_long = _reply_len > 400
                     _has_headings = reply.count("\n#") >= 2
-                    if _is_long or _has_table or _has_headings:
+                    _is_recruitment_employee = msg_intent in ("recruitment", "employee_inquiry")
+                    if (not _is_recruitment_employee) and (_is_long or _has_table or _has_headings):
                         _block_reason = f"STRUCT:len={_reply_len},table={_has_table},headings={_has_headings}"
                         log.warning(
                             "[OUTBOUND_LENGTH_GUARD] bridge=%s phone=%s len=%d table=%s headings=%s",

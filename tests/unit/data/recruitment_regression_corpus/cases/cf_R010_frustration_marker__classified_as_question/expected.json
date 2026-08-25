@@ -1,0 +1,26 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R010",
+  "source_case_type": "C",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "frustration",
+  "expected_intake_step_before": "job_preference",
+  "expected_intake_fields_proposed": {
+    "frustration_marker": "explicit ???",
+    "job_preference": null
+  },
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {},
+  "expected_should_advance_intake": false,
+  "expected_intake_step_after": "job_preference",
+  "expected_questions": [],
+  "expected_should_answer_question": false,
+  "expected_needs_clarification": true,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": false,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "treat as frustration; offer concise recap of intake state so far + what is still needed; do not re-ask post-list",
+  "phase_that_must_close_this": "C",
+  "reason_evidence": "EXPECTED: short acknowledgement that intake= name=? age=24 area=Mymensingh job_preference=? -- what is still needed"
+}

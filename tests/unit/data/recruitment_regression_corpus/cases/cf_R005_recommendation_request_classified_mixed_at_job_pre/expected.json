@@ -1,0 +1,38 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R005",
+  "source_case_type": "C",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "pure_question",
+  "expected_intake_step_before": "job_preference",
+  "expected_intake_fields_proposed": {
+    "job_preference": null,
+    "question_markers": [
+      "কোন পদে",
+      "দেওয়া যায়",
+      "??"
+    ]
+  },
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {
+    "job_preference": "no specific post; recommendation question"
+  },
+  "expected_should_advance_intake": false,
+  "expected_intake_step_after": "job_preference",
+  "expected_questions": [
+    {
+      "topic": "post_recommendation_for_body_fitness",
+      "must_answer_from_source_of_truth": true,
+      "evidence": "candidate asks which post suits his body fitness"
+    }
+  ],
+  "expected_should_answer_question": true,
+  "expected_needs_clarification": false,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": true,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "do not invent post-suitability answers; defer to office per 'নির্দিষ্ট পদে আপনার যোগ্যতা প্রযোজ্য কিনা তা অফিসে সরাসরি যাচাই করে জানানো হবে।'",
+  "phase_that_must_close_this": "C",
+  "reason_evidence": "EXPECTED: cite source-of-truth post-suitability caveat; do NOT advance (no value supplied)."
+}

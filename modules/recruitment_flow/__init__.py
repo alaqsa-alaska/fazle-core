@@ -119,6 +119,69 @@ _QUESTION_WORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
+def _hash_phone_shadow(phone: str) -> str:
+    import hashlib as _hl
+    return _hl.sha1((phone or '').encode('utf-8')).hexdigest()[:10]
+
+
+# ── Phase C v2 wiring (2026-08-23) ──────────────────────────────────
+async def _maybe_decide_v2(
+    *,
+    phone: str,
+    text: str,
+    current_step: Optional[str],
+    session: Optional[dict],
+    identity: Optional[dict],
+) -> Optional["RecruitmentTurnDecision"]:
+    """Optional semantic-decision layer (Phase C).
+
+    Returns None when recruitment_turn_decision_v2_enabled is False
+    (default OFF in app/config.py -- legacy classify_turn_intent
+    path remains byte-identical). When ON, returns a validated
+    RecruitmentTurnDecision (possibly AMBIGUOUS).
+
+    Imports are deferred to avoid top-level cycles.
+    """
+    try:
+        from app.config import get_settings
+        if not bool(get_settings().recruitment_turn_decision_v2_enabled):
+            return None
+    except Exception:
+        return None
+    try:
+        from modules.recruitment_turn_decision import (
+            decide as _rtd_decide,
+            propose as _rtd_propose,
+        )
+        from modules.conversation_canonical import (
+            build_canonical_history as _build_history,
+        )
+        from modules.hermes_dispatch import (
+            build_recruitment_context as _build_sot,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[recruitment_flow] Phase C import failed, falling back to legacy: %s", exc)
+        return None
+    try:
+        history = await _build_history(phone, n=10)
+        proposals = _rtd_propose(text, current_step, (session or {}))
+        source_of_truth = _build_sot(text)
+        decision = await _rtd_decide(
+            text=text,
+            current_step=current_step,
+            session=session or {},
+            identity=identity or {},
+            history=history,
+            intake_proposals=proposals,
+            source_of_truth=source_of_truth,
+            flag_enabled=True,
+        )
+        return decision
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[recruitment_flow] Phase C decide() failed, falling back to legacy: %s", exc)
+        return None
+
+
 # Intake step expected-format patterns. Used to detect "this turn is
 # answering the current intake field" without invoking intake_message().
 _STEP_HAS_VALUE_RE = {
@@ -257,13 +320,78 @@ def _bn_digits(n: int) -> str:
     return str(n).translate(_BENGALI_DIGITS_OUT)
 
 
+_BENGALI_TO_ASCII = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+_BN_ASCII_RE = re.compile(r"[0-9০-৯]{1,3}")
+
+
+def _looks_like_dob(text: str) -> bool:
+    """Phase B (2026-08-23) deterministic DOB detector.
+
+    Returns True when the input text contains a plausible date-of-birth
+    pattern: digit digits separated by '/' or '-' or '.', with at least
+    one 4-digit year. Heuristics deliberately narrow to avoid false
+    positives on salary figures (e.g. "৳10,000-15,000") or phone numbers.
+
+    Per Phase B scope: this is a DETERMINISTIC gate, not a semantic
+    workflow. It only REFUSES age parsing when triggered. It does NOT
+    invent a new DOB intake step (the existing intake contract has
+    none). When the candidate supplies a DOB at the age step, the
+    response asks for the bare age instead.
+    """
+    if not text:
+        return False
+    # 4-digit year, optionally preceded/followed by / - .: yyyy or dd/mm/yyyy etc.
+    if re.search(r"(?:^|[^০-৯0-9])(\d{4})(?:$|[^০-৯0-9])", text):
+        # A 4-digit token alone is ambiguous (could be a salary or a year).
+        # Require a date-like pattern with separator OR an explicit DOB keyword.
+        if re.search(r"\d{1,2}\s*[/\-.\u0964\u0965]\s*\d{1,2}\s*[/\-.\u0964\u0965]\s*\d{2,4}", text):
+            return True
+        if re.search(r"\d{4}\s*[/\-.\u0964\u0965]\s*\d{1,2}\s*[/\-.\u0964\u0965]\s*\d{1,2}", text):
+            return True
+    # Explicit DOB keywords (case-insensitive)
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in ("জন্ম", "তারিখ", "dob", "date of birth", "জন্মদিন", "জন্ম তারিখ")):
+        # require a digit in the same message — so "জন্মদিন আজ" alone isn't a DOB
+        if re.search(r"[০-৯0-9]", text):
+            return True
+    return False
+
+
 def _parse_age(text: str, age_range: tuple[int, int] = (18, 55)) -> Optional[int]:
-    m = re.search(r"\b(\d{1,3})\b", text)
-    if m:
-        val = int(m.group(1))
-        lo, hi = age_range
-        return val if lo <= val <= hi else None
-    return None
+    """Phase B (2026-08-23): extracted age from a candidate message at the
+    age step.
+
+    Deterministic contract:
+      - DOB-flagged text returns None (caller asks for bare age instead).
+      - Bengali-numeral runs in text are transliterated to ASCII digits
+        before extraction.
+      - The first numeric run in [age_range.lo, age_range.hi] wins;
+        candidates below or above the range return None.
+      - A 4-digit year token alone is rejected (would otherwise interpret
+        "জন্ম তারিখ ২০০০" as age-2000).
+    """
+    if not text or not text.strip():
+        return None
+    if _looks_like_dob(text):
+        return None
+    ascii_text = text.translate(_BENGALI_TO_ASCII)
+    m = _BN_ASCII_RE.search(ascii_text)
+    if not m:
+        return None
+    raw = m.group(0)
+    # Skip pure 4-digit "year"-shaped runs (>=4 digits) when there is no
+    # age-shaped integer nearby -- keeps "জন্ম তারিখ ১৯৯০" from being
+    # parsed as age 1990 even when _looks_like_dob somehow misses.
+    if len(raw) >= 4 and "/" not in text and "-" not in text and "." not in text and "তারিখ" not in text:
+        # Allow only if the message has an age-shaped context marker
+        if not re.search(r"(?:বয়স|age|বছর|years)", text, re.IGNORECASE):
+            return None
+    try:
+        val = int(raw)
+    except ValueError:
+        return None
+    lo, hi = age_range
+    return val if lo <= val <= hi else None
 
 
 async def _get_effective_age_range() -> tuple[int, int]:
@@ -575,6 +703,67 @@ async def _apply_audited_transition(
 
 # ── Main intake function ───────────────────────────────────────────────────────
 
+async def _advance_past_locked_step(
+    session: dict,
+    candidate_id: Optional[int],
+    phone: str,
+    step: str,
+    raw_message: str,
+    source: str,
+    message_id: Optional[str],
+):
+    """Phase B (2026-08-23) deterministic advance helper used by the
+    field-locking rule. When the candidate re-sends a value that the
+    session already has stored, intake_message() short-circuits here.
+
+    Behavior:
+      - records the redundant inbound in wbom_candidate_conversations
+        for auditability (so no message is lost)
+      - bumps the session's collection_step to the NEXT step (does NOT
+        keep the same step)
+      - replies with the natural next-step STEP_QUESTIONS prompt
+
+    Does NOT itself call the LLM / Hermes layer. Does NOT advance more
+    than one step.
+    """
+    try:
+        idx = COLLECTION_STEPS.index(step)
+    except ValueError:
+        idx = len(COLLECTION_STEPS) - 1
+    next_step = COLLECTION_STEPS[idx + 1] if idx + 1 < len(COLLECTION_STEPS) else "complete"
+    update = {"collection_step": next_step}
+    if candidate_id is not None:
+        try:
+            await _apply_audited_transition(
+                phone, candidate_id, step, raw_message, source, message_id, update,
+            )
+        except Exception:
+            try:
+                await _update_session(phone, update)
+            except Exception:
+                pass
+    else:
+        try:
+            await _update_session(phone, update)
+        except Exception:
+            pass
+    if next_step == "complete":
+        # All collection steps done -- fall through to scoring below.
+        # We return a no-op reply here and the caller chain is expected
+        # to call back into intake_message with the new step. For safety,
+        # we use a brief next-step-acknowledgement string.
+        return {
+            "reply": "ধন্যবাদ, আপনার আবেদন শেষ হয়েছে।",
+            "action": "collecting",
+            "session_id": session["id"],
+        }
+    return {
+        "reply": STEP_QUESTIONS[next_step],
+        "action": "collecting",
+        "session_id": session["id"],
+    }
+
+
 async def intake_message(
     phone: str,
     message: str,
@@ -669,6 +858,22 @@ async def intake_message(
         )
     update: dict = {}
 
+    # ── Field-locking rule (Phase B, 2026-08-23) ──────────────────────────────
+    # When the candidate re-sends the same value the session already has
+    # stored, treat that as a no-op (no DB write, no re-prompt). This
+    # closes cf_R013's deterministic "re-prompted age-limit four times"
+    # leg without collapsing conversation semantics: a *new* value still
+    # flows through normal extract/validation; an unparseable message
+    # still hits the existing re-prompt paths below.
+    _locked_already = {
+        "full_name": session.get("full_name"),
+        "age": session.get("age"),
+        "area": session.get("area"),
+        "job_preference": session.get("job_preference"),
+        "experience_years": session.get("experience_years"),
+        "confirmed_phone": session.get("confirmed_phone"),
+    }
+
     if step == "name":
         if not _looks_like_name(text):
             if candidate_id is not None:
@@ -676,15 +881,28 @@ async def intake_message(
                     candidate_id, step, raw_message, source, message_id,
                 )
             return {
-                "reply": "দুঃখিত, বুঝতে পারিনি। দয়া করে শুধু আপনার পুরো নাম লিখুন (যেমনঃ Md Karim)।",
+                "reply": "দুঃখিত, বুঝতে পারিনি। দয়া করে শুধু আপনার পুরো নাম লিখুন (যেমন: Md Karim)।",
                 "action": "collecting",
                 "session_id": session["id"],
             }
-        update["full_name"] = text.strip()[:100]
+        # Field-lock check: if the existing full_name is the same as the
+        # trimmed input, accept silently and advance step.
+        proposed_name = text.strip()[:100]
+        if _locked_already["full_name"] and _locked_already["full_name"] == proposed_name:
+            return await _advance_past_locked_step(
+                session, candidate_id, phone, step, raw_message, source, message_id,
+            )
+        update["full_name"] = proposed_name
     elif step == "age":
         age_range = await _get_effective_age_range()
         val = _parse_age(text, age_range)
         if val:
+            # Field-lock: if the session already records the same age,
+            # accept silently without re-asking. cf_R013 closes here.
+            if _locked_already["age"] == val:
+                return await _advance_past_locked_step(
+                    session, candidate_id, phone, step, raw_message, source, message_id,
+                )
             update["age"] = val
         else:
             if candidate_id is not None:
@@ -692,15 +910,24 @@ async def intake_message(
                     candidate_id, step, raw_message, source, message_id,
                 )
             return {
-                "reply": f"সাধারণ বয়সসীমা {_bn_digits(age_range[0])}–{_bn_digits(age_range[1])} বছর। দয়া করে সঠিক বয়স লিখুন (যেমন: 25)",
+                "reply": f"সাধারণ বয়সসীমা {_bn_digits(age_range[0])}–{_bn_digits(age_range[1])} বছর। দয়া করে সঠিক বয়স লিখুন (যেমন: 25)",
                 "action": "collecting",
                 "session_id": session["id"],
             }
     elif step == "area":
-        update["area"] = text.strip()[:100]
+        proposed = text.strip()[:100]
+        if _locked_already["area"] and _locked_already["area"] == proposed:
+            return await _advance_past_locked_step(
+                session, candidate_id, phone, step, raw_message, source, message_id,
+            )
+        update["area"] = proposed
     elif step == "job_preference":
         pos = _parse_job_preference(text)
         if pos:
+            if _locked_already["job_preference"] and _locked_already["job_preference"] == pos:
+                return await _advance_past_locked_step(
+                    session, candidate_id, phone, step, raw_message, source, message_id,
+                )
             update["job_preference"] = pos
         else:
             if candidate_id is not None:
@@ -714,10 +941,19 @@ async def intake_message(
             }
     elif step == "experience":
         val = _parse_experience(text)
-        update["experience_years"] = val if val is not None else 0
+        new_exp = val if val is not None else 0
+        if _locked_already["experience_years"] is not None and _locked_already["experience_years"] == new_exp:
+            return await _advance_past_locked_step(
+                session, candidate_id, phone, step, raw_message, source, message_id,
+            )
+        update["experience_years"] = new_exp
     elif step == "phone_confirm":
         phone_parsed = _parse_phone(text)
         if phone_parsed:
+            if _locked_already["confirmed_phone"] and _locked_already["confirmed_phone"] == phone_parsed:
+                return await _advance_past_locked_step(
+                    session, candidate_id, phone, step, raw_message, source, message_id,
+                )
             update["confirmed_phone"] = phone_parsed
         # Accept even if not parsed — use original phone
 
@@ -1145,6 +1381,49 @@ async def route_recruitment_message(
 
         current_step = active_session.get("collection_step") if isinstance(active_session, dict) else None
         _turn_intent = classify_turn_intent(text, current_step) if _answer_first_active else "pure_intake"
+
+        # Phase C v2 (2026-08-23): in shadow mode, compute V2 decision and
+        # emit a structured log line. NO reply-pathing, NO state mutation.
+        # The default OFF behavior (recruitment_turn_decision_v2_enabled=False)
+        # makes this block a single log line at most.
+        try:
+            from app.config import get_settings
+            _v2_flag = bool(get_settings().recruitment_turn_decision_v2_enabled)
+        except Exception:
+            _v2_flag = False
+        if _v2_flag:
+            try:
+                _v2_decision = await _maybe_decide_v2(
+                    phone=phone,
+                    text=text,
+                    current_step=current_step,
+                    session=active_session if isinstance(active_session, dict) else None,
+                    identity={"role": role or "unknown", "confidence": 0, "source": "shadow_only"},
+                )
+                if _v2_decision is not None:
+                    log.info(
+                        "[recruitment_decision_v2_shadow] thread=%s msg=%s sender=%s step_before=%s "
+                        "semantic_domain=%s turn_type=%s confidence=%.2f accepted=%d rejected=%d "
+                        "questions=%d advance=%s answer=%s human_review=%s multi_domain=%s "
+                        "reason_codes=%s",
+                        (active_session.get('id') if isinstance(active_session, dict) else None),
+                        (message_id or 'none'),
+                        _hash_phone_shadow(phone),
+                        current_step or 'none',
+                        _v2_decision.semantic_domain,
+                        _v2_decision.turn_type,
+                        _v2_decision.confidence,
+                        len(_v2_decision.accepted_proposals),
+                        len(_v2_decision.rejected_proposals),
+                        len(_v2_decision.questions),
+                        _v2_decision.should_advance_intake,
+                        _v2_decision.should_answer_question,
+                        _v2_decision.needs_human_review,
+                        _v2_decision.multi_domain_review_required,
+                        list(_v2_decision.reason_codes),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[recruitment_flow] V2 shadow invocation failed: %s", exc)
 
         if _answer_first_active and _turn_intent in ("pure_question", "mixed"):
             # Try the informational reply first — KB/Hermes/conversation_layer

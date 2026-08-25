@@ -1,0 +1,14 @@
+{
+  "_schema": "recruitment-regression-case-meta/v1",
+  "case_id": "cf_R002",
+  "thread_phone_masked": "88013899d3c",
+  "is_admin_thread": false,
+  "actual_outcome_notes": {
+    "domain": "recruitment",
+    "turn_type": "mixed",
+    "should_advance_intake": "True (legacy advanced from name)",
+    "outbound_text_seen": "কোন পদের কাজের দায়িত্ব ও ডিটেইলস জানতে চান? Security Guard, Escort, Operation Officer, Marketing Officer কিংবা অন্য কিছু?",
+    "rule_that_failed": "Question regex matched 'জানতে চাই'; name regex matched"
+  },
+  "privacy_notes": "Real candidate phone numbers are salted-hash masked (see _meta/corpus_meta.json#mask_algorithm). Admin phone numbers are prefixed 'admin_' and salted-hash masked. Inbound message text and AI outbound message text are PRESERVED VERBATIM because typos, bilingual mixing, and punctuation are part of the failure-bearing signal."
+}

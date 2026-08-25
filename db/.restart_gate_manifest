@@ -223,3 +223,149 @@ tests/unit/test_hermes_channel_keyword_bypass.py
 # committed alongside this fix's own changes, to keep that unrelated
 # task's commit as a separate, deliberate action for whoever picks it up.
 HERMES_PAYROLL_WORKFLOW_GAP_AUDIT_2026-08-18.md
+
+# 2026-08-23: pre-existing audit/report artifacts unrelated to deployment
+# 7e0c260. Two recruitment-conversation audit notes left untracked by their
+# author, intentionally preserved untracked; not part of this restart's
+# commit and not to be committed, deleted, or moved in this session.
+RECRUITMENT_CONVERSATION_AUDIT_2026-08-22_TO_2026-08-23.md
+RECRUITMENT_CONVERSATION_AUDIT_VERIFIED_2026-08-22_TO_2026-08-23.md
+
+# 2026-08-23: deployment-gate fix — Block #4 resolution only. Symlink at
+# /home/azim/core/venv -> /home/azim/.venv so scripts/restart_gate.sh's
+# first-choice interpreter (venv/bin/python) resolves to the same venv
+# the running fazle-core.service uses. Python's venv auto-detection
+# requires the binary to live inside a directory with pyvenv.cfg; a
+# stand-alone symlink to the binary doesn't satisfy that, so the whole
+# venv directory had to be symlinked. Resolves the missing-apscheduler
+# "wrong interpreter" symptom without modifying requirements.txt or the
+# gate script. Pre-existing `venv/bin/` was empty before this session.
+# No code committed. Remove this entry once the gate dependency-declaration
+# gap (apscheduler not in requirements.txt even though
+# modules/scheduler/__init__.py imports it) is properly fixed and the
+# gate's interpreter path is solidified.
+venv
+
+# 2026-08-23 (Phase A of Semantic Recruitment Turn Understanding rollout):
+# Owner-authorized evidence-only regression corpus + Phase-A test harness.
+# 14 real Recruitment failure cases (cf_R001..cf_R013 + cf_W001), each with
+# input.json, _meta.json, conversation.jsonl, expected.json. Phase-A tests
+# validate the DATASET and EXPECTED CONTRACT only -- production behavior
+# is NOT modified by Phase A. Real candidate phone numbers are salted-hash
+# masked in case files; the offline generator (_tools/_author_corpus_DO_NOT_COMMIT.py)
+# contains the raw real-phone-to-case mapping and must NEVER be committed.
+# Synthetic cases (recruitment_synthetic_corpus/) are deferred to Phase C.
+tests/unit/test_phase_a_corpus.py
+tests/unit/data/
+
+# 2026-08-23 (Phase B of Semantic Recruitment Turn Understanding rollout):
+# Owner-authorized deterministic parser/intake corrections in
+# modules/recruitment_flow/__init__.py only. The production file diff is
+# +184/-11 lines and contains exactly three localized changes: (a) age
+# parser now accepts Bengali multi-digit runs via pre-transliteration, (b)
+# a deterministic _looks_like_dob gate blocks age extraction from a
+# date-of-birth pattern, (c) a field-locking rule in intake_message
+# silently advances when the candidate re-sends the same already-locked
+# value. NO semantic layer, NO canonical history, NO actor provenance,
+# NO multi-signal domain routing, NO recruitment_operational_rescue, NO
+# active-session override. Phase B deterministic coverage is asserted by
+# the test file; expected.json across the 14-case Phase-A corpus is
+# unmodified.
+modules/recruitment_flow/__init__.py
+tests/unit/test_phase_b_deterministic.py
+
+# Diagnostic tool used to produce the Phase B 14-case comparison table. Does
+# NOT touch production; reads the Phase A corpus and exercises the Phase B
+# parser helpers in a sandboxed subprocess (does not call intake_message).
+tests/unit/data/recruitment_regression_corpus/_tools/run_phase_b_diagnostic.py
+
+# 2026-08-23 (Phase C of Semantic Recruitment Turn Understanding rollout):
+# Owner-authorized semantic turn-understanding implementation. Surface:
+#   NEW MODULES:
+#     modules/recruitment_turn_decision/ -- RecruitmentTurnDecision contract,
+#         Tier A extract (Phase B parsers re-used, NO new keywords), Tier B
+#         decide(), state_rules.py with correction 2/3/4/7/8 invariants.
+#     modules/conversation_canonical/    -- canonical_history.py (read layer
+#         over existing wbom_whatsapp_messages; NO parallel DB) and
+#         actor_provenance.py with provenance_confidence per row.
+#   MODIFIED FILES (targeted):
+#     modules/recruitment_flow/__init__.py  -- +_maybe_decide_v2 helper +
+#         shadow-log block ONLY when recruitment_turn_decision_v2_enabled=True.
+#         Legacy classify_turn_intent path is byte-identical when OFF.
+#     modules/hermes_dispatch.py            -- +build_decision_context helper
+#         (augments, does NOT replace _looks_like_fee_question /
+#         build_recruitment_context).
+#     modules/conversation_layer/__init__.py-- +decision_context kwarg on
+#         generate_recruitment_reply (backward-compatible default '').
+#     modules/message_router/__init__.py    -- +_v2_cross_ref_enabled() +
+#         shadow-only V2 cross-reference log line in Task-13 block.
+#     app/config.py                         -- +3 flags, all default OFF:
+#         recruitment_turn_decision_v2_enabled,
+#         recruitment_respect_manual_reply,
+#         recruitment_actor_provenance_writeback.
+#   TESTS:
+#     tests/unit/test_phase_c_decision.py
+#     tests/unit/test_phase_c_extract.py
+#     tests/unit/test_phase_c_provenance.py
+#     tests/unit/test_phase_c_wireins.py
+#     tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py
+# Phase A 14-case corpus expected.json is UNCHANGED. Phase B +184/-11
+# production file diff is UNCHANGED. No .env, no DB migration, no service
+# restart, no live WhatsApp message, no commit. CORRECTIVE_REPLIES_SENT=0
+# (historical outreach remains FROZEN). Phase F live shadow requires
+# separate Owner authorization; this implementation is DORMANT when
+# recruitment_turn_decision_v2_enabled=False (default).
+modules/recruitment_turn_decision/
+modules/conversation_canonical/
+modules/hermes_dispatch.py
+modules/conversation_layer/__init__.py
+modules/message_router/__init__.py
+app/config.py
+tests/unit/test_phase_c_decision.py
+tests/unit/test_phase_c_extract.py
+tests/unit/test_phase_c_provenance.py
+tests/unit/test_phase_c_wireins.py
+tests/unit/test_minimax_provider.py
+tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py
+
+# 2026-08-24: Owner directive "ESTABLISH SINGLE AUTHORITATIVE NO-AUTO-REPLY
+# CONTACT GROUP" -- added central reusable is_owner_managed_contact(phone)
+# function in new module modules/owner_contact_registry/__init__.py.
+# The CSV /home/azim/core/resources/ops/selected_contacts_normalized_unique.csv
+# is authoritative; legacy contact groups ignored. No protected operational
+# flow touched. Restricted surface = new module + new test + 8 lines added
+# in bridge_poller._is_draft_always() (CSV gate inserted as step 0.5 between
+# step 0 live phone_block flag and step 1 hardcoded phone set; all other
+# safety layers POISON/AI_SAFE_MODE/DRAFT_ALWAYS/contact-risk/loop detection/
+# financial-intent draft gate unchanged). Test_owner_contact_registry.py:
+# 15/15 pass covering tests A-L. Existing protected business workflows
+# (Escort, Accountant, Employee, Client, Program) all still import cleanly.
+# No DB migration, no .env change, no flag change.
+modules/owner_contact_registry/
+tests/unit/test_owner_contact_registry.py
+
+# 2026-08-24: Owner directive "Master Information for Recruitment and
+# Employee" -- Owner uploaded the master information document. This file
+# is the authoritative Recruitment + Employee knowledge reference for live
+# conversational handling, used together with recruitment_source_of_truth.txt.
+# Read-only at runtime by the live Hermes conversational path. Not committed
+# per Owner "no commit" instruction in same task; held in working tree so
+# the live service can read it.
+resources/ops/master_recruitment_employee_information.txt
+
+# 2026-08-24: Owner directive "ESTABLISH SINGLE AUTHORITATIVE NO-AUTO-REPLY
+# CONTACT GROUP" -- Owner uploaded the Owner-managed contact group CSV.
+# This is the SOLE authoritative contact-group source for the live conversational
+# auto-reply suppression gate. Read-only at runtime by
+# modules/owner_contact_registry/is_owner_managed_contact. Not committed
+# per Owner "no commit" instruction; held in working tree so the live service
+# can read it.
+resources/ops/selected_contacts_normalized_unique.csv
+
+# 2026-08-24: Owner directive "ESTABLISH SINGLE AUTHORITATIVE NO-AUTO-REPLY
+# CONTACT GROUP" + earlier "STRUCT blocker fix" -- added test that proves
+# the narrow STRUCT guard bypass for recruitment/employee intents in
+# modules/bridge_poller/__init__.py works correctly and that all other
+# safety layers remain intact. 10/10 pass. No production code change
+# beyond the targeted bridge_poller guard patch.
+tests/unit/test_bridge_poller_struct_bypass.py
