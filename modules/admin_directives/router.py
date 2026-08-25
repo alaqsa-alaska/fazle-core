@@ -443,8 +443,29 @@ async def _call_hermes_readonly(
     mode is currently persisted in its own current_mode.txt -- the EXACT
     same value the interactive web UI already uses. This does not add a
     new elevation mechanism: BUILD/RUN is still only ever granted via the
-    existing, unmodified `/api/hermes/mode` web endpoint (admin JWT,
-    chat.iamazim.com), with its existing TTL/auto-revert. All three
+    existing `/api/hermes/mode` web endpoint (admin JWT via assistant-
+    platform's requireAdmin middleware, chat.iamazim.com -> a thin proxy
+    to hermes-runner's own Bearer-secret-gated POST /mode) or a direct
+    call to that same hermes-runner endpoint.
+
+    STALE-DOCSTRING CORRECTIONS (2026-08-25, verified against current
+    code, not assumed):
+    (1) "existing TTL/auto-revert" is no longer universally true --
+    hermes-runner's write_mode_state() gained an explicit `permanent`
+    parameter (2026-08-25 Owner decision) that sets expires_at=None for
+    BUILD/RUN with no auto-revert; current_mode.txt is a permanent RUN
+    grant as of this writing. The web UI's /mode proxy (assistant-
+    platform/backend/src/routes/hermes.js) does NOT yet forward this
+    `permanent` flag -- only a direct hermes-runner API call can request
+    it today; the web toggle still only sends mode/ttl_seconds/scope.
+    (2) Since a 2026-08-20 hermes-runner change, any call with
+    readonly_key=="readonly:whatsapp_relay" (i.e. every _deliver_hermes_
+    reply call, this function) unconditionally receives the RUN toolset
+    (file/code_execution/terminal) regardless of what mode is currently
+    persisted/reported -- the "inherits whatever mode is persisted"
+    description above is therefore incomplete for this specific caller;
+    the reported `mode` in logs can say READ while the actual toolset
+    granted is RUN-level. All three
     pre-existing gates on reaching this call at all -- RBAC superadmin,
     exact admin_bridge2_number identity, and source_bridge in
     _HERMES_CONTROL_CHANNELS (see _handle_hermes_relay) -- are completely
@@ -651,14 +672,18 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
     Hermes (assistant-platform's BUILD/RUN-capable agent).
 
     UPDATED, Full-authority Phase 1 (2026-08-13, Owner-approved): the
-    delivered reply (_deliver_hermes_reply, see its own docstring) now
-    inherits whatever READ/BUILD/RUN mode is currently persisted for
-    Hermes -- it is no longer unconditionally hard-locked to READ. Mode is
-    still ONLY ever elevated via the existing, unmodified
-    `/api/hermes/mode` web endpoint (admin JWT, chat.iamazim.com); nothing
-    in this WhatsApp relay path can elevate mode itself. When mode is at
-    its fail-closed default (READ), a relayed message behaves exactly as
-    before -- investigate and report only. Nothing about the three gates
+    delivered reply (_deliver_hermes_reply, see its own docstring for the
+    2026-08-25 corrections -- permanent-mode grants now exist, and since
+    2026-08-20 this caller unconditionally gets the RUN toolset regardless
+    of reported mode) now inherits whatever READ/BUILD/RUN mode is
+    currently persisted for Hermes -- it is no longer unconditionally
+    hard-locked to READ. Mode is still ONLY ever elevated via the existing
+    `/api/hermes/mode` web endpoint (admin JWT, chat.iamazim.com) or a
+    direct hermes-runner API call; nothing in this WhatsApp relay path can
+    elevate mode itself. When mode is at its fail-closed default (READ),
+    a relayed message's *reported* mode still says READ -- see
+    _deliver_hermes_reply's docstring for why that no longer means
+    investigate-only for this specific caller. Nothing about the three gates
     below changed.
 
     Gated on three INDEPENDENT checks, all required: RBAC role (superadmin,
