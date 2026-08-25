@@ -159,11 +159,34 @@ async def test_B_recruitment_intent_not_captured_by_bare_salary_keyword_trigger(
 
 def test_B_ec_trigger_guarded_by_recruitment_intent_at_both_call_sites():
     """Structural guard: both ec_detect_trigger(text) call sites in
-    message_router must skip the bare keyword scan when intent=="recruitment"."""
+    message_router must skip the bare keyword scan when intent=="recruitment".
+
+    2026-08-25 update: the exact single-line form this test originally
+    matched was reformatted to multi-line when the is_extracted_media
+    guard (cf_W001 mitigation, Phase 4 recovery pass) was added alongside
+    it -- both `ec_trigger` and `ec_trigger_catchall` are now assigned via
+    a parenthesized conditional expression spanning several lines rather
+    than one. Checking for the exact substring
+    'intent != "recruitment" and not is_extracted_media' at each
+    assignment (rather than the old full-line match) keeps this test a
+    real regression guard against either guard being silently dropped,
+    without being fragile to further reasonable reformatting."""
     import inspect
+    import re
     src = inspect.getsource(router)
-    assert 'ec_trigger = ec_detect_trigger(text) if intent != "recruitment" else None' in src
-    assert 'ec_trigger_catchall = ec_detect_trigger(text) if intent != "recruitment" else None' in src
+
+    def _assert_guarded(var_name: str) -> None:
+        pattern = re.compile(
+            re.escape(var_name) + r"\s*=\s*\(?\s*"
+            r'ec_detect_trigger\(text\)'
+            r'.*?intent\s*!=\s*"recruitment"'
+            r".*?not\s+is_extracted_media",
+            re.S,
+        )
+        assert pattern.search(src), f"{var_name} assignment must still guard on intent!='recruitment' and not is_extracted_media"
+
+    _assert_guarded("ec_trigger")
+    _assert_guarded("ec_trigger_catchall")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

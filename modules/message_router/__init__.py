@@ -1709,8 +1709,8 @@ async def process_message(
     # never blocks the reply if the source file is unavailable.
     if role_str in ("employee", "supervisor"):
         try:
-            from modules.hermes_dispatch import build_employee_context as _build_emp_ctx
-            _emp_policy = _build_emp_ctx(text)
+            from modules.hermes_dispatch import build_employee_context_with_directives as _build_emp_ctx
+            _emp_policy = await _build_emp_ctx(text)
             if _emp_policy:
                 db_ctx = (db_ctx + "\n\nCompany Policy:\n" + _emp_policy).strip()
         except Exception as _emp_ctx_err:

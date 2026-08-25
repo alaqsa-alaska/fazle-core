@@ -282,6 +282,41 @@ def build_employee_context(message: str = "") -> str:
     return _load_employee_policy_raw()
 
 
+async def build_recruitment_context_with_directives(message: str) -> str:
+    """Phase 3, 2026-08-25 recovery pass ("general Owner business-rule
+    mutation architecture"). Wraps build_recruitment_context() with every
+    currently-active Owner directive unconditionally appended (see
+    modules.admin_directives.get_active_directives_context()) -- closes
+    the verified gap where a directive written on any subject_key other
+    than the 2 pre-existing hardcoded read sites was invisible to every
+    live answer path. A new async function, NOT a signature change to
+    build_recruitment_context() itself -- that function stays synchronous
+    and unchanged, so its 3 existing test call sites
+    (test_phase_c_wireins.py, test_recruitment_fee_canonical_text.py)
+    keep working exactly as before. Fails safe: if directive lookup
+    errors, falls back to the base context alone (get_active_directives_
+    context() itself never raises)."""
+    base = build_recruitment_context(message)
+    from modules.admin_directives import get_active_directives_context
+    directives = await get_active_directives_context()
+    if not directives:
+        return base
+    return f"{base}\n\n{directives}" if base else directives
+
+
+async def build_employee_context_with_directives(message: str = "") -> str:
+    """Employee-side counterpart to build_recruitment_context_with_
+    directives() -- see its docstring for the full rationale. Wraps
+    build_employee_context() (unchanged, synchronous) with active Owner
+    directives appended."""
+    base = build_employee_context(message)
+    from modules.admin_directives import get_active_directives_context
+    directives = await get_active_directives_context()
+    if not directives:
+        return base
+    return f"{base}\n\n{directives}" if base else directives
+
+
 _NUMBER_RE = re.compile(r"[0-9০-৯][0-9০-৯,.\-–+]*")
 _PLACE_RE = re.compile(
     r"[\wঀ-৿-]{2,}(?:পাড়া|ঘাট|এলাকা|জেলা|বন্দর)[ঀ-৿]{0,3}"

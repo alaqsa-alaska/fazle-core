@@ -86,7 +86,7 @@ class TestCreateAdminDirective:
                 json={"directive_text": "always confirm advances over 5000tk", "category": "general"},
             )
         assert response.status_code == 200
-        assert response.json() == {"id": 77}
+        assert response.json() == {"id": 77, "superseded_id": None}
         mock_save.assert_awaited_once()
         args, kwargs = mock_save.call_args
         assert args[0] == "always confirm advances over 5000tk"
@@ -107,6 +107,7 @@ class TestCreateAdminDirective:
         from modules import admin_directives
         mock_save = AsyncMock(return_value=1)
         monkeypatch.setattr(admin_directives, "save_directive", mock_save)
+        monkeypatch.setattr(admin_directives, "find_conflicting_directive", AsyncMock(return_value=None))
 
         async with await _client() as ac:
             response = await ac.post(
@@ -123,6 +124,87 @@ class TestCreateAdminDirective:
         _, kwargs = mock_save.call_args
         assert kwargs["subject_type"] == "phone"
         assert kwargs["subject_key"] == "8801712345678"
+
+    async def test_conflicting_directive_returns_409_without_supersede(self, auth_headers, monkeypatch):
+        """Phase 3, 2026-08-25: general Owner business-rule mutation
+        architecture -- a second active directive on the same
+        (subject_type, subject_key) with different text must not silently
+        overwrite the first."""
+        from modules import admin_directives
+        existing = {
+            "id": 42, "directive_text": "minimum age is 18",
+            "created_at": None,
+        }
+        mock_conflict = AsyncMock(return_value=existing)
+        mock_save = AsyncMock(return_value=99)
+        monkeypatch.setattr(admin_directives, "find_conflicting_directive", mock_conflict)
+        monkeypatch.setattr(admin_directives, "save_directive", mock_save)
+
+        async with await _client() as ac:
+            response = await ac.post(
+                "/admin/directives",
+                headers=auth_headers,
+                json={
+                    "directive_text": "minimum age is 23",
+                    "subject_type": "recruitment_rule",
+                    "subject_key": "recruitment_minimum_age",
+                },
+            )
+        assert response.status_code == 409
+        body = response.json()
+        assert body["detail"]["error"] == "conflicting_active_directive"
+        assert body["detail"]["existing_directive"]["id"] == 42
+        mock_save.assert_not_awaited()
+
+    async def test_supersede_true_revokes_old_then_saves_new(self, auth_headers, monkeypatch):
+        from modules import admin_directives
+        existing = {"id": 42, "directive_text": "minimum age is 18", "created_at": None}
+        mock_conflict = AsyncMock(return_value=existing)
+        mock_revoke = AsyncMock(return_value=True)
+        mock_save = AsyncMock(return_value=99)
+        monkeypatch.setattr(admin_directives, "find_conflicting_directive", mock_conflict)
+        monkeypatch.setattr(admin_directives, "revoke_directive", mock_revoke)
+        monkeypatch.setattr(admin_directives, "save_directive", mock_save)
+
+        async with await _client() as ac:
+            response = await ac.post(
+                "/admin/directives",
+                headers=auth_headers,
+                json={
+                    "directive_text": "minimum age is 23",
+                    "subject_type": "recruitment_rule",
+                    "subject_key": "recruitment_minimum_age",
+                    "supersede": True,
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["superseded_id"] == 42
+        mock_revoke.assert_awaited_once()
+        assert mock_revoke.call_args.args[0] == 42
+        mock_save.assert_awaited_once()
+
+    async def test_same_text_no_conflict_saves_directly(self, auth_headers, monkeypatch):
+        """find_conflicting_directive() itself treats a re-statement of
+        the same rule as no-conflict (see its own docstring/unit test) --
+        this proves the route path honors that (None means proceed)."""
+        from modules import admin_directives
+        mock_conflict = AsyncMock(return_value=None)
+        mock_save = AsyncMock(return_value=100)
+        monkeypatch.setattr(admin_directives, "find_conflicting_directive", mock_conflict)
+        monkeypatch.setattr(admin_directives, "save_directive", mock_save)
+
+        async with await _client() as ac:
+            response = await ac.post(
+                "/admin/directives",
+                headers=auth_headers,
+                json={
+                    "directive_text": "minimum age is 18",
+                    "subject_type": "recruitment_rule",
+                    "subject_key": "recruitment_minimum_age",
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["superseded_id"] is None
 
 
 class TestRevokeAdminDirective:

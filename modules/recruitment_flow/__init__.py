@@ -1319,9 +1319,9 @@ async def route_recruitment_message(
             # / _recruitment_reply_matches_source().
             from modules.hermes_dispatch import (
                 generate_recruitment_reply as _hermes_recruitment_reply,
-                build_recruitment_context as _build_recruitment_context,
+                build_recruitment_context_with_directives as _build_recruitment_context,
             )
-            _kb_context = _build_recruitment_context(text)
+            _kb_context = await _build_recruitment_context(text)
             priority_reply = await _hermes_recruitment_reply(
                 phone=phone, text=text, source=source,
                 kb_context=_kb_context, contact_context=contact_context, history=history,
@@ -1445,9 +1445,9 @@ async def route_recruitment_message(
             if is_feature_active("hermes_customer_recruitment", default=False):
                 from modules.hermes_dispatch import (
                     generate_recruitment_reply as _hermes_recruitment_reply,
-                    build_recruitment_context as _build_recruitment_context,
+                    build_recruitment_context_with_directives as _build_recruitment_context,
                 )
-                _kb_context = _build_recruitment_context(text)
+                _kb_context = await _build_recruitment_context(text)
                 _info_reply = await _hermes_recruitment_reply(
                     phone=phone, text=text, source=source,
                     kb_context=_kb_context, contact_context=contact_context, history=history,
@@ -1558,9 +1558,9 @@ async def route_recruitment_message(
         # other call site above.
         from modules.hermes_dispatch import (
             generate_recruitment_reply as _hermes_recruitment_reply,
-            build_recruitment_context as _build_recruitment_context,
+            build_recruitment_context_with_directives as _build_recruitment_context,
         )
-        _kb_context = _build_recruitment_context(text)
+        _kb_context = await _build_recruitment_context(text)
         reply = await _hermes_recruitment_reply(
             phone=phone,
             text=text,

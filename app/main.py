@@ -3502,16 +3502,48 @@ async def create_admin_directive(payload: dict, key: str = Depends(require_api_k
     directive_text = (payload or {}).get("directive_text")
     if not directive_text:
         raise HTTPException(400, "directive_text required")
+    subject_type = (payload or {}).get("subject_type")
+    subject_key = (payload or {}).get("subject_key")
+    # Phase 3, 2026-08-25 recovery pass (general Owner business-rule
+    # mutation architecture): conflict check before writing. A caller
+    # (typically Earth via remember_business_rule) that hits this without
+    # `supersede: true` gets the existing conflicting directive back
+    # instead of silently creating a second, contradictory active row on
+    # the same subject -- the caller (or the Owner, via Earth relaying
+    # the conflict) then decides whether to supersede it explicitly.
+    # `supersede` defaults False, so every pre-existing caller (REMEMBER/
+    # FORGET WhatsApp path, any earlier script) that never sends this
+    # field is completely unaffected in the no-conflict case, and gets a
+    # clear 409 instead of silent duplication in the conflict case (a
+    # strict improvement, not a behavior regression for a legitimate use).
+    conflict = await admin_directives.find_conflicting_directive(
+        subject_type, subject_key, directive_text,
+    )
+    if conflict and not (payload or {}).get("supersede"):
+        raise HTTPException(
+            409,
+            {
+                "error": "conflicting_active_directive",
+                "existing_directive": {
+                    "id": conflict["id"],
+                    "directive_text": conflict["directive_text"],
+                    "created_at": conflict["created_at"].isoformat() if conflict.get("created_at") else None,
+                },
+                "hint": "Pass supersede=true to revoke the existing directive and write this one instead.",
+            },
+        )
     actor = await _rbac_actor_from_key(key)
+    if conflict and (payload or {}).get("supersede"):
+        await admin_directives.revoke_directive(conflict["id"], revoked_by_phone=actor.get("phone") or "")
     directive_id = await admin_directives.save_directive(
         directive_text,
         created_by_phone=actor.get("phone") or "",
         created_by_channel="web",
         category=(payload or {}).get("category") or "general",
-        subject_type=(payload or {}).get("subject_type"),
-        subject_key=(payload or {}).get("subject_key"),
+        subject_type=subject_type,
+        subject_key=subject_key,
     )
-    return {"id": directive_id}
+    return {"id": directive_id, "superseded_id": conflict["id"] if conflict else None}
 
 
 @app.post("/admin/directives/{directive_id}/revoke", dependencies=[Depends(require_command("admin_directive_write"))])
