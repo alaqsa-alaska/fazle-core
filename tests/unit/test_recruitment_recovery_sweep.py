@@ -237,7 +237,7 @@ class TestSchedulerWiring:
 class TestRunRecoverySweep:
     async def test_no_candidates_no_admin_digest_sent(self):
         with (
-            patch("modules.preflight_guard.is_feature_active", new=AsyncMock(return_value=False)),
+            patch("modules.preflight_guard.is_feature_active", return_value=False),
             patch("modules.recruitment_recovery_sweep._find_stale_unanswered", new=AsyncMock(return_value=[])),
         ):
             from modules.recruitment_recovery_sweep import run_recovery_sweep
@@ -249,7 +249,7 @@ class TestRunRecoverySweep:
     async def test_actionable_results_trigger_one_admin_digest(self):
         mock_enqueue = AsyncMock()
         with (
-            patch("modules.preflight_guard.is_feature_active", new=AsyncMock(return_value=False)),
+            patch("modules.preflight_guard.is_feature_active", return_value=False),
             patch("modules.recruitment_recovery_sweep._find_stale_unanswered", new=AsyncMock(return_value=[CANDIDATE_ROW])),
             patch(
                 "modules.recruitment_recovery_sweep._decide_and_reply",
@@ -268,7 +268,7 @@ class TestRunRecoverySweep:
     async def test_all_skips_no_admin_digest(self):
         mock_enqueue = AsyncMock()
         with (
-            patch("modules.preflight_guard.is_feature_active", new=AsyncMock(return_value=False)),
+            patch("modules.preflight_guard.is_feature_active", return_value=False),
             patch("modules.recruitment_recovery_sweep._find_stale_unanswered", new=AsyncMock(return_value=[CANDIDATE_ROW])),
             patch(
                 "modules.recruitment_recovery_sweep._decide_and_reply",

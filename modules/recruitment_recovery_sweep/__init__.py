@@ -211,8 +211,14 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
 async def run_recovery_sweep() -> dict:
     """Entry point for the scheduler job (and manual `trigger_job`/admin
     RUN JOB invocation). Always returns a summary dict; never raises."""
+    # 2026-08-25 live-restart-caught bug fix: is_feature_active() is
+    # SYNCHRONOUS (in-memory cache read, see modules.preflight_guard) --
+    # `await`ing it raised "object bool can't be used in 'await'
+    # expression" on every real scheduler tick, caught only after the
+    # first live post-restart run (unit tests mocked this with an
+    # AsyncMock, which masked the sync/async mismatch entirely).
     from modules.preflight_guard import is_feature_active
-    live_send = await is_feature_active("recruitment_recovery_sweep_live_send", default=False)
+    live_send = is_feature_active("recruitment_recovery_sweep_live_send", default=False)
 
     candidates = await _find_stale_unanswered(_MAX_CANDIDATES_PER_RUN)
     decisions = []
