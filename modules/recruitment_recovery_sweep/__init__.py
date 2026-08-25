@@ -134,7 +134,27 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
 
         from shared.draft import should_generate_draft
         chat_jid = phone if "@" in phone else f"{phone}@s.whatsapp.net"
-        ok_to_consider = await should_generate_draft(chat_jid, received_at)
+        # 2026-08-25, WS2 live-sample verification: should_generate_draft()'s
+        # OWN default historical_cutoff_hours is 2 -- a value tuned for its
+        # original caller (skip drafting replies to freshly-imported WA
+        # history), not for this sweep's intentionally much wider
+        # _LOOKBACK_HOURS=48 window. Calling it unqualified silently capped
+        # every candidate older than 2h to the SAME "already_replied" skip
+        # as a genuine prior reply -- confirmed against a real 20-candidate
+        # sample: 19/20 were >2h old and 100% of them were skipped this way,
+        # while the one candidate under 2h old was the only one that reached
+        # real reply generation. That made "already_replied" true for the
+        # wrong reason for the large majority of the sweep's actual target
+        # population (stale 2h-48h conversations -- the ones that most need
+        # recovery) and silently shrank the sweep's real effective window to
+        # ~15min-2h. Passing this sweep's own lookback aligns the reused
+        # guard's historical cutoff with the window _find_stale_unanswered()
+        # already enforces at the SQL level, so the guard's remaining
+        # (fpe_wa_messages is_from_me) check is what actually decides
+        # "already_replied" going forward.
+        ok_to_consider = await should_generate_draft(
+            chat_jid, received_at, historical_cutoff_hours=_LOOKBACK_HOURS
+        )
         if not ok_to_consider:
             # 2026-08-25, Workstream 2 live-sample verification: label
             # corrected from "admin_already_replied" to "already_replied".

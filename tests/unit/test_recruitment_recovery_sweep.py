@@ -109,6 +109,27 @@ class TestDecideAndReplyGates:
         assert result["action"] == "skip"
         assert result["reason"] == "no_reply_generated"
 
+    async def test_should_generate_draft_called_with_sweep_lookback_cutoff(self):
+        """2026-08-25 WS2 real-sample bug fix: should_generate_draft()'s own
+        default historical_cutoff_hours=2 is tuned for its ORIGINAL caller
+        (skip drafting on freshly-imported WA history), not for this
+        sweep's much wider _LOOKBACK_HOURS=48 window. Confirmed against a
+        real 20-candidate live sample: 19/20 were >2h old and 100% of them
+        were skipped as "already_replied" purely from that unrelated 2h
+        cutoff, not a genuine prior reply -- silently capping the sweep's
+        real effective window to ~15min-2h instead of the intended 48h.
+        This locks in the fix: the sweep must pass its own lookback so the
+        reused guard's historical cutoff matches its actual candidate
+        window."""
+        from modules.recruitment_recovery_sweep import _LOOKBACK_HOURS
+        patches = _patch_common()
+        with _apply_all(patches):
+            from modules.recruitment_recovery_sweep import _decide_and_reply
+            await _decide_and_reply(CANDIDATE_ROW, live_send=False)
+        patches["shared.draft.should_generate_draft"].assert_awaited_once()
+        _, kwargs = patches["shared.draft.should_generate_draft"].call_args
+        assert kwargs.get("historical_cutoff_hours") == _LOOKBACK_HOURS == 48
+
 
 class TestDecideAndReplyDryRunVsLiveSend:
     async def test_dry_run_never_calls_outbound_enqueue(self):
