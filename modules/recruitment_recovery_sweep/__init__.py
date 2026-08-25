@@ -136,7 +136,16 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
         chat_jid = phone if "@" in phone else f"{phone}@s.whatsapp.net"
         ok_to_consider = await should_generate_draft(chat_jid, received_at)
         if not ok_to_consider:
-            decision["reason"] = "admin_already_replied"
+            # 2026-08-25, Workstream 2 live-sample verification: label
+            # corrected from "admin_already_replied" to "already_replied".
+            # should_generate_draft() checks ANY outbound (is_from_me=TRUE)
+            # after the inbound -- confirmed via a real live sample
+            # (8801306116146) that this includes AI/system-generated
+            # replies, not only a human admin's manual reply. The
+            # underlying safety property (never double-reply) was already
+            # correct; only this label was misleading about who/what sent
+            # the prior reply.
+            decision["reason"] = "already_replied"
             return decision
 
         from modules.intent import classify as classify_intent

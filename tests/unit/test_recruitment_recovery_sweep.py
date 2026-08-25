@@ -91,10 +91,13 @@ class TestDecideAndReplyGates:
         assert result["action"] == "skip"
         assert "role_not_in_sweep_scope" in result["reason"]
 
-    async def test_admin_already_replied_is_skipped(self):
+    async def test_already_replied_is_skipped(self):
+        """Label corrected 2026-08-25 (Workstream 2 live-sample
+        verification): should_generate_draft() catches ANY prior
+        outbound, not only a human admin's -- see the code's own comment."""
         result = await _run_decide(ok_to_consider=False)
         assert result["action"] == "skip"
-        assert result["reason"] == "admin_already_replied"
+        assert result["reason"] == "already_replied"
 
     async def test_recruitment_ineligible_is_skipped(self):
         result = await _run_decide(eligibility={"eligible": False, "autosend": False, "reason": "no_recruitment_context"})
