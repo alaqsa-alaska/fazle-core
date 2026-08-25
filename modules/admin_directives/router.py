@@ -77,12 +77,14 @@ _AI_COOLDOWN_SECONDS = 5.0
 
 # ── Rate limiter + in-flight tracking (Hermes relay only) ───────────────────
 # A real Hermes turn spawns a real subprocess with real LLM/tool cost and can
-# take up to hermes-runner's own ~170s budget -- far longer than this
-# codebase's MESSAGE_ROUTE_TIMEOUT (30s default), so it must run as a
-# fire-and-forget background task (see _handle_hermes_relay), not be awaited
-# inline. A longer cooldown than the AI-console query above is deliberate:
-# this gates a much more expensive, real-compute operation, one bridge2
-# Super Admin at a time.
+# take up to hermes-runner's own budget (300s as of 2026-08-14, raised from
+# 150s for opencode_dispatch headroom -- see hermes-runner/server.py's own
+# timeout-chain comment and HANDOFF_P2_TIMEOUT_FIX_2026-08-14.md) -- far
+# longer than this codebase's MESSAGE_ROUTE_TIMEOUT (30s default), so it
+# must run as a fire-and-forget background task (see _handle_hermes_relay),
+# not be awaited inline. A longer cooldown than the AI-console query above
+# is deliberate: this gates a much more expensive, real-compute operation,
+# one bridge2 Super Admin at a time.
 _hermes_cooldown: dict[str, float] = {}
 _HERMES_COOLDOWN_SECONDS = 15.0
 # Keeps a strong reference to in-flight background tasks so they aren't
@@ -479,7 +481,15 @@ async def _call_hermes_readonly(
     rule against inventing a parallel mechanism where one already exists."""
     settings = get_settings()
     try:
-        async with httpx.AsyncClient(timeout=175.0) as client:
+        # 175.0 -> 330.0 on 2026-08-14: must stay above hermes-runner's own
+        # HERMES_RUN_TIMEOUT (300s as of the same date, raised for
+        # opencode_dispatch headroom) with real margin, same as this
+        # chain's other members -- see hermes-runner/server.py's timeout-
+        # chain comment and HANDOFF_P2_TIMEOUT_FIX_2026-08-14.md. This is
+        # a separate, direct-to-127.0.0.1:8093 call (no nginx hop) from
+        # assistant-platform's own hermes.js/nginx chain -- both had to be
+        # raised independently in lockstep with hermes-runner.
+        async with httpx.AsyncClient(timeout=330.0) as client:
             resp = await client.post(
                 f"{settings.hermes_runner_url}/run",
                 headers={"Authorization": f"Bearer {settings.hermes_runner_secret}"},
