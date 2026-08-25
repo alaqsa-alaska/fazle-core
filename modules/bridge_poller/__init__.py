@@ -1270,6 +1270,8 @@ async def _poll_bridge(config: dict):
                         bridge_name, phone, text,
                         id_role=id_role, id_conf=id_conf, id_name=id_name,
                         message_id=str(msg.get("id") or msg.get("message_id") or ""),
+                        chat_jid=msg.get("chat_jid") or "",
+                        msg_timestamp=_parse_source_timestamp(msg.get("timestamp")),
                     )
                     await _mark_core_queue_status(bridge_name, msg, "done")
                 except Exception as route_err:
@@ -1970,6 +1972,8 @@ async def process_bridge_inbound(
     id_conf: int = 0,
     id_name: str = "",
     message_id: str = "",
+    chat_jid: str = "",
+    msg_timestamp=None,
 ) -> None:
     """Unified bridge inbound processing pipeline.
 
@@ -1978,6 +1982,15 @@ async def process_bridge_inbound(
     entry paths behave identically.
 
     Does NOT save the inbound message — callers must do that beforehand.
+
+    chat_jid / msg_timestamp (2026-08-25 recovery-pass wiring, optional):
+    when both are provided, enables shared.draft.should_generate_draft()'s
+    "admin already replied" guard right before the customer-facing send
+    decision below. That check existed in shared/draft.py but was never
+    called from any live send path (unit-tested only) -- callers that omit
+    these two kwargs get the prior behavior unchanged (check skipped, fail-
+    open). msg_timestamp should be the actual inbound message's timestamp
+    (tz-aware or naive-UTC datetime), not the current time.
     """
     # 0. Recruitment eligibility + best-effort funnel entry (2026-08-21,
     # Owner Correction 1 / regression case ...1609): this used to be step 3,
@@ -2164,6 +2177,33 @@ async def process_bridge_inbound(
                 else:
                     log.warning("[%s] Admin-Hermes reply enqueue failed/deduped for %s", bridge_name, phone)
         else:
+            # 2026-08-25 recovery-pass wiring: "admin already manually
+            # replied to this thread" guard (shared.draft.should_generate_
+            # draft() -- previously dead code, unit-tested but never called
+            # from any live send path; see recovery-2026-08-25 branch).
+            # Runs before the entire customer-facing safety cascade below:
+            # if a human admin has already answered this chat on WhatsApp
+            # since this inbound came in, there is nothing for Hermes to
+            # add and no draft should be created either. Fail-open by
+            # design (see should_generate_draft docstring) and a no-op
+            # unless the caller supplied both chat_jid and msg_timestamp.
+            if chat_jid and msg_timestamp is not None:
+                try:
+                    from shared.draft import should_generate_draft
+                    if not await should_generate_draft(chat_jid, msg_timestamp):
+                        log.info(
+                            "[%s] MANUAL_REPLY_GUARD: admin already replied to %s "
+                            "(chat_jid=%s) — skipping auto-reply/draft",
+                            bridge_name, phone, chat_jid,
+                        )
+                        return
+                except Exception as _mrg_err:
+                    log.debug(
+                        "[%s] should_generate_draft check failed phone=%s: %s — "
+                        "proceeding (fail-open)",
+                        bridge_name, phone, _mrg_err,
+                    )
+
             # P17-FIX-2: recruit_gate — recruitment intake bypasses SAFE MODE
             # Role-based auto-reply: read live from DB (via wa_chat_frontend) so the UI toggle takes effect immediately.
             _recruit_gate = False

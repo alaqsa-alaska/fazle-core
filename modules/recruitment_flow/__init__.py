@@ -1152,16 +1152,23 @@ async def recruitment_eligibility(
     if role in OPERATIONAL_ROLES or role not in ("unknown", "new_lead", "candidate"):
         return {"eligible": False, "autosend": False, "reason": "operational_identity",
                 "active_session": active_session}
+    if active_session:
+        # 2026-08-25 recovery-pass fix: this check now runs BEFORE the
+        # operational_intent check below (was after -- see git history).
+        # A mid-funnel candidate's fee/location/etc. question can trip an
+        # OPERATIONAL_INTENTS keyword (e.g. bare "টাকা" -> payment_due) even
+        # though they are actively answering the funnel's own questions.
+        # An existing active session is a far stronger signal than any
+        # single-turn intent classification, so it must not be overridden
+        # by one -- superset of the old "session_followup_draft" keyword-
+        # hint check. Still draft-only (autosend=False) so an established
+        # candidate's free-text answer never bypasses the normal review
+        # posture, only the explicit-trigger/detector-entity paths below
+        # autosend.
+        return {"eligible": True, "autosend": False, "reason": "active_session_continuation",
+                "active_session": active_session}
     if intent in OPERATIONAL_INTENTS:
         return {"eligible": False, "autosend": False, "reason": "operational_intent",
-                "active_session": active_session}
-    if active_session:
-        # Superset of the old "session_followup_draft" keyword-hint check --
-        # a session already existing is itself the strong signal; still
-        # draft-only (autosend=False) so an established candidate's free-
-        # text answer never bypasses the normal review posture, only the
-        # explicit-trigger/detector-entity paths below autosend.
-        return {"eligible": True, "autosend": False, "reason": "active_session_continuation",
                 "active_session": active_session}
     if explicit:
         return {"eligible": True, "autosend": True, "reason": "explicit_recruitment",
