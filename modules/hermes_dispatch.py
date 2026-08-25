@@ -550,6 +550,40 @@ async def _minimax_primary_enabled() -> bool:
         return False
 
 
+def _shadow_check_reply_grounding(
+    reply: Optional[str], db_context: str, *, role: str, intent: str, source: str,
+) -> None:
+    """Workstream 3, 2026-08-25 closure pass ("knowledge-grounded
+    conversation, no hallucinated facts"): the recruitment path has
+    _recruitment_reply_matches_source() as a live-enforced fact-check
+    gate; generate_reply() (employee/general) had none at all. Reuses
+    that same function -- its actual logic (numbers/places must appear in
+    the supplied context) is not recruitment-specific, only its name and
+    the flag it reads are.
+
+    Deliberately SHADOW-ONLY here, not enforced: this path's db_context is
+    far more heterogeneous than recruitment's curated source-of-truth file
+    (ad hoc payroll numbers, generic RAG snippets, contact context), so
+    blocking without first measuring the real false-positive rate risks
+    degrading real employee replies -- exactly the "activate first,
+    investigate after" mistake this closure pass is explicitly trying to
+    avoid. Logs only; never changes the returned reply, never raises.
+    Promote to enforced once shadow evidence shows an acceptably low
+    false-positive rate, same staged pattern recruitment_factcheck_
+    normalized itself used before going live."""
+    if not reply or not db_context:
+        return
+    try:
+        if not _recruitment_reply_matches_source(reply, db_context):
+            log.warning(
+                "[hermes_dispatch] generate_reply SHADOW fact-check would have "
+                "blocked role=%s intent=%s source=%s (not enforced)",
+                role, intent, source,
+            )
+    except Exception as exc:  # noqa: BLE001 — shadow check must never affect the real reply
+        log.debug("[hermes_dispatch] generate_reply shadow fact-check error: %s", exc)
+
+
 async def generate_reply(
     user_message: str,
     intent: str,
@@ -592,6 +626,7 @@ async def generate_reply(
             minimax_reply = None
         if minimax_reply:
             log.info("[hermes_dispatch] generate_reply(minimax_primary) role=%s intent=%s source=%s", role, intent, source)
+            _shadow_check_reply_grounding(minimax_reply, db_context, role=role, intent=intent, source=source)
             return minimax_reply
         log.info("[hermes_dispatch] generate_reply minimax unavailable/empty — falling back to hermes-runner")
 
@@ -603,10 +638,12 @@ async def generate_reply(
         db_context=db_context,
         history=history,
     )
-    return await _call_hermes(
+    reply = await _call_hermes(
         message, sender_phone=sender_phone,
         log_label=f"generate_reply role={role} intent={intent} source={source}",
     )
+    _shadow_check_reply_grounding(reply, db_context, role=role, intent=intent, source=source)
+    return reply
 
 
 async def generate_recruitment_reply(
