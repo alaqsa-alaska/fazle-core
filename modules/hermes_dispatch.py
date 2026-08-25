@@ -209,6 +209,79 @@ def build_recruitment_context(message: str) -> str:
     return _FEE_SECTION_RE.sub("", full_text)
 
 
+# Phase 3, 2026-08-25 recovery pass ("employee-info grounding gap"): the
+# recruitment path above has a dedicated, reliably-read authoritative
+# source (recruitment_source_of_truth.txt, wired 2026-08-12). The
+# employee-conversation path had no equivalent -- general company-rules/
+# leave/attendance/duty questions fell back to generic top-3 BM25 RAG
+# over the whole undifferentiated corpus, the same mechanism this
+# module's own comments above (2026-08-12) document as unreliable for
+# surfacing a single authoritative file's content on natural phrasing.
+# master_recruitment_employee_information.txt's অংশ-১ ("কোম্পানি নীতিমালা")
+# section is exactly this content (attendance, leave, discipline, salary-
+# payment dates/mechanics, resignation notice, provident fund, etc.) --
+# extracted from the same file the recruitment path already treats as
+# authoritative rather than duplicated into a second file, to avoid the
+# multi-document-drift problem this same recovery pass found and fixed
+# for the training-salary figures. অংশ-২ (a blank appointment-letter
+# template) and the later "Recruitment Knowledge Library" section are
+# explicitly candidate-facing, not employee-facing, so they're excluded.
+_EMPLOYEE_POLICY_SOURCE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "resources"
+    / "ops"
+    / "master_recruitment_employee_information.txt"
+)
+_employee_policy_cache: Optional[str] = None
+_EMPLOYEE_POLICY_SECTION_RE = re.compile(r"অংশ-১[:：].*?(?=অংশ-২[:：])", re.S)
+
+
+def _load_employee_policy_raw() -> str:
+    """Read + cache just the অংশ-১ (company policy) section of
+    master_recruitment_employee_information.txt. Mirrors
+    _load_recruitment_source_raw()'s whole-file-read-and-cache pattern
+    (cached at module level for process lifetime), scoped to this
+    section only. Falls back to the whole file (with a warning) if the
+    অংশ-১/অংশ-২ markers aren't found, rather than silently returning
+    nothing. Fails closed to "" on any read error; never raises."""
+    global _employee_policy_cache
+    if _employee_policy_cache is not None:
+        return _employee_policy_cache
+    try:
+        full = _EMPLOYEE_POLICY_SOURCE_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "[hermes_dispatch] failed to read master_recruitment_employee_information.txt: %s",
+            exc,
+        )
+        return ""
+    match = _EMPLOYEE_POLICY_SECTION_RE.search(full)
+    if match:
+        text = match.group(0).strip()
+    else:
+        log.warning(
+            "[hermes_dispatch] employee policy section markers (অংশ-১/অংশ-২) not "
+            "found in master_recruitment_employee_information.txt — using whole "
+            "file as fallback (may include non-employee-facing content)"
+        )
+        text = full.strip()
+    _employee_policy_cache = text
+    return text
+
+
+def build_employee_context(message: str = "") -> str:
+    """Authoritative employee company-policy context (attendance, leave,
+    discipline, salary-payment dates/mechanics, resignation notice,
+    provident fund, etc.) for a specific inbound message. Currently
+    returns the full অংশ-১ section unconditionally -- unlike
+    build_recruitment_context() there is no known sensitive sub-section
+    that should only be included on direct question, but the message
+    parameter is kept for signature symmetry and possible future
+    topic-scoped filtering. Fails closed to "" if the source file failed
+    to load."""
+    return _load_employee_policy_raw()
+
+
 _NUMBER_RE = re.compile(r"[0-9০-৯][0-9০-৯,.\-–+]*")
 _PLACE_RE = re.compile(
     r"[\wঀ-৿-]{2,}(?:পাড়া|ঘাট|এলাকা|জেলা|বন্দর)[ঀ-৿]{0,3}"

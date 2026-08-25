@@ -1662,6 +1662,27 @@ async def process_message(
 
     # ── 15. AI FALLBACK ────────────────────────────────────────────────────────
     db_ctx = await get_contact_context(sender)
+    # Phase 3, 2026-08-25 recovery pass ("employee-info grounding gap"):
+    # a known employee's general company-rules/leave/attendance/duty
+    # question landed here with only get_contact_context() + generic
+    # top-3 RAG below -- the same generic RAG mechanism this codebase's
+    # own comments (modules/hermes_dispatch.py, 2026-08-12) document as
+    # unreliable for surfacing a single authoritative file's content.
+    # build_employee_context() reads master_recruitment_employee_
+    # information.txt's অংশ-১ (company policy) section directly, the same
+    # dedicated-whole-file-read pattern already used for Recruitment.
+    # Scoped to employee/supervisor roles only -- unrelated roles
+    # (accountant, escort_client, etc.) don't get internal HR policy
+    # text injected into their general-fallback context. Fail-safe:
+    # never blocks the reply if the source file is unavailable.
+    if role_str in ("employee", "supervisor"):
+        try:
+            from modules.hermes_dispatch import build_employee_context as _build_emp_ctx
+            _emp_policy = _build_emp_ctx(text)
+            if _emp_policy:
+                db_ctx = (db_ctx + "\n\nCompany Policy:\n" + _emp_policy).strip()
+        except Exception as _emp_ctx_err:
+            log.debug("[router] employee policy context skipped: %s", _emp_ctx_err)
     # Phase 4 — Hybrid RAG enrichment: enrich general queries with KB context
     try:
         from modules.rag import safe_search as _rag_search
