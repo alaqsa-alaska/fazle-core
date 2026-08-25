@@ -108,3 +108,70 @@ class TestGetActiveDirectivesContext:
         with patch("modules.admin_directives.list_directives", new=AsyncMock(return_value=rows)):
             result = await get_active_directives_context()
         assert result == ""
+
+
+class TestBuildRecruitmentContextWithDirectives:
+    """hermes_dispatch.build_recruitment_context_with_directives() --
+    wraps the existing synchronous build_recruitment_context() (untouched)
+    with the active-directives block appended. See its own docstring for
+    why this is a new function rather than an async conversion of the
+    original."""
+
+    async def test_no_active_directives_returns_base_context_unchanged(self):
+        from modules import hermes_dispatch
+        with (
+            patch.object(hermes_dispatch, "build_recruitment_context", return_value="base recruitment kb"),
+            patch("modules.admin_directives.get_active_directives_context", new=AsyncMock(return_value="")),
+        ):
+            result = await hermes_dispatch.build_recruitment_context_with_directives("hi")
+        assert result == "base recruitment kb"
+
+    async def test_active_directive_appended_after_base_context(self):
+        from modules import hermes_dispatch
+        with (
+            patch.object(hermes_dispatch, "build_recruitment_context", return_value="base recruitment kb"),
+            patch(
+                "modules.admin_directives.get_active_directives_context",
+                new=AsyncMock(return_value="- [recruitment_rule/x] minimum age is 23"),
+            ),
+        ):
+            result = await hermes_dispatch.build_recruitment_context_with_directives("hi")
+        assert "base recruitment kb" in result
+        assert "minimum age is 23" in result
+        assert result.index("base recruitment kb") < result.index("minimum age is 23")
+
+    async def test_empty_base_context_with_active_directive_returns_directive_only(self):
+        from modules import hermes_dispatch
+        with (
+            patch.object(hermes_dispatch, "build_recruitment_context", return_value=""),
+            patch(
+                "modules.admin_directives.get_active_directives_context",
+                new=AsyncMock(return_value="- [x/y] some rule"),
+            ),
+        ):
+            result = await hermes_dispatch.build_recruitment_context_with_directives("hi")
+        assert result == "- [x/y] some rule"
+
+
+class TestBuildEmployeeContextWithDirectives:
+    async def test_no_active_directives_returns_base_context_unchanged(self):
+        from modules import hermes_dispatch
+        with (
+            patch.object(hermes_dispatch, "build_employee_context", return_value="base employee policy"),
+            patch("modules.admin_directives.get_active_directives_context", new=AsyncMock(return_value="")),
+        ):
+            result = await hermes_dispatch.build_employee_context_with_directives("hi")
+        assert result == "base employee policy"
+
+    async def test_active_directive_appended_after_base_context(self):
+        from modules import hermes_dispatch
+        with (
+            patch.object(hermes_dispatch, "build_employee_context", return_value="base employee policy"),
+            patch(
+                "modules.admin_directives.get_active_directives_context",
+                new=AsyncMock(return_value="- [employee_rule/x] new leave policy"),
+            ),
+        ):
+            result = await hermes_dispatch.build_employee_context_with_directives("hi")
+        assert "base employee policy" in result
+        assert "new leave policy" in result
