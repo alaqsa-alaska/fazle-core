@@ -410,6 +410,19 @@ async def job_backup_staleness() -> dict:
     return {"status": "ok", "newest_age_h": newest_age_h, "alerted": True}
 
 
+async def job_recruitment_recovery_sweep() -> dict:
+    """Phase 7, 2026-08-25 recovery pass: periodic unanswered Recruitment/
+    Employee conversation recovery. Thin wrapper -- all real logic lives
+    in modules.recruitment_recovery_sweep (lazy import here for the same
+    reason every other job module is lazily imported in this file:
+    avoids a top-level import cycle, since that module imports several
+    things -- identity_brain, recruitment_flow, hermes_dispatch,
+    bridge_poller -- that themselves import modules.scheduler indirectly
+    via modules.admin_directives.router's trigger_admin_investigation)."""
+    from modules.recruitment_recovery_sweep import run_recovery_sweep
+    return await run_recovery_sweep()
+
+
 async def job_combined_draft_cleanup() -> dict:
     """P15-01/P15-02 — hourly: clean draft entries older than 24h."""
     results: dict = {"status": "ok"}
@@ -579,6 +592,7 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     register_job("payment_reconciliation", job_payment_reconciliation)
     register_job("backup_staleness_alert", job_backup_staleness)
     register_job("combined_draft_cleanup", job_combined_draft_cleanup)
+    register_job("recruitment_recovery_sweep", job_recruitment_recovery_sweep)
     register_job("daily_memory_review", job_daily_memory_review)
     register_job("rag_rebuild", job_rag_rebuild)
 
@@ -639,6 +653,17 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     _scheduler.add_job(_wrap("combined_draft_cleanup", job_combined_draft_cleanup),
                        IntervalTrigger(hours=1),
                        id="combined_draft_cleanup", replace_existing=True)
+
+    # Phase 7, 2026-08-25 recovery pass: periodic unanswered Recruitment/
+    # Employee conversation recovery, ~30 min per the Owner's own stated
+    # requirement. See modules.recruitment_recovery_sweep's module
+    # docstring -- guarded behind recruitment_recovery_sweep_live_send
+    # (DB feature flag, default False); runs full dry-run analysis +
+    # admin digest either way, only gates the actual outbound send.
+    recovery_sweep_min = int(os.getenv("RECRUITMENT_RECOVERY_SWEEP_INTERVAL_MIN", "30"))
+    _scheduler.add_job(_wrap("recruitment_recovery_sweep", job_recruitment_recovery_sweep),
+                       IntervalTrigger(minutes=recovery_sweep_min),
+                       id="recruitment_recovery_sweep", replace_existing=True)
 
     # Phase 6 — Continuous Learning Loop
     memory_review_hour = int(os.getenv("MEMORY_REVIEW_HOUR", "9"))
