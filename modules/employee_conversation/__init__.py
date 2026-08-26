@@ -1186,3 +1186,135 @@ async def handle_employee_payment_request(
 
     identity = await resolve_employee_identity(phone, employee_id=employee_id)
     return await start_employee_conversation(phone, text, source, purpose, identity)
+
+
+# ── Phase 5 (2026-08-26): Employee informational query handler ───────────────
+# Reusable handler for salary_query / payment_due / "টাকা কবে" / "আমার
+# পাওনা আছে?" type questions. Builds verified employee payroll context,
+# enriches with general salary-policy KB (RAG), and calls Hermes with the
+# SAME Tier-15 confidentiality net the legacy §10 chain already applies.
+#
+# HARD GUARANTEES (mirrors handle_employee_payment_request()'s contract):
+#   - NEVER calls create_transaction(), _upsert_ledger(), accounting_worker(),
+#     or any financial-write function.
+#   - NEVER mutates payroll, ledger, balance, or attendance.
+#   - Returns a conversational reply (string) + admin_note (None) only.
+#   - On any failure: returns a safe clarification / fallback, never
+#     fabricates salary figures or payment dates that aren't in the
+#     authoritative payroll summary.
+#   - Privacy: db_ctx is scoped to the resolved emp_id (server-resolved,
+#     not user-supplied); the Tier-15 net strips any other phone/credential
+#     from the reply before it leaves.
+#
+# Reused by BOTH:
+#   - message_router §10 legacy chain (no behavior change for keyword path)
+#   - message_router _task13_authoritative_dispatch() (Phase 5, semantic
+#     employee path; same logic, same guarantees, called when
+#     task13_employee_authoritative=ON and intent in salary_query/payment_due).
+async def handle_employee_informational_query(
+    phone: str,
+    text: str,
+    source: str,
+    emp_id: int,
+    intent: str = "salary_query",
+) -> tuple[str, Optional[dict]]:
+    """Handle salary_query / payment_due / "টাকা কবে পাব?" / "আমার পাওনা আছে?"
+    questions for a verified employee.
+
+    Builds authoritative payroll context from get_payroll_summary(emp_id),
+    enriches with general salary-policy KB via RAG (fail-safe if RAG is
+    slow/unavailable), then either calls Hermes (hermes_customer_employee
+    flag ON) or falls through to the unchanged app.llm chain.
+
+    The reply is cleaned + passed through enforce_general_reply_confidentiality
+    (Tier 15 net) which permits the sender's own phone number, blocks
+    credential-like output and any OTHER phone number.
+
+    Returns (reply, None) on success or safe clarification.
+    """
+    try:
+        from modules.payroll_logic import get_payroll_summary, format_payroll_context
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ec/phase5] payroll_logic import failed: %s", exc)
+        return (
+            "এই মুহূর্তে বেতন/পে�েন্ট তথ্য পেতে অনুগ্রহ করে অ�িসে যোগাযোগ করুন।",
+            None,
+        )
+
+    try:
+        payroll = await get_payroll_summary(emp_id)
+        db_ctx = format_payroll_context(payroll)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ec/phase5] payroll summary failed emp=%s: %s", emp_id, exc)
+        db_ctx = ""
+
+    # KB / RAG enrichment — fail-safe. Adds general salary-policy content
+    # (payment-date rule, attendance condition, deductions) so the LLM has
+    # policy context beyond this employee's own row.
+    try:
+        from modules.rag import safe_search as _rag_search
+        _rag_hits = await _rag_search(text, k=3, role="employee")
+        if _rag_hits:
+            _rag_lines = [
+                f"- {h.get('title', '')}: {(h.get('text') or '').strip()[:300]}"
+                for h in _rag_hits
+                if (h.get("text") or "").strip()
+            ]
+            if _rag_lines:
+                db_ctx = (db_ctx + "\n\nKB Context:\n" + "\n".join(_rag_lines)).strip()
+    except Exception as _rag_err:  # noqa: BLE001 — RAG is best-effort
+        log.debug("[ec/phase5] rag enrichment skipped: %s", _rag_err)
+
+    # Build history (last few turns, bidirectional). Same source as §10.
+    try:
+        from modules.message_router import get_recent_history
+        history_lines = await get_recent_history(phone, limit=5)
+        history = "\n".join(history_lines)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[ec/phase5] history fetch failed: %s", exc)
+        history = ""
+
+    reply: Optional[str] = None
+
+    # Try Hermes first when the customer-dispatch flag is on.
+    try:
+        from modules.preflight_guard import is_feature_active
+        if is_feature_active("hermes_customer_employee", default=False):
+            from modules.hermes_dispatch import generate_reply as _hermes_generate_reply
+            reply = await _hermes_generate_reply(
+                text, intent, db_ctx, history=history, role="employee",
+                source=source, sender_phone=phone,
+            )
+    except Exception as exc:  # noqa: BLE001 — never block fallback
+        log.warning("[ec/phase5] hermes path failed: %s", exc)
+
+    # Fallback: legacy app.llm chain (unchanged).
+    if not reply:
+        try:
+            from app import llm as _ai
+            reply = await _ai.generate_reply(
+                text, intent, db_ctx, history=history, role="employee", source=source,
+            )
+        except Exception as exc:  # noqa: BLE001 — must always produce a reply
+            log.warning("[ec/phase5] ai.generate_reply failed: %s", exc)
+            reply = ""
+
+    # Tier-15 confidentiality net: strip credential-like output, echoed
+    # prompt sections, and any non-sender phone number.
+    try:
+        from shared.reply_policy import (
+            clean_general_reply as _clean_reply,
+            enforce_general_reply_confidentiality as _enforce_confidentiality,
+        )
+        reply = _enforce_confidentiality(_clean_reply(reply), sender_phone=phone)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[ec/phase5] confidentiality net failed: %s", exc)
+
+    if not reply or not reply.strip():
+        # Safe clarification — never fabricate figures.
+        reply = (
+            "এই মুহূর্তে নির্দিষ্ট বেতন/পে�েন্ট তথ্য যাচাই করে জানাতে পারছি না। "
+            "অনুগ্রহ করে অফিসে যোগাযোগ করুন।"
+        )
+
+    return reply, None

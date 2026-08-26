@@ -534,9 +534,8 @@ async def _task13_authoritative_dispatch(
 
     if domain == "employee_conversation" and sem_decision.confidence >= 0.6:
         # Gated ONLY by task13_employee_authoritative — never by the
-        # recruitment flag. Employee-domain authoritative routing has zero
-        # live evidence yet (Owner decision, 2026-08-22) and must stay in
-        # true shadow until this flag is explicitly turned on for it.
+        # recruitment flag. Employee-domain authoritative routing is
+        # enabled by Phase 5 (2026-08-26, Owner directive).
         if not employee_authoritative:
             return None, None
         emp_id = identity_reference.get("employee_id") or identity_reference.get("linked_employee_id")
@@ -547,19 +546,26 @@ async def _task13_authoritative_dispatch(
             # reached — this is a defensive fail-closed guard, not the
             # normal path. Never guess an identity here.
             return None, None
-        # 2026-08-21 salary/keyword-trigger context-routing fix and the
-        # existing release-intent admin-review branch (both in the legacy
-        # §10 EMPLOYEE chain) are order-dependent protections this
-        # function must not shortcut around — see this session's own
-        # "never repeat that guard-widening class of mistake" instruction.
-        # Both are deliberately left to the legacy chain via an
-        # unconditional (None, None) fall-through; only genuinely
-        # conversational triggers (advance/food/conveyance/emergency, or
-        # an already-open Sprint-3A session) are delegated to the module
-        # literally named for this domain.
+        # Phase 5 (2026-08-26): salary_query / payment_due now enter the
+        # semantic employee path via the reusable informational handler.
+        # The handler uses get_payroll_summary(emp_id) + format_payroll_context
+        # + RAG enrichment + Hermes (hermes_customer_employee flag gated)
+        # + Tier-15 confidentiality net. NEVER mutates payroll/ledger/
+        # attendance. Returns a conversational reply or safe clarification.
         if intent in ("salary_query", "payment_due"):
-            return None, None
-        from modules.escort_lifecycle import is_release_intent
+            from modules.employee_conversation import (
+                handle_employee_informational_query as _ec_informational,
+            )
+            _ec_reply, _ec_admin_note = await _ec_informational(
+                sender, text, source, emp_id, intent=intent,
+            )
+            return _ec_reply, _ec_admin_note
+        # Other conversational triggers (advance/food/conveyance/emergency,
+        # or an already-open Sprint-3A session) continue to use the legacy
+        # ec_handle_payment_request path -- the 2026-08-21 salary/keyword
+        # trigger-context-routing fix and the existing release-intent
+        # admin-review branch (both in the legacy §10 EMPLOYEE chain) are
+        # order-dependent protections this function must not shortcut.
         if is_release_intent(text):
             return None, None
         return await ec_handle_payment_request(sender, text, source, emp_id, intent=intent)
