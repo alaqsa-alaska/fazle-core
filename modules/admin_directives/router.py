@@ -677,6 +677,137 @@ async def trigger_admin_investigation(job_name: str, alert_context: str) -> None
         log.error("[phase5b_trigger] job=%s event=report_send_failed error=%s", job_name, exc)
 
 
+# ── Recruitment policy-conflict escalation (Owner directive, 2026-08-27) ────
+# "Reuse existing architecture" post-intake implementation pass, item G:
+# when modules.recruitment_flow detects a candidate question that touches a
+# materially conflicting recruitment policy area (today: the joining-fee
+# contradiction found in Phase A verification — some live sources say no
+# mandatory upfront payment, at least one says a mandatory non-refundable
+# fee), Hermes must not guess; ask the Owner/Admin via the existing admin
+# WhatsApp channel and let their reply become an authoritative directive
+# through the existing modules.admin_directives mutation mechanism
+# (remember_business_rule), same as any other Tier C write.
+#
+# Deliberately modeled on trigger_admin_investigation() immediately below —
+# same config gates (fail-closed kill switch, hermes_runner_secret,
+# admin_bridge2_number), same never-raises contract — but two real
+# differences:
+#   1. Cooldown is per subject_key (a genuinely different policy question
+#      must be able to escalate independently), not per job_name.
+#   2. The composed question is delivered through _call_hermes_readonly()
+#      AND the resulting hermes_session_id is remembered via
+#      _remember_hermes_session() — trigger_admin_investigation() discards
+#      its session_id (each investigation is a one-shot, stateless turn).
+#      Here the Admin's own natural WhatsApp reply must land as a RESUMED
+#      turn of the SAME conversation (via the existing Bridge1/Bridge2
+#      Hermes Control Channel continuity in _get_active_hermes_session /
+#      _handle_hermes_relay), so Hermes has the question's own context
+#      (including which subject_type/subject_key to use) when it decides
+#      whether to call remember_business_rule. That resumed reply is a
+#      live, human-initiated turn like any other Admin WhatsApp message —
+#      force_read_only=False, real RUN-mode capability, same RBAC/channel
+#      gates as every other _handle_hermes_relay call — this function
+#      itself only ever composes/sends the QUESTION (force_read_only=True,
+#      via _call_hermes_readonly's default), never writes a directive.
+#
+# Default-DISABLED via settings.recruitment_policy_escalation_enabled — a
+# SEPARATE flag from hermes_alert_investigation_enabled (see that setting's
+# own updated comment in app/config.py for why) — must be explicitly opted
+# into via .env before this fires in production for the first time.
+_policy_clarification_cooldown: dict[str, float] = {}
+
+
+async def trigger_recruitment_policy_clarification(
+    *, subject_type: str, subject_key: str, conflict_summary: str,
+) -> None:
+    """Fires a one-shot, read-only-originated Hermes turn that composes and
+    sends a policy-clarification question to the canonical Super Admin
+    (bridge2), remembering the session so the Admin's own reply resumes it.
+    Fail-closed: any missing config, empty input, an already-active
+    directive on this exact subject, or a per-subject_key cooldown hit
+    means no send, with a logged reason — never a silent no-op, never
+    raises. Callers (modules.recruitment_flow) must treat this as
+    best-effort and never let it block or delay the candidate's own reply."""
+    settings = get_settings()
+
+    if not subject_key or not (conflict_summary or "").strip():
+        log.warning(
+            "[recruitment_policy_escalation] event=skipped reason=empty_context subject_key=%s",
+            subject_key or "unknown",
+        )
+        return
+
+    if not settings.recruitment_policy_escalation_enabled:
+        log.info("[recruitment_policy_escalation] event=skipped reason=feature_disabled subject_key=%s", subject_key)
+        return
+
+    if not settings.hermes_runner_secret:
+        log.warning("[recruitment_policy_escalation] event=skipped reason=hermes_not_configured subject_key=%s", subject_key)
+        return
+
+    bridge2_number = settings.admin_bridge2_number or ""
+    if not bridge2_number:
+        log.warning("[recruitment_policy_escalation] event=skipped reason=bridge2_not_configured subject_key=%s", subject_key)
+        return
+
+    # Avoid re-escalating a question the Owner has already answered — the
+    # SAME check modules.recruitment_flow._resolve_fee_policy_reply()
+    # already makes before calling this function, repeated here so this
+    # function is safe to call from any future caller directly too.
+    try:
+        from modules.admin_directives import list_directives
+        existing = await list_directives(subject_key=subject_key, status="active", limit=1)
+        if existing:
+            log.info("[recruitment_policy_escalation] event=skipped reason=already_resolved subject_key=%s", subject_key)
+            return
+    except Exception as exc:
+        log.warning("[recruitment_policy_escalation] directive check failed, proceeding: %s", exc)
+
+    now = time.monotonic()
+    cooldown_s = max(int(settings.hermes_alert_investigation_cooldown_seconds or 3600), 60)
+    last = _policy_clarification_cooldown.get(subject_key, 0.0)
+    if now - last < cooldown_s:
+        log.info(
+            "[recruitment_policy_escalation] event=skipped reason=cooldown subject_key=%s remaining_s=%d",
+            subject_key, int(cooldown_s - (now - last)),
+        )
+        return
+    _policy_clarification_cooldown[subject_key] = now
+
+    log.info("[recruitment_policy_escalation] event=triggered subject_type=%s subject_key=%s", subject_type, subject_key)
+
+    request_text = (
+        "একজন recruitment candidate সদ্য একটি প্রশ্ন করেছে যেখানে বর্তমান recruitment "
+        f"policy তথ্যসূত্রের মধ্যে দ্বন্দ্ব পাওয়া গেছে (subject_type={subject_type}, "
+        f"subject_key={subject_key}).\n\n"
+        f"দ্বন্দ্ব: {conflict_summary}\n\n"
+        "Boss, বর্তমানে কোন নীতিটি সঠিক/কার্যকর তা সংক্ষেপে জানান। আপনার উত্তরটি "
+        f"remember_business_rule(subject_type=\"{subject_type}\", subject_key=\"{subject_key}\", "
+        "directive_text=<আপনার উত্তর>, confirm=true) দিয়ে save করে দেব, যাতে ভবিষ্যতে একই "
+        "প্রশ্নের জন্য candidate-দের এই উত্তরটিই দেওয়া হয়। ততক্ষণ candidate-কে একটি safe, "
+        "non-committal উত্তর দেওয়া হচ্ছে — কোনো অনুমানভিত্তিক তথ্য দেওয়া হচ্ছে না।"
+    )
+    reply_text, session_id = await _call_hermes_readonly(
+        request_text,
+        log_label=f"recruitment policy clarification subject={subject_key}",
+        readonly_key=f"readonly:policy:{subject_key}",
+    )
+    _remember_hermes_session("bridge2", bridge2_number, session_id)
+    log.info("[recruitment_policy_escalation] subject_key=%s event=question_composed", subject_key)
+
+    try:
+        await outbound.enqueue(
+            bridge2_number,
+            f"🔔 Recruitment policy clarification needed ({subject_key}):\n{reply_text}",
+            source_bridge="bridge2",
+            purpose="recruitment_policy_clarification",
+            idempotency_key=f"policyclarify-{subject_key}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        )
+        log.info("[recruitment_policy_escalation] subject_key=%s event=question_sent", subject_key)
+    except Exception as exc:
+        log.error("[recruitment_policy_escalation] subject_key=%s event=send_failed error=%s", subject_key, exc)
+
+
 async def _handle_hermes_relay(request_text: str, sender_phone: str, source_bridge: str = "") -> str:
     """Phase 4 (2026-08-04): relays an admin's WhatsApp request to the real
     Hermes (assistant-platform's BUILD/RUN-capable agent).

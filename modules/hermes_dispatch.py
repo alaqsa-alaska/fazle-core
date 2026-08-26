@@ -678,6 +678,75 @@ _STEP_DISPLAY_NAME: dict[str, str] = {
 }
 
 
+async def _build_post_intake_state_block(session_row: dict) -> str:
+    """Owner directive (2026-08-27): post-intake counterpart of the
+    'already collected / still missing' block below, for a scored
+    candidate. Reuses this same session_state injection point (section 5
+    of build_whatsapp_recruitment_policy) rather than a second context
+    channel — Hermes sees exactly one 'session state' section regardless
+    of whether the candidate is mid-intake or post-intake.
+
+    Read-only: looks up wbom_candidates.post_intake_status via the
+    session's candidate_id (fazle_recruitment_sessions itself has no
+    post-intake column — see db/migrations/072). Returns "" (no block) if
+    the candidate is unlinked, unreadable, or already terminal (declined)
+    — get_active_session()'s own scored branch already excludes terminal
+    candidates from ever reaching this call in the live routing path, but
+    this function fails closed independently in case some other caller
+    ever calls it directly with a stale row.
+
+    Falls closed to "" on any DB error; never raises."""
+    candidate_id = session_row.get("candidate_id")
+    if candidate_id is None:
+        return ""
+    try:
+        from app.database import fetch_one as _fetch_one
+        from modules.recruitment_flow import POST_INTAKE_TERMINAL_STATUSES, _bn_digits
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        log.warning("[hermes_dispatch] post_intake_state import failed: %s", exc)
+        return ""
+    try:
+        cand = await _fetch_one(
+            "SELECT post_intake_status FROM wbom_candidates WHERE candidate_id = $1",
+            candidate_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        log.warning(
+            "[hermes_dispatch] post_intake_state candidate lookup failed candidate=%s: %s",
+            candidate_id, exc,
+        )
+        return ""
+    if not cand:
+        return ""
+    status = cand.get("post_intake_status") or "awaiting_agreement"
+    if status in POST_INTAKE_TERMINAL_STATUSES:
+        return ""
+
+    facts: list[str] = []
+    if session_row.get("full_name"):
+        facts.append(f"নাম={session_row['full_name']}")
+    if session_row.get("age") is not None:
+        facts.append(f"বয়স={_bn_digits(int(session_row['age']))}")
+    if session_row.get("area"):
+        facts.append(f"এলাকা={session_row['area']}")
+    if session_row.get("job_preference"):
+        facts.append(f"নির্বাচিত পদ={session_row['job_preference']}")
+
+    lines = [
+        "- অবস্থা: আবেদন সম্পন্ন (candidate ইতিমধ্যে প্রাথমিক তথ্য দিয়েছে, scored)।",
+        "- ইতিমধ্যে সংগৃহীত তথ্য: " + (", ".join(facts) if facts else "—"),
+        f"- বর্তমান post-intake status: {status}",
+        "",
+        "নিয়ম (rule): এই candidate-এর নাম/বয়স/এলাকা/নির্বাচিত পদ আবার জিজ্ঞেস করবে "
+        "না — ইতিমধ্যে সংগৃহীত। এখন স্বাভাবিক কথোপকথন চালিয়ে যাও: প্রযোজ্য প্রশিক্ষণ/"
+        "probation শর্ত ব্যাখ্যা কর, রাজি কিনা স্বাভাবিকভাবে জিজ্ঞেস কর, আপত্তি/প্রশ্নের "
+        "উত্তর দাও, এবং রাজি হলে যোগদানের প্রস্তুতির দিকে এগিয়ে যাও। শুধু \"আমাদের টিম "
+        "যোগাযোগ করবে\" বলে কথোপকথন শেষ কোরো না। কোনো বেতন/ফি/নীতির সংখ্যা বা শর্ত "
+        "উদ্ভাবন করবে না — Knowledge অংশে না থাকলে অফিসে যোগাযোগ করতে বলবে।",
+    ]
+    return "\n".join(lines)
+
+
 async def _build_recruitment_session_state_block(phone: str) -> str:
     """Build a Bengali 'session state' block describing which intake
     fields are already collected, which are missing, and the current
@@ -708,7 +777,7 @@ async def _build_recruitment_session_state_block(phone: str) -> str:
             """
             SELECT full_name, age, area, job_preference,
                    experience_years, confirmed_phone,
-                   collection_step, funnel_stage
+                   collection_step, funnel_stage, candidate_id
             FROM fazle_recruitment_sessions
             WHERE phone = $1
             ORDER BY updated_at DESC NULLS LAST
@@ -727,9 +796,17 @@ async def _build_recruitment_session_state_block(phone: str) -> str:
         return ""
 
     funnel_stage = row.get("funnel_stage") or "new"
-    # Past collection → session is in scored/applied/ignored territory,
-    # no intake questions apply. Return empty (no state block) so the
-    # prompt is unchanged.
+
+    # Owner directive (2026-08-27): a scored candidate is no longer a dead
+    # end for this block -- build the post-intake counterpart instead of
+    # returning empty. Any OTHER non-collecting stage (e.g. 'expired')
+    # still returns "" unchanged below.
+    if funnel_stage == "scored":
+        return await _build_post_intake_state_block(row)
+
+    # Past collection (any stage other than scored/collecting/new) → no
+    # intake questions and no post-intake conversation applies. Return
+    # empty (no state block) so the prompt is unchanged.
     if funnel_stage not in ("collecting", "new"):
         return ""
 

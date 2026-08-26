@@ -249,6 +249,20 @@ class Settings(BaseSettings):
     hermes_alert_investigation_enabled: bool = False
     hermes_alert_investigation_cooldown_seconds: int = 3600
 
+    # Post-intake recruitment policy-conflict escalation (Owner directive,
+    # 2026-08-27, "Reuse existing architecture" implementation pass).
+    # Mirrors hermes_alert_investigation_enabled's own default-DISABLED
+    # kill-switch shape (deliberately a SEPARATE flag, not a repurposing of
+    # that one -- the trust boundary is the same [proactive, unattended
+    # Hermes-initiated message to the Owner], but the purpose differs
+    # [alert investigation vs recruitment policy clarification], and Owner
+    # should be able to enable this independently after reviewing the
+    # feature). Gates modules.admin_directives.router.
+    # trigger_recruitment_policy_clarification() -- see that function's own
+    # docstring. Must be explicitly opted into via .env before it fires in
+    # production for the first time; code deployment alone never enables it.
+    recruitment_policy_escalation_enabled: bool = False
+
     # Escort order configuration
     # Comma-separated phone numbers that are authorised to send escort client orders.
     # When EMPTY (default), all inbound phones are accepted (open mode).

@@ -96,6 +96,26 @@ COLLECTION_STEPS: list[str] = [
     "name", "age", "area", "job_preference", "experience", "phone_confirm",
 ]
 
+# ── Post-intake conversation state (Owner directive, 2026-08-27) ────────────
+# db/migrations/072_wbom_candidates_post_intake_status.sql. Set the moment
+# intake completes (_finalize_candidate); progressed by _classify_post_
+# intake_turn()'s best-effort semantic classification (never guessed --
+# see that function's own docstring). Kept to exactly this set per the
+# Owner's directive -- no redundant states.
+POST_INTAKE_STATUSES: frozenset[str] = frozenset({
+    "awaiting_agreement", "agreed", "joining_ready",
+    "salary_objection", "not_ready_now", "declined", "future_contact",
+})
+# Only "declined" stops treating the candidate as an active post-intake
+# conversation (get_active_session()'s scored branch returns None so a
+# later message from them is no longer auto-routed as session continuation
+# -- it can still reach recruitment via the normal keyword/detector path).
+# "future_contact"/"not_ready_now" are deliberately NOT terminal: the
+# candidate messaging again IS the future contact/readiness signal, and
+# must resume the same grounded post-intake conversation, not be treated
+# as a brand-new inquiry.
+POST_INTAKE_TERMINAL_STATUSES: frozenset[str] = frozenset({"declined"})
+
 # ── Turn-intent classification (2026-08-23, see ──────────────────────────────
 # RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md): let
 # route_recruitment_message() recognize when an inbound message is an
@@ -289,6 +309,50 @@ ALREADY_APPLIED_MSG: str = (
     "আপনার আবেদন ইতিমধ্যে প্রক্রিয়াধীন রয়েছে।\n"
     "আমাদের টিম শীঘ্রই যোগাযোগ করবে।"
 )
+
+# ── Post-intake conversation (Owner directive, 2026-08-27) ──────────────────
+# Last-resort fallback ONLY -- reached when both the Hermes/KB layer and its
+# conversation_layer fallback return nothing at all for a scored candidate's
+# message (see _route_post_intake_message). Deliberately an open invitation,
+# not a hard stop, and states no business fact of its own -- matches the
+# same "never fabricate, defer to the office" posture as
+# SAFE_FEE_PENDING_OWNER_DECISION above.
+POST_INTAKE_FALLBACK_MSG: str = (
+    "আপনার আবেদন সম্পন্ন হয়েছে। কোনো প্রশ্ন থাকলে জিজ্ঞেস করুন, অথবা সরাসরি "
+    "অফিসে যোগাযোগ করুন: 01958 122300।"
+)
+
+# Subject naming for admin_directives -- kept as module constants (not a
+# free-form string at each call site) so recruitment_flow's own directive
+# lookup and the escalation request text handed to Hermes always agree on
+# the exact key. subject_key values are plain free text (no DB-level
+# registration needed, see modules.admin_directives.save_directive) --
+# these are simply this module's own convention.
+RECRUITMENT_POLICY_SUBJECT_TYPE: str = "recruitment_policy"
+RECRUITMENT_FEE_POLICY_SUBJECT_KEY: str = "recruitment_joining_fee"
+
+# Structured classification prompt for _classify_post_intake_turn(). Kept
+# conservative: "none" (no state change) is the correct output whenever the
+# candidate's turn is a question, an information request, or otherwise
+# doesn't clearly match one category -- classification must never guess,
+# matching this codebase's existing verify_employee_claim() precedent.
+_POST_INTAKE_CLASSIFY_SYSTEM_PROMPT: str = (
+    "তুমি recruitment candidate-এর reply classify করছ। প্রার্থী ইতিমধ্যে "
+    "প্রাথমিক তথ্য জমা দিয়েছে (scored) এবং এখন joining/training শর্ত নিয়ে "
+    "কথোপকথন চলছে। এই বার্তাটি নিচের category-গুলোর মধ্যে কোনটির সাথে "
+    "স্পষ্টভাবে মেলে তা ঠিক কর:\n"
+    "  agreed — প্রার্থী শর্ত মেনে এগিয়ে যেতে স্পষ্টভাবে রাজি (যেমন \"হ্যাঁ আমি রাজি\")\n"
+    "  joining_ready — প্রার্থী এখনই যোগদানের জন্য প্রস্তুত/কাগজপত্র নিয়ে আসতে চায়\n"
+    "  salary_objection — প্রার্থী বেতন/ভাতা নিয়ে আপত্তি করছে কিন্তু সম্পূর্ণ প্রত্যাখ্যান করেনি\n"
+    "  not_ready_now — প্রার্থী আগ্রহী কিন্তু এখন প্রস্তুত না\n"
+    "  declined — প্রার্থী স্পষ্টভাবে চাকরি না করার সিদ্ধান্ত জানিয়েছে\n"
+    "  future_contact — প্রার্থী পরে যোগাযোগ করতে বলেছে\n"
+    "  none — উপরের কোনোটির সাথেই স্পষ্টভাবে মেলে না (প্রশ্ন, তথ্য অনুরোধ, অস্পষ্ট বার্তা)\n"
+    "শুধু স্পষ্ট ক্ষেত্রে category দাও; সামান্যতম অনিশ্চয়তা থাকলে \"none\" দাও, "
+    "কখনো অনুমান করো না। কোনো ব্যাখ্যা ছাড়া শুধুমাত্র এই JSON ফরম্যাটে উত্তর দাও:\n"
+    '{"post_intake_status": "<category>", "confidence": <0.0-1.0>}'
+)
+_POST_INTAKE_CLASSIFY_CONFIDENCE_FLOOR: float = 0.60
 
 # Soft-ask prepended to the first recruitment reply only when identity_brain
 # found NO signal at all for this number (role="unknown" -- distinct from
@@ -620,11 +684,17 @@ async def _audit_candidate_conversation(
 
 async def _finalize_candidate(candidate_id: int, session: dict, *, conn: Any = None) -> None:
     try:
+        # Owner directive (2026-08-27): intake completion transitions
+        # straight into the post-intake conversation instead of ending it --
+        # COALESCE so a hypothetical re-finalize of an already-progressed
+        # candidate (post_intake_status already set to something else) can
+        # never clobber it back to the starting state.
         sql = """UPDATE wbom_candidates
                  SET full_name = $1, age = $2, area = $3,
                      job_preference = $4, experience_years = $5,
                      funnel_stage = 'scored', collection_step = NULL,
                      score = $6, score_bucket = $7,
+                     post_intake_status = COALESCE(post_intake_status, 'awaiting_agreement'),
                      last_contact_at = NOW(), updated_at = NOW()
                  WHERE candidate_id = $8"""
         args = (
@@ -1098,24 +1168,69 @@ def is_recruitment_trigger(text: str) -> bool:
 
 
 async def get_active_session(phone: str) -> Optional[dict]:
-    """Return a fresh collecting session for phone, or expire it."""
+    """Return a fresh collecting session for phone, or the candidate's
+    active post-intake session, or None.
+
+    Owner directive (2026-08-27): a scored candidate whose
+    post_intake_status is not terminal (see POST_INTAKE_TERMINAL_STATUSES)
+    counts as an active recruitment conversation, same as a mid-intake
+    session -- this is the single point recruitment_eligibility() consults
+    for its strongest signal (active_session_continuation, checked before
+    any keyword/intent check), so extending it here is enough to route
+    every subsequent message from a scored-but-open candidate back into the
+    recruitment flow without a second routing mechanism. route_recruitment_
+    message() distinguishes the two cases via the post_intake_active key
+    this function adds -- it never runs field-collection logic for a
+    post-intake session.
+
+    Collecting/new branch is BYTE-IDENTICAL to before this change (same TTL
+    expiry, same return shape) -- only a new branch for funnel_stage=
+    'scored' was added below it."""
     session = await _get_session(phone)
-    if not session or session.get("funnel_stage") not in ("collecting", "new"):
+    if not session:
         return None
-    updated_at = session.get("updated_at") or session.get("created_at")
-    if updated_at:
-        if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) - updated_at > SESSION_TTL:
-            await execute(
-                """UPDATE fazle_recruitment_sessions
-                   SET funnel_stage='expired'
-                   WHERE phone=$1 AND funnel_stage IN ('collecting','new')""",
-                phone,
-            )
-            log.info("[recruit] expired stale session phone=%s updated_at=%s", phone, updated_at)
+
+    stage = session.get("funnel_stage")
+
+    if stage in ("collecting", "new"):
+        updated_at = session.get("updated_at") or session.get("created_at")
+        if updated_at:
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - updated_at > SESSION_TTL:
+                await execute(
+                    """UPDATE fazle_recruitment_sessions
+                       SET funnel_stage='expired'
+                       WHERE phone=$1 AND funnel_stage IN ('collecting','new')""",
+                    phone,
+                )
+                log.info("[recruit] expired stale session phone=%s updated_at=%s", phone, updated_at)
+                return None
+        return session
+
+    if stage == "scored":
+        candidate_id = session.get("candidate_id")
+        if candidate_id is None:
             return None
-    return session
+        try:
+            status = await fetch_val(
+                "SELECT post_intake_status FROM wbom_candidates WHERE candidate_id=$1",
+                candidate_id,
+            )
+        except Exception as e:
+            log.debug(f"[recruit] post_intake_status lookup failed candidate={candidate_id}: {e}")
+            return None
+        if status in POST_INTAKE_TERMINAL_STATUSES:
+            return None
+        session = dict(session)
+        # NULL means "scored before migration 072 / not yet processed" --
+        # treated the same as the status _finalize_candidate() sets by
+        # default, per that migration's own no-backfill note.
+        session["post_intake_status"] = status or "awaiting_agreement"
+        session["post_intake_active"] = True
+        return session
+
+    return None
 
 
 # Moved from modules.recruitment_ai (2026-07-11) — this was the only live
@@ -1268,6 +1383,194 @@ def _is_llm_priority_phone(phone: str) -> bool:
     return phone in allowlist
 
 
+# ── Post-intake conversation helpers (Owner directive, 2026-08-27) ──────────
+
+async def _classify_post_intake_turn(phone: str, text: str) -> Optional[str]:
+    """Best-effort semantic classification of a scored candidate's reply
+    into a post_intake_status transition. Returns one of POST_INTAKE_
+    STATUSES, or None when no confident transition applies -- NEVER
+    guesses (same fail-closed-on-ambiguity posture as this codebase's
+    verify_employee_claim() tool). Reuses modules.hermes_dispatch.
+    call_decision_llm() -- the SAME structured-classification call shape
+    modules.recruitment_turn_decision already uses for intake-turn
+    decisions (caller_scope="customer", no tools, text in/text out) --
+    deliberately not a new LLM integration.
+
+    Read-only w.r.t. the LLM call; the caller (_route_post_intake_message)
+    owns the actual DB write, same separation as every other decision-LLM
+    caller in this codebase (the model classifies meaning, deterministic
+    code persists state)."""
+    try:
+        from modules.hermes_dispatch import call_decision_llm
+    except Exception as exc:  # noqa: BLE001 -- fail closed
+        log.debug("[recruit] post_intake classify import failed: %s", exc)
+        return None
+    try:
+        raw = await call_decision_llm(
+            system_prompt=_POST_INTAKE_CLASSIFY_SYSTEM_PROMPT,
+            user_payload=(text or "")[:500],
+            sender_phone=phone,
+        )
+    except Exception as exc:  # noqa: BLE001 -- fail closed, never raise
+        log.debug("[recruit] post_intake classify call failed: %s", exc)
+        return None
+    if not raw:
+        return None
+    try:
+        import json
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        data = json.loads(match.group(0)) if match else json.loads(raw)
+        status = str(data.get("post_intake_status") or "").strip()
+        confidence = float(data.get("confidence") or 0.0)
+    except Exception:
+        log.debug("[recruit] post_intake classify: unparsable response, treating as no-op")
+        return None
+    if status not in POST_INTAKE_STATUSES or confidence < _POST_INTAKE_CLASSIFY_CONFIDENCE_FLOOR:
+        return None
+    return status
+
+
+async def _resolve_fee_policy_reply(text: str) -> Optional[str]:
+    """Fee-question guard. Only fires when this turn itself looks like a
+    fee question (never volunteers -- same trigger as the pre-existing
+    SAFE_FEE_PENDING_OWNER_DECISION use at this module's answer-first call
+    site). Owner directive (2026-08-27) extends the prior hardcoded-only
+    behavior with a directive-check-first step, reusing modules.
+    admin_directives (the existing Owner business-rule mutation mechanism)
+    instead of a second, parallel policy store:
+
+      1. An active Owner directive on RECRUITMENT_FEE_POLICY_SUBJECT_KEY
+         already exists -> answer from it directly (latest Owner decision
+         wins over older/conflicting static KB content).
+      2. Otherwise -> return the existing safe, non-committal holding
+         reply (byte-identical text to before) and best-effort trigger a
+         one-time (cooldown-gated) Owner/Admin WhatsApp clarification via
+         modules.admin_directives.router.trigger_recruitment_policy_
+         clarification() -- never blocks or delays the candidate's reply
+         if the trigger call is slow/fails.
+
+    Returns None when the turn isn't a fee question at all (caller then
+    proceeds to the normal KB/Hermes reply path unchanged)."""
+    from modules.hermes_dispatch import _looks_like_fee_question
+    if not _looks_like_fee_question(text):
+        return None
+
+    from modules import admin_directives
+    try:
+        directives = await admin_directives.list_directives(
+            subject_key=RECRUITMENT_FEE_POLICY_SUBJECT_KEY, status="active", limit=1,
+        )
+    except Exception as exc:  # noqa: BLE001 -- fail open to the safe default below
+        log.warning("[recruit] fee policy directive lookup failed: %s", exc)
+        directives = []
+    if directives:
+        return directives[0].get("directive_text") or SAFE_FEE_PENDING_OWNER_DECISION
+
+    try:
+        from modules.admin_directives.router import trigger_recruitment_policy_clarification
+        await trigger_recruitment_policy_clarification(
+            subject_type=RECRUITMENT_POLICY_SUBJECT_TYPE,
+            subject_key=RECRUITMENT_FEE_POLICY_SUBJECT_KEY,
+            conflict_summary=(
+                "Live recruitment KB has conflicting joining/training-fee "
+                "framing -- some sources say no mandatory upfront payment "
+                "(salary-deducted only), at least one live KB row and one "
+                "static policy doc state a mandatory upfront/non-refundable "
+                "fee. A candidate just asked about the fee."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 -- never block the candidate reply
+        log.warning("[recruit] fee policy escalation trigger failed: %s", exc)
+    return SAFE_FEE_PENDING_OWNER_DECISION
+
+
+async def _route_post_intake_message(
+    phone: str,
+    text: str,
+    *,
+    source: str,
+    message_id: Optional[str],
+    active_session: dict,
+    contact_context: str,
+    history: str,
+    decision: dict,
+) -> dict:
+    """Owner directive (2026-08-27): the post-intake counterpart of the
+    active-session branch above -- reused entry point is route_recruitment_
+    message() (see its call site), never a second router. A scored, non-
+    terminal candidate's message NEVER runs field-collection logic
+    (intake_message()) -- there is nothing left to collect -- it always
+    goes through the same Hermes/KB recruitment-reply machinery every
+    other recruitment answer uses, with the post-intake session-state
+    block (modules.hermes_dispatch._build_post_intake_state_block, wired
+    into the existing _build_recruitment_session_state_block()) supplying
+    the already-collected facts and current post_intake_status so Hermes
+    never re-asks name/age/etc. and continues the conversation naturally
+    instead of stopping at 'our team will contact you'.
+
+    State transition (best-effort, never blocks the reply): a semantic
+    classification of THIS turn (_classify_post_intake_turn) may update
+    wbom_candidates.post_intake_status BEFORE the reply is generated, so
+    the reply itself is grounded in the up-to-date status."""
+    candidate_id = active_session.get("candidate_id")
+
+    new_status = await _classify_post_intake_turn(phone, text)
+    if new_status and candidate_id is not None and new_status != active_session.get("post_intake_status"):
+        try:
+            await execute(
+                "UPDATE wbom_candidates SET post_intake_status=$1, updated_at=NOW() WHERE candidate_id=$2",
+                new_status, candidate_id,
+            )
+            log.info(
+                "[recruit] post_intake_status %s -> %s candidate=%s",
+                active_session.get("post_intake_status"), new_status, candidate_id,
+            )
+            active_session = dict(active_session)
+            active_session["post_intake_status"] = new_status
+        except Exception as exc:  # noqa: BLE001 -- reply generation still proceeds
+            log.warning("[recruit] post_intake_status update failed candidate=%s: %s", candidate_id, exc)
+
+    if candidate_id is not None:
+        await _audit_candidate_conversation(candidate_id, "post_intake", text, source, message_id)
+
+    fee_reply = await _resolve_fee_policy_reply(text)
+    if fee_reply:
+        return {
+            "eligible": True,
+            "autosend": bool(decision.get("autosend")),
+            "reason": "post_intake_fee_policy",
+            "reply": fee_reply,
+        }
+
+    reply = None
+    from modules.preflight_guard import is_feature_active
+    if is_feature_active("hermes_customer_recruitment", default=False):
+        from modules.hermes_dispatch import (
+            generate_recruitment_reply as _hermes_recruitment_reply,
+            build_recruitment_context_with_directives as _build_recruitment_context,
+        )
+        kb_context = await _build_recruitment_context(text)
+        reply = await _hermes_recruitment_reply(
+            phone=phone, text=text, source=source,
+            kb_context=kb_context, contact_context=contact_context, history=history,
+        )
+    if not reply:
+        from modules.conversation_layer import generate_recruitment_reply as _fallback_reply
+        reply = await _fallback_reply(
+            phone=phone, text=text, source=source,
+            contact_context=contact_context, history=history,
+        )
+    if not reply or not reply.strip():
+        reply = POST_INTAKE_FALLBACK_MSG
+
+    return {
+        "eligible": True,
+        "autosend": bool(decision.get("autosend")),
+        "reason": "post_intake_conversation",
+        "reply": reply,
+    }
+
+
 async def route_recruitment_message(
     phone: str,
     text: str,
@@ -1318,6 +1621,18 @@ async def route_recruitment_message(
         }
 
     active_session = decision.get("active_session")
+
+    # Owner directive (2026-08-27): a scored, non-terminal candidate (see
+    # get_active_session()'s scored branch) is an active post-intake
+    # conversation, not a mid-intake one -- route it through the dedicated
+    # helper (Hermes/KB reply + post-intake session-state, never field-
+    # collection) before any of the intake-specific logic below runs.
+    if active_session and active_session.get("post_intake_active"):
+        return await _route_post_intake_message(
+            phone, text, source=source, message_id=message_id,
+            active_session=active_session, contact_context=contact_context,
+            history=history, decision=decision,
+        )
 
     # Phase 1B (2026-08-06, Owner-approved allowlist): for an explicitly
     # allowlisted phone only, try the live KB/RAG/LLM reply layer FIRST,
@@ -1507,11 +1822,18 @@ async def route_recruitment_message(
             if _info_reply and _info_reply.strip():
                 # 2026-08-23: safe-fee override while Owner resolves
                 # source-of-truth contradiction (see SAFE_FEE_PENDING_OWNER_
-                # DECISION above and the plan). Only when the candidate's
-                # turn itself looks like a fee question — never volunteer.
-                from modules.hermes_dispatch import _looks_like_fee_question as _looks_fee
-                if _looks_fee(text):
-                    _info_reply = SAFE_FEE_PENDING_OWNER_DECISION
+                # DECISION above). Only when the candidate's turn itself
+                # looks like a fee question — never volunteer. 2026-08-27:
+                # now goes through _resolve_fee_policy_reply() so an active
+                # Owner directive (set via the escalation flow below) is
+                # used instead of the static safe-pending text once the
+                # conflict is actually resolved, and so a still-unresolved
+                # conflict triggers the same cooldown-gated Owner/Admin
+                # clarification the post-intake path uses — one shared
+                # mechanism, not two.
+                _fee_override = await _resolve_fee_policy_reply(text)
+                if _fee_override:
+                    _info_reply = _fee_override
                     _fact_check_pass = False  # bypassed by owner-decision gate
                 # For MIXED turns we still need to advance intake so the
                 # candidate's provided value is saved. intake_message()
