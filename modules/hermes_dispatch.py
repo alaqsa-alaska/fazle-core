@@ -646,6 +646,167 @@ async def generate_reply(
     return reply
 
 
+# Phase 3, 2026-08-26 — Recruitment session-state guard. Build a Bengali
+# "## সেশন অবস্থা" block for the recruitment prompt from the candidate's
+# current fazle_recruitment_sessions row + the canonical STEP_QUESTIONS
+# schema. Iterates STEP_QUESTIONS keys (the schema source) rather than a
+# hardcoded field list — new intake fields added to STEP_QUESTIONS in
+# recruitment_flow.py automatically get the already-collected treatment.
+#
+# STEP_TO_COLUMN is the one minimal mapping between the human-readable
+# intake step name (STEP_QUESTIONS key) and the actual fazle_recruitment_
+# sessions column name. It's no more hardcoded than the existing per-step
+# `if step == "name": ... elif step == "age": ...` chain inside
+# recruitment_flow.intake_message() — both must agree by construction
+# (and intake_message is the writer).
+_STEP_TO_COLUMN: dict[str, str] = {
+    "name": "full_name",
+    "age": "age",
+    "area": "area",
+    "job_preference": "job_preference",
+    "experience": "experience_years",
+    "phone_confirm": "confirmed_phone",
+}
+
+_STEP_DISPLAY_NAME: dict[str, str] = {
+    "name": "নাম",
+    "age": "বয়স",
+    "area": "এলাকা",
+    "job_preference": "পদ-পছন্দ",
+    "experience": "অভিজ্ঞতা",
+    "phone_confirm": "মোবাইল নম্বর (কনফার্মেশন)",
+}
+
+
+async def _build_recruitment_session_state_block(phone: str) -> str:
+    """Build a Bengali 'session state' block describing which intake
+    fields are already collected, which are missing, and the current
+    funnel step — so the conversational layer can avoid re-asking
+    fields the candidate has already supplied.
+
+    Read-only. Never writes to DB. Reads one row from
+    fazle_recruitment_sessions via app.database.fetch_one; if the
+    session/phone does not exist, returns "" (caller injects nothing).
+
+    Generic over STEP_QUESTIONS keys + _STEP_TO_COLUMN mapping. A new
+    intake field added to STEP_QUESTIONS (and the matching column added
+    to intake_message's update dict) will be picked up automatically.
+
+    Falls closed: any DB error returns "" and logs a warning.
+    """
+    try:
+        # Imported lazily so this module's import-time cost is unchanged
+        # for non-recruitment callers.
+        from app.database import fetch_one
+        from modules.recruitment_flow import COLLECTION_STEPS, STEP_QUESTIONS
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        log.warning("[hermes_dispatch] session_state import failed: %s", exc)
+        return ""
+
+    try:
+        row = await fetch_one(
+            """
+            SELECT full_name, age, area, job_preference,
+                   experience_years, confirmed_phone,
+                   collection_step, funnel_stage
+            FROM fazle_recruitment_sessions
+            WHERE phone = $1
+            ORDER BY updated_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            phone,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed, never raise
+        log.warning(
+            "[hermes_dispatch] session_state lookup failed phone=%s: %s",
+            _safe_phone_label(phone), exc,
+        )
+        return ""
+
+    if not row:
+        return ""
+
+    funnel_stage = row.get("funnel_stage") or "new"
+    # Past collection → session is in scored/applied/ignored territory,
+    # no intake questions apply. Return empty (no state block) so the
+    # prompt is unchanged.
+    if funnel_stage not in ("collecting", "new"):
+        return ""
+
+    current_step = row.get("collection_step") or "name"
+    if current_step == "complete":
+        return ""
+
+    # The set of step names recognized by the current prompt schema.
+    # Anything not in this set must be filtered out (defensive against
+    # schema drift — adding/removing a step from STEP_QUESTIONS must
+    # not require a code change here).
+    schema_steps = set(STEP_QUESTIONS.keys())
+
+    collected: list[str] = []
+    missing: list[str] = []
+    for step_name in COLLECTION_STEPS:
+        if step_name not in schema_steps:
+            continue
+        col = _STEP_TO_COLUMN.get(step_name)
+        if not col:
+            continue
+        display = _STEP_DISPLAY_NAME.get(step_name, step_name)
+        val = row.get(col)
+        # Treat non-empty / non-null as collected. For age (int), falsy 0
+        # is not a valid collected value — guard with `is not None` for
+        # numeric fields and `val` truthiness for strings.
+        if col in ("age", "experience_years"):
+            is_collected = val is not None
+        else:
+            is_collected = bool(val)
+        if is_collected:
+            # age / experience are integers; render as Bengali digits for
+            # consistency with the rest of the prompt.
+            if col in ("age", "experience_years") and val is not None:
+                from modules.recruitment_flow import _bn_digits
+                collected.append(f"{display}={_bn_digits(int(val))}")
+            elif col in ("age", "experience_years"):
+                # numeric field with None value → not collected; skip.
+                missing.append(display)
+            else:
+                collected.append(f"{display}={val}")
+        else:
+            missing.append(display)
+
+    if not collected and not missing:
+        return ""
+
+    # If current_step is no longer in the schema (drift), fall back to
+    # "name" rather than rendering an unknown display label.
+    if current_step not in schema_steps:
+        current_step = "name"
+    current_display = _STEP_DISPLAY_NAME.get(current_step, current_step)
+    lines: list[str] = [
+        f"- বর্তমান ধা� (current step): {current_display}",
+        "- ইতিমধ্যে সংগৃহীত (already collected): "
+        + (", ".join(collected) if collected else "—"),
+        "- এখনো প্রয়োজন (still missing): "
+        + (", ".join(missing) if missing else "—"),
+        "",
+        "নিয়ম (rule): ইতিমধ্যে সংগৃহীত তথ্য আর জিজ্ঞেস করবে না। শুধুমাত্র "
+        "\"এখনো প্রয়োজন\" তালিকায় �াকা তথ্য জিজ্ঞেস করবে। প্রার্থী যদি "
+        "ইতিমধ্যে দেওয়া কোনো তথ্য সংশোধন করতে বলে, সেটি সংশোধন হিসেবে "
+        "গ্রহণ করবে (এটি পুনঃপ্রশ্ন নয়)। শুধু অস্পষ্ট বা অবৈধ মান হলে "
+        "পুনঃপ্রশ্ন করবে।",
+    ]
+    return "\n".join(lines)
+
+
+def _safe_phone_label(phone: str) -> str:
+    """Hashed short label for log lines (never raw phone in logs)."""
+    try:
+        import hashlib
+        return hashlib.sha1((phone or "").encode("utf-8")).hexdigest()[:10]
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 async def generate_recruitment_reply(
     *,
     phone: str,
@@ -709,6 +870,7 @@ async def generate_recruitment_reply(
         kb_context=kb_context,
         history=history,
         contact_context=contact_context,
+        session_state=await _build_recruitment_session_state_block(phone),
     )
     reply = await _call_hermes(
         message, sender_phone=phone,

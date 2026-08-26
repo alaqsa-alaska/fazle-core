@@ -404,19 +404,32 @@ def build_whatsapp_recruitment_policy(
     kb_context: str,
     history: str = "",
     contact_context: str = "",
+    *,
+    session_state: str = "",
 ) -> str:
     """
     Assemble the structured prompt for a recruitment-path WhatsApp reply.
 
-    6-section context order:
-      1. Role           — recruitment assistant identity
-      2. Business Rules — what can and cannot be said
-      3. Workflow       — 3-step candidate funnel
-      4. Knowledge      — approved source of truth (static file + RAG chunks)
-      5. Conversation   — recent candidate history
-      6. User Question  — the inbound message
+    7-section context order (Phase 3, 2026-08-26: section 5 added when caller
+    supplies session_state, default behavior unchanged for empty session_state):
+      1. Role            — recruitment assistant identity
+      2. Business Rules  — what can and cannot be said
+      3. Workflow        — 3-step candidate funnel
+      4. Knowledge       — approved source of truth (static file + RAG chunks)
+      5. Session State   — current intake step + already-collected + missing
+                           (caller builds it from fazle_recruitment_sessions +
+                           STEP_QUESTIONS keys; prevents re-asking already-
+                           collected fields)
+      6. Conversation    — recent candidate history
+      7. User Question   — the inbound message
 
     Identical output for bridge1, bridge2, and meta — source is logged only.
+
+    session_state (Phase 3, 2026-08-26): optional kwarg. When non-empty,
+    injected between Knowledge and Conversation. Caller (modules.
+    hermes_dispatch.generate_recruitment_reply) builds it by reading the
+    candidate's fazle_recruitment_sessions row + STEP_QUESTIONS keys.
+    Backward-compatible: default "" preserves every existing test/caller.
     """
     family = get_channel_family(source)
     log.info(
@@ -439,6 +452,13 @@ def build_whatsapp_recruitment_policy(
         "## জ্ঞান ও তথ্য (Knowledge)",
         knowledge,
     ]
+
+    if session_state:
+        parts += [
+            "",
+            "## সেশন অবস্থা (Session State — do not re-ask already-collected fields)",
+            session_state,
+        ]
 
     if history:
         parts += [
