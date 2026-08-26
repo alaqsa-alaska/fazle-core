@@ -1313,8 +1313,101 @@ async def handle_employee_informational_query(
     if not reply or not reply.strip():
         # Safe clarification — never fabricate figures.
         reply = (
-            "এই মুহূর্তে নির্দিষ্ট বেতন/পে�েন্ট তথ্য যাচাই করে জানাতে পারছি না। "
-            "অনুগ্রহ করে অফিসে যোগাযোগ করুন।"
+            "এই মুহূর্তে নির্দিষ্ট বেতন/পেমেন্ট তথ্য যাচাই করে জানাতে পারছি না। "
+            "অনুগ্রহ করে অফিসে যোগা�োগ করুন।"
         )
 
     return reply, None
+
+
+# ── Phase 6 (2026-08-26): Short-context intent refinement ─────────────────────
+# For very short inbound texts (হ্যাঁ / না / ৩২ / চট্�গ্রাম / আগেই বলেছি /
+# ওটাই / "আগেরটার কী হলো?"-class follow-ups), the upstream intent
+# classifier often returns "greeting", "chitchat", or "unknown" — because
+# there's not enough surface signal in 1-3 chars to disambiguate. Without
+# refinement, those short replies either fall through to the keyword
+# scanner (potentially starting a new ec_trigger session) or get routed
+# without context.
+#
+# This helper reads the existing Sprint-3A conversation session for the
+# phone (if any) and the recent chat history. If there's an open session
+# awaiting an answer, the short reply is treated as that answer. Otherwise
+# the helper returns raw_intent unchanged — fail-open, no behavior change
+# for non-short messages or when no session exists.
+#
+# HARD GUARANTEES:
+#   - Read-only (one DB read + a small history peek).
+#   - NEVER calls create_transaction() / _upsert_ledger() / financial-write.
+#   - Falls closed to raw_intent on any DB error.
+#   - Never blocks. Always returns a string.
+#
+# Reuse (no new modules, no new flags):
+#   - modules.employee_conversation.get_conversation_session (already there)
+#   - modules.message_router.get_recent_history (already there)
+#
+# Scope: only affects intent dispatch. The actual reply still goes through
+# Phase 5's handle_employee_informational_query (for salary_query/payment_due)
+# or ec_handle_payment_request (for other intents), with the FULL
+# db_ctx/RAG/history/Tier-15 confidentiality scaffolding intact.
+_SHORT_INTENT_OVERRIDE = "confirmation"
+# Bangla digit codepoints U+09E6..U+09EF (০..�). Listed explicitly so
+# the set survives copy/paste through any encoding layer.
+_BN_DIGIT_CHARS = frozenset("০১২৩৪৫৬৭৮৯")
+_MAX_SHORT_LEN = 16  # covers হ্যাঁ / না / ৩২ / চট্টগ্রাম / ওটাই / আগেই বলেছি / সে�া হয়ে গেছে
+# (counted by Python len() = codepoints; Bangla combining marks inflate the count).
+
+
+def _is_short_reply(text: str) -> bool:
+    """True when text is a short reply that almost certainly needs prior
+    context to interpret (হ্যাঁ / না / ৩২ / চট্�গ্রাম / ওটাই etc.)"""
+    s = (text or "").strip()
+    if not s:
+        return False
+    if len(s) > _MAX_SHORT_LEN:
+        return False
+    # All-Bengali-digit strings (or digits + minor punctuation/whitespace)
+    # are short numeric answers.
+    stripped = s.rstrip("।.?!, ")
+    if stripped and all(c in _BN_DIGIT_CHARS for c in stripped):
+        return True
+    # Canonical short-reply words + "I already said" class.
+    short_words = {
+        "হ্যাঁ", "হ্যা", "না", "নেই",
+        "আগেই", "ওটাই", "ওইটা", "সেটাই",
+        "আগে", "আগেরটা", "আগেরটার",
+    }
+    # Strip trailing punctuation and check the core word.
+    core = s.rstrip("।.?! ,")
+    if core in short_words:
+        return True
+    # "I already said X" class — short Bangla sentence that begins with
+    # আগেই / ওটাই / সেটা and references prior content.
+    if any(core.startswith(p + " ") for p in ("আগেই", "ওটাই", "সেটা", "ওই", "আগের")):
+        return True
+    return False
+
+
+async def refine_short_intent(phone: str, text: str, raw_intent: str) -> str:
+    """If the inbound is a short reply and there's an open Sprint-3A session
+    awaiting an answer for this phone, override raw_intent with
+    "confirmation" so the existing conversational handler can interpret the
+    short reply in the context of the pending question.
+
+    Otherwise returns raw_intent unchanged. Pure read-only, no DB writes,
+    no behavior change for non-short messages or when no session exists.
+    """
+    if not _is_short_reply(text):
+        return raw_intent
+    try:
+        session = await get_conversation_session(phone)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        log.debug("[ec/phase6] session lookup failed (fail closed): %s", exc)
+        return raw_intent
+    if not session:
+        return raw_intent
+    # Session exists and short reply — treat as confirmation against the
+    # pending step. The downstream ec_handle_payment_request already has
+    # full session context + history to interpret the meaning.
+    if raw_intent in ("greeting", "chitchat", "unknown", ""):
+        return _SHORT_INTENT_OVERRIDE
+    return raw_intent

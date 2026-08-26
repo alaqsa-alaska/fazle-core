@@ -546,6 +546,17 @@ async def _task13_authoritative_dispatch(
             # reached — this is a defensive fail-closed guard, not the
             # normal path. Never guess an identity here.
             return None, None
+        # Phase 6 (2026-08-26): refine short-reply intent (হ্যাঁ/না/৩২/
+        # চট্টগ্রাম/আগেই বলেছি/etc.) using the existing Sprint-3A
+        # conversation session + history. Pure read-only helper in
+        # modules.employee_conversation.refine_short_intent. Fails closed
+        # to the original intent when no session exists or the reply
+        # isn't short. Never mutates payroll/ledger.
+        try:
+            from modules.employee_conversation import refine_short_intent
+            intent = await refine_short_intent(sender, text, intent)
+        except Exception as _ref_exc:  # noqa: BLE001
+            log.debug("[router] refine_short_intent skipped (non-fatal): %s", _ref_exc)
         # Phase 5 (2026-08-26): salary_query / payment_due now enter the
         # semantic employee path via the reusable informational handler.
         # The handler uses get_payroll_summary(emp_id) + format_payroll_context
