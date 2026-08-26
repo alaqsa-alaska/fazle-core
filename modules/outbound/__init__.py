@@ -45,6 +45,24 @@ async def enqueue(
 ) -> Optional[int]:
     """Insert into queue. Returns id, or None if dedup'd by idempotency_key."""
     import json
+    # Phase 7 (2026-08-26): Generic no-duplicate-answer invariant.
+    # Read-only check for a substantially similar recent reply to the same
+    # recipient + same purpose within the dedup window. Emits a structured
+    # warning log so the caller (Phase 5/6 informational handlers, Hermes
+    # dispatch) can include "you already said this" in the LLM prompt on
+    # the next iteration. Does NOT block the current send — the existing
+    # idempotency_key dedup is the authoritative gate. Falls closed to
+    # "no recent reply" on any DB error.
+    try:
+        if purpose and _was_recently_replied(recipient, purpose, body):
+            log.warning(
+                "[OUTBOUND_PHASE7] similar recent reply recipient=%s purpose=%s "
+                "dedup_window_minutes=%s (informational, NOT blocking send)",
+                recipient, purpose, _PHASE7_DEDUP_MINUTES,
+            )
+    except Exception as _phase7_exc:  # noqa: BLE001
+        log.debug("[OUTBOUND_PHASE7] similar-reply check skipped (non-fatal): %s", _phase7_exc)
+
     meta_json = json.dumps(meta or {})
     row = await fetch_one(
         """INSERT INTO fazle_outbound_queue
@@ -60,6 +78,50 @@ async def enqueue(
     else:
         log.info(f"[OUTBOUND_ENQUEUE] dedup_skip recipient={recipient} key={idempotency_key}")
     return qid
+
+
+# Phase 7 (2026-08-26): reply-invariant helper. Window is intentionally
+# generous so genuinely different replies aren't flagged; tighten only if
+# the structured-log noise becomes operationally annoying.
+_PHASE7_DEDUP_MINUTES = 10
+
+
+def _normalize_reply_for_compare(text: str) -> str:
+    """Lowercase, collapse whitespace, strip punctuation. Used only for
+    similarity comparison — never reaches candidate-facing text."""
+    import re as _re
+    s = (text or "").strip().lower()
+    s = _re.sub(r"\s+", " ", s)
+    s = _re.sub(r"[।.,?!:;]", "", s)
+    return s.strip()
+
+
+async def _was_recently_replied(recipient: str, purpose: str, candidate_body: str) -> bool:
+    """Return True iff a substantially similar outbound reply was queued
+    to the same recipient + same purpose within the dedup window.
+
+    Read-only: queries fazle_outbound_queue + fazle_draft_replies
+    history. Never blocks; caller decides whether to act on the warning.
+    Returns False (no recent reply) on any error.
+    """
+    try:
+        # Look at the last few outbound replies to this recipient + purpose
+        rows = await fetch_all(
+            """SELECT body, created_at FROM fazle_outbound_queue
+               WHERE recipient = $1 AND purpose = $2
+                 AND created_at > NOW() - make_interval(mins => $3)
+               ORDER BY created_at DESC LIMIT 5""",
+            recipient, purpose, _PHASE7_DEDUP_MINUTES,
+        )
+        norm_candidate = _normalize_reply_for_compare(candidate_body)
+        if not norm_candidate:
+            return False
+        for r in rows:
+            if _normalize_reply_for_compare(r.get("body") or "") == norm_candidate:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — fail closed to False
+        return False
 
 
 async def pending_count() -> int:

@@ -874,6 +874,52 @@ async def intake_message(
         "confirmed_phone": session.get("confirmed_phone"),
     }
 
+    # Phase 7 (2026-08-26): Generic no-duplicate-question invariant.
+    # Normalized comparator (Bangla vs ASCII digits, whitespace/punctuation)
+    # used to detect "same value re-sent" even when the per-step parser
+    # produces a slightly different representation (e.g. "৩২" vs "32",
+    # "Dhaka ." vs "Dhaka"). Falls back to the per-step exact-match
+    # _locked_already check below — Phase 7 only ADDS a normalized
+    # variant, never replaces the original. Read-only.
+    _phase7_skip_step = None
+    try:
+        if step == "age":
+            _phase7_candidate = _parse_age(text, await _get_effective_age_range())
+            if _phase7_candidate is not None and is_already_answered(
+                session, step, str(_phase7_candidate),
+                correction_text=raw_message,
+            ):
+                _phase7_skip_step = step
+        elif step == "job_preference":
+            _phase7_candidate = _parse_job_preference(text)
+            if _phase7_candidate and is_already_answered(
+                session, step, _phase7_candidate,
+                correction_text=raw_message,
+            ):
+                _phase7_skip_step = step
+        elif step == "experience":
+            _phase7_candidate = _parse_experience(text)
+            _phase7_value = _phase7_candidate if _phase7_candidate is not None else 0
+            if is_already_answered(
+                session, step, str(_phase7_value),
+                correction_text=raw_message,
+            ):
+                _phase7_skip_step = step
+        elif step in ("name", "area", "phone_confirm"):
+            if is_already_answered(
+                session, step, text,
+                correction_text=raw_message,
+            ):
+                _phase7_skip_step = step
+    except Exception as _phase7_exc:  # noqa: BLE001 — fail closed
+        log.debug("[recruit] Phase 7 is_already_answered skipped (non-fatal): %s", _phase7_exc)
+        _phase7_skip_step = None
+    if _phase7_skip_step:
+        return await _advance_past_locked_step(
+            session, candidate_id, phone, _phase7_skip_step,
+            raw_message, source, message_id,
+        )
+
     if step == "name":
         if not _looks_like_name(text):
             if candidate_id is not None:
@@ -1634,3 +1680,105 @@ async def route_recruitment_message(
         "reason": decision.get("reason", "explicit_recruitment"),
         "reply": reply,
     }
+
+
+# Phase 7 (2026-08-26): Generic no-duplicate-question invariant ────────
+# Used by callers (intake_message + the LLM/Hermes reply path) to suppress
+# a re-ask when the user already supplied a valid value for this step in
+# a prior turn. The LLM path's session-state block (Phase 3) already lists
+# "already collected"; this gives the deterministic intake path a
+# normalized comparator that handles:
+#   - exact match (e.g. "Dhaka" == "Dhaka")
+#   - Bangla vs ASCII digit equivalence ("৩২" == "32" == 32)
+#   - whitespace + trailing punctuation normalization
+# The exemption for "user is correcting" is handled by the caller (the
+# existing _locked_already path; the LLM prompt instructs to re-ask on
+# correction; this helper returns False when correction markers appear).
+#
+# Read-only. Never mutates any session row. Falls through to the existing
+# behavior if the comparator can't determine a normalized match.
+#
+# Schema mapping: intake_message's `update` dict (and the existing per-step
+# branch) writes to specific columns in fazle_recruitment_sessions. Mirror
+# that mapping locally so is_already_answered() reads the correct column
+# for each step. This MUST stay in sync with intake_message's update dict
+# (lines 895, 906, 923, 931, 949, 957). If you add a step to
+# COLLECTION_STEPS + STEP_QUESTIONS, also add it to _STEP_TO_COLUMN.
+_STEP_TO_COLUMN: dict[str, str] = {
+    "name": "full_name",
+    "age": "age",
+    "area": "area",
+    "job_preference": "job_preference",
+    "experience": "experience_years",
+    "phone_confirm": "confirmed_phone",
+}
+
+_CORRECTION_MARKERS = (
+    "ভুল", "সংশোধন", "আগেরটা", "আগের", "আগে", "ওটা না",
+    "wrong", "correction", "actually",
+)
+
+
+def _normalize_for_compare(value: str) -> str:
+    """Lowercase, collapse whitespace, strip leading/trailing punctuation
+    AND internal Bengali/ASCII punctuation. Bangla digits translated to
+    ASCII so "৩২" matches "32". Used by the Phase 7 comparator only —
+    never reaches candidate-facing text."""
+    s = (value or "").strip()
+    s = s.translate(_BENGALI_TO_ASCII)
+    s = re.sub(r"\s+", " ", s)
+    # Strip both leading/trailing AND internal punctuation so "Dhaka,
+    # Bangladesh." normalizes to "dhaka bangladesh" for matching.
+    s = re.sub(r"[।.,?!:;]", "", s)
+    return s.strip().lower()
+
+
+def is_already_answered(
+    session_row: dict,
+    step_name: str,
+    candidate_value: str,
+    *,
+    correction_text: str = "",
+) -> bool:
+    """Return True iff the user has already supplied a valid (normalized-
+    match) value for this step AND this turn is NOT a correction.
+
+    Caller-supplied `session_row` is the existing active-session dict
+    (the same dict intake_message and the LLM prompt already have
+    access to). step_name is one of COLLECTION_STEPS. candidate_value is
+    the freshly-parsed inbound value (may be Bangla digits / with
+    whitespace / with punctuation).
+
+    correction_text: the raw inbound text (passed in so we can detect
+    "ভুল হয়েছে" / "আগেরটা সংশোধন" type corrections that should
+    bypass the invariant).
+
+    Returns False (i.e. "not answered yet, ask again") when:
+      - session_row is missing/empty.
+      - the step's stored column is empty / None.
+      - the normalized candidate_value doesn't match the stored value.
+      - the raw inbound text contains a correction marker.
+    """
+    if not session_row or not candidate_value:
+        return False
+    if correction_text:
+        norm_corr = correction_text.strip().lower()
+        for marker in _CORRECTION_MARKERS:
+            if marker in norm_corr:
+                return False
+    col = _STEP_TO_COLUMN.get(step_name)
+    if not col:
+        return False
+    stored = session_row.get(col)
+    if stored is None:
+        return False
+    # Numeric fields: compare as integers (handles Bangla vs ASCII digits).
+    if col in ("age", "experience_years"):
+        try:
+            stored_n = int(stored)
+            candidate_n = int(re.sub(r"\D", "", _normalize_for_compare(candidate_value)) or "0")
+            return stored_n == candidate_n
+        except (ValueError, TypeError):
+            return False
+    # String fields: normalized comparison.
+    return _normalize_for_compare(str(stored)) == _normalize_for_compare(str(candidate_value))
