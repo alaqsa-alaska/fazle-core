@@ -109,6 +109,7 @@
 069_hermes_tasks_build_authorization.sql
 070_hermes_action_approvals_dispatch_billing_types.sql
 071_hermes_action_approvals_escort_program_creation.sql
+072_wbom_candidates_post_intake_status.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -283,7 +284,18 @@ structured-input wrapper over the EXISTING `modules.escort.save_escort_programs(
 program-creation logic. Same widen-then-add-constraint shape as migrations 051/070.
 `modules/hermes_tasks/__init__.py`'s `ACTION_TYPES` frozenset widened in lockstep.
 
-**Next available number for new work: `072`.**
+**`072_wbom_candidates_post_intake_status.sql` (2026-08-27, Owner directive "reuse existing
+architecture" post-intake recruitment conversation pass, APPLIED to production, commit 19bbed1):**
+adds `wbom_candidates.post_intake_status` (nullable TEXT, CHECK-constrained to 7 values --
+`awaiting_agreement`/`agreed`/`joining_ready`/`salary_objection`/`not_ready_now`/`declined`/
+`future_contact`) plus a partial index. Fills a genuine gap confirmed by direct verification: no
+existing column represented what happens after a candidate reaches `funnel_stage='scored'` --
+`available_join_date` exists but is never written by any live code path, and
+`wbom_job_applications`/`wbom_recruitment_reminders` are both FK-linked but have 0 live rows.
+Purely additive, no backfill (NULL treated as `awaiting_agreement` by the reading code). Same
+CHECK-constraint-on-column pattern as migration 059.
+
+**Next available number for new work: `073`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 

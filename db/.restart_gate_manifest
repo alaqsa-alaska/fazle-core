@@ -369,3 +369,26 @@ resources/ops/selected_contacts_normalized_unique.csv
 # safety layers remain intact. 10/10 pass. No production code change
 # beyond the targeted bridge_poller guard patch.
 tests/unit/test_bridge_poller_struct_bypass.py
+
+# 2026-08-27: found untracked and dirty ahead of the 19bbed1 (post-intake
+# recruitment conversation) restart -- NOT created or reviewed by this
+# session, dated from the immediately-prior Phase 7 (no-duplicate-invariant,
+# commit d8b1ff1) session. Six ad-hoc scripts/phase7_*.py DB-check/live-test
+# scripts and scripts/restart_fazle7.sh (a bare `sudo systemctl restart`
+# one-liner, superseded by scripts/restart_gate.sh). None are imported by
+# any app module (standalone scripts only) and none are touched by 19bbed1.
+# SECURITY NOTE: scripts/phase7_age_resend.py and scripts/phase7_second_
+# webhook.py hardcode what appears to be a live Meta webhook verification
+# secret in plaintext -- flagged to the Owner for rotation/review; left
+# exactly as found (not deleted, not committed, not printed further) per
+# this repo's standing rule on secret-exposure incidents. Owner: please
+# review and either commit (after removing the hardcoded secret) or delete
+# these six files + the restart script; remove this manifest entry once
+# resolved either way.
+scripts/phase7_age_resend.py
+scripts/phase7_check_outbound.py
+scripts/phase7_check_session.py
+scripts/phase7_check_sessions.py
+scripts/phase7_live_test.py
+scripts/phase7_second_webhook.py
+scripts/restart_fazle7.sh
