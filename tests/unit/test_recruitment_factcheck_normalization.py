@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from modules.hermes_dispatch import (
+    _candidate_identity_numbers,
     _normalize_number_token,
     _normalize_place_token,
     _recruitment_reply_matches_source,
@@ -313,3 +314,88 @@ class TestRangeExtractionFix:
         from modules.hermes_dispatch import _NUMBER_RE
         assert _NUMBER_RE.findall("01958-122300") == ["01958-122300"]
         assert _NUMBER_RE.findall("2026-08-21") == ["2026-08-21"]
+
+
+class TestCandidatePhoneIdentityFix:
+    """2026-08-27 fix (Owner directive): a candidate's own phone number is
+    contextual identity data, not a recruitment-policy fact -- echoing it
+    back (e.g. "your number 01912345678 is noted") must not be blocked
+    just because that exact number isn't in recruitment_source_of_truth.txt.
+    Scoped narrowly via _candidate_identity_numbers(phone, text): only the
+    sender's own WhatsApp phone, or a phone-shaped (>=10 digit) number the
+    CANDIDATE themselves just typed this turn -- never a global allowlist,
+    never anything Hermes introduces on its own."""
+
+    NO_PHONE_SOURCE = (
+        "probation salary: ৳১০,০০০–১৩,০০০। "
+        "probation period পদ ও মূল্যায়ন অনুযায়ী ৩–৬ মাস।"
+    )
+    OFFICIAL_PHONE_SOURCE = "সর্বশেষ ও একমাত্র recruitment যোগাযোগ নম্বর: 01958-122300।"
+
+    def test_candidates_own_sender_phone_echoed_is_allowed(self, normalized_factcheck):
+        reply = "আপনার নম্বর 01912345678 পেয়েছি, ধন্যবাদ।"
+        extra = _candidate_identity_numbers("01912345678", "")
+        assert _recruitment_reply_matches_source(
+            reply, self.NO_PHONE_SOURCE, extra_supported_numbers=extra,
+        ) is True
+
+    def test_candidates_own_phone_typed_this_turn_is_allowed(self, normalized_factcheck):
+        # Sender phone differs from what they typed (e.g. session's
+        # sender number vs. a number they just supplied) -- either way,
+        # a number appearing in THIS turn's own text is the candidate's
+        # own input, not Hermes inventing a fact.
+        reply = "আপনার নম্বর 01865639673 নোট করা হলো।"
+        extra = _candidate_identity_numbers("8801865639673", "আমার নম্বর 01865639673")
+        assert _recruitment_reply_matches_source(
+            reply, self.NO_PHONE_SOURCE, extra_supported_numbers=extra,
+        ) is True
+
+    def test_official_recruitment_phone_from_source_still_allowed(self, normalized_factcheck):
+        # Regression check: the office's own number, already in the
+        # authoritative source, validates with no extra_supported_numbers
+        # needed at all -- this fix doesn't change that existing path.
+        reply = "যোগাযোগ করুন: 01958-122300।"
+        assert _recruitment_reply_matches_source(reply, self.OFFICIAL_PHONE_SOURCE) is True
+
+    def test_arbitrary_third_party_phone_still_blocked(self, normalized_factcheck):
+        # A phone number that is NEITHER the candidate's own (sender or
+        # this-turn-typed) NOR in kb_context must still be rejected --
+        # proves this fix does not become a general phone-number allowlist.
+        reply = "এই নম্বরে যোগাযোগ করুন: 01700000000।"
+        extra = _candidate_identity_numbers("8801912345678", "কোনো প্রশ্ন নেই")
+        assert _recruitment_reply_matches_source(
+            reply, self.NO_PHONE_SOURCE, extra_supported_numbers=extra,
+        ) is False
+
+    def test_unsupported_salary_number_still_blocked_alongside_phone_fix(self, normalized_factcheck):
+        # A fabricated salary figure must still be blocked even when a
+        # legitimate candidate-phone extra is present in the same reply.
+        reply = "আপনার নম্বর 01912345678 পেয়েছি। বেতন ৫০,০০০ টাকা।"
+        extra = _candidate_identity_numbers("01912345678", "")
+        assert _recruitment_reply_matches_source(
+            reply, self.NO_PHONE_SOURCE, extra_supported_numbers=extra,
+        ) is False
+
+    def test_36_misreading_of_range_still_blocked_alongside_phone_fix(self, normalized_factcheck):
+        # The "৩–৬" -> "36" misreading (caught by the earlier range-
+        # extraction fix) must remain blocked even with a phone-identity
+        # extra present.
+        reply = "আপনার নম্বর 01912345678 পেয়েছি। probation ৩৬ মাস।"
+        extra = _candidate_identity_numbers("01912345678", "")
+        assert _recruitment_reply_matches_source(
+            reply, self.NO_PHONE_SOURCE, extra_supported_numbers=extra,
+        ) is False
+
+    def test_identity_numbers_exclude_short_digits(self):
+        # Age/experience-length numbers in the candidate's own text must
+        # NOT be smuggled in as "identity" -- only phone-length (>=10
+        # digit) numbers qualify.
+        result = _candidate_identity_numbers("", "আমার বয়স ২৫, অভিজ্ঞতা 3 বছর")
+        assert result == set()
+
+    def test_identity_numbers_includes_sender_phone_normalized(self):
+        result = _candidate_identity_numbers("8801912345678", "")
+        assert result == {"8801912345678"}
+
+    def test_identity_numbers_empty_on_no_input(self):
+        assert _candidate_identity_numbers("", "") == set()

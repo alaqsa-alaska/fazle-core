@@ -386,7 +386,38 @@ def _place_stem(token: str) -> str:
     return token
 
 
-def _recruitment_reply_matches_source(reply: str, kb_context: str) -> bool:
+def _candidate_identity_numbers(phone: str, text: str) -> set[str]:
+    """Owner directive (2026-08-27): a candidate's own phone number is
+    contextual identity data, not a recruitment-policy fact -- it should
+    never need to appear in recruitment_source_of_truth.txt to be safely
+    echoed back (e.g. "your number 01958... is noted"). Returns the
+    normalized digit-string of the sender's own WhatsApp phone plus any
+    phone-shaped (>=10 digit) number the candidate THEMSELVES just typed
+    in this turn's inbound text -- i.e. only numbers tied to the
+    candidate's own identity/input for THIS call, never a global
+    allowlist and never anything Hermes itself introduced. Deliberately
+    narrow: excludes short numbers (age, experience years) so this can't
+    become a general escape hatch for arbitrary figures -- only
+    phone-length digit runs qualify. Never raises; returns an empty set
+    on any error."""
+    numbers: set[str] = set()
+    try:
+        if phone:
+            norm = _normalize_number_token(phone)
+            if norm:
+                numbers.add(norm)
+        for tok in _NUMBER_RE.findall(text or ""):
+            norm = _normalize_number_token(tok)
+            if len(norm) >= 10:  # BD mobile length (01XXXXXXXXX / 8801XXXXXXXXX) -- excludes age/experience/etc.
+                numbers.add(norm)
+    except Exception:  # noqa: BLE001 — fail closed to "no extra allowance"
+        return set()
+    return numbers
+
+
+def _recruitment_reply_matches_source(
+    reply: str, kb_context: str, *, extra_supported_numbers: Optional[set] = None,
+) -> bool:
     """True if `reply` introduces no numeric fact or place-name absent
     from `kb_context`. Ported from recruitment_ai's
     enforce_recruitment_reply_policy() (see this module's own header
@@ -403,6 +434,17 @@ def _recruitment_reply_matches_source(reply: str, kb_context: str) -> bool:
     equivalent formatting of APPROVED source-of-truth validates. Invented
     numbers/locations are still rejected. Default behavior unchanged
     when flag is off (substring matching as before).
+
+    extra_supported_numbers (2026-08-27, Owner directive): an additional
+    set of ALREADY-NORMALIZED digit strings that count as supported on
+    top of whatever kb_context contains -- see _candidate_identity_numbers()
+    above, the only intended source of this set. Only consulted in the
+    normalized path (where the concept of "normalized number identity"
+    exists at all); the legacy path is unaffected/unchanged. Every other
+    numeric fact (salary, fee, duration, age, or any number not in this
+    set or in kb_context) is still rejected exactly as before -- this
+    narrows what counts as "the candidate's own identity", it does not
+    widen recruitment-policy grounding in any way.
     """
     # Lazy import to avoid circular imports at module load.
     try:
@@ -418,6 +460,8 @@ def _recruitment_reply_matches_source(reply: str, kb_context: str) -> bool:
         source_numbers = {
             _normalize_number_token(t) for t in _NUMBER_RE.findall(kb_context)
         }
+        if extra_supported_numbers:
+            source_numbers |= set(extra_supported_numbers)
         reply_numbers.discard("")
         if not reply_numbers.issubset(source_numbers):
             log.warning(
@@ -754,10 +798,24 @@ async def _build_post_intake_state_block(session_row: dict) -> str:
         f"- বর্তমান post-intake status: {status}",
         "",
         "নিয়ম (rule): এই candidate-এর নাম/বয়স/এলাকা/নির্বাচিত পদ আবার জিজ্ঞেস করবে "
-        "না — ইতিমধ্যে সংগৃহীত। এখন স্বাভাবিক কথোপকথন চালিয়ে যাও: প্রযোজ্য প্রশিক্ষণ/"
-        "probation শর্ত ব্যাখ্যা কর, রাজি কিনা স্বাভাবিকভাবে জিজ্ঞেস কর, আপত্তি/প্রশ্নের "
-        "উত্তর দাও, এবং রাজি হলে যোগদানের প্রস্তুতির দিকে এগিয়ে যাও। শুধু \"আমাদের টিম "
-        "যোগাযোগ করবে\" বলে কথোপকথন শেষ কোরো না। কোনো বেতন/ফি/নীতির সংখ্যা বা শর্ত "
+        "না — ইতিমধ্যে সংগৃহীত।",
+        "এই candidate ইতিমধ্যে আবেদন সম্পন্ন করেছে (scored) — তাই কখনো \"আবেদন প্রক্রিয়া "
+        "শুরু করতে রাজি আছেন?\" জাতীয় প্রশ্ন কোরো না, এটা বিভ্রান্তিকর কারণ আবেদন ইতিমধ্যে "
+        "শুরু হয়ে গেছে। এর বদলে পরবর্তী ধাপ, ইন্টারভিউ বা যোগদানের প্রস্তুতি নিয়ে কথা বলো।",
+        "প্রার্থী যদি প্রতিষ্ঠান আসল/প্রতারণা কিনা প্রশ্ন করে বা সন্দেহ প্রকাশ করে, শুধু \"আমি "
+        "রিয়েল\"-জাতীয় খালি দাবি কোরো না — Knowledge অংশে থাকা অফিসের ঠিকানা এবং টাকা/রশিদ "
+        "সংক্রান্ত নীতি (কোনো ঘুষ বা অগ্রিম টাকা নেওয়া হয় না, নির্দিষ্ট মানি-রিসিট ছাড়া কেউ টাকা "
+        "চাইলে সেটা প্রতারণা) উল্লেখ করে বিশ্বাসযোগ্যতা প্রতিষ্ঠা কর — Knowledge-এ না থাকা কোনো "
+        "দাবি নিজে থেকে বানিও না।",
+        "প্রার্থী যদি শুধু সংক্ষিপ্ত স্বীকৃতি দেয় (যেমন \"ওকে\"/\"ধন্যবাদ\"/\"জী ইনশাআল্লাহ\"/"
+        "\"Oky\") — কোনো নতুন প্রশ্ন বা আপত্তি ছাড়া — সেটাকে কথোপকথন শেষ করার সংকেত হিসেবে "
+        "ধরবে না। কথোপকথনের ইতিহাস এবং বর্তমান post-intake status (উপরে) থেকে বোঝার চেষ্টা "
+        "করো ঠিক কী বিষয়ে স্বীকৃতি দিচ্ছে, তারপর স্বাভাবিকভাবে প্রযোজ্য প্রশিক্ষণ/probation শর্ত "
+        "সংক্ষেপে ব্যাখ্যা করে বা রাজি কিনা জিজ্ঞেস করে কথোপকথন এগিয়ে নাও।",
+        "সাধারণভাবে: প্রশ্ন/আপত্তি থাকলে আগে তার উত্তর দাও, তারপর রাজি/readiness-এর দিকে "
+        "এগিয়ে যাও — এবং রাজি হলে যোগদানের প্রস্তুতির দিকে যাও। শুধু \"আমাদের টিম যোগাযোগ "
+        "করবে\" / \"যোগাযোগ করবেন\" / \"ভালো থাকবেন\" বলে কথোপকথন শেষ কোরো না, যদি না "
+        "প্রার্থী স্পষ্টভাবে কথোপকথন শেষ করতে চায়। কোনো বেতন/ফি/নীতির সংখ্যা বা শর্ত "
         "উদ্ভাবন করবে না — Knowledge অংশে না থাকলে অফিসে যোগাযোগ করতে বলবে।",
     ]
     return "\n".join(lines)
@@ -949,7 +1007,10 @@ async def generate_recruitment_reply(
         except Exception as exc:  # noqa: BLE001 — must never raise into the caller
             log.warning("[hermes_dispatch] generate_recruitment_reply minimax call raised: %s", exc)
             minimax_reply = None
-        if minimax_reply and _recruitment_reply_matches_source(minimax_reply, kb_context):
+        if minimax_reply and _recruitment_reply_matches_source(
+            minimax_reply, kb_context,
+            extra_supported_numbers=_candidate_identity_numbers(phone, text),
+        ):
             log.info("[hermes_dispatch] generate_recruitment_reply(minimax_primary) source=%s", source)
             return minimax_reply
         if minimax_reply:
@@ -969,7 +1030,10 @@ async def generate_recruitment_reply(
         message, sender_phone=phone,
         log_label=f"generate_recruitment_reply source={source}",
     )
-    if reply and not _recruitment_reply_matches_source(reply, kb_context):
+    if reply and not _recruitment_reply_matches_source(
+        reply, kb_context,
+        extra_supported_numbers=_candidate_identity_numbers(phone, text),
+    ):
         return None
     return reply
 

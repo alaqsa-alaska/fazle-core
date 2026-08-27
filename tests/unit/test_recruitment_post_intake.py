@@ -283,6 +283,24 @@ async def test_build_post_intake_state_block_empty_when_terminal():
 
 
 @pytest.mark.asyncio
+async def test_build_post_intake_state_block_covers_trust_already_applied_and_ack_guidance():
+    """Owner directive (2026-08-27): the rule text must explicitly cover
+    the three observed quality gaps -- (1) never asking an already-scored
+    candidate whether they want to START applying, (2) grounding a trust/
+    fraud question in Knowledge facts instead of a bare "I am real"
+    assertion, (3) treating a short acknowledgment (ওকে/ধন্যবাদ/জী
+    ইনশাআল্লাহ) as a continuation cue, not a conversation-ending signal."""
+    session_row = {"candidate_id": 42, "full_name": "Karim"}
+    with patch("app.database.fetch_one", new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement"})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "আবেদন প্রক্রিয়া শুরু করতে রাজি" in block  # names the forbidden phrasing
+    assert "রিয়েল" in block  # names the forbidden bare trust-claim
+    assert "রশিদ" in block  # points to the actual grounding fact to use instead
+    assert "ওকে" in block and "জী ইনশাআল্লাহ" in block  # names the ack examples
+    assert "কথোপকথন শেষ করার সংকেত হিসেবে" in block  # the core instruction: don't treat as end-of-conversation
+
+
+@pytest.mark.asyncio
 async def test_session_state_block_dispatches_to_post_intake_for_scored():
     row = {
         "candidate_id": 42, "full_name": "Karim", "age": 28, "area": None,
