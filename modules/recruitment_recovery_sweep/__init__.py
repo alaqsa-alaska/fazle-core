@@ -44,10 +44,11 @@ first" instruction.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from app.database import fetch_all
+from app.database import fetch_all, fetch_one, execute
 
 log = logging.getLogger("fazle.recruitment_recovery_sweep")
 
@@ -65,6 +66,267 @@ _MAX_CANDIDATES_PER_RUN = 20
 # territory this sweep does not touch at all.
 _RECRUITMENT_ROLES = ("unknown", "new_lead", "candidate")
 _EMPLOYEE_ROLES = ("employee", "supervisor")
+
+# ── Recovery send safety gate (Owner directive, 2026-08-27) ────────────────
+# Root cause of the observed defect (candidate 8801744835680 asked for their
+# name at 06:06 UTC despite giving it at 00:38 UTC, 7 total sends to one
+# recipient): _decide_and_reply()'s live-send branch called outbound.
+# enqueue() but never modules.bridge_poller._save_message(..., "outbound",
+# ...) afterward -- every OTHER live send site in this codebase (bridge_
+# poller's own customer-reply and admin-hermes-reply paths) pairs enqueue()
+# with that write-back; this module's sweep branch never did. Without it,
+# wbom_whatsapp_messages -- the exact table _find_stale_unanswered()'s own
+# NOT EXISTS check reads -- never reflected the sweep's own prior sends, so
+# every ~30min tick re-selected the same "unanswered" trigger message
+# forever. Separately confirmed: shared.draft.should_generate_draft()'s own
+# "already replied" guard reads fpe_wa_messages, which structurally only
+# ever contains bridge1/bridge2/operator_ui traffic (verified live, zero
+# bridge3 rows ever) -- it can never see bridge3 recruitment candidates at
+# all, live or dead code for this population. Restoring the _save_message
+# write-back (below, in the live-send branch) directly repairs the
+# EXISTING, already-correct _find_stale_unanswered() SQL-level check for
+# every future tick -- the single highest-leverage fix, requiring no new
+# table and reusing the exact pattern every other live send site already
+# follows.
+#
+# That structural fix stops MOST repeat-sends (no new inbound == no
+# re-selection at all), but doesn't by itself stop a fresh, semantically-
+# redundant reply to a genuinely NEW inbound message (e.g. candidate sends
+# something new, but Hermes's reply asks for a field already on file, or
+# restates something already told to them, in different wording). The
+# functions below are that second, independent layer -- checked against the
+# ACTUAL generated reply text, right before enqueue, never against exact
+# prior wording alone.
+
+# Deterministic, no-LLM-call layer: recognizes a reply asking for a field
+# that is already present in structured recruitment state. Keyword sets are
+# intentionally small/conservative (prefer false-negative -- let the
+# semantic LLM layer below catch what this misses -- over blocking a
+# reply that isn't actually redundant).
+_OBJECTIVE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "collect_name": ("আপনার নাম", "নাম জানান", "নাম কি", "নাম বলুন", "your name"),
+    "collect_age": ("আপনার বয়স", "বয়স কত", "বয়স জানান"),
+    "collect_area": ("কোন জেলা", "বর্তমান ঠিকানা", "এলাকা"),
+    "collect_experience": ("কত বছরের অভিজ্ঞতা", "অভিজ্ঞতা আছে"),
+    "collect_previous_company": ("কোন কোম্পানিতে", "কোন প্রতিষ্ঠানে কাজ করেছেন", "contact person"),
+    "clarify_job_preference": ("কোন পদে আগ্রহী", "কোন পদে কাজ"),
+}
+
+
+def _guess_reply_objective(reply: str) -> str:
+    """Best-effort, record-keeping-only label for [RECOVERY_STATE] --
+    NOT used for gating logic (see _no_progression_since_last_recovery's
+    own docstring for why objective-matching isn't required there). Falls
+    back to a generic label when no keyword matches."""
+    for objective, keywords in _OBJECTIVE_KEYWORDS.items():
+        if any(kw in reply for kw in keywords):
+            return objective
+    return "general_reply"
+
+
+def _resolved_field_conflict(
+    reply: str, session_row: dict, claim: Optional[dict],
+) -> Optional[str]:
+    """Returns the conflicting objective name if `reply` appears to ask
+    for a field already present in session_row/claim, else None. Pure,
+    synchronous, no DB/LLM call."""
+    from modules.recruitment_flow import _experience_claim_resolved
+
+    checks: dict[str, bool] = {
+        "collect_name": bool(session_row.get("full_name")),
+        "collect_age": session_row.get("age") is not None,
+        "collect_area": bool(session_row.get("area")),
+        "collect_experience": session_row.get("experience_years") is not None,
+        "collect_previous_company": _experience_claim_resolved(claim),
+        "clarify_job_preference": bool(session_row.get("job_preference")),
+    }
+    for objective, keywords in _OBJECTIVE_KEYWORDS.items():
+        if checks.get(objective) and any(kw in reply for kw in keywords):
+            return objective
+    return None
+
+
+# Semantic fallback: one lightweight LLM call, same call_decision_llm()
+# shape modules.recruitment_flow._classify_post_intake_turn already uses --
+# reused, not a new integration. Only invoked when the deterministic layer
+# above found nothing, so a candidate whose reply is obviously fine never
+# pays this cost. Fails OPEN (no block) on any error/timeout/ambiguous
+# response, matching _classify_post_intake_turn's own "never guess" -- a
+# best-effort second layer must never itself become a reason recovery stops
+# working.
+_RECOVERY_SAFETY_SYSTEM_PROMPT = (
+    "তুমি একটি প্রস্তাবিত WhatsApp reply যাচাই করছ, candidate-কে পাঠানোর আগে। "
+    "নিচে candidate-এর সাম্প্রতিক কথোপকথনের ইতিহাস এবং প্রস্তাবিত reply দেওয়া আছে। "
+    "নির্ধারণ কর: প্রস্তাবিত reply কি এমন কোনো তথ্য জিজ্ঞাসা করছে বা পুনরাবৃত্তি করছে "
+    "যা candidate ইতিমধ্যে কথোপকথনে স্পষ্টভাবে দিয়েছে, বা যার উত্তর candidate-কে "
+    "ইতিমধ্যে দেওয়া হয়ে গেছে (শব্দচয়ন ভিন্ন হলেও)? শুধু স্পষ্ট পুনরাবৃত্তির ক্ষেত্রেই "
+    "redundant বলে চিহ্নিত কর; সামান্যতম অনিশ্চয়তা থাকলে redundant=false দাও, কখনো "
+    "অনুমান করো না। কোনো ব্যাখ্যা ছাড়া শুধুমাত্র এই JSON ফরম্যাটে উত্তর দাও:\n"
+    '{"redundant": <true|false>, "confidence": <0.0-1.0>, "resolved_topic": "<short label or null>"}'
+)
+_RECOVERY_SAFETY_CONFIDENCE_FLOOR = 0.70
+
+
+async def _semantic_redundancy_check(phone: str, reply: str, history: str) -> Optional[str]:
+    """Returns a short topic label if the LLM confidently judges `reply`
+    redundant against `history`, else None. Never raises."""
+    try:
+        from modules.hermes_dispatch import call_decision_llm
+    except Exception as exc:  # noqa: BLE001 -- fail open
+        log.debug("[recovery_sweep] safety-gate import failed: %s", exc)
+        return None
+    payload = f"সাম্প্রতিক কথোপকথন:\n{(history or '')[-1500:]}\n\nপ্রস্তাবিত reply:\n{reply}"
+    try:
+        raw = await call_decision_llm(
+            system_prompt=_RECOVERY_SAFETY_SYSTEM_PROMPT, user_payload=payload, sender_phone=phone,
+        )
+    except Exception as exc:  # noqa: BLE001 -- fail open
+        log.debug("[recovery_sweep] safety-gate call failed: %s", exc)
+        return None
+    if not raw:
+        return None
+    try:
+        import json
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        data = json.loads(match.group(0)) if match else json.loads(raw)
+        confidence = float(data.get("confidence") or 0.0)
+    except Exception:
+        return None
+    if data.get("redundant") is True and confidence >= _RECOVERY_SAFETY_CONFIDENCE_FLOOR:
+        topic = str(data.get("resolved_topic") or "").strip()
+        return topic or "semantic_duplicate"
+    return None
+
+
+# Recovery-progression tracking: same marker-block-in-notes pattern
+# modules.recruitment_flow already established for [EXPERIENCE_CLAIM]
+# (wbom_candidates.notes, no schema change) -- a separate, independently
+# parsed [RECOVERY_STATE] block so the two coexist in the same free-text
+# column without interfering. Records the last objective a recovery reply
+# pursued for this candidate, so "another scheduler interval elapsed" alone
+# can never re-trigger the SAME unresolved objective -- only a new inbound
+# meaningfully longer than a bare acknowledgement can.
+_RECOVERY_STATE_BLOCK_RE = re.compile(r"\[RECOVERY_STATE\].*?\[/RECOVERY_STATE\]", re.DOTALL)
+_SHORT_ACK_RE = re.compile(
+    r"^(ওকে|ok|okay|হ্যাঁ|জী|জি|ধন্যবাদ|আচ্ছা|thanks|thank you)[.!।\s]*$", re.IGNORECASE,
+)
+
+
+def _format_recovery_state_block(*, objective: str, topic: str = "", sent_at: str) -> str:
+    return (
+        "[RECOVERY_STATE]\n"
+        f"objective: {objective}\n"
+        f"topic: {topic or '—'}\n"
+        f"sent_at: {sent_at}\n"
+        "[/RECOVERY_STATE]"
+    )
+
+
+def _parse_recovery_state_block(notes: Optional[str]) -> Optional[dict]:
+    if not notes:
+        return None
+    matches = _RECOVERY_STATE_BLOCK_RE.findall(notes)
+    if not matches:
+        return None
+    data: dict = {}
+    for line in matches[-1].splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if key in ("objective", "topic", "sent_at"):
+            data[key] = None if value == "—" else value
+    return data or None
+
+
+async def _upsert_recovery_state(candidate_id: int, *, objective: str, topic: str = "") -> None:
+    """Best-effort; never blocks/raises. Preserves any [EXPERIENCE_CLAIM]
+    block already present in notes -- only the [RECOVERY_STATE] marker is
+    replaced/appended."""
+    try:
+        row = await fetch_one("SELECT notes FROM wbom_candidates WHERE candidate_id=$1", candidate_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[recovery_sweep] recovery_state read failed candidate=%s: %s", candidate_id, exc)
+        return
+    existing_notes = (row or {}).get("notes") or ""
+    block = _format_recovery_state_block(
+        objective=objective, topic=topic, sent_at=datetime.now(timezone.utc).isoformat(),
+    )
+    if _RECOVERY_STATE_BLOCK_RE.search(existing_notes):
+        new_notes = _RECOVERY_STATE_BLOCK_RE.sub(lambda _m: block, existing_notes, count=1)
+    else:
+        new_notes = f"{existing_notes}\n\n{block}".strip() if existing_notes else block
+    try:
+        await execute(
+            "UPDATE wbom_candidates SET notes=$1, updated_at=NOW() WHERE candidate_id=$2",
+            new_notes, candidate_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[recovery_sweep] recovery_state write failed candidate=%s: %s", candidate_id, exc)
+
+
+def _no_progression_since_last_recovery(recovery_state: Optional[dict], text: str) -> bool:
+    """True if a recovery reply was already sent to this candidate for
+    SOME objective, and this turn's triggering inbound text is only a bare
+    acknowledgement (no meaningful new information) -- regardless of
+    whether the new candidate reply's own topic happens to match the prior
+    one, since a short ack carries no real progression either way. Time
+    elapsed since the last recovery send is deliberately NOT part of this
+    check -- a scheduler interval alone must never be sufficient
+    authorization for a repeat."""
+    if not recovery_state:
+        return False
+    return bool(_SHORT_ACK_RE.match((text or "").strip()))
+
+
+async def _recovery_safety_gate(
+    *, phone: str, candidate_id: Optional[int], reply: str, text: str, history: str,
+) -> Optional[str]:
+    """Combined pre-send gate, run against the ACTUAL generated reply.
+    Returns a block reason string, or None if the reply is safe to send.
+    Never raises -- any internal failure fails OPEN (returns None) so this
+    best-effort layer can never itself take recovery offline; the
+    structural _save_message fix above remains the primary safety net
+    regardless of this function's outcome."""
+    try:
+        from modules.recruitment_flow import _parse_experience_claim_block
+
+        session_row: dict = {}
+        claim: Optional[dict] = None
+        notes: Optional[str] = None
+        if candidate_id is not None:
+            cand = await fetch_one(
+                "SELECT * FROM fazle_recruitment_sessions WHERE candidate_id=$1 "
+                "ORDER BY updated_at DESC NULLS LAST LIMIT 1",
+                candidate_id,
+            )
+            session_row = dict(cand) if cand else {}
+            notes_row = await fetch_one(
+                "SELECT notes FROM wbom_candidates WHERE candidate_id=$1", candidate_id,
+            )
+            notes = (notes_row or {}).get("notes")
+            claim = _parse_experience_claim_block(notes)
+
+        objective = _resolved_field_conflict(reply, session_row, claim)
+        if objective:
+            return f"resolved_field_conflict:{objective}"
+
+        # Item D: a prior recovery was already sent to this candidate, and
+        # THIS turn's triggering inbound is nothing more than a bare
+        # acknowledgement -- elapsed scheduler time alone can never justify
+        # another send, regardless of what the new reply's own topic is.
+        recovery_state = _parse_recovery_state_block(notes) if candidate_id is not None else None
+        if _no_progression_since_last_recovery(recovery_state, text):
+            return f"no_progression:{recovery_state.get('objective') or 'unknown'}"
+
+        topic = await _semantic_redundancy_check(phone, reply, history)
+        if topic:
+            return f"semantic_duplicate:{topic}"
+
+        return None
+    except Exception as exc:  # noqa: BLE001 -- fail open, never block recovery entirely
+        log.warning("[recovery_sweep] safety gate failed open phone=%s: %s", phone, exc)
+        return None
 
 
 async def _find_stale_unanswered(limit: int) -> list[dict]:
@@ -211,6 +473,31 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
         decision["role"] = role
         decision["autosend"] = autosend
 
+        # Owner directive (2026-08-27): mandatory safety gate against the
+        # ACTUAL generated reply -- resolved-field conflict, semantic
+        # duplicate, and no-progression-since-last-recovery. Recruitment
+        # role only (the employee path has no wbom_candidates row / claim
+        # state this gate reasons about). Checked before the dry-run/
+        # live-send split so a dry-run digest also shows what WOULD be
+        # blocked, not just what would be sent.
+        candidate_id: Optional[int] = None
+        if role in _RECRUITMENT_ROLES:
+            try:
+                cand_row = await fetch_one(
+                    "SELECT candidate_id FROM wbom_candidates WHERE phone=$1", phone,
+                )
+                candidate_id = (cand_row or {}).get("candidate_id")
+            except Exception as exc:  # noqa: BLE001 -- gate itself fails open below
+                log.debug("[recovery_sweep] candidate_id lookup failed phone=%s: %s", phone, exc)
+
+            block_reason = await _recovery_safety_gate(
+                phone=phone, candidate_id=candidate_id, reply=reply, text=text, history=history,
+            )
+            if block_reason:
+                decision["action"] = "blocked_redundant"
+                decision["reason"] = block_reason
+                return decision
+
         if not live_send:
             decision["action"] = "dry_run_preview"
             return decision
@@ -225,6 +512,29 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
             )
             decision["action"] = "sent" if qid else "dedup_skipped"
             decision["queue_id"] = qid
+            if qid:
+                # Root-cause fix (Owner directive, 2026-08-27): every OTHER
+                # live send site in this codebase (bridge_poller's own
+                # customer-reply and admin-hermes-reply paths) pairs
+                # outbound.enqueue() with this write-back so wbom_
+                # whatsapp_messages -- the table _find_stale_unanswered()'s
+                # own NOT EXISTS check reads -- reflects what was actually
+                # sent. This sweep never did, which is the structural root
+                # cause of repeat-sends to the same unanswered trigger
+                # message across scheduler ticks. See this module's own
+                # top-of-file comment for the full trace.
+                try:
+                    from modules.bridge_poller import _save_message
+                    await _save_message(
+                        source_bridge, phone, reply, "outbound",
+                        identity_role=role, workflow=intent,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- never block on this
+                    log.warning("[recovery_sweep] _save_message failed phone=%s: %s", phone, exc)
+                if candidate_id is not None:
+                    await _upsert_recovery_state(
+                        candidate_id, objective=_guess_reply_objective(reply), topic=intent,
+                    )
         else:
             from modules.bridge_poller import _save_draft
             await _save_draft(

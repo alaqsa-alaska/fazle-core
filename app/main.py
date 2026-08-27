@@ -3616,6 +3616,24 @@ async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_ke
         idempotency_key=idempotency_key,
     )
     deduped = idempotency_key is not None and queue_id is None
+    if queue_id and not deduped:
+        # Owner directive (2026-08-27, recovery-sweep containment pass):
+        # this endpoint enqueued the outbound send but never recorded it
+        # into wbom_whatsapp_messages, the same table modules.
+        # recruitment_recovery_sweep._find_stale_unanswered()'s own
+        # NOT EXISTS check reads to decide whether a candidate/employee
+        # still needs a recovery reply -- and the same table modules.
+        # message_router.get_recent_history() reads for conversation
+        # context. Without this write-back, an admin's direct WhatsApp
+        # send via this route was invisible to both, letting the
+        # recovery sweep re-contact someone an admin had just personally
+        # messaged. Mirrors the exact pattern every other live send site
+        # in this codebase already follows (bridge_poller's own customer-
+        # reply and admin-hermes-reply paths).
+        try:
+            await _save_message(source_bridge, recipient, body, "outbound")
+        except Exception as exc:  # noqa: BLE001 -- never fail the send response on this
+            log.warning("[send_whatsapp_message] _save_message failed recipient=%s: %s", recipient, exc)
     await rbac.record_audit(
         channel="http",
         command="send_whatsapp_message",
