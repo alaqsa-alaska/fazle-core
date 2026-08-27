@@ -168,11 +168,35 @@ _RECOVERY_SAFETY_CONFIDENCE_FLOOR = 0.70
 
 
 async def _semantic_redundancy_check(phone: str, reply: str, history: str) -> Optional[str]:
-    """Returns a short topic label if the LLM confidently judges `reply`
-    redundant against `history`, else None. Never raises."""
+    """OPTIONAL, best-effort second layer -- returns a short topic label
+    if the LLM confidently judges `reply` redundant against `history`,
+    else None. Never raises.
+
+    Owner directive (2026-08-27): this function's None return is the ONLY
+    kind of "fail open" this module permits, and only under these exact
+    circumstances, every one of which means "no unresolved duplicate-risk
+    evidence exists from this layer" -- never "an error occurred so
+    proceed anyway" as the reason to send. It must NEVER be treated as
+    "eligibility confirmed" — the caller (_recovery_safety_gate) only
+    consults this function AFTER the deterministic layer has already
+    positively confirmed no conflict; this layer can only ADD a block
+    reason, never substitute for the deterministic one:
+      - hermes_dispatch import fails            -> None (logged debug)
+      - call_decision_llm() raises (LLM/provider
+        unavailable, network error, timeout)     -> None (logged debug)
+      - raw response is empty/None               -> None (no LLM opinion)
+      - JSON parse fails / response unparsable    -> None (logged debug --
+        previously silent, now logged for observability)
+      - parsed but confidence below the floor,
+        or redundant=false                        -> None (LLM's genuine,
+        confident judgment: not redundant)
+    In every case, "no evidence of redundancy from this layer" is
+    correct, provided (and only provided) the deterministic layer already
+    ran cleanly -- which the caller enforces structurally, not this
+    function."""
     try:
         from modules.hermes_dispatch import call_decision_llm
-    except Exception as exc:  # noqa: BLE001 -- fail open
+    except Exception as exc:  # noqa: BLE001 -- provider/import unavailable
         log.debug("[recovery_sweep] safety-gate import failed: %s", exc)
         return None
     payload = f"সাম্প্রতিক কথোপকথন:\n{(history or '')[-1500:]}\n\nপ্রস্তাবিত reply:\n{reply}"
@@ -180,17 +204,19 @@ async def _semantic_redundancy_check(phone: str, reply: str, history: str) -> Op
         raw = await call_decision_llm(
             system_prompt=_RECOVERY_SAFETY_SYSTEM_PROMPT, user_payload=payload, sender_phone=phone,
         )
-    except Exception as exc:  # noqa: BLE001 -- fail open
-        log.debug("[recovery_sweep] safety-gate call failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 -- LLM timeout / provider unavailable
+        log.debug("[recovery_sweep] safety-gate call failed (timeout/provider unavailable): %s", exc)
         return None
     if not raw:
+        log.debug("[recovery_sweep] safety-gate got empty response from decision LLM")
         return None
     try:
         import json
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         data = json.loads(match.group(0)) if match else json.loads(raw)
         confidence = float(data.get("confidence") or 0.0)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 -- unparsable response
+        log.debug("[recovery_sweep] safety-gate response unparsable: %s", exc)
         return None
     if data.get("redundant") is True and confidence >= _RECOVERY_SAFETY_CONFIDENCE_FLOOR:
         topic = str(data.get("resolved_topic") or "").strip()
@@ -284,16 +310,28 @@ async def _recovery_safety_gate(
 ) -> Optional[str]:
     """Combined pre-send gate, run against the ACTUAL generated reply.
     Returns a block reason string, or None if the reply is safe to send.
-    Never raises -- any internal failure fails OPEN (returns None) so this
-    best-effort layer can never itself take recovery offline; the
-    structural _save_message fix above remains the primary safety net
-    regardless of this function's outcome."""
+
+    Owner directive (2026-08-27, safety-review pass): the deterministic,
+    DB/state-backed layer (resolved-field conflict, no-progression-since-
+    last-recovery) must FAIL CLOSED -- "ALLOW only when deterministic
+    eligibility remains valid", never "ALLOW because the checker errored".
+    Any failure loading or evaluating structured recruitment state (DB
+    error, unexpected shape, etc.) is treated as UNRESOLVED duplicate-risk
+    evidence and blocks the send. Only the OPTIONAL semantic LLM layer
+    (_semantic_redundancy_check, called below) may itself resolve to "no
+    evidence found" on its own internal failures (timeout/empty/parse-
+    failure/provider-unavailable -- see that function's own docstring for
+    the exhaustive list) -- and even then, ONLY because the deterministic
+    layer already positively confirmed no conflict first. This function
+    itself still never raises into its caller -- every failure mode
+    resolves to an explicit block reason string, not an exception."""
+    session_row: dict = {}
+    claim: Optional[dict] = None
+    notes: Optional[str] = None
+    recovery_state: Optional[dict] = None
     try:
         from modules.recruitment_flow import _parse_experience_claim_block
 
-        session_row: dict = {}
-        claim: Optional[dict] = None
-        notes: Optional[str] = None
         if candidate_id is not None:
             cand = await fetch_one(
                 "SELECT * FROM fazle_recruitment_sessions WHERE candidate_id=$1 "
@@ -306,27 +344,51 @@ async def _recovery_safety_gate(
             )
             notes = (notes_row or {}).get("notes")
             claim = _parse_experience_claim_block(notes)
+            recovery_state = _parse_recovery_state_block(notes)
+    except Exception as exc:  # noqa: BLE001 -- FAIL CLOSED: deterministic
+        # eligibility could not be confirmed from authoritative state, so
+        # this is NOT a clean send -- block rather than guess.
+        log.warning(
+            "[recovery_sweep] safety gate: deterministic state load failed, "
+            "BLOCKING send (fail-closed) phone=%s: %s", phone, exc,
+        )
+        return "gate_unavailable:state_load_error"
 
+    try:
         objective = _resolved_field_conflict(reply, session_row, claim)
-        if objective:
-            return f"resolved_field_conflict:{objective}"
+    except Exception as exc:  # noqa: BLE001 -- FAIL CLOSED (same rationale)
+        log.warning(
+            "[recovery_sweep] safety gate: resolved-field check failed, "
+            "BLOCKING send (fail-closed) phone=%s: %s", phone, exc,
+        )
+        return "gate_unavailable:resolved_field_check_error"
+    if objective:
+        return f"resolved_field_conflict:{objective}"
 
-        # Item D: a prior recovery was already sent to this candidate, and
-        # THIS turn's triggering inbound is nothing more than a bare
-        # acknowledgement -- elapsed scheduler time alone can never justify
-        # another send, regardless of what the new reply's own topic is.
-        recovery_state = _parse_recovery_state_block(notes) if candidate_id is not None else None
-        if _no_progression_since_last_recovery(recovery_state, text):
-            return f"no_progression:{recovery_state.get('objective') or 'unknown'}"
+    # Item D: a prior recovery was already sent to this candidate, and
+    # THIS turn's triggering inbound is nothing more than a bare
+    # acknowledgement -- elapsed scheduler time alone can never justify
+    # another send, regardless of what the new reply's own topic is.
+    try:
+        no_progression = _no_progression_since_last_recovery(recovery_state, text)
+    except Exception as exc:  # noqa: BLE001 -- FAIL CLOSED (same rationale)
+        log.warning(
+            "[recovery_sweep] safety gate: no-progression check failed, "
+            "BLOCKING send (fail-closed) phone=%s: %s", phone, exc,
+        )
+        return "gate_unavailable:progression_check_error"
+    if no_progression:
+        return f"no_progression:{(recovery_state or {}).get('objective') or 'unknown'}"
 
-        topic = await _semantic_redundancy_check(phone, reply, history)
-        if topic:
-            return f"semantic_duplicate:{topic}"
+    # Deterministic layer has now positively confirmed no conflict --
+    # only from here is it safe to let the OPTIONAL semantic layer's own
+    # fail-open behavior apply (it can only ADD a block, never remove
+    # one already found above).
+    topic = await _semantic_redundancy_check(phone, reply, history)
+    if topic:
+        return f"semantic_duplicate:{topic}"
 
-        return None
-    except Exception as exc:  # noqa: BLE001 -- fail open, never block recovery entirely
-        log.warning("[recovery_sweep] safety gate failed open phone=%s: %s", phone, exc)
-        return None
+    return None
 
 
 async def _find_stale_unanswered(limit: int) -> list[dict]:
@@ -513,24 +575,24 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
             decision["action"] = "sent" if qid else "dedup_skipped"
             decision["queue_id"] = qid
             if qid:
-                # Root-cause fix (Owner directive, 2026-08-27): every OTHER
-                # live send site in this codebase (bridge_poller's own
-                # customer-reply and admin-hermes-reply paths) pairs
-                # outbound.enqueue() with this write-back so wbom_
-                # whatsapp_messages -- the table _find_stale_unanswered()'s
-                # own NOT EXISTS check reads -- reflects what was actually
-                # sent. This sweep never did, which is the structural root
-                # cause of repeat-sends to the same unanswered trigger
-                # message across scheduler ticks. See this module's own
-                # top-of-file comment for the full trace.
-                try:
-                    from modules.bridge_poller import _save_message
-                    await _save_message(
-                        source_bridge, phone, reply, "outbound",
-                        identity_role=role, workflow=intent,
-                    )
-                except Exception as exc:  # noqa: BLE001 -- never block on this
-                    log.warning("[recovery_sweep] _save_message failed phone=%s: %s", phone, exc)
+                # Owner directive (2026-08-27, safety-review pass): the
+                # wbom_whatsapp_messages write-back does NOT happen here
+                # (enqueue-time) any more -- outbound.enqueue() only
+                # guarantees the row was ACCEPTED into fazle_outbound_
+                # queue, not that transport delivery ever succeeds
+                # (up to max_attempts=3 retries with exponential backoff
+                # before landing in 'dlq'). Writing "outbound" here would
+                # permanently mark a candidate as "already answered" even
+                # for a message that never actually reached them -- see
+                # _reconcile_confirmed_sends()'s own docstring for the
+                # full trace of why this moved and how it's now handled
+                # (called once per sweep run, from run_recovery_sweep(),
+                # only for rows fazle_outbound_queue itself confirms
+                # status='sent'). [RECOVERY_STATE] bookkeeping below is
+                # NOT delivery-sensitive in the same way -- worst case on
+                # a failed send is one extra skipped candidate on the
+                # NEXT tick (fail-closed), not an incorrect send, so it
+                # stays immediate.
                 if candidate_id is not None:
                     await _upsert_recovery_state(
                         candidate_id, objective=_guess_reply_objective(reply), topic=intent,
@@ -550,6 +612,92 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
         return decision
 
 
+# ── Confirmed-delivery reconciliation (Owner directive, 2026-08-27,
+# safety-review pass) ────────────────────────────────────────────────────
+# outbound.enqueue() only guarantees a fazle_outbound_queue row was
+# ACCEPTED -- it does NOT guarantee transport delivery ever succeeds
+# (sweep_once() retries up to max_attempts=3 with exponential backoff,
+# ~1+2+4 min, before a permanently-undeliverable row lands in 'dlq', which
+# already happens routinely in this system -- confirmed live, 82 rows).
+# Writing the wbom_whatsapp_messages "outbound" record at enqueue time
+# (this module's own original fix, and the pre-existing pattern every
+# OTHER live send site in this codebase already used) would therefore
+# permanently mark a candidate/employee as "already answered" even for a
+# message that never actually reached them -- _find_stale_unanswered()
+# would then never re-select them again, silently and permanently.
+#
+# Fix: the write-back now happens HERE, once per sweep run, ONLY for
+# fazle_outbound_queue rows fazle_outbound_queue ITSELF confirms
+# status='sent' -- never for 'pending'/'sending'/'failed'/'dlq'. No
+# schema change: matched to wbom_whatsapp_messages by recipient + exact
+# body text + received_at >= the queue row's created_at (no queue_id FK
+# needed -- the alternative, a schema migration, is explicitly out of
+# scope for this deployment). Covers BOTH this module's own
+# "recovery_sweep_reply" purpose AND app/main.py's /admin/send-whatsapp
+# "hermes_admin_send" purpose (that route used to do its own immediate
+# write; removed in favor of this single, delivery-confirmed mechanism --
+# see that route's own updated comment).
+#
+# A row that ends up 'dlq' is correctly NEVER written -- the candidate
+# stays eligible for a future recovery attempt, exactly as it should for
+# a message that was never actually delivered. A row that succeeds on a
+# LATER retry (past this reconciliation pass) is picked up on the NEXT
+# sweep run's reconciliation pass instead -- bounded by this sweep's own
+# ~30min interval, not indefinite.
+_RECONCILE_WINDOW_HOURS = 48
+_RECONCILE_BATCH_LIMIT = 200
+
+
+async def _reconcile_confirmed_sends() -> int:
+    """Writes the missing wbom_whatsapp_messages outbound record for every
+    confirmed-sent (status='sent') recovery/admin-send queue row from the
+    last _RECONCILE_WINDOW_HOURS that doesn't already have one. Returns
+    the number of rows reconciled. Never raises -- best-effort, but this
+    IS the authoritative write path (not a secondary layer), so a failure
+    here is logged at warning level, not silently swallowed."""
+    try:
+        rows = await fetch_all(
+            """
+            SELECT q.id, q.recipient, q.body, q.source_bridge, q.purpose, q.created_at
+            FROM fazle_outbound_queue q
+            WHERE q.purpose IN ('recovery_sweep_reply', 'hermes_admin_send')
+              AND q.status = 'sent'
+              AND q.sent_at > NOW() - ($1 * INTERVAL '1 hour')
+              AND NOT EXISTS (
+                  SELECT 1 FROM wbom_whatsapp_messages m
+                  WHERE m.sender_number = q.recipient
+                    AND m.direction = 'outbound'
+                    AND m.message_body = q.body
+                    AND m.received_at >= q.created_at
+              )
+            ORDER BY q.sent_at ASC
+            LIMIT $2
+            """,
+            _RECONCILE_WINDOW_HOURS, _RECONCILE_BATCH_LIMIT,
+        )
+    except Exception as exc:  # noqa: BLE001 -- log and skip this run's reconciliation
+        log.warning("[recovery_sweep] reconciliation query failed: %s", exc)
+        return 0
+
+    from modules.bridge_poller import _save_message
+    reconciled = 0
+    for row in rows:
+        try:
+            await _save_message(
+                row["source_bridge"] or "bridge3", row["recipient"], row["body"], "outbound",
+                workflow=row["purpose"],
+            )
+            reconciled += 1
+        except Exception as exc:  # noqa: BLE001 -- one bad row must not abort the rest
+            log.warning(
+                "[recovery_sweep] reconciliation write failed queue_id=%s recipient=%s: %s",
+                row["id"], row["recipient"], exc,
+            )
+    if reconciled:
+        log.info("[recovery_sweep] reconciled %d confirmed-sent row(s) into wbom_whatsapp_messages", reconciled)
+    return reconciled
+
+
 async def run_recovery_sweep() -> dict:
     """Entry point for the scheduler job (and manual `trigger_job`/admin
     RUN JOB invocation). Always returns a summary dict; never raises."""
@@ -561,6 +709,14 @@ async def run_recovery_sweep() -> dict:
     # AsyncMock, which masked the sync/async mismatch entirely).
     from modules.preflight_guard import is_feature_active
     live_send = is_feature_active("recruitment_recovery_sweep_live_send", default=False)
+
+    # Owner directive (2026-08-27, safety-review pass): reconcile
+    # confirmed-sent rows into wbom_whatsapp_messages BEFORE selecting
+    # this run's candidates, so _find_stale_unanswered()'s own NOT EXISTS
+    # check sees every send that has actually been confirmed delivered
+    # since the last tick -- see _reconcile_confirmed_sends()'s own
+    # docstring for the full rationale.
+    reconciled_count = await _reconcile_confirmed_sends()
 
     candidates = await _find_stale_unanswered(_MAX_CANDIDATES_PER_RUN)
     decisions = []
@@ -602,6 +758,7 @@ async def run_recovery_sweep() -> dict:
     return {
         "status": "ok",
         "live_send": live_send,
+        "reconciled": reconciled_count,
         "candidates_checked": len(candidates),
         "actions": counts,
         "decisions": decisions,

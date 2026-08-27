@@ -3616,24 +3616,19 @@ async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_ke
         idempotency_key=idempotency_key,
     )
     deduped = idempotency_key is not None and queue_id is None
-    if queue_id and not deduped:
-        # Owner directive (2026-08-27, recovery-sweep containment pass):
-        # this endpoint enqueued the outbound send but never recorded it
-        # into wbom_whatsapp_messages, the same table modules.
-        # recruitment_recovery_sweep._find_stale_unanswered()'s own
-        # NOT EXISTS check reads to decide whether a candidate/employee
-        # still needs a recovery reply -- and the same table modules.
-        # message_router.get_recent_history() reads for conversation
-        # context. Without this write-back, an admin's direct WhatsApp
-        # send via this route was invisible to both, letting the
-        # recovery sweep re-contact someone an admin had just personally
-        # messaged. Mirrors the exact pattern every other live send site
-        # in this codebase already follows (bridge_poller's own customer-
-        # reply and admin-hermes-reply paths).
-        try:
-            await _save_message(source_bridge, recipient, body, "outbound")
-        except Exception as exc:  # noqa: BLE001 -- never fail the send response on this
-            log.warning("[send_whatsapp_message] _save_message failed recipient=%s: %s", recipient, exc)
+    # Owner directive (2026-08-27, recovery-sweep safety-review pass): this
+    # endpoint used to write straight into wbom_whatsapp_messages here,
+    # immediately after enqueue() returned a queue_id -- but enqueue()
+    # only guarantees the row was ACCEPTED, not that transport delivery
+    # ever succeeds (fazle_outbound_queue retries up to max_attempts=3
+    # with exponential backoff before landing in 'dlq'). Writing at
+    # enqueue time would have permanently marked a candidate/employee as
+    # "already answered" even for a message that never actually reached
+    # them. modules.recruitment_recovery_sweep._reconcile_confirmed_sends()
+    # now performs this write for BOTH this route's "hermes_admin_send"
+    # purpose and the sweep's own "recovery_sweep_reply" purpose, but only
+    # once fazle_outbound_queue confirms status='sent' -- see that
+    # function's own docstring for the full rationale. Nothing to do here.
     await rbac.record_audit(
         channel="http",
         command="send_whatsapp_message",

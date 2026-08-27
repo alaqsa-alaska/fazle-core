@@ -271,6 +271,7 @@ class TestRunRecoverySweep:
     async def test_no_candidates_no_admin_digest_sent(self):
         with (
             patch("modules.preflight_guard.is_feature_active", return_value=False),
+            patch("modules.recruitment_recovery_sweep._reconcile_confirmed_sends", new=AsyncMock(return_value=0)),
             patch("modules.recruitment_recovery_sweep._find_stale_unanswered", new=AsyncMock(return_value=[])),
         ):
             from modules.recruitment_recovery_sweep import run_recovery_sweep
@@ -283,6 +284,7 @@ class TestRunRecoverySweep:
         mock_enqueue = AsyncMock()
         with (
             patch("modules.preflight_guard.is_feature_active", return_value=False),
+            patch("modules.recruitment_recovery_sweep._reconcile_confirmed_sends", new=AsyncMock(return_value=0)),
             patch("modules.recruitment_recovery_sweep._find_stale_unanswered", new=AsyncMock(return_value=[CANDIDATE_ROW])),
             patch(
                 "modules.recruitment_recovery_sweep._decide_and_reply",
@@ -302,6 +304,7 @@ class TestRunRecoverySweep:
         mock_enqueue = AsyncMock()
         with (
             patch("modules.preflight_guard.is_feature_active", return_value=False),
+            patch("modules.recruitment_recovery_sweep._reconcile_confirmed_sends", new=AsyncMock(return_value=0)),
             patch("modules.recruitment_recovery_sweep._find_stale_unanswered", new=AsyncMock(return_value=[CANDIDATE_ROW])),
             patch(
                 "modules.recruitment_recovery_sweep._decide_and_reply",
@@ -324,23 +327,22 @@ class TestRunRecoverySweep:
 # own prior sends. Fixed below; plus a second, independent semantic/
 # resolved-field safety layer checked against the ACTUAL generated reply.
 
-class TestSaveMessageWriteBackRootCauseFix:
-    async def test_live_send_calls_save_message_with_outbound_direction(self):
-        """The actual regression fix: every live recovery send must now
-        also record itself into wbom_whatsapp_messages, exactly like
-        bridge_poller's own customer-reply and admin-hermes-reply paths
-        already do -- this is what lets _find_stale_unanswered()'s
-        existing NOT EXISTS check see it on the next scheduler tick."""
+class TestSaveMessageWriteBackNotAtEnqueueTime:
+    """Owner directive (2026-08-27, safety-review pass): the write-back
+    moved OUT of _decide_and_reply() entirely -- outbound.enqueue() only
+    guarantees queue acceptance, not confirmed delivery, so writing here
+    would risk permanently marking a candidate "already answered" for a
+    message that never actually reached them. See TestReconcileConfirmedSends
+    below for where this now happens (confirmed-sent-only, once per sweep
+    run)."""
+
+    async def test_live_send_does_not_call_save_message_directly(self):
         patches = _patch_common(eligibility={"eligible": True, "autosend": True, "reason": "explicit_recruitment"})
         with _apply_all(patches):
             from modules.recruitment_recovery_sweep import _decide_and_reply
             result = await _decide_and_reply(CANDIDATE_ROW, live_send=True)
         assert result["action"] == "sent"
-        patches["modules.bridge_poller._save_message"].assert_awaited_once()
-        args, kwargs = patches["modules.bridge_poller._save_message"].call_args
-        assert args[0] == "bridge3"  # source_bridge
-        assert args[1] == CANDIDATE_ROW["sender_number"]
-        assert args[3] == "outbound"
+        patches["modules.bridge_poller._save_message"].assert_not_awaited()
 
     async def test_dry_run_never_calls_save_message(self):
         patches = _patch_common()
@@ -348,14 +350,6 @@ class TestSaveMessageWriteBackRootCauseFix:
             from modules.recruitment_recovery_sweep import _decide_and_reply
             await _decide_and_reply(CANDIDATE_ROW, live_send=False)
         patches["modules.bridge_poller._save_message"].assert_not_awaited()
-
-    async def test_save_message_failure_does_not_break_the_send_decision(self):
-        patches = _patch_common(eligibility={"eligible": True, "autosend": True, "reason": "explicit_recruitment"})
-        patches["modules.bridge_poller._save_message"] = AsyncMock(side_effect=RuntimeError("db down"))
-        with _apply_all(patches):
-            from modules.recruitment_recovery_sweep import _decide_and_reply
-            result = await _decide_and_reply(CANDIDATE_ROW, live_send=True)
-        assert result["action"] == "sent"  # the send itself already succeeded; this is best-effort
 
 
 class TestRecoveryStateWriteBack:
@@ -651,27 +645,94 @@ class TestRecoverySafetyGateIntegration:
             )
         assert result == "no_progression:collect_name"
 
-    async def test_gate_fails_open_on_internal_error(self):
+    async def test_deterministic_state_load_failure_fails_closed_blocks_send(self):
+        """Owner directive (2026-08-27, safety review): the deterministic
+        layer must FAIL CLOSED -- a DB error loading structured state is
+        unresolved duplicate-risk evidence, not a green light to send.
+        Supersedes the pre-review 'fails open' behavior."""
         from modules.recruitment_recovery_sweep import _recovery_safety_gate
         with patch("modules.recruitment_recovery_sweep.fetch_one", new=AsyncMock(side_effect=RuntimeError("db down"))):
             result = await _recovery_safety_gate(
                 phone="8801711111111", candidate_id=42,
                 reply="আপনার নাম জানান।", text="hi", history="",
             )
+        assert result == "gate_unavailable:state_load_error"
+
+    async def test_only_semantic_layer_may_fail_open_after_deterministic_layer_clears(self):
+        """The ONLY legitimate 'no block' outcome from an internal failure
+        is the semantic LLM layer's own timeout/empty/parse-failure, and
+        only once the deterministic layer already ran cleanly and found
+        nothing."""
+        from modules.recruitment_recovery_sweep import _recovery_safety_gate
+
+        async def fake_fetch_one(sql, *args):
+            if "fazle_recruitment_sessions" in sql:
+                return {"job_preference": "Escort"}
+            if "notes" in sql:
+                return {"notes": None}
+            return None
+
+        with patch("modules.recruitment_recovery_sweep.fetch_one", new=AsyncMock(side_effect=fake_fetch_one)), \
+             patch("modules.hermes_dispatch.call_decision_llm", new=AsyncMock(side_effect=TimeoutError("llm timeout"))):
+            result = await _recovery_safety_gate(
+                phone="8801711111111", candidate_id=42,
+                reply="প্রশিক্ষণকালীন ভাতা জানানো হলো।", text="বেতন কত?", history="",
+            )
         assert result is None
 
+    async def test_resolved_field_check_failure_fails_closed(self):
+        from modules.recruitment_recovery_sweep import _recovery_safety_gate
+        with patch("modules.recruitment_recovery_sweep.fetch_one", new=AsyncMock(return_value=None)), \
+             patch("modules.recruitment_recovery_sweep._resolved_field_conflict",
+                   side_effect=RuntimeError("unexpected shape")):
+            result = await _recovery_safety_gate(
+                phone="8801711111111", candidate_id=42,
+                reply="text", text="hi", history="",
+            )
+        assert result == "gate_unavailable:resolved_field_check_error"
 
-class TestHermesAdminSendWriteBack:
+    async def test_no_progression_check_failure_fails_closed(self):
+        from modules.recruitment_recovery_sweep import _recovery_safety_gate
+        with patch("modules.recruitment_recovery_sweep.fetch_one", new=AsyncMock(return_value=None)), \
+             patch("modules.recruitment_recovery_sweep._no_progression_since_last_recovery",
+                   side_effect=RuntimeError("unexpected shape")):
+            result = await _recovery_safety_gate(
+                phone="8801711111111", candidate_id=42,
+                reply="text", text="hi", history="",
+            )
+        assert result == "gate_unavailable:progression_check_error"
+
+    async def test_semantic_layer_cannot_undo_a_deterministic_block(self):
+        """Ordering guarantee: even if the semantic layer would return
+        None, a deterministic conflict found first still blocks -- the
+        semantic call must not even be reached."""
+        from modules.recruitment_recovery_sweep import _recovery_safety_gate
+        semantic_mock = AsyncMock(return_value=None)
+        with patch("modules.recruitment_recovery_sweep.fetch_one",
+                   new=AsyncMock(return_value={"full_name": "Karim"})), \
+             patch("modules.recruitment_recovery_sweep._semantic_redundancy_check", new=semantic_mock):
+            result = await _recovery_safety_gate(
+                phone="8801711111111", candidate_id=42,
+                reply="আপনার নাম জানান।", text="hi", history="",
+            )
+        assert result == "resolved_field_conflict:collect_name"
+        semantic_mock.assert_not_awaited()
+
+
+class TestHermesAdminSendNoLongerWritesDirectly:
     """Owner Step 1 checklist item 'hermes_admin_send interaction' --
     /admin/send-whatsapp (app/main.py) had the SAME missing write-back as
     the recovery sweep itself; without it, an admin's direct send was
-    invisible to both _find_stale_unanswered() and get_recent_history(),
-    letting the sweep re-contact someone an admin had just personally
-    messaged (observed live: 4 of the 60 historical recovery_sweep_reply
-    sends collided with a prior hermes_admin_send). Fixed alongside the
-    sweep's own fix since Owner's regression scenario 4 depends on it."""
+    invisible to both _find_stale_unanswered() and get_recent_history().
+    Superseded (2026-08-27, safety-review pass): rather than writing
+    immediately at enqueue time (same "queue acceptance != delivered" risk
+    the sweep's own original fix had), this route now enqueues only --
+    modules.recruitment_recovery_sweep._reconcile_confirmed_sends() writes
+    the record once fazle_outbound_queue itself confirms status='sent',
+    covering this route's "hermes_admin_send" purpose alongside the
+    sweep's own "recovery_sweep_reply" purpose in one place."""
 
-    async def test_send_whatsapp_message_calls_save_message_on_success(self):
+    async def test_send_whatsapp_message_does_not_call_save_message_directly(self):
         from app import main as app_main
         with patch("modules.outbound.enqueue", new=AsyncMock(return_value=555)), \
              patch("modules.rbac.record_audit", new=AsyncMock()), \
@@ -681,16 +742,85 @@ class TestHermesAdminSendWriteBack:
                 {"recipient": "8801711111111", "body": "hello", "source_bridge": "bridge2"},
                 key="test-key",
             )
-        mock_save.assert_awaited_once_with("bridge2", "8801711111111", "hello", "outbound")
-
-    async def test_send_whatsapp_message_skips_save_message_when_deduped(self):
-        from app import main as app_main
-        with patch("modules.outbound.enqueue", new=AsyncMock(return_value=None)), \
-             patch("modules.rbac.record_audit", new=AsyncMock()), \
-             patch.object(app_main, "_rbac_actor_from_key", new=AsyncMock(return_value={"phone": "8801880446111"})), \
-             patch.object(app_main, "_save_message", new=AsyncMock()) as mock_save:
-            await app_main.send_whatsapp_message(
-                {"recipient": "8801711111111", "body": "hello", "source_bridge": "bridge2", "idempotency_key": "k1"},
-                key="test-key",
-            )
         mock_save.assert_not_awaited()
+
+
+class TestReconcileConfirmedSends:
+    """Owner directive (2026-08-27, safety-review pass) -- the actual
+    delivery-confirmed write-back mechanism, covering both
+    'recovery_sweep_reply' and 'hermes_admin_send' purposes."""
+
+    async def test_writes_save_message_for_each_confirmed_sent_row(self):
+        from modules.recruitment_recovery_sweep import _reconcile_confirmed_sends
+        rows = [
+            {"id": 1, "recipient": "8801711111111", "body": "hello", "source_bridge": "bridge3",
+             "purpose": "recovery_sweep_reply", "created_at": datetime(2026, 8, 27, tzinfo=timezone.utc)},
+            {"id": 2, "recipient": "8801722222222", "body": "hi there", "source_bridge": "bridge2",
+             "purpose": "hermes_admin_send", "created_at": datetime(2026, 8, 27, tzinfo=timezone.utc)},
+        ]
+        with patch("modules.recruitment_recovery_sweep.fetch_all", new=AsyncMock(return_value=rows)), \
+             patch("modules.bridge_poller._save_message", new=AsyncMock()) as mock_save:
+            count = await _reconcile_confirmed_sends()
+        assert count == 2
+        assert mock_save.await_count == 2
+        first_args = mock_save.call_args_list[0].args
+        assert first_args[0] == "bridge3"
+        assert first_args[1] == "8801711111111"
+        assert first_args[3] == "outbound"
+
+    async def test_query_only_matches_confirmed_sent_never_dlq_or_pending(self):
+        """Regression proof for the exact scenario Owner raised: a
+        permanently-undeliverable row (status='dlq') must never surface
+        here -- the SQL WHERE clause is the actual gate, asserted by shape
+        since this suite mocks the DB rather than running one."""
+        from modules.recruitment_recovery_sweep import _reconcile_confirmed_sends
+        mock_fetch = AsyncMock(return_value=[])
+        with patch("modules.recruitment_recovery_sweep.fetch_all", new=mock_fetch):
+            await _reconcile_confirmed_sends()
+        query = mock_fetch.call_args.args[0]
+        assert "status = 'sent'" in query
+        assert "'dlq'" not in query
+        assert "'pending'" not in query
+        assert "NOT EXISTS" in query
+        assert "direction = 'outbound'" in query
+
+    async def test_no_rows_no_writes(self):
+        from modules.recruitment_recovery_sweep import _reconcile_confirmed_sends
+        with patch("modules.recruitment_recovery_sweep.fetch_all", new=AsyncMock(return_value=[])), \
+             patch("modules.bridge_poller._save_message", new=AsyncMock()) as mock_save:
+            count = await _reconcile_confirmed_sends()
+        assert count == 0
+        mock_save.assert_not_awaited()
+
+    async def test_query_failure_returns_zero_does_not_raise(self):
+        from modules.recruitment_recovery_sweep import _reconcile_confirmed_sends
+        with patch("modules.recruitment_recovery_sweep.fetch_all", new=AsyncMock(side_effect=RuntimeError("db down"))):
+            count = await _reconcile_confirmed_sends()
+        assert count == 0
+
+    async def test_one_bad_row_does_not_abort_the_rest(self):
+        from modules.recruitment_recovery_sweep import _reconcile_confirmed_sends
+        rows = [
+            {"id": 1, "recipient": "8801711111111", "body": "a", "source_bridge": "bridge3",
+             "purpose": "recovery_sweep_reply", "created_at": datetime(2026, 8, 27, tzinfo=timezone.utc)},
+            {"id": 2, "recipient": "8801722222222", "body": "b", "source_bridge": "bridge3",
+             "purpose": "recovery_sweep_reply", "created_at": datetime(2026, 8, 27, tzinfo=timezone.utc)},
+        ]
+        mock_save = AsyncMock(side_effect=[RuntimeError("write failed"), None])
+        with patch("modules.recruitment_recovery_sweep.fetch_all", new=AsyncMock(return_value=rows)), \
+             patch("modules.bridge_poller._save_message", new=mock_save):
+            count = await _reconcile_confirmed_sends()
+        assert count == 1  # only the second row succeeded
+        assert mock_save.await_count == 2  # both were attempted
+
+    async def test_run_recovery_sweep_calls_reconciliation_before_candidate_selection(self):
+        mock_reconcile = AsyncMock(return_value=3)
+        with (
+            patch("modules.preflight_guard.is_feature_active", return_value=False),
+            patch("modules.recruitment_recovery_sweep._reconcile_confirmed_sends", new=mock_reconcile),
+            patch("modules.recruitment_recovery_sweep._find_stale_unanswered", new=AsyncMock(return_value=[])),
+        ):
+            from modules.recruitment_recovery_sweep import run_recovery_sweep
+            result = await run_recovery_sweep()
+        mock_reconcile.assert_awaited_once()
+        assert result["reconciled"] == 3
