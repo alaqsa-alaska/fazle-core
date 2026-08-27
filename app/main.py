@@ -2051,6 +2051,36 @@ async def _dispatch_meta_channel_message(
         await _notify_admin(send_to_admin)
 
 
+async def _dispatch_meta_channel_message_background(
+    *, channel: str, sender_id: str, text: str,
+    external_message_id: str | None, live_send_flag: str,
+) -> None:
+    """Fire-and-forget wrapper for _dispatch_meta_channel_message() (Owner
+    directive, 2026-08-27, Meta reconfiguration Phase 10: "Do not make
+    Hermes latency delay Meta webhook acknowledgement" -- confirmed in
+    production logs, hermes_dispatch calls routinely take 15-30s;
+    meta_webhook() must not hold Meta's webhook connection open that long).
+
+    The caller (_handle_messenger_message/_handle_instagram_message) still
+    runs the durable dedup check and inbound _save_message() synchronously,
+    BEFORE scheduling this -- only the slow, Hermes-routed reply generation
+    and outbound enqueue happen in the background, after the webhook has
+    already returned {"status": "ok"}. Unlike a bare asyncio.create_task()
+    of _dispatch_meta_channel_message directly, this wrapper catches and
+    logs any exception itself -- an uncaught exception in a fire-and-forget
+    task would otherwise vanish as a silent 'Task exception was never
+    retrieved' warning at garbage-collection time instead of a real log
+    line (this codebase already has one such existing fire-and-forget
+    pattern, modules.message_router._hk_fire(), used as the template)."""
+    try:
+        await _dispatch_meta_channel_message(
+            channel=channel, sender_id=sender_id, text=text,
+            external_message_id=external_message_id, live_send_flag=live_send_flag,
+        )
+    except Exception as exc:  # noqa: BLE001 — fire-and-forget must never crash the event loop
+        log.exception(f"[{channel.upper()}] background dispatch failed sender={sender_id}: {exc}")
+
+
 async def _handle_messenger_message(messaging: dict):
     """Handle Facebook Messenger inbound message.
 
@@ -2090,10 +2120,10 @@ async def _handle_messenger_message(messaging: dict):
 
     from modules.preflight_guard import is_feature_active
     if is_feature_active("meta_messenger_inbound", default=False):
-        await _dispatch_meta_channel_message(
+        asyncio.create_task(_dispatch_meta_channel_message_background(
             channel="messenger", sender_id=sender_id, text=text,
             external_message_id=message_id, live_send_flag="meta_messenger_live_send",
-        )
+        ))
         return
 
     try:
@@ -2175,10 +2205,10 @@ async def _handle_instagram_message(messaging: dict):
         _meta_log_event("meta_fallback_used", channel="instagram", reason="inbound_flag_off_sync_only")
         return
 
-    await _dispatch_meta_channel_message(
+    asyncio.create_task(_dispatch_meta_channel_message_background(
         channel="instagram", sender_id=sender_id, text=text,
         external_message_id=message_id, live_send_flag="meta_instagram_live_send",
-    )
+    ))
 
 
 async def _handle_fb_comment(value: dict):
@@ -2188,6 +2218,21 @@ async def _handle_fb_comment(value: dict):
     sender_id = str(value.get("sender_id", ""))
     text = value.get("message", "").strip()
     if not comment_id or not text:
+        return
+
+    # Owner directive (2026-08-27, Meta reconfiguration Phase 5): the Page's
+    # OWN reply to a comment is itself a new comment on the same post, and
+    # Meta's "feed"/comment webhook fires for it exactly like any customer
+    # comment. Before this fix, _handle_fb_comment had no identity check at
+    # all -- unlike modules.social_auto_reply.backlog_processor.scan_recent()
+    # (a periodic scan, not this real-time webhook path), which already
+    # compares sender.id against settings.fb_page_id for /conversations. This
+    # mirrors that same, reliable ID-based check (not the fragile "Al Aqsa"
+    # display-name check used elsewhere for nested reply threads) for the
+    # live webhook path, so a Page-authored reply can never be re-ingested
+    # as a new customer comment and drive a self-reply loop.
+    if settings.fb_page_id and sender_id == settings.fb_page_id:
+        log.debug(f"[FB-COMMENT] ignoring Page's own comment/reply comment_id={comment_id}")
         return
 
     log.info(f"[FB-COMMENT] from={sender_name}({sender_id}) comment_id={comment_id} text={text[:60]!r}")

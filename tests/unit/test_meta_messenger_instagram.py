@@ -18,6 +18,7 @@ Every DB/network boundary is mocked — no real DB or Graph API call.
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -161,14 +162,22 @@ class TestHandleMessengerMessageMigration:
     async def test_flag_on_uses_unified_dispatch_skips_legacy_ingest(self):
         """The double-reply-prevention guarantee: once migrated,
         ingest_social_event() (which the social_auto_reply daemon reads)
-        must NOT be called for this message."""
+        must NOT be called for this message.
+
+        Owner directive (2026-08-27, Phase 10 fast-ack fix): dispatch is
+        now scheduled via asyncio.create_task(..._background(...)) instead
+        of awaited inline, so the webhook's HTTP response is never delayed
+        by Hermes latency -- patch the background wrapper (what's actually
+        passed to create_task) and yield once (asyncio.sleep(0)) so the
+        scheduled task gets a turn before asserting."""
         from app.main import _handle_messenger_message
         with patch("app.main._meta_channel_duplicate_delivery", new=AsyncMock(return_value=False)), \
              patch("app.main._save_message", new=AsyncMock()), \
              patch("modules.preflight_guard.is_feature_active", return_value=True), \
-             patch("app.main._dispatch_meta_channel_message", new=AsyncMock()) as mock_dispatch, \
+             patch("app.main._dispatch_meta_channel_message_background", new=AsyncMock()) as mock_dispatch, \
              patch("app.main.ingest_social_event", new=AsyncMock()) as mock_ingest:
             await _handle_messenger_message(self._messaging())
+            await asyncio.sleep(0)
         mock_dispatch.assert_awaited_once()
         kwargs = mock_dispatch.call_args.kwargs
         assert kwargs["channel"] == "messenger"
@@ -178,8 +187,9 @@ class TestHandleMessengerMessageMigration:
         from app.main import _handle_messenger_message
         with patch("app.main._meta_channel_duplicate_delivery", new=AsyncMock(return_value=True)), \
              patch("app.main._save_message", new=AsyncMock()) as mock_save, \
-             patch("app.main._dispatch_meta_channel_message", new=AsyncMock()) as mock_dispatch:
+             patch("app.main._dispatch_meta_channel_message_background", new=AsyncMock()) as mock_dispatch:
             await _handle_messenger_message(self._messaging())
+            await asyncio.sleep(0)
         mock_save.assert_not_awaited()
         mock_dispatch.assert_not_awaited()
 
@@ -203,19 +213,24 @@ class TestHandleInstagramMessage:
         with patch("app.main._meta_channel_duplicate_delivery", new=AsyncMock(return_value=False)), \
              patch("app.main._save_message", new=AsyncMock()) as mock_save, \
              patch("modules.preflight_guard.is_feature_active", return_value=False), \
-             patch("app.main._dispatch_meta_channel_message", new=AsyncMock()) as mock_dispatch:
+             patch("app.main._dispatch_meta_channel_message_background", new=AsyncMock()) as mock_dispatch:
             await _handle_instagram_message(self._messaging())
+            await asyncio.sleep(0)
         mock_save.assert_awaited_once()
         assert mock_save.call_args.args[0] == "instagram"
         mock_dispatch.assert_not_awaited()
 
     async def test_flag_on_dispatches_via_unified_path(self):
+        """Owner Phase 10 fast-ack fix: dispatch is scheduled via
+        asyncio.create_task(..._background(...)), not awaited inline —
+        patch the background wrapper and yield once before asserting."""
         from app.main import _handle_instagram_message
         with patch("app.main._meta_channel_duplicate_delivery", new=AsyncMock(return_value=False)), \
              patch("app.main._save_message", new=AsyncMock()), \
              patch("modules.preflight_guard.is_feature_active", return_value=True), \
-             patch("app.main._dispatch_meta_channel_message", new=AsyncMock()) as mock_dispatch:
+             patch("app.main._dispatch_meta_channel_message_background", new=AsyncMock()) as mock_dispatch:
             await _handle_instagram_message(self._messaging())
+            await asyncio.sleep(0)
         mock_dispatch.assert_awaited_once()
         kwargs = mock_dispatch.call_args.kwargs
         assert kwargs["channel"] == "instagram"
@@ -568,3 +583,115 @@ class TestMetaOutboundIdempotency:
                 "SELECT COUNT(*) FROM fazle_outbound_queue WHERE idempotency_key=$1", key
             )
         assert count == 1
+
+
+class TestMetaWebhookFastAcknowledgement:
+    """Owner directive (2026-08-27, Meta reconfiguration Phase 10): 'Do not
+    make Hermes latency delay Meta webhook acknowledgement.' Proves the
+    ordering property directly, not just that dispatch was scheduled: the
+    caller (_handle_messenger_message/_handle_instagram_message) must
+    return control to the webhook handler BEFORE a slow Hermes-routed
+    dispatch finishes, by driving a real (unmocked) asyncio.create_task
+    against a dispatch that blocks on a controllable event."""
+
+    async def test_messenger_handler_returns_before_slow_dispatch_completes(self):
+        from app.main import _handle_messenger_message
+
+        dispatch_started = asyncio.Event()
+        dispatch_may_finish = asyncio.Event()
+        dispatch_finished = asyncio.Event()
+
+        async def slow_dispatch(**kwargs):
+            dispatch_started.set()
+            await dispatch_may_finish.wait()
+            dispatch_finished.set()
+
+        with patch("app.main._meta_channel_duplicate_delivery", new=AsyncMock(return_value=False)), \
+             patch("app.main._save_message", new=AsyncMock()), \
+             patch("modules.preflight_guard.is_feature_active", return_value=True), \
+             patch("app.main._dispatch_meta_channel_message", new=AsyncMock(side_effect=slow_dispatch)), \
+             patch("app.main.ingest_social_event", new=AsyncMock()):
+            messaging = {"sender": {"id": "PSID_SLOW"}, "message": {"text": "hi", "mid": "mid.slow.1"}}
+            await _handle_messenger_message(messaging)  # must return immediately
+
+            # The handler returning is the webhook ack point. At this exact
+            # moment, the background dispatch must NOT have finished yet --
+            # proving the handler didn't wait for it.
+            assert not dispatch_finished.is_set()
+
+            # Give the scheduled background task a chance to actually start
+            # running (it was only just created, not yet scheduled by the
+            # loop) and confirm it does eventually start.
+            await asyncio.wait_for(dispatch_started.wait(), timeout=2)
+            assert not dispatch_finished.is_set()
+
+            # Now let it complete and confirm it actually does run to
+            # completion in the background (not silently dropped/orphaned).
+            dispatch_may_finish.set()
+            await asyncio.wait_for(dispatch_finished.wait(), timeout=2)
+
+    async def test_background_dispatch_exception_is_caught_and_logged_not_raised(self, caplog):
+        """A failure in the backgrounded dispatch must never escape as an
+        unhandled task exception -- it must be caught and logged."""
+        from app.main import _dispatch_meta_channel_message_background
+        with patch("app.main._dispatch_meta_channel_message", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             caplog.at_level("ERROR", logger="fazle.app"):
+            await _dispatch_meta_channel_message_background(
+                channel="messenger", sender_id="PSID1", text="hi",
+                external_message_id="mid.1", live_send_flag="meta_messenger_live_send",
+            )  # must not raise
+        assert "background dispatch failed" in caplog.text
+        assert "boom" in caplog.text
+
+
+class TestFbCommentSelfReplyLoopPrevention:
+    """Owner directive (2026-08-27, Meta reconfiguration Phase 5): 'Prevent
+    loops where the Page receives its own reply as a new customer event.'
+    _handle_fb_comment() previously had NO identity check at all -- unlike
+    modules.social_auto_reply.backlog_processor.scan_recent()'s existing
+    ID-based check for /conversations, which this mirrors for the live
+    webhook path."""
+
+    async def test_page_own_comment_is_ignored(self):
+        from app.main import _handle_fb_comment
+        with patch("app.main.settings") as mock_settings, \
+             patch("app.main._save_message", new=AsyncMock()) as mock_save, \
+             patch("app.main.ingest_social_event", new=AsyncMock()) as mock_ingest:
+            mock_settings.fb_page_id = "114154837962249"
+            value = {
+                "comment_id": "c_1", "sender_id": "114154837962249",
+                "sender_name": "Al-Manaratayn Skill Solutions", "message": "Thanks for reaching out!",
+                "post_id": "p_1",
+            }
+            await _handle_fb_comment(value)
+        mock_save.assert_not_awaited()
+        mock_ingest.assert_not_awaited()
+
+    async def test_customer_comment_still_processed(self):
+        from app.main import _handle_fb_comment
+        with patch("app.main.settings") as mock_settings, \
+             patch("app.main._save_message", new=AsyncMock()) as mock_save, \
+             patch("app.main.ingest_social_event", new=AsyncMock()) as mock_ingest, \
+             patch("app.main._social_auto_reply_single_engine", return_value=True):
+            mock_settings.fb_page_id = "114154837962249"
+            value = {
+                "comment_id": "c_2", "sender_id": "999888777",
+                "sender_name": "Real Customer", "message": "How do I apply?",
+                "post_id": "p_1",
+            }
+            await _handle_fb_comment(value)
+        mock_save.assert_awaited_once()
+        mock_ingest.assert_awaited_once()
+
+    async def test_fb_page_id_unset_never_blocks_processing(self):
+        """If FB_PAGE_ID isn't configured, the guard must fail open to
+        'process the comment' rather than silently drop all comments."""
+        from app.main import _handle_fb_comment
+        with patch("app.main.settings") as mock_settings, \
+             patch("app.main._save_message", new=AsyncMock()) as mock_save, \
+             patch("app.main.ingest_social_event", new=AsyncMock()), \
+             patch("app.main._social_auto_reply_single_engine", return_value=True):
+            mock_settings.fb_page_id = ""
+            value = {"comment_id": "c_3", "sender_id": "999888777", "sender_name": "X", "message": "hi", "post_id": "p_1"}
+            await _handle_fb_comment(value)
+        mock_save.assert_awaited_once()
