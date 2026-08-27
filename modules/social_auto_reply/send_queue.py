@@ -213,6 +213,35 @@ async def _send_messenger(recipient_id: str, text: str) -> str:
     return str(resp.json().get("message_id") or "")
 
 
+async def _send_instagram(recipient_id: str, text: str) -> str:
+    """Send an Instagram DM reply via the Page-linked Instagram Messaging
+    API (Owner directive, 2026-08-27). Uses the SAME /me/messages Send API
+    endpoint and Page access token as _send_messenger() above -- for a
+    Facebook-Login-linked Instagram Professional Account (the setup this
+    integration targets: an existing Page with Instagram connected in
+    Meta's dashboard, not the separate Instagram-Login product), Meta
+    routes /me/messages to the correct platform automatically based on
+    which conversation the recipient_id (an Instagram-scoped ID, IGSID)
+    belongs to -- no separate endpoint or token needed. Not yet live-
+    verified end-to-end (Instagram account not yet connected); flagged
+    for a real-send verification once it is."""
+    settings = get_settings()
+    if not settings.fb_page_access_token:
+        raise PermissionError("fb_page_access_token missing")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{settings.meta_api_url}/me/messages",
+            params={"access_token": settings.fb_page_access_token},
+            json={"recipient": {"id": recipient_id}, "message": {"text": text}, "messaging_type": "RESPONSE"},
+        )
+    if resp.status_code != 200:
+        body = resp.text[:500]
+        if resp.status_code in {400, 403} and ("instagram_manage_messages" in body or "pages_messaging" in body):
+            raise PermissionError(body)
+        raise RuntimeError(f"instagram send failed {resp.status_code}: {body}")
+    return str(resp.json().get("message_id") or "")
+
+
 async def _send_comment(comment_id: str, text: str) -> str:
     settings = get_settings()
     if not settings.fb_page_access_token:

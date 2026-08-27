@@ -80,6 +80,128 @@ class TestMetaWebhookProcessing:
         assert response.status_code == 200
 
 
+def _messenger_payload(sender: str, text: str, *, object_type: str = "page", is_echo: bool = False, mid: str = "mid.test1") -> dict:
+    """Minimal Messenger/Instagram webhook payload — object_type is what
+    actually distinguishes the two (Owner directive, 2026-08-27); the
+    per-message shape (sender/recipient/message.mid/message.text/is_echo)
+    is field-compatible across both."""
+    entry: dict = {
+        "id": "PAGE_OR_IG_ID",
+        "messaging": [{
+            "sender": {"id": sender},
+            "recipient": {"id": "PAGE_OR_IG_ID"},
+            "timestamp": 1746518400,
+            "message": {"mid": mid, "text": text},
+        }],
+    }
+    if is_echo:
+        entry["messaging"][0]["message"]["is_echo"] = True
+    return {"object": object_type, "entry": [entry]}
+
+
+class TestMetaMessengerInstagramRouting:
+    """Owner directive (2026-08-27): payload["object"] is what actually
+    distinguishes Instagram from Messenger — this is the regression test
+    for the real bug found during discovery (the dispatch loop routed
+    every entry's messaging[] into _handle_messenger_message()
+    unconditionally, with no object-type check at all)."""
+
+    async def test_instagram_object_routes_to_instagram_handler_not_messenger(self, client):
+        payload = _messenger_payload("IGSID1", "hi", object_type="instagram")
+        body = _meta_body(payload)
+        with patch("app.main._handle_instagram_message", new=AsyncMock()) as mock_ig, \
+             patch("app.main._handle_messenger_message", new=AsyncMock()) as mock_msgr:
+            response = await client.post(
+                "/webhook/meta", content=body,
+                headers={"Content-Type": "application/json", "X-Hub-Signature-256": _meta_signature(payload)},
+            )
+        assert response.status_code == 200
+        mock_ig.assert_awaited_once()
+        mock_msgr.assert_not_awaited()
+
+    async def test_page_object_routes_to_messenger_handler_not_instagram(self, client):
+        payload = _messenger_payload("PSID1", "hi", object_type="page")
+        body = _meta_body(payload)
+        with patch("app.main._handle_instagram_message", new=AsyncMock()) as mock_ig, \
+             patch("app.main._handle_messenger_message", new=AsyncMock()) as mock_msgr:
+            response = await client.post(
+                "/webhook/meta", content=body,
+                headers={"Content-Type": "application/json", "X-Hub-Signature-256": _meta_signature(payload)},
+            )
+        assert response.status_code == 200
+        mock_msgr.assert_awaited_once()
+        mock_ig.assert_not_awaited()
+
+    async def test_echo_message_not_dispatched(self, client):
+        payload = _messenger_payload("SELF_ID", "our own reply", object_type="page", is_echo=True)
+        body = _meta_body(payload)
+        with patch("app.main._handle_instagram_message", new=AsyncMock()) as mock_ig, \
+             patch("app.main._handle_messenger_message", new=AsyncMock()) as mock_msgr:
+            response = await client.post(
+                "/webhook/meta", content=body,
+                headers={"Content-Type": "application/json", "X-Hub-Signature-256": _meta_signature(payload)},
+            )
+        assert response.status_code == 200
+        mock_ig.assert_not_awaited()
+        mock_msgr.assert_not_awaited()
+
+    async def test_whatsapp_business_account_object_unaffected(self, client, mock_all_services):
+        """Regression: the object-type dispatch fix must not change
+        WhatsApp-via-meta routing (a different top-level object value,
+        handled entirely by the pre-existing changes[] loop)."""
+        payload = make_meta_payload(UNKNOWN_PHONE, "hello there")
+        body = _meta_body(payload)
+        response = await client.post(
+            "/webhook/meta", content=body,
+            headers={"Content-Type": "application/json", "X-Hub-Signature-256": _meta_signature(payload)},
+        )
+        assert response.status_code == 200
+
+
+class TestMetaWebhookSignatureSecurity:
+    """Owner Phase 4 (mandatory): reject invalid/missing signatures;
+    never trust a POST solely because the endpoint URL is secret."""
+
+    async def test_invalid_signature_rejected(self, client):
+        payload = _messenger_payload("PSID1", "hi")
+        body = _meta_body(payload)
+        response = await client.post(
+            "/webhook/meta", content=body,
+            headers={"Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + "0" * 64},
+        )
+        assert response.status_code == 403
+
+    async def test_missing_signature_rejected_when_enforced(self, client):
+        payload = _messenger_payload("PSID1", "hi")
+        body = _meta_body(payload)
+        response = await client.post(
+            "/webhook/meta", content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 403
+
+    async def test_malformed_json_body_rejected(self, client):
+        response = await client.post(
+            "/webhook/meta",
+            content=b"{not valid json",
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": "sha256="
+                + hmac.new(b"test_app_secret", b"{not valid json", hashlib.sha256).hexdigest(),
+            },
+        )
+        assert response.status_code == 400
+
+    async def test_valid_signature_accepted(self, client):
+        payload = _messenger_payload("PSID1", "hi", is_echo=True)  # echo -> no side effects, pure signature check
+        body = _meta_body(payload)
+        response = await client.post(
+            "/webhook/meta", content=body,
+            headers={"Content-Type": "application/json", "X-Hub-Signature-256": _meta_signature(payload)},
+        )
+        assert response.status_code == 200
+
+
 class TestMessageDeduplication:
     """Identical messages within 120s should not be processed twice."""
 

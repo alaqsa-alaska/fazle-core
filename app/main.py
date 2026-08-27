@@ -1767,10 +1767,28 @@ async def meta_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Bad JSON")
 
+    # Owner directive (2026-08-27, Meta Messenger/Instagram integration):
+    # Instagram Messaging webhook events arrive with payload["object"] ==
+    # "instagram" and use the SAME entry[].messaging[] shape as Facebook
+    # Messenger (payload["object"] == "page") -- sender.id/recipient.id/
+    # message.mid/message.text/is_echo are field-compatible (confirmed
+    # against Meta's current Instagram Messaging Platform docs, 2026-08-27
+    # -- not assumed from stale examples). Before this fix, the loop below
+    # routed EVERY entry's messaging[] into _handle_messenger_message()
+    # unconditionally, with no object-type check at all -- meaning once an
+    # Instagram webhook subscription is added, Instagram DMs would have
+    # been silently misrouted into the Messenger handler and misfiled
+    # under platform="messenger". object_type is read once per payload
+    # (Meta always sends one object type per webhook delivery).
+    object_type = payload.get("object", "")
     for entry in payload.get("entry", []):
-        # ── Facebook Messenger messages ─────────────────────────────────────
+        # ── Facebook Messenger / Instagram DM messages ───────────────────────
         for messaging in entry.get("messaging", []):
-            if "message" in messaging and not messaging["message"].get("is_echo"):
+            if "message" not in messaging or messaging["message"].get("is_echo"):
+                continue
+            if object_type == "instagram":
+                await _handle_instagram_message(messaging)
+            else:
                 await _handle_messenger_message(messaging)
 
         # ── WhatsApp Cloud API + Facebook Page feed (comments) ──────────────
@@ -1925,15 +1943,120 @@ async def _handle_meta_message(msg: dict, value: dict):
         await _notify_admin(send_to_admin)
 
 
+async def _meta_channel_duplicate_delivery(channel: str, external_message_id: str | None) -> bool:
+    """Durable, DB-level dedup for a Meta DM channel's inbound message
+    delivery (Owner directive, 2026-08-27) — Meta retries webhook
+    deliveries on any non-2xx response or timeout; a retry must not
+    reprocess the same message or cause a second Hermes reply. Mirrors
+    _handle_meta_message()'s own existing source_message_ref check
+    (WhatsApp-via-meta), generalized for any Meta channel. Never relies on
+    in-memory-only state. Fails open (returns False) on any DB error —
+    matches every other best-effort dedup check in this file."""
+    if not external_message_id:
+        return False
+    try:
+        existing = await fetch_one(
+            """SELECT 1 FROM wbom_whatsapp_messages
+               WHERE platform=$1 AND direction='inbound' AND source_message_ref=$2
+               LIMIT 1""",
+            channel, external_message_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail open, never block on this
+        log.warning(f"[{channel.upper()}] duplicate-delivery check failed: {exc}")
+        return False
+    return bool(existing)
+
+
+async def _dispatch_meta_channel_message(
+    *, channel: str, sender_id: str, text: str,
+    external_message_id: str | None, live_send_flag: str,
+) -> None:
+    """Shared unified-path dispatch for any Meta DM channel (messenger,
+    instagram) once its own *_inbound feature flag is ON. Owner directive
+    (2026-08-27, "Messenger and Instagram should become transports, not
+    separate brains"): reuses the EXACT SAME process_message()/Hermes
+    pipeline WhatsApp-via-bridge1/bridge2/bridge3/meta already uses — no
+    new routing/reply logic here. Never calls the Meta Send API inline —
+    routes through the existing fazle_outbound_queue (source_bridge
+    already supports "messenger"; see modules.outbound._send_with_channel)
+    exactly like every other channel, so idempotency/retry/DLQ are
+    inherited for free. While the live-send flag is off, the reply is
+    drafted for admin review instead of sent — "receive/test webhook
+    traffic safely before enabling Hermes live replies" (Owner Phase 18)."""
+    reply, send_to_admin = await _process_message(sender_id, text, channel)
+
+    if reply:
+        from modules.preflight_guard import is_feature_active
+        if is_feature_active(live_send_flag, default=False):
+            key = (
+                f"{channel}:{hashlib.sha256(f'{sender_id}|{external_message_id}'.encode()).hexdigest()[:40]}"
+                if external_message_id else None
+            )
+            qid = await outbound_queue.enqueue(
+                sender_id, reply, source_bridge=channel,
+                purpose=f"customer-reply:{channel}", idempotency_key=key,
+                meta={"customer_reply": True, "channel": channel},
+            )
+            if qid:
+                await _save_message(channel, sender_id, reply, direction="outbound")
+            else:
+                log.info(f"[{channel.upper()}] reply enqueue deduplicated for {sender_id}")
+        else:
+            log.info(f"[{channel.upper()}] inbound-only staging (live-send flag off) — drafting for {sender_id}")
+            await _save_draft(channel, sender_id, reply, f"{channel}_dm", sender_message=text)
+
+    if send_to_admin:
+        if send_to_admin.get("purpose") == "draft-only-contact-review":
+            await _save_draft(
+                channel, sender_id, send_to_admin.get("text") or text,
+                classify(text) or "draft_only_contact",
+            )
+        await _notify_admin(send_to_admin)
+
+
 async def _handle_messenger_message(messaging: dict):
-    """Handle Facebook Messenger inbound message — save + recruitment autoreply."""
+    """Handle Facebook Messenger inbound message.
+
+    Owner directive (2026-08-27, Meta Messenger/Instagram integration):
+    routing authority is now the meta_messenger_inbound / meta_messenger_
+    live_send feature flags (assistant_feature_flags via preflight_guard),
+    not just the blanket SOCIAL_AUTO_REPLY_SINGLE_ENGINE env toggle — when
+    meta_messenger_inbound is ON, this message goes through the unified
+    process_message()/Hermes pipeline (see _dispatch_meta_channel_message)
+    instead of modules.social_auto_reply's own separate reply brain,
+    matching the 2026-07-21 precedent that already did this same
+    migration for WhatsApp DM traffic. Defaults OFF — zero behavior
+    change until explicitly activated; while OFF this function is
+    byte-identical to before this change.
+
+    ingest_social_event() (the legacy social_auto_reply raw-event/
+    classification store) is deliberately NOT called once meta_messenger_
+    inbound is ON: modules.social_auto_reply.planner_worker.
+    process_due_threads() reads social_inbox_events for ANY pending row
+    regardless of platform and would independently plan+send its OWN
+    reply for the same event — a genuine double-reply. Once migrated,
+    Messenger bypasses that table entirely, the same way WhatsApp-via-meta
+    already does (wbom_whatsapp_messages only)."""
     sender_id = messaging.get("sender", {}).get("id", "")
     text = messaging.get("message", {}).get("text", "").strip()
     if not sender_id or not text:
         return
 
+    message_id = messaging.get("message", {}).get("mid")
+    if await _meta_channel_duplicate_delivery("messenger", message_id):
+        log.info(f"[MESSENGER] duplicate webhook delivery ignored message_id={message_id}")
+        return
+
     log.info(f"[MESSENGER] from={sender_id} text={text[:60]!r}")
-    await _save_message("messenger", sender_id, text, direction="inbound")
+    await _save_message("messenger", sender_id, text, direction="inbound", source_message_ref=message_id or "")
+
+    from modules.preflight_guard import is_feature_active
+    if is_feature_active("meta_messenger_inbound", default=False):
+        await _dispatch_meta_channel_message(
+            channel="messenger", sender_id=sender_id, text=text,
+            external_message_id=message_id, live_send_flag="meta_messenger_live_send",
+        )
+        return
 
     try:
         await ingest_social_event(
@@ -1942,7 +2065,7 @@ async def _handle_messenger_message(messaging: dict):
             sender_id=sender_id,
             text=text,
             conversation_id=messaging.get("conversation", {}).get("id"),
-            message_id=messaging.get("message", {}).get("mid"),
+            message_id=message_id,
             media_flag=bool(messaging.get("message", {}).get("attachments")),
             raw_payload=messaging,
         )
@@ -1969,6 +2092,52 @@ async def _handle_messenger_message(messaging: dict):
                 await _save_message("messenger", sender_id, reply, direction="outbound")
         else:
             log.info(f"[MESSENGER] SAFE MODE: reply suppressed for {sender_id}")
+
+
+async def _handle_instagram_message(messaging: dict):
+    """Handle Instagram DM inbound message.
+
+    Owner directive (2026-08-27): built directly on the unified
+    process_message()/Hermes pipeline from day one — Instagram never had
+    a modules.social_auto_reply integration to migrate away from (unlike
+    Messenger), so there is no legacy fallback path here. Gated behind
+    meta_instagram_inbound (default OFF, same staged-activation pattern
+    as Messenger's migration). While OFF, the message is still saved
+    (wbom_whatsapp_messages, platform="instagram") for history/audit but
+    never reaches Hermes or gets a reply — "receive/test webhook traffic
+    safely before enabling Hermes live replies" (Owner Phase 18).
+
+    Payload shape is field-compatible with Messenger's messaging[] entry
+    (sender.id / recipient.id / message.mid / message.text / is_echo) —
+    confirmed against Meta's current Instagram Messaging Platform docs
+    (2026-08-27), not assumed from stale examples. What actually
+    distinguishes Instagram from Messenger is payload["object"] ==
+    "instagram" vs "page" at the webhook top level — see meta_webhook's
+    own dispatch, NOT this function, which is why a shared per-message
+    parser would have been the wrong abstraction (Owner Phase 12: "Do not
+    assume Instagram and Messenger payload structures are identical")."""
+    sender_id = messaging.get("sender", {}).get("id", "")
+    text = messaging.get("message", {}).get("text", "").strip()
+    if not sender_id or not text:
+        return
+
+    message_id = messaging.get("message", {}).get("mid")
+    if await _meta_channel_duplicate_delivery("instagram", message_id):
+        log.info(f"[INSTAGRAM] duplicate webhook delivery ignored message_id={message_id}")
+        return
+
+    log.info(f"[INSTAGRAM] from={sender_id} text={text[:60]!r}")
+    await _save_message("instagram", sender_id, text, direction="inbound", source_message_ref=message_id or "")
+
+    from modules.preflight_guard import is_feature_active
+    if not is_feature_active("meta_instagram_inbound", default=False):
+        log.debug(f"[INSTAGRAM] meta_instagram_inbound flag off, sync-only for {sender_id}")
+        return
+
+    await _dispatch_meta_channel_message(
+        channel="instagram", sender_id=sender_id, text=text,
+        external_message_id=message_id, live_send_flag="meta_instagram_live_send",
+    )
 
 
 async def _handle_fb_comment(value: dict):
@@ -3566,7 +3735,7 @@ async def revoke_admin_directive(directive_id: int, key: str = Depends(require_a
 # was actually sent, so a mistake is traceable after the fact even though
 # there's no separate approval-click step (deliberate design choice -- see
 # project_hermes_unification_20260810.md, Capability Expansion Plan, Level 2).
-_VALID_SOURCE_BRIDGES = {"bridge1", "bridge2", "bridge3", "meta", "meta_whatsapp", "messenger", "facebook_comment"}
+_VALID_SOURCE_BRIDGES = {"bridge1", "bridge2", "bridge3", "meta", "meta_whatsapp", "messenger", "instagram", "facebook_comment"}
 
 
 @app.post("/admin/send-whatsapp", dependencies=[Depends(require_command("send_whatsapp_message"))])

@@ -175,14 +175,16 @@ async def list_dlq_entries(limit: int = 20) -> list[dict]:
 
 async def _send_with_channel(source_bridge: str, recipient: str, body: str) -> str:
     """Send through a supported channel and return an external delivery id."""
-    if source_bridge in {"meta", "meta_whatsapp", "messenger", "facebook_comment"}:
+    if source_bridge in {"meta", "meta_whatsapp", "messenger", "instagram", "facebook_comment"}:
         from modules.social_auto_reply.send_queue import (
-            _send_comment, _send_messenger, _send_meta_whatsapp,
+            _send_comment, _send_instagram, _send_messenger, _send_meta_whatsapp,
         )
         if source_bridge in {"meta", "meta_whatsapp"}:
             return await _send_meta_whatsapp(recipient, body)
         if source_bridge == "messenger":
             return await _send_messenger(recipient, body)
+        if source_bridge == "instagram":
+            return await _send_instagram(recipient, body)
         return await _send_comment(recipient, body)
 
     from app.bridge import get_bridge1, get_bridge2, get_bridge3, BridgeSendError
