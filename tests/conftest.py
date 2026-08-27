@@ -1000,6 +1000,53 @@ async def client(test_db_pool) -> AsyncGenerator[AsyncClient, None]:
 
 
 @pytest.fixture(autouse=True)
+def _disable_shadow_logger_real_writes(request):
+    """Restart-gate/test-infrastructure investigation (2026-08-27, Owner
+    directive): modules.hermes_kernel.shadow_logger.log_decision()/
+    log_event() are fired via bare asyncio.create_task() from modules.
+    message_router's _hk_fire() closure -- true fire-and-forget,
+    uncaptured, unawaited by the caller -- at dozens of call sites inside
+    process_message(). With HERMES_DECISION_AUDIT_ENABLED=true /
+    HERMES_EVENT_LOG_ENABLED=true in .env (the real, unchanged production
+    setting), ANY test that exercises process_message() -- even one that
+    mocks everything else and has nothing to do with shadow logging --
+    silently schedules a REAL, unawaited DB write against the test
+    database as an uncontrolled side effect. If the test function returns
+    (and pytest-asyncio's function-scoped event loop starts tearing down)
+    before that task gets a scheduling turn to finish, it is abandoned
+    mid-flight. Under momentary CPU/event-loop contention on this shared
+    VPS (real production traffic — fazle-core.service, hermes-runner,
+    ollama — runs on the same machine and was confirmed actively
+    processing real customer messages during reproduction), the abandoned
+    task's turn can be delayed past pytest's fixed 30s test timeout,
+    which pytest then attributes to whichever test happened to be running
+    at that moment. This reproduces the observed pattern exactly:
+    intermittent, only in longer/bundled gate runs (never in a fast
+    isolated rerun of the same suite), a DIFFERENT specific test each
+    time, always the same "Task-was-destroyed... _sock_write_done"
+    signature. Confirmed via live pg_stat_activity monitoring (before,
+    during, and after both an isolated run and a full check4+check4b
+    run) that this is NOT a Postgres connection leak, pool exhaustion, or
+    lock/transaction contention — connection count never exceeded 2 the
+    entire time.
+
+    Fix: make these fire-and-forget calls true no-ops for every test
+    EXCEPT tests/unit/test_hermes_kernel_shadow_logger.py itself (which
+    explicitly exercises their real enable/resolve/write behavior with
+    its own mocks/invalidate_flag_cache() calls) -- closing off this
+    entire class of flakiness at its actual source. Zero change to
+    modules/hermes_kernel/shadow_logger.py, modules/message_router/
+    __init__.py, or any real .env flag -- this is a pure test-isolation
+    fix, same category as _reset_admin_command_dedup_cache below."""
+    if request.module.__name__.endswith("test_hermes_kernel_shadow_logger"):
+        yield
+        return
+    with patch("modules.hermes_kernel.shadow_logger.log_decision", new=AsyncMock()), \
+         patch("modules.hermes_kernel.shadow_logger.log_event", new=AsyncMock()):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_admin_command_dedup_cache():
     """Clear modules.admin_commands' in-process dedup LRU before each test.
 
