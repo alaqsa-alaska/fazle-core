@@ -482,3 +482,208 @@ async def test_trigger_candidate_reference_review_never_raises_on_enqueue_failur
          patch("modules.admin_directives.router.outbound.enqueue",
                new=AsyncMock(side_effect=RuntimeError("boom"))):
         await admin_router.trigger_candidate_reference_review(candidate_id=42, phone="8801000000022", claim={})
+
+
+# ── Defect-1 diagnosis (Owner report, 2026-08-27): does the write-before-
+# generate sequence inside _route_post_intake_message() already resolve
+# no_relevant_experience WITHIN the same turn, so the reply skips the
+# verification question and gives training-path guidance instead? These
+# are true end-to-end tests (classify+extract -> notes write -> fresh
+# session-state read -> reply) with every DB/LLM boundary mocked, proving
+# the real orchestration's behavior rather than a single function in
+# isolation. Confirmed: this already worked correctly in committed code
+# (2b2e3e3) — the apparent "re-asks after 0" defect reported live was an
+# artifact of a dry-run script that called generate_recruitment_reply()
+# directly, bypassing the write step, to avoid live side effects. No
+# production code change was needed for this half of the report — these
+# tests exist so that invariant has a permanent regression guard.
+
+def _fake_db_fetch_one_factory(*, job_preference, experience_years, notes_holder):
+    """Builds an app.database.fetch_one stand-in that answers BOTH real
+    queries _build_recruitment_session_state_block()'s call chain makes:
+    the fazle_recruitment_sessions row, and (once routed to the post-
+    intake branch) the wbom_candidates notes lookup — reading notes_holder
+    live, so a write during the same call is visible to the next read."""
+    async def _fake(sql, *args):
+        if "wbom_candidates" in sql and "notes" in sql:
+            return {"post_intake_status": "awaiting_agreement", "notes": notes_holder["value"]}
+        if "fazle_recruitment_sessions" in sql:
+            return {
+                "full_name": "Candidate", "age": 25, "area": "Dhaka",
+                "job_preference": job_preference, "experience_years": experience_years,
+                "confirmed_phone": None, "collection_step": "complete",
+                "funnel_stage": "scored", "candidate_id": 42,
+            }
+        return None
+    return _fake
+
+
+def _fake_upsert_factory(notes_holder):
+    async def _fake_upsert(candidate_id, **fields):
+        merged = dict(rf._parse_experience_claim_block(notes_holder["value"]) or {})
+        for k, v in fields.items():
+            if v:
+                merged[k] = v
+        merged.setdefault("verification_status", "unverified")
+        block = rf._format_experience_claim_block(**{
+            k: merged.get(k) for k in
+            ("claimed_role", "claimed_company", "claimed_duration",
+             "reference_name", "reference_phone", "verification_status")
+        })
+        notes_holder["value"] = block
+        return merged
+    return _fake_upsert
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,duration_claim", [
+    ("0", "0"),
+    ("নতুন", "নতুন"),
+])
+async def test_no_relevant_experience_resolves_within_same_turn_no_duplicate_question(text, duration_claim):
+    """Owner requirement: 0 / নতুন / a confidently-established no-
+    relevant-experience answer must move straight to training-path
+    guidance in THIS turn's reply — not repeat the verification
+    question. Proven end-to-end through the real orchestration."""
+    notes_holder = {"value": None}
+    active_session = {
+        "id": 1, "candidate_id": 42, "funnel_stage": "scored",
+        "post_intake_active": True, "post_intake_status": "awaiting_agreement",
+        "job_preference": "Security Supervisor",
+    }
+    classify_result = {
+        "post_intake_status": None,
+        "experience": {"claimed_duration": duration_claim, "no_relevant_experience": True},
+    }
+    captured_state_block = {}
+
+    async def fake_generate_reply(**kw):
+        block = await hermes_dispatch._build_recruitment_session_state_block(kw["phone"])
+        captured_state_block["value"] = block
+        return block or "fallback"
+
+    with patch("modules.recruitment_flow.fetch_one",
+               new=AsyncMock(side_effect=lambda sql, *a: {"notes": notes_holder["value"]})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=classify_result)), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._upsert_experience_claim",
+               new=_fake_upsert_factory(notes_holder)), \
+         patch("modules.admin_directives.router.trigger_candidate_reference_review", new=AsyncMock()), \
+         patch("app.database.fetch_one",
+               new=AsyncMock(side_effect=_fake_db_fetch_one_factory(
+                   job_preference="Security Supervisor", experience_years=0, notes_holder=notes_holder))), \
+         patch("modules.preflight_guard.is_feature_active", return_value=True), \
+         patch("modules.hermes_dispatch.generate_recruitment_reply", new=fake_generate_reply):
+        await rf._route_post_intake_message(
+            "8801000000030", text, source="bridge3", message_id=None,
+            active_session=active_session, contact_context="", history=f"Them: {text}",
+            decision={"autosend": False},
+        )
+
+    state_block = captured_state_block["value"]
+    assert "practical learning" in state_block or "training" in state_block
+    assert "প্রত্যাখ্যান কোরো না" in state_block
+    # The re-ask rule (asks for company/duration/reference) must NOT be
+    # present alongside the training-path rule — that would mean both
+    # branches fired, i.e. a duplicate question.
+    assert "contact person" not in state_block
+
+
+@pytest.mark.asyncio
+async def test_generic_positive_years_still_asks_via_full_orchestration():
+    """Owner requirement: a generic POSITIVE years answer (e.g. 4) is
+    NOT sufficient — must still ask for role/company/reference, proven
+    end-to-end (not just at the state-block-unit level)."""
+    notes_holder = {"value": None}
+    active_session = {
+        "id": 1, "candidate_id": 42, "funnel_stage": "scored",
+        "post_intake_active": True, "post_intake_status": "awaiting_agreement",
+        "job_preference": "Security Supervisor",
+    }
+    classify_result = {"post_intake_status": None, "experience": None}  # nothing confidently extracted from "4" alone
+    captured_state_block = {}
+
+    async def fake_generate_reply(**kw):
+        block = await hermes_dispatch._build_recruitment_session_state_block(kw["phone"])
+        captured_state_block["value"] = block
+        return block or "fallback"
+
+    with patch("modules.recruitment_flow.fetch_one",
+               new=AsyncMock(side_effect=lambda sql, *a: {"notes": notes_holder["value"]})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=classify_result)), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._upsert_experience_claim", new=AsyncMock()), \
+         patch("modules.admin_directives.router.trigger_candidate_reference_review", new=AsyncMock()), \
+         patch("app.database.fetch_one",
+               new=AsyncMock(side_effect=_fake_db_fetch_one_factory(
+                   job_preference="Security Supervisor", experience_years=4, notes_holder=notes_holder))), \
+         patch("modules.preflight_guard.is_feature_active", return_value=True), \
+         patch("modules.hermes_dispatch.generate_recruitment_reply", new=fake_generate_reply):
+        await rf._route_post_intake_message(
+            "8801000000031", "4", source="bridge3", message_id=None,
+            active_session=active_session, contact_context="", history="Them: 4",
+            decision={"autosend": False},
+        )
+
+    state_block = captured_state_block["value"]
+    assert "কোন কোম্পানিতে" in state_block
+    assert "যথেষ্ট নয়" in state_block
+
+
+# ── Defect-2 fix (Owner report, 2026-08-27): canonical stored job_
+# preference must outrank a stray role mention elsewhere in history/
+# conversation content. Real case: candidate 8801***043's canonical role
+# is Escort, but the generated reply cited Security Guard's salary/terms
+# because the candidate's own OLD intake answer contained the substring
+# "Security Guard". Fix lives in _build_post_intake_state_block() (an
+# unconditional rule, not inside the responsible-role branch — this
+# candidate is Escort, a non-responsible role).
+
+@pytest.mark.asyncio
+async def test_canonical_role_authority_rule_present_for_escort_with_stray_role_history():
+    session_row = {
+        "candidate_id": 42, "full_name": "Karim", "age": 25, "area": "Cox's Bazar",
+        "job_preference": "Escort", "experience_years": 0,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "canonical role authority" in block
+    assert '"Escort"' in block
+    # Explicitly forbids leaking another role's terms.
+    assert "বেতন/শর্ত/সুবিধা কখনো ব্যবহার কোরো না" in block
+    # Names the exact stray-mention scenario from the real incident.
+    assert "Security Guard" in block
+
+
+@pytest.mark.asyncio
+async def test_canonical_role_authority_rule_present_for_responsible_role_too():
+    """Unconditional — not just for non-supervisory roles."""
+    session_row = {
+        "candidate_id": 42, "full_name": "Nazmul", "age": 27, "area": "Tangail",
+        "job_preference": "Security Supervisor", "experience_years": 4,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "canonical role authority" in block
+    assert '"Security Supervisor"' in block
+
+
+@pytest.mark.asyncio
+async def test_canonical_role_authority_rule_allows_explicit_role_change_override():
+    """The rule must explicitly carve out the one legitimate exception:
+    the candidate explicitly asking about / switching to another role in
+    THIS conversation — never a silent, permanent lock to the stored
+    value."""
+    session_row = {
+        "candidate_id": 42, "full_name": "Karim", "age": 25, "area": "Dhaka",
+        "job_preference": "Escort", "experience_years": 0,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "পদ পরিবর্তনের অনুরোধ করে" in block
+    assert "তখনই নতুন পদ অনুযায়ী উত্তর দাও" in block
