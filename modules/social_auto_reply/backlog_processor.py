@@ -14,6 +14,47 @@ from . import ingest_social_event
 log = logging.getLogger("fazle.social.backlog")
 
 
+async def _get_page_scoped_token(client: httpx.AsyncClient, settings) -> str | None:
+    """Derive a genuine Page-scoped access token from the configured
+    System User token (Owner directive, 2026-08-27, backlog-scanner #190
+    fix). Root cause, confirmed live and read-only, not guessed from the
+    error string: FB_PAGE_ACCESS_TOKEN is a System User token (debug_token
+    reports type=SYSTEM_USER) -- it works for every other Meta call this
+    app makes (Send API POST /me/messages, comment replies POST
+    /{comment_id}/comments, basic GET /{page-id} lookups), but Meta's
+    legacy Page Inbox/Conversations API (GET /{page-id}/conversations)
+    and the Posts read edge (GET /{page-id}/posts) specifically reject a
+    System User token with (#190) "This method must be called with a Page
+    Access Token", even though it carries the identical permission scopes
+    a real Page token would. A token derived via this exact
+    GET /{page-id}?fields=access_token exchange (a token exchange Meta's
+    own API supports for a System User with page-asset access) resolved
+    both edges immediately in live verification -- confirmed via
+    conv_resp.status_code == 200 and post_resp.status_code == 200 with
+    the SAME query shape this function already used, only the token
+    swapped. No other call site in this codebase is affected; this
+    derivation is local to the backlog scanner only. Returns None (the
+    caller skips the scan for this run, not crashes) on any failure.
+    Never logs the derived token value."""
+    try:
+        resp = await client.get(
+            f"{settings.meta_api_url}/{settings.fb_page_id}",
+            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
+            params={"fields": "access_token"},
+        )
+        if resp.status_code != 200:
+            log.warning(f"[social.backlog] page-token derivation failed: HTTP {resp.status_code}")
+            return None
+        token = resp.json().get("access_token")
+        if not token:
+            log.warning("[social.backlog] page-token derivation returned no access_token field")
+            return None
+        return token
+    except Exception as exc:
+        log.warning(f"[social.backlog] page-token derivation error: {exc}")
+        return None
+
+
 async def scan_recent(limit: int = 10) -> dict:
     settings = get_settings()
     if not settings.fb_page_access_token or not settings.fb_page_id:
@@ -21,9 +62,12 @@ async def scan_recent(limit: int = 10) -> dict:
     since = datetime.now(timezone.utc) - timedelta(days=7)
     conversations = comments = 0
     async with httpx.AsyncClient(timeout=20.0) as client:
+        page_token = await _get_page_scoped_token(client, settings)
+        if not page_token:
+            return {"status": "skipped", "reason": "page-token derivation failed"}
         conv_resp = await client.get(
             f"{settings.meta_api_url}/{settings.fb_page_id}/conversations",
-            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
+            headers={"Authorization": f"Bearer {page_token}"},
             params={
                 "limit": limit,
                 "fields": "id,updated_time,participants{id,name},messages.limit(3){id,from{id,name},message,created_time,attachments}",
@@ -52,7 +96,7 @@ async def scan_recent(limit: int = 10) -> dict:
                     conversations += 1
         post_resp = await client.get(
             f"{settings.meta_api_url}/{settings.fb_page_id}/posts",
-            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
+            headers={"Authorization": f"Bearer {page_token}"},
             params={
                 "limit": 5,
                 "fields": "id,created_time,comments.limit(10){id,from{id,name},message,created_time,comment_count,comments.limit(5){from{id,name},message,created_time}}",

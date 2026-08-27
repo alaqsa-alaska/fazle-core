@@ -116,22 +116,40 @@ class TestBacklogProcessorTokenTransport:
     pytestmark = pytest.mark.asyncio
 
     async def test_scan_recent_uses_header_not_url_param(self):
+        """Owner directive (2026-08-27, backlog-scanner #190 fix): scan_
+        recent() now makes THREE calls -- the page-token derivation itself
+        (uses the raw configured token) plus /conversations and /posts
+        (use the DERIVED page-scoped token) -- all three still travel via
+        Authorization header, never a URL query param, on every call."""
         from modules.social_auto_reply import backlog_processor
+
+        def fake_response(url, **kwargs):
+            if url.rstrip("/").endswith("/12345") and kwargs.get("params", {}).get("fields") == "access_token":
+                return _fake_response(json_body={"access_token": "fake-derived-page-token-not-real", "id": "12345"})
+            return _fake_response(json_body={"data": []})
+
         with patch("modules.social_auto_reply.backlog_processor.get_settings") as mock_settings, \
              patch("modules.social_auto_reply.backlog_processor.execute", new=AsyncMock()), \
              patch("modules.social_auto_reply.backlog_processor.ingest_social_event", new=AsyncMock()), \
-             patch("httpx.AsyncClient.get", new=AsyncMock(return_value=_fake_response(json_body={"data": []}))) as mock_get:
+             patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=fake_response)) as mock_get:
             mock_settings.return_value = MagicMock(
                 fb_page_access_token="fake-secret-token-not-real",
                 fb_page_id="12345",
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
-            await backlog_processor.scan_recent(limit=5)
-        assert mock_get.await_count == 2
+            result = await backlog_processor.scan_recent(limit=5)
+        assert result["status"] == "ok"
+        assert mock_get.await_count == 3
         for call in mock_get.call_args_list:
-            assert call.kwargs["headers"] == {"Authorization": "Bearer fake-secret-token-not-real"}
             assert "access_token" not in call.kwargs.get("params", {})
             assert "fake-secret-token-not-real" not in call.args[0]
+            assert "fake-derived-page-token-not-real" not in call.args[0]
+        # derivation call: raw configured token
+        derivation_call = mock_get.call_args_list[0]
+        assert derivation_call.kwargs["headers"] == {"Authorization": "Bearer fake-secret-token-not-real"}
+        # conversations + posts calls: the DERIVED token, not the raw one
+        for call in mock_get.call_args_list[1:]:
+            assert call.kwargs["headers"] == {"Authorization": "Bearer fake-derived-page-token-not-real"}
 
 
 class TestHttpxLoggerRedactionFilter:
