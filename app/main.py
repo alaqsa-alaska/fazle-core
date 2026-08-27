@@ -2769,7 +2769,7 @@ async def _send_messenger(recipient_id: str, text: str) -> bool:
             r = await client.post(
                 url,
                 json=payload,
-                params={"access_token": settings.fb_page_access_token},
+                headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
             )
             if r.status_code != 200:
                 log.error(f"[MESSENGER] send failed {r.status_code}: {r.text[:200]}")
@@ -2789,7 +2789,7 @@ async def _send_fb_comment_reply(comment_id: str, text: str) -> bool:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 url,
-                params={"access_token": settings.fb_page_access_token},
+                headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
                 json={"message": text},
             )
             if r.status_code != 200:

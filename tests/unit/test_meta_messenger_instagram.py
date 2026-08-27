@@ -489,7 +489,11 @@ class TestSendInstagramRequestConstruction:
         mock_post.assert_awaited_once()
         _, kwargs = mock_post.call_args
         assert mock_post.call_args.args[0] == "https://graph.facebook.com/v23.0/me/messages"
-        assert kwargs["params"] == {"access_token": "fake-page-token-not-real"}
+        # Owner directive (2026-08-27, token exposure containment): token
+        # now travels via Authorization header, never a URL query param --
+        # httpx logs full request URLs at INFO level, params would leak.
+        assert kwargs["headers"] == {"Authorization": "Bearer fake-page-token-not-real"}
+        assert "params" not in kwargs
         assert kwargs["json"] == {
             "recipient": {"id": "IGSID1"},
             "message": {"text": "hello there"},

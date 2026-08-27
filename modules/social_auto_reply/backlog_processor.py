@@ -23,8 +23,8 @@ async def scan_recent(limit: int = 10) -> dict:
     async with httpx.AsyncClient(timeout=20.0) as client:
         conv_resp = await client.get(
             f"{settings.meta_api_url}/{settings.fb_page_id}/conversations",
+            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
             params={
-                "access_token": settings.fb_page_access_token,
                 "limit": limit,
                 "fields": "id,updated_time,participants{id,name},messages.limit(3){id,from{id,name},message,created_time,attachments}",
             },
@@ -52,8 +52,8 @@ async def scan_recent(limit: int = 10) -> dict:
                     conversations += 1
         post_resp = await client.get(
             f"{settings.meta_api_url}/{settings.fb_page_id}/posts",
+            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
             params={
-                "access_token": settings.fb_page_access_token,
                 "limit": 5,
                 "fields": "id,created_time,comments.limit(10){id,from{id,name},message,created_time,comment_count,comments.limit(5){from{id,name},message,created_time}}",
             },

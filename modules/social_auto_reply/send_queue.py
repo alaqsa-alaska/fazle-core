@@ -202,7 +202,7 @@ async def _send_messenger(recipient_id: str, text: str) -> str:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             f"{settings.meta_api_url}/me/messages",
-            params={"access_token": settings.fb_page_access_token},
+            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
             json={"recipient": {"id": recipient_id}, "message": {"text": text}, "messaging_type": "RESPONSE"},
         )
     if resp.status_code != 200:
@@ -231,7 +231,7 @@ async def _send_instagram(recipient_id: str, text: str) -> str:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             f"{settings.meta_api_url}/me/messages",
-            params={"access_token": settings.fb_page_access_token},
+            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
             json={"recipient": {"id": recipient_id}, "message": {"text": text}, "messaging_type": "RESPONSE"},
         )
     if resp.status_code != 200:
@@ -249,7 +249,7 @@ async def _send_comment(comment_id: str, text: str) -> str:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             f"{settings.meta_api_url}/{comment_id}/comments",
-            params={"access_token": settings.fb_page_access_token},
+            headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
             json={"message": text},
         )
     if resp.status_code != 200:
