@@ -33,6 +33,25 @@ def _admin_number() -> Optional[str]:
     return raw.split(",")[0].strip() or None
 
 
+_META_CHANNELS = {"meta", "meta_whatsapp", "messenger", "instagram", "facebook_comment"}
+
+
+def _meta_outbound_log(event: str, *, source_bridge: str, **fields: Any) -> None:
+    """Meta-channel-scoped observability event (Owner directive,
+    2026-08-27, Section 1) -- channel-gated so bridge1/bridge2/bridge3
+    sends (the vast majority of this generic worker's traffic) stay
+    completely unaffected; only messenger/instagram/meta* rows emit
+    anything here. Matches app.main._meta_log_event's format
+    ("[META_EVENT] event=... channel=...") so both are grep-able the same
+    way. Never logs recipient/body/tokens -- queue id, status, and error
+    class only."""
+    if source_bridge not in _META_CHANNELS:
+        return
+    parts = [f"event={event}", f"channel={source_bridge}"]
+    parts += [f"{k}={v}" for k, v in fields.items() if v not in (None, "")]
+    log.info("[META_EVENT] " + " ".join(parts))
+
+
 async def enqueue(
     recipient: str,
     body: str,
@@ -286,6 +305,7 @@ async def sweep_once(limit: int = 20) -> dict:
                     rid, attempts, external_id,
                 )
                 sent += 1
+                _meta_outbound_log("meta_outbound_sent", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts)
             except Exception as e:
                 err = str(e)[:500]
                 if attempts >= r["max_attempts"]:
@@ -298,6 +318,7 @@ async def sweep_once(limit: int = 20) -> dict:
                     )
                     dlq += 1
                     await record_error("outbound.dlq", e)
+                    _meta_outbound_log("meta_outbound_dlq", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts, error_class=type(e).__name__)
                 else:
                     # Exponential backoff: 1m, 2m, 4m, ...
                     await conn.execute(
@@ -311,6 +332,7 @@ async def sweep_once(limit: int = 20) -> dict:
                         rid, attempts, err,
                     )
                     failed += 1
+                    _meta_outbound_log("meta_outbound_failed", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts, error_class=type(e).__name__)
     return {"picked": len(rows), "sent": sent, "failed": failed, "dlq": dlq}
 
 

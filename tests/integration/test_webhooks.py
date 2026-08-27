@@ -157,6 +157,32 @@ class TestMetaMessengerInstagramRouting:
         )
         assert response.status_code == 200
 
+    async def test_meta_retry_of_same_messenger_message_id_not_saved_twice(self, client, mock_all_services, test_db_pool):
+        """Owner Section 3 (2026-08-27): 'durable dedup prevents Meta
+        retries from causing another reply' — real end-to-end proof, not
+        just a mocked unit test. Meta retries webhook delivery on any
+        non-2xx/timeout; posting the identical payload twice must persist
+        exactly one inbound row for that (platform, source_message_ref).
+        Runs with meta_messenger_inbound OFF (today's live default) — the
+        dedup check in _handle_messenger_message() runs unconditionally,
+        before the flag branch, so it must hold in either state."""
+        payload = _messenger_payload("PSID_RETRY1", "hello, testing retry", object_type="page", mid="mid.retry-dedup-1")
+        body = _meta_body(payload)
+        headers = {"Content-Type": "application/json", "X-Hub-Signature-256": _meta_signature(payload)}
+
+        r1 = await client.post("/webhook/meta", content=body, headers=headers)
+        r2 = await client.post("/webhook/meta", content=body, headers=headers)
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+
+        async with test_db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM wbom_whatsapp_messages "
+                "WHERE platform='messenger' AND direction='inbound' AND source_message_ref=$1",
+                "mid.retry-dedup-1",
+            )
+        assert count == 1, "Meta retry of the same message_id must not be saved/processed twice"
+
 
 class TestMetaWebhookSignatureSecurity:
     """Owner Phase 4 (mandatory): reject invalid/missing signatures;

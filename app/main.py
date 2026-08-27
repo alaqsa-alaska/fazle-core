@@ -1728,6 +1728,27 @@ async def get_state_version_endpoint():
     return {"version": v, "ts": time.time()}
 
 
+def _meta_log_event(event: str, **fields: Any) -> None:
+    """Structured observability event for the Meta webhook / unified-
+    dispatch path (Owner directive, 2026-08-27, Section 1). Matches this
+    file's existing bracketed-tag logging convention (see [META]/
+    [MESSENGER]/[INSTAGRAM] elsewhere in this file) with one added,
+    grep-able discriminator: event=<name> always comes first, so
+    `grep "event=meta_outbound_failed"` finds every occurrence regardless
+    of which channel triggered it.
+
+    Callers pass only specific, already-known-safe identifiers (channel,
+    external message/event id, page/IG account id, queue id, status,
+    block/fallback reason) -- NEVER access tokens, the App Secret, the
+    Verify Token, Authorization headers, or raw payload bodies. Nothing
+    here reads request headers or settings.meta_app_secret/meta_verify_
+    token/fb_page_access_token/meta_api_token, by construction, so there
+    is no way for a careless call site to leak one through this helper."""
+    parts = [f"event={event}"]
+    parts += [f"{k}={v}" for k, v in fields.items() if v not in (None, "")]
+    log.info("[META_EVENT] " + " ".join(parts))
+
+
 # ── Meta Webhook Verification (GET) ───────────────────────────────────────────
 @app.get("/webhook/meta")
 async def meta_verify(request: Request):
@@ -1737,6 +1758,7 @@ async def meta_verify(request: Request):
     challenge = params.get("hub.challenge")
     if mode == "subscribe" and token == settings.meta_verify_token:
         log.info("Meta webhook verified")
+        _meta_log_event("meta_webhook_verified", mode=mode)
         return Response(content=challenge, media_type="text/plain")
     raise HTTPException(status_code=403, detail="Verification failed")
 
@@ -1746,6 +1768,7 @@ async def meta_verify(request: Request):
 async def meta_webhook(request: Request):
     """Receive Meta events: WhatsApp Cloud API, Facebook Messenger, and Page comments."""
     body_bytes = await request.body()
+    _meta_log_event("meta_webhook_received", bytes=len(body_bytes))
 
     # Verify signature
     sig = request.headers.get("X-Hub-Signature-256", "")
@@ -1756,8 +1779,10 @@ async def meta_webhook(request: Request):
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(sig, expected):
+            _meta_log_event("meta_webhook_invalid_signature", reason="mismatch")
             raise HTTPException(status_code=403, detail="Invalid signature")
     elif settings.meta_webhook_signature_enforcement:
+        _meta_log_event("meta_webhook_invalid_signature", reason="missing_signature_enforced")
         raise HTTPException(status_code=403, detail="Missing Meta webhook signature")
     else:
         log.warning("[WEBHOOK_AUTH_AUDIT] unsigned Meta webhook accepted; enforcement disabled")
@@ -1785,6 +1810,12 @@ async def meta_webhook(request: Request):
         # ── Facebook Messenger / Instagram DM messages ───────────────────────
         for messaging in entry.get("messaging", []):
             if "message" not in messaging or messaging["message"].get("is_echo"):
+                if messaging.get("message", {}).get("is_echo"):
+                    _meta_log_event(
+                        "meta_webhook_echo_ignored",
+                        channel="instagram" if object_type == "instagram" else "messenger",
+                        external_message_id=messaging.get("message", {}).get("mid"),
+                    )
                 continue
             if object_type == "instagram":
                 await _handle_instagram_message(messaging)
@@ -1964,6 +1995,8 @@ async def _meta_channel_duplicate_delivery(channel: str, external_message_id: st
     except Exception as exc:  # noqa: BLE001 — fail open, never block on this
         log.warning(f"[{channel.upper()}] duplicate-delivery check failed: {exc}")
         return False
+    if existing:
+        _meta_log_event("meta_webhook_duplicate", channel=channel, external_message_id=external_message_id)
     return bool(existing)
 
 
@@ -1983,9 +2016,11 @@ async def _dispatch_meta_channel_message(
     inherited for free. While the live-send flag is off, the reply is
     drafted for admin review instead of sent — "receive/test webhook
     traffic safely before enabling Hermes live replies" (Owner Phase 18)."""
+    _meta_log_event("meta_inbound_dispatched", channel=channel, external_message_id=external_message_id)
     reply, send_to_admin = await _process_message(sender_id, text, channel)
 
     if reply:
+        _meta_log_event("meta_hermes_reply_generated", channel=channel, external_message_id=external_message_id)
         from modules.preflight_guard import is_feature_active
         if is_feature_active(live_send_flag, default=False):
             key = (
@@ -1999,10 +2034,12 @@ async def _dispatch_meta_channel_message(
             )
             if qid:
                 await _save_message(channel, sender_id, reply, direction="outbound")
+                _meta_log_event("meta_outbound_queued", channel=channel, queue_id=qid)
             else:
                 log.info(f"[{channel.upper()}] reply enqueue deduplicated for {sender_id}")
         else:
             log.info(f"[{channel.upper()}] inbound-only staging (live-send flag off) — drafting for {sender_id}")
+            _meta_log_event("meta_fallback_used", channel=channel, reason="live_send_flag_off_drafted")
             await _save_draft(channel, sender_id, reply, f"{channel}_dm", sender_message=text)
 
     if send_to_admin:
@@ -2043,6 +2080,7 @@ async def _handle_messenger_message(messaging: dict):
         return
 
     message_id = messaging.get("message", {}).get("mid")
+    _meta_log_event("meta_messenger_normalized", channel="messenger", external_message_id=message_id)
     if await _meta_channel_duplicate_delivery("messenger", message_id):
         log.info(f"[MESSENGER] duplicate webhook delivery ignored message_id={message_id}")
         return
@@ -2073,6 +2111,7 @@ async def _handle_messenger_message(messaging: dict):
         log.warning(f"[social] messenger ingest failed for {sender_id}: {e}")
     if _social_auto_reply_single_engine():
         log.debug(f"[MESSENGER] social daemon is single reply engine, legacy reply path skipped for {sender_id}")
+        _meta_log_event("meta_fallback_used", channel="messenger", reason="legacy_social_auto_reply_single_engine")
         return
 
     if "messenger" not in settings.auto_reply_source_list:
@@ -2122,6 +2161,7 @@ async def _handle_instagram_message(messaging: dict):
         return
 
     message_id = messaging.get("message", {}).get("mid")
+    _meta_log_event("meta_instagram_normalized", channel="instagram", external_message_id=message_id)
     if await _meta_channel_duplicate_delivery("instagram", message_id):
         log.info(f"[INSTAGRAM] duplicate webhook delivery ignored message_id={message_id}")
         return
@@ -2132,6 +2172,7 @@ async def _handle_instagram_message(messaging: dict):
     from modules.preflight_guard import is_feature_active
     if not is_feature_active("meta_instagram_inbound", default=False):
         log.debug(f"[INSTAGRAM] meta_instagram_inbound flag off, sync-only for {sender_id}")
+        _meta_log_event("meta_fallback_used", channel="instagram", reason="inbound_flag_off_sync_only")
         return
 
     await _dispatch_meta_channel_message(

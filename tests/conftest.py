@@ -39,6 +39,25 @@ os.environ.setdefault("ACCOUNTANT_PHONE", "")
 os.environ.setdefault("ESCORT_CLIENT_PHONES", "")
 os.environ.setdefault("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "false")
 
+# app.main calls app.logging_setup.setup_logging() at MODULE level on import
+# (line ~68) — it attaches a RotatingFileHandler to the ROOT logger pointed
+# at logs/fazle-core.log by default. Since most test files import app.main
+# (directly or transitively) during collection, that handler stays attached
+# for the entire pytest process and EVERY log.info() call anywhere in the
+# app — including these tests' own fixture data ("db down", "write failed",
+# recipient=8801711111111, etc.) — was landing in the SAME file the live
+# fazle-core.service writes to (confirmed live, 2026-08-27: a pytest run
+# produced [META_EVENT] lines in logs/fazle-core.log seconds after running).
+# setup_logging() already reads FAZLE_LOG_DIR as its override point for
+# exactly this kind of redirection — point it at a throwaway temp directory
+# before any import can trigger setup_logging(), so tests physically cannot
+# write into the production log file. Owner directive (2026-08-27, Meta
+# Messenger/Instagram integration, Section 1): "Ensure tests do not write
+# fixture noise into the production log file."
+if "FAZLE_LOG_DIR" not in os.environ:
+    import tempfile
+    os.environ["FAZLE_LOG_DIR"] = tempfile.mkdtemp(prefix="fazle-test-logs-")
+
 import asyncpg
 import pytest
 import pytest_asyncio
