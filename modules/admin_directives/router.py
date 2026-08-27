@@ -531,15 +531,27 @@ async def _deliver_hermes_reply(request_text: str, sender_phone: str, source_bri
     message. Never awaited inline by _handle_hermes_relay -- see that
     function's docstring for why (MESSAGE_ROUTE_TIMEOUT).
 
-    source_bridge (Owner-directed, 2026-08-12, bridge1 Hermes Control
-    Channel): which bridge the REPLY goes out on -- always the same bridge
-    the triggering request arrived on (see _handle_hermes_relay's call
-    site), never a hardcoded literal, so a bridge2 self-chat request keeps
-    replying via bridge2 exactly as before, and a bridge1 request replies
-    via bridge1. Defaults to "bridge2" so every other/older call site's
-    behavior is unchanged byte-for-byte. Also the key (together with
-    sender_phone) for conversation continuity below -- bridge1 and bridge2
-    self-chat are two independent Hermes conversation threads.
+    source_bridge (Owner-directed, 2026-08-27, Admin<->Hermes topology
+    unification -- supersedes the 2026-08-12 symmetric-reply behavior):
+    which bridge the REPLY goes out on. _handle_hermes_relay's call site
+    now always passes "bridge1" here, regardless of whether the Admin's
+    request arrived via bridge1 or bridge2 -- the intended flow is
+    Admin -> Bridge2 (or Bridge1) -> Hermes -> Bridge1 -> Admin, never a
+    reply landing back inside a bridge2 self-chat thread. A bridge1-sent
+    reply lands as a new inbound message on bridge2 (the Admin's own
+    number is the recipient) -- this is exactly the shape modules.
+    message_router.process_message()'s cross-bridge echo guard (2026-08-12)
+    already recognizes and silently ignores, so it now also correctly
+    absorbs replies to what used to be bridge2-originated requests, not
+    just bridge1-originated ones. Defaults to "bridge2" so every other/
+    older call site's behavior is unchanged byte-for-byte -- only
+    _handle_hermes_relay's call passes the literal "bridge1" explicitly.
+    Also the key (together with sender_phone) for conversation continuity
+    below -- as a direct consequence, a bridge1-arriving request and a
+    bridge2-arriving request now resume the SAME Hermes conversation
+    thread (both key off "bridge1"), not two independent ones as before
+    2026-08-27 -- an intended simplification to one unified control
+    channel, not an accidental side effect.
 
     Conversation continuity (2026-08-13): looks up any still-fresh session
     for this (source_bridge, sender_phone) pair and asks hermes-runner to
@@ -899,21 +911,30 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
     _authorize's RBAC-only verdict).
 
     _HERMES_CONTROL_CHANNELS (Owner-directed, 2026-08-12, bridge1 Hermes
-    Control Channel): widened from "bridge2" only to {"bridge2", "bridge1"}
-    -- bridge1 is a NEW dedicated Admin<->Hermes channel (the Admin
-    messages bridge1's own number directly, a genuine is_from_me=0 inbound
-    message, no self-chat ambiguity), alongside the original bridge2
-    self-chat mechanism, not a replacement for it. The identity check
-    below (wrong_identity) is untouched -- widening the channel set never
-    widens WHO is admitted, only which bridge their message may arrive on.
-    bridge3 and any other value remain denied, unchanged. A reply to a
-    bridge1-arriving request is delivered back out via bridge1 (see
-    _deliver_hermes_reply's source_bridge parameter) -- this deliberately
-    lands as a new inbound message on bridge2 (the Admin's own number is
-    the recipient), which is why modules.message_router.process_message()
-    has its own matching cross-bridge echo guard (2026-08-12) recognizing
-    and silently ignoring exactly that reply shape arriving back on
-    bridge2, so it's never mistaken for a new admin request.
+    Control Channel): {"bridge2", "bridge1"} -- both remain valid channels
+    for the Admin's REQUEST to arrive on (bridge1 is a dedicated
+    Admin<->Hermes channel, the Admin messages bridge1's own number
+    directly, a genuine is_from_me=0 inbound message, no self-chat
+    ambiguity; bridge2 is the original self-chat mechanism). The identity
+    check below (wrong_identity) is untouched -- this set only decides
+    which bridge the Admin's message may arrive ON, never who is
+    admitted. bridge3 and any other value remain denied, unchanged.
+
+    REPLY channel (Owner-directed, 2026-08-27, topology unification --
+    supersedes the 2026-08-12 symmetric-reply behavior): regardless of
+    which of the two channels above the request arrived on, the reply is
+    now always delivered back out via bridge1 (_deliver_hermes_reply is
+    always called with source_bridge="bridge1" below) -- the intended
+    flow is Admin -> Bridge2 (or Bridge1) -> Hermes -> Bridge1 -> Admin,
+    never a reply landing back inside a bridge2 self-chat thread. This
+    deliberately lands as a new inbound message on bridge2 (the Admin's
+    own number is the recipient), which is why modules.message_router.
+    process_message() has its own matching cross-bridge echo guard
+    (2026-08-12) recognizing and silently ignoring exactly that reply
+    shape arriving back on bridge2, so it's never mistaken for a new
+    admin request -- that guard already covered the bridge1-request case
+    and needed no change to also cover the bridge2-request case, since it
+    matches on content-signature, not on why the reply was generated.
 
     source_bridge (S6, 2026-08-08): phone-identity alone is not a channel
     check -- it would (mis)trust an admin_bridge2_number-matching sender
@@ -961,7 +982,14 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
         return "⏳ একটু অপেক্ষা করুন। Hermes ইতিমধ্যে একটি অনুরোধ প্রক্রিয়া করছে।"
     _hermes_cooldown[sender_phone] = now
 
-    task = asyncio.create_task(_deliver_hermes_reply(request_text, sender_phone, source_bridge))
+    # Owner directive (2026-08-27, Admin<->Hermes topology unification):
+    # always reply via bridge1, regardless of which control channel
+    # (bridge1 or bridge2) the request itself arrived on -- see this
+    # function's own docstring ("REPLY channel") and _deliver_hermes_
+    # reply's docstring for the full rationale and the pre-existing echo
+    # guard that already safely absorbs the resulting bridge1->bridge2
+    # landing pattern.
+    task = asyncio.create_task(_deliver_hermes_reply(request_text, sender_phone, "bridge1"))
     _hermes_relay_tasks.add(task)
     task.add_done_callback(_hermes_relay_tasks.discard)
 

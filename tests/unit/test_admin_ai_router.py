@@ -398,13 +398,37 @@ class TestHermesRelayHandler:
         # it just doesn't produce a visible WhatsApp message for this turn
         # (see message_router's "is not None" check and bridge_poller's
         # "if reply:" check, both of which this relies on).
+        #
+        # 2026-08-27 (Admin<->Hermes topology unification): the reply is
+        # now always delivered via bridge1, even for a bridge2-arriving
+        # request -- see test_bridge_requests_always_reply_via_bridge1
+        # below for the direct assertion of this behavior across both
+        # channels; this test only re-confirms the no-ack UX is unchanged.
         with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
              patch.object(router.rbac, "record_audit", new=AsyncMock()), \
              patch.object(router, "get_settings", return_value=_FakeSettings()), \
              patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
             reply = await self._run(text="hermes: check bridge health", phone="8801880446111")
         assert reply == ""
-        mock_deliver.assert_awaited_once_with("check bridge health", "8801880446111", "bridge2")
+        mock_deliver.assert_awaited_once_with("check bridge health", "8801880446111", "bridge1")
+
+    async def test_bridge1_arrival_also_replies_via_bridge1(self):
+        """Owner directive (2026-08-27, Admin<->Hermes topology
+        unification): Admin -> Bridge2 (or Bridge1) -> Hermes -> Bridge1
+        -> Admin -- a bridge1-arriving request replies via bridge1 (this
+        was already true pre-2026-08-27; see
+        test_allowed_bridge2_superadmin_gets_no_ack_but_schedules_background_task
+        above for the bridge2-arrival case, which changed). Separate test
+        method, not a loop over both channels in one test, because
+        _hermes_cooldown is keyed only by phone -- a second call for the
+        same phone within one test would hit the cooldown block before
+        reaching _deliver_hermes_reply at all."""
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            await self._run(text="hermes: check bridge health", phone="8801880446111", source="bridge1")
+        mock_deliver.assert_awaited_once_with("check bridge health", "8801880446111", "bridge1")
 
     async def test_second_call_within_cooldown_blocked(self):
         with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
@@ -938,17 +962,17 @@ class TestProcessAdminNaturalQueryHermesChannel:
     async def test_reply_delivery_channel_matches_request_channel_bridge2(self):
         """No new channel-selection mechanism inside process_admin_natural_
         query itself: the implicit path reuses _handle_hermes_relay ->
-        _deliver_hermes_reply, whose outbound reply now targets whichever
-        channel the request arrived on. This is the bridge2 regression
-        guard -- the original, working self-chat path must keep replying
-        via bridge2, unchanged. See also
-        test_reply_delivery_channel_matches_request_channel_bridge1 (the
-        new channel) and TestDeliverHermesReply for _deliver_hermes_reply's
-        own direct coverage of this parameter. Split into two test methods
-        (not one with two calls) because _handle_hermes_relay's own
-        cooldown would otherwise block the second call within the same
-        test -- the autouse _reset_cooldown fixture only resets between
-        tests."""
+        _deliver_hermes_reply. Owner directive (2026-08-27, Admin<->Hermes
+        topology unification -- supersedes the pre-2026-08-27 symmetric
+        behavior asserted here previously): regardless of the request's
+        arrival channel, the reply now always goes out via bridge1. See
+        also test_reply_delivery_channel_matches_request_channel_bridge1
+        (bridge1 arrival, same bridge1 reply -- unchanged) and
+        TestDeliverHermesReply for _deliver_hermes_reply's own direct
+        coverage of this parameter. Split into two test methods (not one
+        with two calls) because _handle_hermes_relay's own cooldown would
+        otherwise block the second call within the same test -- the
+        autouse _reset_cooldown fixture only resets between tests."""
         with patch.object(router, "get_settings", return_value=_FakeSettings()), \
              patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
              patch.object(router.rbac, "record_audit", new=AsyncMock()), \
@@ -958,12 +982,14 @@ class TestProcessAdminNaturalQueryHermesChannel:
             )
             await asyncio.sleep(0)
         assert reply == ""
-        mock_deliver.assert_awaited_once_with("কোথায় আছ?", "8801880446111", "bridge2")
+        mock_deliver.assert_awaited_once_with("কোথায় আছ?", "8801880446111", "bridge1")
 
     async def test_reply_delivery_channel_matches_request_channel_bridge1(self):
-        """The new channel: a request arriving via bridge1 must have its
-        reply delivered back out via bridge1 too. See the bridge2 sibling
-        test above for why this is a separate test method."""
+        """A request arriving via bridge1 must have its reply delivered
+        back out via bridge1 too -- unchanged by the 2026-08-27 topology
+        unification (it was already "bridge1 in -> bridge1 out"; only the
+        bridge2 sibling test above changed). See that test's docstring for
+        why this is a separate test method."""
         with patch.object(router, "get_settings", return_value=_FakeSettings()), \
              patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
              patch.object(router.rbac, "record_audit", new=AsyncMock()), \
