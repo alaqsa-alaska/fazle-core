@@ -1346,7 +1346,12 @@ async def _poll_bridge(config: dict):
                 # Hermes self-relay (2026-08-12, Owner-directed): reuses the
                 # exact regex admin_directives.router's own inbound HERMES
                 # command uses, so the two paths recognize identical text.
-                from modules.admin_directives.router import process_admin_ai_command, _RE_HERMES
+                # process_admin_natural_query (2026-08-27 addition, see the
+                # unprefixed-fallback block below): the same unprefixed-text
+                # bypass genuinely-inbound messages already get.
+                from modules.admin_directives.router import (
+                    process_admin_ai_command, process_admin_natural_query, _RE_HERMES,
+                )
 
                 admin_number = (
                     _settings.bridge1_number if bridge_name == "bridge1"
@@ -1473,6 +1478,72 @@ async def _poll_bridge(config: dict):
                             )
                         except Exception as _go_err:
                             log.error(f"[{bridge_name}] group order error for msg {omsg_id}: {_go_err}")
+                        continue
+
+                    # Bridge2 self-chat natural-language Admin->Hermes fallback
+                    # (2026-08-27, Owner-directed): closes the gap where an
+                    # unprefixed Super Admin self-chat message -- one that
+                    # doesn't start with "hermes,"/"hermes:" -- fell through
+                    # every check above and was silently dropped. Mirrors,
+                    # for this is_from_me=1 self-chat scanner, the exact same
+                    # unprefixed-text bypass process_admin_natural_query()
+                    # already applies to genuinely-inbound (is_from_me=0)
+                    # messages on bridge1/bridge2 (see that function's own
+                    # docstring) -- this is the missing second call site for
+                    # the identical rule, not a new routing system.
+                    #
+                    # Scoped narrowly, in this order, so nothing else in
+                    # this loop can ever be reinterpreted as a Hermes turn:
+                    #   1. only reached once none of the deterministic
+                    #      operational patterns above matched (explicit
+                    #      "hermes," prefix, release confirmation, escort
+                    #      completion, group order) -- every one of those
+                    #      branches `continue`s before reaching here;
+                    #   2. bridge2 only, never bridge1 -- bridge1 is the HR
+                    #      number, not Super Admin, and has no self-chat
+                    #      ambiguity to begin with (see _handle_hermes_
+                    #      relay's docstring);
+                    #   3. never inside the Trusted Group -- a message
+                    #      posted into the shared dispatch group is not a
+                    #      private Admin<->Hermes conversation turn no
+                    #      matter who is_from_me it is; only the explicit
+                    #      prefix (checked unconditionally above) may reach
+                    #      Hermes from inside the group.
+                    #
+                    # Reuses process_admin_natural_query() completely
+                    # unchanged -- no new authorization logic here. Its own
+                    # identity check (sender_phone == settings.
+                    # admin_bridge2_number) and channel check (source_bridge
+                    # in _HERMES_CONTROL_CHANNELS) both trivially pass for
+                    # this call (sender is always admin_number == bridge2's
+                    # own admin number, source_bridge is always "bridge2"),
+                    # so it always delegates to _handle_hermes_relay() --
+                    # the exact same RBAC + cooldown + RUN-toolset + session
+                    # + approval-gate path the explicit-prefix branch above
+                    # already uses, never process_admin_natural_query()'s AI
+                    # console fallback. _handle_hermes_relay() returns ""
+                    # here (its immediate ack is intentionally empty, same
+                    # as the prefixed path) -- the real answer is delivered
+                    # moments later as its own outbound message via
+                    # _deliver_hermes_reply(), unchanged and unaffected by
+                    # this fallback.
+                    if bridge_name == "bridge2" and not is_trusted_group_msg:
+                        log.info(f"[{bridge_name}] outgoing unprefixed self-chat → routing to Hermes natural-query, msg={omsg_id}")
+                        try:
+                            ack = await process_admin_natural_query(
+                                otext, sender_phone=admin_number, source_bridge=bridge_name,
+                            )
+                            if ack:
+                                from modules.outbound import enqueue as enqueue_outbound
+                                await enqueue_outbound(
+                                    admin_number, ack,
+                                    source_bridge=bridge_name,
+                                    purpose="hermes-self-relay-ack",
+                                    idempotency_key=f"hermes-self-relay-nl:{omsg_id}",
+                                )
+                        except Exception as _hermes_nl_err:
+                            log.error(f"[{bridge_name}] hermes natural-query self-relay error for msg {omsg_id}: {_hermes_nl_err}")
+                        continue
 
                 if new_out_cursor > out_cursor:
                     await _set_outgoing_cursor(bridge_name, new_out_cursor)
