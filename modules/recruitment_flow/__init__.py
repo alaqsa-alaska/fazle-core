@@ -354,6 +354,169 @@ _POST_INTAKE_CLASSIFY_SYSTEM_PROMPT: str = (
 )
 _POST_INTAKE_CLASSIFY_CONFIDENCE_FLOOR: float = 0.60
 
+# ── Responsible/supervisory-role experience verification (Owner directive,
+# 2026-08-27) ─────────────────────────────────────────────────────────────
+# Scope confirmed by Owner: these role names (exact stored job_preference
+# values from VALID_POSITIONS, plus two narrative-only names the KB may
+# describe even though intake never stores them literally today —
+# "Supervisor"/"Ghat In-Charge" — kept for forward compatibility) require a
+# role-specific experience question before the agreement question, instead
+# of accepting a bare generic years-of-experience answer. Deliberately does
+# NOT include Escort, Survey Scout, Security Guard, Marketing Officer —
+# ordinary non-supervisory roles are unaffected by this gate.
+_RESPONSIBLE_ROLES: frozenset[str] = frozenset({
+    "Security Supervisor", "Assistant Supervisor", "Supervisor",
+    "Ghat Supervisor", "Ghat In-Charge", "Operation Officer",
+    "Security In-Charge",
+})
+
+
+def _is_responsible_role(job_preference: Optional[str]) -> bool:
+    return bool(job_preference) and job_preference.strip() in _RESPONSIBLE_ROLES
+
+
+# Additional extraction instructions appended to _POST_INTAKE_CLASSIFY_
+# SYSTEM_PROMPT (same call, same JSON response — NOT a second LLM
+# round-trip) when the active candidate is in a responsible role and has
+# not yet supplied a checkable experience claim. Never guesses — matches
+# the base prompt's own "sammantatam anishchayata thakle none dao" posture.
+_EXPERIENCE_EXTRACTION_INSTRUCTIONS_TMPL: str = (
+    "\n\nএছাড়াও, এই প্রার্থী \"{role}\" (দায়িত্বশীল/সুপারভাইজরি) পদে আগ্রহী এবং "
+    "এই নির্দিষ্ট পদের জন্য প্রাসঙ্গিক অভিজ্ঞতা এখনো স্পষ্টভাবে যাচাইযোগ্য নয়। "
+    "কথোপকথনের ইতিহাস ও এই বার্তা থেকে (শুধুমাত্র স্পষ্টভাবে বলা থাকলে -- কখনো "
+    "অনুমান কোরো না) নিচের তথ্যও বের কর:\n"
+    "  claimed_company -- কোন প্রতিষ্ঠান/কোম্পানিতে এই ধরনের কাজ করেছে "
+    "(স্পষ্ট না থাকলে null)\n"
+    "  claimed_duration -- কতদিন/বছর কাজ করেছে, প্রার্থীর নিজের ভাষায় "
+    "(যেমন \"১০ বছরের বেশি\") (স্পষ্ট না থাকলে null)\n"
+    "  reference_name -- reference/contact person-এর নাম (স্পষ্ট না থাকলে null)\n"
+    "  reference_phone -- reference/contact person-এর নম্বর (স্পষ্ট না থাকলে null)\n"
+    "  no_relevant_experience -- true শুধু যদি প্রার্থী স্পষ্টভাবে বলে যে তার এই "
+    "নির্দিষ্ট ধরনের কাজে কোনো প্রাসঙ্গিক অভিজ্ঞতা নেই, নাহলে false\n"
+    "JSON output-এ এই key-গুলোও যোগ কর (তথ্য না থাকলে null/false দাও, বাদ দিও না): "
+    '"claimed_company", "claimed_duration", "reference_name", "reference_phone", '
+    '"no_relevant_experience"।'
+)
+
+# Marker-delimited block stored inside wbom_candidates.notes (existing,
+# previously-unused free-text column — no schema change). Owner directive
+# (2026-08-27): claimed role/employer/duration/reference must be labeled
+# and distinguished, and verification_status must never be set to
+# "verified"/"rejected" by automated code — only "unverified" (default) and
+# "awaiting_admin_review" (set once, after sufficient detail triggers the
+# Admin notification) are ever written here. "verified"/"rejected" exist in
+# the vocabulary for a human to set manually; nothing in this codebase
+# writes them.
+_EXPERIENCE_CLAIM_BLOCK_RE = re.compile(
+    r"\[EXPERIENCE_CLAIM\].*?\[/EXPERIENCE_CLAIM\]", re.DOTALL,
+)
+_EXPERIENCE_CLAIM_FIELDS: tuple[str, ...] = (
+    "claimed_role", "claimed_company", "claimed_duration",
+    "reference_name", "reference_phone", "verification_status",
+)
+# Sentinel written into claimed_company when the candidate has explicitly
+# confirmed they have no relevant experience for this specific responsible
+# role — distinguishes "resolved, no claim to verify" from "not asked yet".
+_NO_RELEVANT_EXPERIENCE_SENTINEL: str = "প্রাসঙ্গিক অভিজ্ঞতা নেই (candidate confirmed)"
+
+
+def _format_experience_claim_block(
+    *, claimed_role=None, claimed_company=None, claimed_duration=None,
+    reference_name=None, reference_phone=None, verification_status="unverified",
+) -> str:
+    return (
+        "[EXPERIENCE_CLAIM]\n"
+        f"claimed_role: {claimed_role or '—'}\n"
+        f"claimed_company: {claimed_company or '—'}\n"
+        f"claimed_duration: {claimed_duration or '—'}\n"
+        f"reference_name: {reference_name or '—'}\n"
+        f"reference_phone: {reference_phone or '—'}\n"
+        f"verification_status: {verification_status}\n"
+        "[/EXPERIENCE_CLAIM]"
+    )
+
+
+def _parse_experience_claim_block(notes: Optional[str]) -> Optional[dict]:
+    """Read-only: extract the (most recent) [EXPERIENCE_CLAIM] block from
+    wbom_candidates.notes. Returns None if absent/empty. Never raises."""
+    if not notes:
+        return None
+    matches = _EXPERIENCE_CLAIM_BLOCK_RE.findall(notes)
+    if not matches:
+        return None
+    data: dict = {}
+    for line in matches[-1].splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key in _EXPERIENCE_CLAIM_FIELDS:
+            data[key] = None if value == "—" else value
+    return data or None
+
+
+def _experience_claim_resolved(claim: Optional[dict]) -> bool:
+    """True when no further experience-verification question is needed
+    this turn — either a checkable claim (company + duration) is already
+    captured, the candidate confirmed no relevant experience, or the claim
+    already moved past "unverified" (e.g. awaiting_admin_review)."""
+    if not claim:
+        return False
+    if claim.get("verification_status") in ("awaiting_admin_review", "verified", "rejected"):
+        return True
+    company = claim.get("claimed_company") or ""
+    if _NO_RELEVANT_EXPERIENCE_SENTINEL in company:
+        return True
+    return bool(company) and bool(claim.get("claimed_duration"))
+
+
+async def _upsert_experience_claim(candidate_id: int, **fields) -> Optional[dict]:
+    """Best-effort merge new experience-claim fields into wbom_candidates.
+    notes, replacing any prior [EXPERIENCE_CLAIM] block in place (other
+    note content, if any, is preserved untouched) and never overwriting an
+    already-known field with a blank/falsy new value — supports the
+    candidate answering across several separate messages (Owner directive:
+    extract conversationally, don't require one exact formatted reply).
+
+    Returns the merged claim dict (so callers can immediately check
+    sufficiency without a second DB read), or None on any DB error
+    (fails closed, never raises)."""
+    try:
+        row = await fetch_one(
+            "SELECT notes FROM wbom_candidates WHERE candidate_id=$1", candidate_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[recruit] experience_claim read failed candidate=%s: %s", candidate_id, exc)
+        return None
+    existing_notes = (row or {}).get("notes") or ""
+    merged = dict(_parse_experience_claim_block(existing_notes) or {})
+    for key, value in fields.items():
+        if value:
+            merged[key] = value
+    merged.setdefault("verification_status", "unverified")
+    block = _format_experience_claim_block(
+        claimed_role=merged.get("claimed_role"),
+        claimed_company=merged.get("claimed_company"),
+        claimed_duration=merged.get("claimed_duration"),
+        reference_name=merged.get("reference_name"),
+        reference_phone=merged.get("reference_phone"),
+        verification_status=merged.get("verification_status"),
+    )
+    if _EXPERIENCE_CLAIM_BLOCK_RE.search(existing_notes):
+        new_notes = _EXPERIENCE_CLAIM_BLOCK_RE.sub(lambda _m: block, existing_notes, count=1)
+    else:
+        new_notes = f"{existing_notes}\n\n{block}".strip() if existing_notes else block
+    try:
+        await execute(
+            "UPDATE wbom_candidates SET notes=$1, updated_at=NOW() WHERE candidate_id=$2",
+            new_notes, candidate_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[recruit] experience_claim write failed candidate=%s: %s", candidate_id, exc)
+        return None
+    return merged
+
 # Soft-ask prepended to the first recruitment reply only when identity_brain
 # found NO signal at all for this number (role="unknown" -- distinct from
 # role="candidate", which already means an explicit job-related keyword
@@ -523,9 +686,53 @@ def _parse_job_preference(text: str) -> Optional[str]:
     return None
 
 
+# Bengali number WORDS for common small experience-duration claims (Owner
+# directive 2026-08-27). Bengali/ASCII DIGITS ("১০ বছর", "10+ বছর") already
+# parsed correctly via to_ascii_digits() + the \d{1,2} regex below — this
+# table only covers the gap: word forms like "দশ বছরের বেশি" (a real
+# candidate case, 8801718415009, that was silently zeroed by the old
+# digit-only parser). Deliberately small/common values only, not
+# exhaustive — anything outside this table falls through to the
+# preserve-raw-text path rather than a guess.
+_BN_EXPERIENCE_NUMBER_WORDS: dict[str, int] = {
+    "শূন্য": 0, "এক": 1, "দুই": 2, "তিন": 3, "চার": 4, "পাঁচ": 5,
+    "ছয়": 6, "সাত": 7, "আট": 8, "নয়": 9, "দশ": 10,
+    "এগারো": 11, "বারো": 12, "তেরো": 13, "চৌদ্দ": 14, "পনেরো": 15,
+    "ষোল": 16, "সতেরো": 17, "আঠারো": 18, "উনিশ": 19, "বিশ": 20,
+    "পঁচিশ": 25, "ত্রিশ": 30, "চল্লিশ": 40,
+}
+_NO_EXPERIENCE_RE = re.compile(
+    r"নতুন|কোনো\s*অভিজ্ঞতা\s*নেই|অভিজ্ঞতা\s*নাই|no\s*experience", re.IGNORECASE,
+)
+
+
 def _parse_experience(text: str) -> Optional[int]:
-    m = re.search(r"\b(\d{1,2})\b", text)
-    return int(m.group(1)) if m else 0
+    """Extract claimed years-of-experience as an int, or None when the
+    claim cannot be safely reduced to a single number (Owner directive
+    2026-08-27: never silently convert an unparseable free-text claim to
+    0 — callers must preserve the raw text instead, e.g. via
+    _upsert_experience_claim(); do not invent a duration here).
+
+    Returns 0 only when the text unambiguously states zero/none/new
+    ("0", "নতুন", "কোনো অভিজ্ঞতা নেই"). Handles ASCII digits, Bengali
+    digits (transliterated the same way _parse_phone() already does —
+    "১০+ বছর" -> "10+ বছর", still matches), and a small set of common
+    Bengali number WORDS. Anything else (an amount too irregular to
+    safely normalize) returns None — the caller is responsible for
+    preserving the raw claim text rather than guessing."""
+    if not text or not text.strip():
+        return None
+    stripped = text.strip()
+    from modules.phone_normalizer import to_ascii_digits
+    m = re.search(r"\b(\d{1,2})\b", to_ascii_digits(stripped))
+    if m:
+        return int(m.group(1))
+    if _NO_EXPERIENCE_RE.search(stripped):
+        return 0
+    for word, value in _BN_EXPERIENCE_NUMBER_WORDS.items():
+        if word in stripped:
+            return value
+    return None
 
 
 def _parse_phone(text: str) -> Optional[str]:
@@ -1063,6 +1270,25 @@ async def intake_message(
                 session, candidate_id, phone, step, raw_message, source, message_id,
             )
         update["experience_years"] = new_exp
+        if val is None and candidate_id is not None:
+            # Owner directive (2026-08-27): _parse_experience() couldn't
+            # safely reduce this free-text claim to a number — preserve
+            # the raw text as an unverified claim (wbom_candidates.notes)
+            # instead of letting it silently read as "confirmed zero".
+            # The responsible-role post-intake flow reads this back later
+            # via _parse_experience_claim_block(). Best-effort, never
+            # blocks intake.
+            try:
+                await _upsert_experience_claim(
+                    candidate_id,
+                    claimed_role=session.get("job_preference"),
+                    claimed_duration=text.strip()[:200],
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "[recruit] intake experience claim preserve failed candidate=%s: %s",
+                    candidate_id, exc,
+                )
     elif step == "phone_confirm":
         phone_parsed = _parse_phone(text)
         if phone_parsed:
@@ -1385,49 +1611,83 @@ def _is_llm_priority_phone(phone: str) -> bool:
 
 # ── Post-intake conversation helpers (Owner directive, 2026-08-27) ──────────
 
-async def _classify_post_intake_turn(phone: str, text: str) -> Optional[str]:
-    """Best-effort semantic classification of a scored candidate's reply
-    into a post_intake_status transition. Returns one of POST_INTAKE_
-    STATUSES, or None when no confident transition applies -- NEVER
-    guesses (same fail-closed-on-ambiguity posture as this codebase's
-    verify_employee_claim() tool). Reuses modules.hermes_dispatch.
-    call_decision_llm() -- the SAME structured-classification call shape
-    modules.recruitment_turn_decision already uses for intake-turn
-    decisions (caller_scope="customer", no tools, text in/text out) --
-    deliberately not a new LLM integration.
+async def _classify_post_intake_turn(
+    phone: str, text: str, *, history: str = "",
+    extract_experience_role: Optional[str] = None,
+) -> dict:
+    """Best-effort semantic classification of a scored candidate's reply.
+    Always returns {"post_intake_status": Optional[str], "experience":
+    Optional[dict]} — NEVER guesses on either key (same fail-closed-on-
+    ambiguity posture as this codebase's verify_employee_claim() tool).
+    Reuses modules.hermes_dispatch.call_decision_llm() — the SAME
+    structured-classification call shape modules.recruitment_turn_decision
+    already uses for intake-turn decisions (caller_scope="customer", no
+    tools, text in/text out) — deliberately not a new LLM integration.
+
+    extract_experience_role (Owner directive, 2026-08-27): when given (a
+    responsible-role job_preference string, see _is_responsible_role()),
+    ONE extra instruction block is appended to the SAME system prompt and
+    the SAME call — deliberately not a second LLM round-trip, to avoid
+    doubling latency/timeout risk on an already-slow path — asking the
+    model to also extract claimed_company/claimed_duration/reference_name/
+    reference_phone/no_relevant_experience from this turn AND the recent
+    history (candidates often answer across several messages). Returned
+    under the "experience" key only when at least one field was extracted;
+    None otherwise.
 
     Read-only w.r.t. the LLM call; the caller (_route_post_intake_message)
-    owns the actual DB write, same separation as every other decision-LLM
-    caller in this codebase (the model classifies meaning, deterministic
+    owns all DB writes, same separation as every other decision-LLM caller
+    in this codebase (the model classifies/extracts meaning, deterministic
     code persists state)."""
+    result: dict = {"post_intake_status": None, "experience": None}
     try:
         from modules.hermes_dispatch import call_decision_llm
     except Exception as exc:  # noqa: BLE001 -- fail closed
         log.debug("[recruit] post_intake classify import failed: %s", exc)
-        return None
+        return result
+
+    system_prompt = _POST_INTAKE_CLASSIFY_SYSTEM_PROMPT
+    if extract_experience_role:
+        system_prompt = system_prompt + _EXPERIENCE_EXTRACTION_INSTRUCTIONS_TMPL.format(
+            role=extract_experience_role,
+        )
+    payload = (text or "")[:500]
+    if extract_experience_role and history:
+        payload = f"সাম্প্রতিক কথোপকথন:\n{history[-1500:]}\n\nবর্তমান বার্তা:\n{payload}"
+
     try:
         raw = await call_decision_llm(
-            system_prompt=_POST_INTAKE_CLASSIFY_SYSTEM_PROMPT,
-            user_payload=(text or "")[:500],
-            sender_phone=phone,
+            system_prompt=system_prompt, user_payload=payload, sender_phone=phone,
         )
     except Exception as exc:  # noqa: BLE001 -- fail closed, never raise
         log.debug("[recruit] post_intake classify call failed: %s", exc)
-        return None
+        return result
     if not raw:
-        return None
+        return result
     try:
         import json
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         data = json.loads(match.group(0)) if match else json.loads(raw)
-        status = str(data.get("post_intake_status") or "").strip()
         confidence = float(data.get("confidence") or 0.0)
     except Exception:
         log.debug("[recruit] post_intake classify: unparsable response, treating as no-op")
-        return None
-    if status not in POST_INTAKE_STATUSES or confidence < _POST_INTAKE_CLASSIFY_CONFIDENCE_FLOOR:
-        return None
-    return status
+        return result
+
+    status = str(data.get("post_intake_status") or "").strip()
+    if status in POST_INTAKE_STATUSES and confidence >= _POST_INTAKE_CLASSIFY_CONFIDENCE_FLOOR:
+        result["post_intake_status"] = status
+
+    if extract_experience_role and confidence >= _POST_INTAKE_CLASSIFY_CONFIDENCE_FLOOR:
+        exp: dict = {}
+        for key in ("claimed_company", "claimed_duration", "reference_name", "reference_phone"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip() and value.strip().lower() not in ("null", "none", "n/a"):
+                exp[key] = value.strip()[:200]
+        if data.get("no_relevant_experience") is True:
+            exp["no_relevant_experience"] = True
+        if exp:
+            result["experience"] = exp
+    return result
 
 
 async def _resolve_fee_policy_reply(text: str) -> Optional[str]:
@@ -1514,7 +1774,28 @@ async def _route_post_intake_message(
     the reply itself is grounded in the up-to-date status."""
     candidate_id = active_session.get("candidate_id")
 
-    new_status = await _classify_post_intake_turn(phone, text)
+    # Owner directive (2026-08-27): for a responsible-role candidate whose
+    # experience claim isn't resolved yet, ask the SAME classify call to
+    # also extract role-specific experience detail from this turn (one
+    # call, not two — see _classify_post_intake_turn's own docstring).
+    job_preference = active_session.get("job_preference")
+    extract_role = None
+    if candidate_id is not None and _is_responsible_role(job_preference):
+        try:
+            notes_row = await fetch_one(
+                "SELECT notes FROM wbom_candidates WHERE candidate_id=$1", candidate_id,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fail closed, treat as unresolved
+            log.debug("[recruit] experience_claim pre-check failed candidate=%s: %s", candidate_id, exc)
+            notes_row = None
+        existing_claim = _parse_experience_claim_block((notes_row or {}).get("notes"))
+        if not _experience_claim_resolved(existing_claim):
+            extract_role = job_preference
+
+    classify_result = await _classify_post_intake_turn(
+        phone, text, history=history, extract_experience_role=extract_role,
+    )
+    new_status = classify_result.get("post_intake_status")
     if new_status and candidate_id is not None and new_status != active_session.get("post_intake_status"):
         try:
             await execute(
@@ -1532,6 +1813,45 @@ async def _route_post_intake_message(
 
     if candidate_id is not None:
         await _audit_candidate_conversation(candidate_id, "post_intake", text, source, message_id)
+
+    exp = classify_result.get("experience")
+    if extract_role and exp and candidate_id is not None:
+        if exp.get("no_relevant_experience"):
+            await _upsert_experience_claim(
+                candidate_id, claimed_role=job_preference,
+                claimed_company=_NO_RELEVANT_EXPERIENCE_SENTINEL,
+            )
+        else:
+            merged = await _upsert_experience_claim(
+                candidate_id, claimed_role=job_preference,
+                claimed_company=exp.get("claimed_company"),
+                claimed_duration=exp.get("claimed_duration"),
+                reference_name=exp.get("reference_name"),
+                reference_phone=exp.get("reference_phone"),
+            )
+            # Owner directive: notify Admin ONLY once, ONLY when enough
+            # reference detail exists (company + duration; reference
+            # name/phone included in the notification "where available",
+            # never required to trigger it) — never on a partial answer.
+            if (
+                merged
+                and merged.get("verification_status") == "unverified"
+                and merged.get("claimed_company")
+                and merged.get("claimed_duration")
+            ):
+                merged = await _upsert_experience_claim(
+                    candidate_id, verification_status="awaiting_admin_review",
+                ) or merged
+                try:
+                    from modules.admin_directives.router import trigger_candidate_reference_review
+                    await trigger_candidate_reference_review(
+                        candidate_id=candidate_id, phone=phone, claim=merged,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- never block the reply
+                    log.warning(
+                        "[recruit] reference review trigger failed candidate=%s: %s",
+                        candidate_id, exc,
+                    )
 
     fee_reply = await _resolve_fee_policy_reply(text)
     if fee_reply:

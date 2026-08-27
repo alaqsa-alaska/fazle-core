@@ -994,13 +994,17 @@ async def _build_post_intake_state_block(session_row: dict) -> str:
         return ""
     try:
         from app.database import fetch_one as _fetch_one
-        from modules.recruitment_flow import POST_INTAKE_TERMINAL_STATUSES, _bn_digits
+        from modules.recruitment_flow import (
+            POST_INTAKE_TERMINAL_STATUSES, _bn_digits,
+            _is_responsible_role, _parse_experience_claim_block,
+            _NO_RELEVANT_EXPERIENCE_SENTINEL,
+        )
     except Exception as exc:  # noqa: BLE001 — fail closed
         log.warning("[hermes_dispatch] post_intake_state import failed: %s", exc)
         return ""
     try:
         cand = await _fetch_one(
-            "SELECT post_intake_status FROM wbom_candidates WHERE candidate_id = $1",
+            "SELECT post_intake_status, notes FROM wbom_candidates WHERE candidate_id = $1",
             candidate_id,
         )
     except Exception as exc:  # noqa: BLE001 — fail closed
@@ -1015,6 +1019,7 @@ async def _build_post_intake_state_block(session_row: dict) -> str:
     if status in POST_INTAKE_TERMINAL_STATUSES:
         return ""
 
+    job_preference = session_row.get("job_preference")
     facts: list[str] = []
     if session_row.get("full_name"):
         facts.append(f"নাম={session_row['full_name']}")
@@ -1022,8 +1027,10 @@ async def _build_post_intake_state_block(session_row: dict) -> str:
         facts.append(f"বয়স={_bn_digits(int(session_row['age']))}")
     if session_row.get("area"):
         facts.append(f"এলাকা={session_row['area']}")
-    if session_row.get("job_preference"):
-        facts.append(f"নির্বাচিত পদ={session_row['job_preference']}")
+    if job_preference:
+        facts.append(f"নির্বাচিত পদ={job_preference}")
+    if session_row.get("experience_years") is not None:
+        facts.append(f"সাধারণ অভিজ্ঞতা (বছর, ফর্ম থেকে)={_bn_digits(int(session_row['experience_years']))}")
 
     lines = [
         "- অবস্থা: আবেদন সম্পন্ন (candidate ইতিমধ্যে প্রাথমিক তথ্য দিয়েছে, scored)।",
@@ -1051,6 +1058,64 @@ async def _build_post_intake_state_block(session_row: dict) -> str:
         "প্রার্থী স্পষ্টভাবে কথোপকথন শেষ করতে চায়। কোনো বেতন/ফি/নীতির সংখ্যা বা শর্ত "
         "উদ্ভাবন করবে না — Knowledge অংশে না থাকলে অফিসে যোগাযোগ করতে বলবে।",
     ]
+
+    # Owner directive (2026-08-27): responsible/supervisory-role candidates
+    # need role-specific experience verification before the agreement
+    # question — a generic years-of-experience answer alone is not
+    # sufficient. See modules.recruitment_flow._RESPONSIBLE_ROLES /
+    # _upsert_experience_claim / _experience_claim_resolved for the
+    # persistence side (wbom_candidates.notes, no schema change).
+    if _is_responsible_role(job_preference):
+        claim = _parse_experience_claim_block(cand.get("notes")) or {}
+        v_status = claim.get("verification_status")
+        no_relevant = _NO_RELEVANT_EXPERIENCE_SENTINEL in (claim.get("claimed_company") or "")
+        has_detail = bool(claim.get("claimed_company")) and bool(claim.get("claimed_duration")) and not no_relevant
+
+        if no_relevant:
+            lines.append(
+                "নিয়ম (গুরুত্বপূর্ণ): এই প্রার্থীর এই নির্দিষ্ট দায়িত্বশীল পদে প্রাসঙ্গিক অভিজ্ঞতা "
+                "নেই বলে ইতিমধ্যে নিশ্চিত হয়েছে। সরাসরি প্রত্যাখ্যান কোরো না — স্বাভাবিকভাবে "
+                "ব্যাখ্যা কর যে দায়িত্বশীল/সুপারভাইজরি পদে অন্যদের সঠিক নির্দেশনা দেওয়ার আগে "
+                "কাজটি নিজে বোঝা দরকার, তাই প্রথমে practical learning/training-এর মাধ্যমে "
+                "শেখানো হবে। প্রশিক্ষণের সময়কাল নির্দিষ্ট দিন/মাস সংখ্যা বলে গ্যারান্টি দিও না — "
+                "Knowledge অংশে থাকা variable-duration নীতি (প্রার্থীর শেখার গতি, দক্ষতা, "
+                "উপস্থিতি, শৃঙ্খলা অনুযায়ী পরিবর্তনশীল) অনুযায়ী স্বাভাবিকভাবে বলো।",
+            )
+        elif v_status == "awaiting_admin_review":
+            lines.append(
+                "নিয়ম: এই প্রার্থীর দেওয়া পূর্ববর্তী কর্মস্থল/reference তথ্য অফিসে যাচাইয়ের জন্য "
+                "পাঠানো হয়েছে (awaiting admin review) — এটাকে কখনো \"verified\"/\"যাচাই হয়ে "
+                "গেছে\" বলে দাবি কোরো না, এবং একই তথ্য আবার চাইবে না। কথোপকথন স্বাভাবিকভাবে "
+                "এগিয়ে নাও (প্রশিক্ষণ/probation শর্ত ব্যাখ্যা, রাজি কিনা জিজ্ঞাসা) — চূড়ান্ত "
+                "সিদ্ধান্ত অফিসের যাচাইয়ের পরে হবে, সেটা এখনই বলার দরকার নেই যদি প্রার্থী "
+                "নিজে থেকে জিজ্ঞেস না করে।",
+            )
+        elif not has_detail:
+            lines.append(
+                f"নিয়ম (গুরুত্বপূর্ণ): এই প্রার্থী \"{job_preference}\"-এর মতো দায়িত্বশীল/"
+                "সুপারভাইজরি পদে আগ্রহী। উপরে দেখানো সাধারণ \"কত বছরের অভিজ্ঞতা\" উত্তর "
+                "(থাকলেও) এই পদের জন্য যথেষ্ট নয় — সরাসরি \"আপনি কি এগিয়ে যেতে রাজি আছেন?\" "
+                "জাতীয় agreement প্রশ্নে যেও না। এর বদলে নির্দিষ্টভাবে জিজ্ঞাসা কর প্রার্থী "
+                f"আগে ঠিক {job_preference}-এর মতো (বা সরাসরি প্রাসঙ্গিক) দায়িত্বশীল পদে "
+                "কোথাও কাজ করেছে কিনা — কোন প্রতিষ্ঠানে, কত বছর, এবং সম্ভব হলে সেই "
+                "প্রতিষ্ঠানের একজন contact/reference person-এর নাম ও নম্বর। উদাহরণ: "
+                f"\"আপনি আগে {job_preference} হিসেবে কোনো প্রতিষ্ঠানে কাজ করেছেন কি? করে "
+                "থাকলে কোন কোম্পানিতে, কত বছর কাজ করেছেন এবং সম্ভব হলে ওই প্রতিষ্ঠানের একজন "
+                "contact person-এর নাম ও contact number জানান।\" প্রার্থী একাধিক বার্তায় "
+                "ভেঙে উত্তর দিলেও স্বাভাবিকভাবে বুঝে নাও, একই প্রশ্ন বারবার কোরো না। প্রার্থী "
+                "যদি বলে তার এই কাজে কোনো প্রাসঙ্গিক অভিজ্ঞতা নেই, তাহলে সরাসরি প্রত্যাখ্যান "
+                "না করে practical training পথের কথা বলো। কোনো দাবিকে নিজে থেকে "
+                "\"verified\"/\"যাচাই হয়ে গেছে\" বোলো না — এটা শুধু claimed/unverified তথ্য, "
+                "অফিস যাচাই করবে। Operation Officer বা Ghat Supervisor/Ghat In-Charge হলে "
+                "Knowledge অংশে থাকা নির্দিষ্ট rationale ব্যবহার করো, নিজে থেকে ব্যাখ্যা "
+                "বানিও না।",
+            )
+        # has_detail-but-not-yet-flagged (transient/race edge case): no
+        # extra rule needed — the classifier/extraction on this exact turn
+        # will flip verification_status to awaiting_admin_review before
+        # the NEXT reply, so falling through to the base rules above is
+        # safe for this one turn.
+
     return "\n".join(lines)
 
 

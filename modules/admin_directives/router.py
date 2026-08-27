@@ -808,6 +808,69 @@ async def trigger_recruitment_policy_clarification(
         log.error("[recruitment_policy_escalation] subject_key=%s event=send_failed error=%s", subject_key, exc)
 
 
+# ── Candidate reference-review notification (Owner directive, 2026-08-27) ──
+# Responsible/supervisory-role experience-verification pass, item G's
+# sibling: once modules.recruitment_flow captures enough of a candidate's
+# claimed previous employer/duration (see _upsert_experience_claim /
+# _experience_claim_resolved there), notify the canonical Super Admin so a
+# human can actually contact the reference. Reuses the exact same
+# outbound.enqueue -> bridge2 primitive as trigger_admin_investigation()
+# and trigger_recruitment_policy_clarification() above — NOT a new sender.
+# Two deliberate differences from those two siblings:
+#   1. No Hermes composition step (_call_hermes_readonly) and no
+#      _remember_hermes_session — the notification is a deterministic
+#      dump of already-structured claim data, and the Admin's own reply
+#      doesn't need to resume as an authoritative-directive-writing Hermes
+#      turn the way a policy answer does. Skipping that round-trip also
+#      avoids adding a second hermes-runner call to an already latency-
+#      sensitive path (see Phase A recovery's live timeout observations).
+#   2. No cooldown dict: this is a one-shot-per-candidate event, not a
+#      periodic alert, so a stable (no-timestamp) idempotency_key on
+#      outbound.enqueue's existing ON CONFLICT DO NOTHING dedup is the
+#      only gate needed — it fires at most once per candidate_id even if
+#      called again on a later turn.
+# Never marks anything "verified" — this only ever forwards claimed/
+# unverified data for a human to check, per Owner's explicit instruction.
+async def trigger_candidate_reference_review(
+    *, candidate_id: int, phone: str, claim: dict,
+) -> None:
+    """Notify the canonical Super Admin (bridge2) that a responsible-role
+    candidate has supplied enough reference detail to be worth checking.
+    Fail-closed: missing bridge2 config means no send, logged reason —
+    never a silent no-op, never raises."""
+    bridge2_number = get_settings().admin_bridge2_number or ""
+    if not bridge2_number:
+        log.warning(
+            "[candidate_reference_review] event=skipped reason=bridge2_not_configured candidate=%s",
+            candidate_id,
+        )
+        return
+
+    lines = [
+        f"📋 Candidate reference review needed (candidate_id={candidate_id}, phone={phone}):",
+        f"দাবিকৃত পদ: {claim.get('claimed_role') or '—'}",
+        f"প্রতিষ্ঠান: {claim.get('claimed_company') or '—'}",
+        f"সময়কাল: {claim.get('claimed_duration') or '—'}",
+    ]
+    if claim.get("reference_name"):
+        lines.append(f"Reference name: {claim['reference_name']}")
+    if claim.get("reference_phone"):
+        lines.append(f"Reference phone: {claim['reference_phone']}")
+    lines.append("Status: unverified (claimed only) — অনুগ্রহ করে যাচাই করুন।")
+
+    try:
+        await outbound.enqueue(
+            bridge2_number,
+            "\n".join(lines),
+            source_bridge="bridge2",
+            purpose="candidate_reference_review",
+            idempotency_key=f"candref-{candidate_id}",
+        )
+        log.info("[candidate_reference_review] candidate=%s event=notification_sent", candidate_id)
+    except Exception as exc:
+        log.error("[candidate_reference_review] candidate=%s event=send_failed error=%s", candidate_id, exc)
+
+
 async def _handle_hermes_relay(request_text: str, sender_phone: str, source_bridge: str = "") -> str:
     """Phase 4 (2026-08-04): relays an admin's WhatsApp request to the real
     Hermes (assistant-platform's BUILD/RUN-capable agent).

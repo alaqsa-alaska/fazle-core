@@ -133,7 +133,8 @@ async def test_route_recruitment_message_does_not_call_intake_message_for_post_i
                 "active_session": active_session}
     intake_mock = AsyncMock()
     with patch("modules.recruitment_flow.recruitment_eligibility", new=AsyncMock(return_value=decision)), \
-         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._classify_post_intake_turn",
+               new=AsyncMock(return_value={"post_intake_status": None, "experience": None})), \
          patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
          patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
          patch("modules.preflight_guard.is_feature_active", return_value=False), \
@@ -149,7 +150,8 @@ async def test_route_recruitment_message_does_not_call_intake_message_for_post_i
 @pytest.mark.asyncio
 async def test_route_post_intake_message_falls_back_when_all_reply_layers_empty():
     active_session = {"id": 1, "candidate_id": 42, "post_intake_status": "awaiting_agreement"}
-    with patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=None)), \
+    with patch("modules.recruitment_flow._classify_post_intake_turn",
+               new=AsyncMock(return_value={"post_intake_status": None, "experience": None})), \
          patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
          patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
          patch("modules.preflight_guard.is_feature_active", return_value=False), \
@@ -176,7 +178,8 @@ async def test_route_post_intake_message_falls_back_when_all_reply_layers_empty(
 async def test_classify_post_intake_turn_maps_known_categories(raw_json, expected):
     with patch("modules.hermes_dispatch.call_decision_llm", new=AsyncMock(return_value=raw_json)):
         result = await rf._classify_post_intake_turn("8801000000011", "some reply")
-    assert result == expected
+    assert result["post_intake_status"] == expected
+    assert result["experience"] is None
 
 
 @pytest.mark.asyncio
@@ -184,7 +187,7 @@ async def test_classify_post_intake_turn_none_on_low_confidence():
     raw = '{"post_intake_status": "agreed", "confidence": 0.2}'
     with patch("modules.hermes_dispatch.call_decision_llm", new=AsyncMock(return_value=raw)):
         result = await rf._classify_post_intake_turn("8801000000012", "মনে হয় হ্যাঁ?")
-    assert result is None
+    assert result["post_intake_status"] is None
 
 
 @pytest.mark.asyncio
@@ -192,21 +195,21 @@ async def test_classify_post_intake_turn_none_on_explicit_none_category():
     raw = '{"post_intake_status": "none", "confidence": 0.9}'
     with patch("modules.hermes_dispatch.call_decision_llm", new=AsyncMock(return_value=raw)):
         result = await rf._classify_post_intake_turn("8801000000013", "অফিস কোথায়?")
-    assert result is None
+    assert result["post_intake_status"] is None
 
 
 @pytest.mark.asyncio
 async def test_classify_post_intake_turn_never_guesses_on_unparsable_response():
     with patch("modules.hermes_dispatch.call_decision_llm", new=AsyncMock(return_value="not json at all")):
         result = await rf._classify_post_intake_turn("8801000000014", "hmm")
-    assert result is None
+    assert result["post_intake_status"] is None
 
 
 @pytest.mark.asyncio
 async def test_classify_post_intake_turn_none_when_llm_unavailable():
     with patch("modules.hermes_dispatch.call_decision_llm", new=AsyncMock(return_value=None)):
         result = await rf._classify_post_intake_turn("8801000000015", "হ্যাঁ রাজি")
-    assert result is None
+    assert result["post_intake_status"] is None
 
 
 # ── _resolve_fee_policy_reply ────────────────────────────────────────────────
