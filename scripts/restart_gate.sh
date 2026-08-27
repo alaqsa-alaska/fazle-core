@@ -20,6 +20,23 @@ ENV_FILE=".env"
 BACKUP_DIR="/home/azim/backups/fazle"
 SERVICE="fazle-core.service"
 HEALTH_URL="http://127.0.0.1:$(grep -oP '(?<=^APP_PORT=)\d+' "$ENV_FILE" 2>/dev/null || echo 8200)/health"
+ERROR_LOG="logs/fazle-core-error.log"
+
+# Check 9 (post-restart) bounded-window tuning — see docs/DEPLOYMENT_RESTART_GATE.md
+# "Check 9" for the evidence these are based on. Both are env-overridable for the
+# same reason CRITICAL_FLAGS-adjacent thresholds elsewhere in this script are.
+#   RESTART_GATE_MAX_STARTUP_WAIT_S: bounded wait for uvicorn's own
+#     "Application startup complete." signal (StandardError log) after
+#     `systemctl restart`. Observed lifespan-startup duration across 4
+#     historical restarts (2026-08-25 10:21, 2026-08-27 08:22, 11:02, 17:54):
+#     9-15s consistently, even under real host load — 60s gives ~4-6x margin.
+#   RESTART_GATE_MAX_CORE_SETTLE_S: additional bounded wait ONLY if a CORE
+#     application probe (db/bridges/outbound/ollama/qdrant — excludes the
+#     host-ambient cpu/disk/mem probes) is still degraded/critical once the
+#     app has confirmed it started; 30s covers a slow DB-pool warmup without
+#     turning into an unbounded sleep.
+RESTART_GATE_MAX_STARTUP_WAIT_S="${RESTART_GATE_MAX_STARTUP_WAIT_S:-60}"
+RESTART_GATE_MAX_CORE_SETTLE_S="${RESTART_GATE_MAX_CORE_SETTLE_S:-30}"
 
 CRITICAL_FLAGS=(AUTO_REPLY_ENABLED RECRUITMENT_AUTOREPLY_ENABLED SOCIAL_AUTO_REPLY_SINGLE_ENGINE AI_SAFE_MODE INTERNAL_NOTIFICATIONS_ENABLED)
 
@@ -248,30 +265,41 @@ try:
 except Exception:
     print("unreachable")' 2>/dev/null)"
 
+# Baseline captured BEFORE the restart, for Check 9's crash-loop and
+# new-lines-only detection below.
+pre_nrestarts=$(systemctl show "$SERVICE" -p NRestarts --value 2>/dev/null || echo 0)
+pre_errlog_bytes=$( [[ -f "$ERROR_LOG" ]] && wc -c < "$ERROR_LOG" || echo 0)
+
 echo
 echo "Restarting $SERVICE ..."
+t0=$(date +%s)
 sudo systemctl restart "$SERVICE"
 
-# ── Check 9: post-restart health poll with backoff, up to 30s ──────────────
-echo "Check 9: post-restart health poll"
-ok=0
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    sleep 2
-    if code=$(curl -s -o /tmp/restart_gate_health.json -w "%{http_code}" --max-time 3 "$HEALTH_URL" 2>/dev/null); then
-        if [[ "$code" == "200" ]]; then
-            ok=1
-            break
-        fi
-    fi
-done
-
-if [[ "$ok" -eq 1 ]]; then
-    status=$(python3 -c 'import json; print(json.load(open("/tmp/restart_gate_health.json")).get("status","?"))' 2>/dev/null)
-    echo "  after: $status (took up to $((i*2))s)"
-    echo "RESTART: SUCCESS"
-    exit 0
-else
-    echo "  after: unreachable after 30s"
-    echo "RESTART: FAILED — service did not become healthy. See RECOVERY.md for rollback procedure." >&2
-    exit 1
-fi
+# ── Check 9: post-restart readiness poll ────────────────────────────────────
+# Owner directive (2026-08-27, restart-gate false-negative investigation):
+# distinguishes 5 states instead of the old binary "curl returns exactly
+# 200, or FAIL" check, which conflated a fully-started process reporting
+# its OWN documented degraded/critical /health status (a real, valid signal
+# -- see app/main.py's health() route: status=="critical" -> HTTP 503,
+# everything else -> 200) with genuine unreachability. Evidence: the
+# 2026-08-27 17:54 Stage-A restart logged valid 503 access-log lines
+# ("GET /health ... 503") the ENTIRE 30s the old check polled -- the app
+# was reachable and answering the whole time; only ambient host cpu load
+# (unrelated to this deploy) pushed the aggregate status to "critical".
+#
+# The actual state machine lives in scripts/restart_gate_readiness.py
+# (extracted so it's independently unit-testable with fixtures -- see
+# tests/unit/test_restart_gate_readiness.py -- rather than embedded
+# untestably in this bash loop). No production (app/, modules/) code was
+# touched for this; no new HTTP endpoint was added -- the readiness signal
+# is uvicorn's own pre-existing "Application startup complete." line.
+echo "Check 9: post-restart readiness poll"
+python3 scripts/restart_gate_readiness.py poll \
+    --service "$SERVICE" \
+    --health-url "$HEALTH_URL" \
+    --error-log "$ERROR_LOG" \
+    --pre-nrestarts "$pre_nrestarts" \
+    --pre-errlog-bytes "$pre_errlog_bytes" \
+    --max-startup-wait-s "$RESTART_GATE_MAX_STARTUP_WAIT_S" \
+    --max-core-settle-s "$RESTART_GATE_MAX_CORE_SETTLE_S"
+exit $?
