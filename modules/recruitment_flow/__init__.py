@@ -1874,12 +1874,18 @@ async def _route_post_intake_message(
             phone=phone, text=text, source=source,
             kb_context=kb_context, contact_context=contact_context, history=history,
         )
-    if not reply:
-        from modules.conversation_layer import generate_recruitment_reply as _fallback_reply
-        reply = await _fallback_reply(
-            phone=phone, text=text, source=source,
-            contact_context=contact_context, history=history,
-        )
+    # Owner directive (2026-08-27, production-readiness pass, Step 6): if
+    # the primary Hermes path fails/returns nothing here, do NOT fall
+    # through to modules.conversation_layer.generate_recruitment_reply()
+    # -- that function is the PRE-INTAKE funnel-entry reply generator (it
+    # has no idea this candidate is already scored/post-intake) and can
+    # ask for name/age/area/job_preference/experience again, destroying
+    # context for a candidate who already answered all of it. Live-
+    # confirmed during Phase-A regeneration: candidate 8801403472618 hit
+    # exactly this path and got "আগ্রহী হলে নাম, বয়স, শিক্ষা... পাঠান" even
+    # though those fields were already on file. POST_INTAKE_FALLBACK_MSG
+    # is already the correct, context-preserving, fact-free fallback for
+    # this branch -- go straight there instead.
     if not reply or not reply.strip():
         reply = POST_INTAKE_FALLBACK_MSG
 

@@ -124,7 +124,15 @@ async def test_route_recruitment_message_dispatches_post_intake():
 @pytest.mark.asyncio
 async def test_route_recruitment_message_does_not_call_intake_message_for_post_intake():
     """A scored/post-intake candidate must never run field-collection
-    logic — there is nothing left to collect."""
+    logic — there is nothing left to collect. Owner directive (2026-08-27,
+    production-readiness pass, Step 6): when the primary Hermes path is
+    unavailable, the post-intake branch must go straight to
+    POST_INTAKE_FALLBACK_MSG, never modules.conversation_layer.
+    generate_recruitment_reply() — that generic pre-intake reply generator
+    doesn't know this candidate already answered name/age/area/job_
+    preference/experience and can ask for them again, destroying context
+    (live-confirmed against candidate 8801403472618 during Phase-A
+    regeneration)."""
     active_session = {
         "id": 1, "candidate_id": 42, "funnel_stage": "scored",
         "post_intake_active": True, "post_intake_status": "awaiting_agreement",
@@ -132,35 +140,42 @@ async def test_route_recruitment_message_does_not_call_intake_message_for_post_i
     decision = {"eligible": True, "autosend": False, "reason": "active_session_continuation",
                 "active_session": active_session}
     intake_mock = AsyncMock()
+    conversation_layer_mock = AsyncMock(return_value="ঠিক আছে")
     with patch("modules.recruitment_flow.recruitment_eligibility", new=AsyncMock(return_value=decision)), \
          patch("modules.recruitment_flow._classify_post_intake_turn",
                new=AsyncMock(return_value={"post_intake_status": None, "experience": None})), \
          patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
          patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
          patch("modules.preflight_guard.is_feature_active", return_value=False), \
-         patch("modules.conversation_layer.generate_recruitment_reply", new=AsyncMock(return_value="ঠিক আছে")), \
+         patch("modules.conversation_layer.generate_recruitment_reply", new=conversation_layer_mock), \
          patch("modules.recruitment_flow.intake_message", new=intake_mock):
         result = await rf.route_recruitment_message(
             "8801000000009", "কি কি কাগজ লাগবে?", source="bridge1",
         )
     intake_mock.assert_not_called()
-    assert result["reply"] == "ঠিক আছে"
+    conversation_layer_mock.assert_not_called()  # the actual Step-6 assertion
+    assert result["reply"] == rf.POST_INTAKE_FALLBACK_MSG
 
 
 @pytest.mark.asyncio
 async def test_route_post_intake_message_falls_back_when_all_reply_layers_empty():
+    """Owner directive (2026-08-27, Step 6): the ONLY fallback for this
+    branch is POST_INTAKE_FALLBACK_MSG — conversation_layer's generic
+    reply generator is never consulted here (see the test above)."""
     active_session = {"id": 1, "candidate_id": 42, "post_intake_status": "awaiting_agreement"}
+    conversation_layer_mock = AsyncMock(return_value=None)
     with patch("modules.recruitment_flow._classify_post_intake_turn",
                new=AsyncMock(return_value={"post_intake_status": None, "experience": None})), \
          patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
          patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
          patch("modules.preflight_guard.is_feature_active", return_value=False), \
-         patch("modules.conversation_layer.generate_recruitment_reply", new=AsyncMock(return_value=None)):
+         patch("modules.conversation_layer.generate_recruitment_reply", new=conversation_layer_mock):
         result = await rf._route_post_intake_message(
             "8801000000010", "...", source="bridge1", message_id=None,
             active_session=active_session, contact_context="", history="",
             decision={"autosend": False},
         )
+    conversation_layer_mock.assert_not_called()
     assert result["reply"] == rf.POST_INTAKE_FALLBACK_MSG
 
 
