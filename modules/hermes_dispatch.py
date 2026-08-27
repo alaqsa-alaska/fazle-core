@@ -317,7 +317,23 @@ async def build_employee_context_with_directives(message: str = "") -> str:
     return f"{base}\n\n{directives}" if base else directives
 
 
-_NUMBER_RE = re.compile(r"[0-9০-৯][0-9০-৯,.\-–+]*")
+# 2026-08-27 fix (post-intake conversation phase, live-diagnosed): the
+# en-dash "–" (U+2013) is dropped from the "keep extending this token"
+# class. recruitment_source_of_truth.txt uses "–" exclusively as a
+# RANGE separator ("১০,০০০–১৩,০০০", "৩–৬ মাস", "১৮–৫৫ বছর") and the plain
+# ASCII hyphen "-" exclusively within a single token (phone numbers like
+# "01958-122300", dates like "2026-08-21") -- confirmed by scanning every
+# hyphen/en-dash-containing match in that file. Before this fix, a
+# dash-joined range in the SOURCE collapsed into one merged token (e.g.
+# "১০,০০০–১৩,০০০" -> normalized "1000013000"), which could never match a
+# reply that correctly cites the two bounds as separate numbers ("10000",
+# "13000") -- every range-expressed fact in the authoritative source was
+# effectively unverifiable, regardless of correctness. ASCII "-" behavior
+# is completely unchanged (still merges, e.g. phone numbers) -- this is a
+# single-character removal, not a rewrite of the extraction logic.
+# Genuinely unsupported/invented numbers are still rejected exactly as
+# before; only correct bounds of an authoritative range now validate.
+_NUMBER_RE = re.compile(r"[0-9০-৯][0-9০-৯,.\-+]*")
 _PLACE_RE = re.compile(
     r"[\wঀ-৿-]{2,}(?:পাড়া|ঘাট|এলাকা|জেলা|বন্দর)[ঀ-৿]{0,3}"
 )

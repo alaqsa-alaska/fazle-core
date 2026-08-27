@@ -156,8 +156,27 @@ class TestSupportedFactCheck:
         assert _recruitment_reply_matches_source(reply, SOURCE_OF_TRUTH) is True
 
     def test_age_limit_ascii(self, normalized_factcheck):
-        reply = "বয়সসীমা 18-55 বছর।"
+        # 2026-08-27: phrasing changed from a compact "18-55" (single
+        # ASCII-hyphen-joined token) to "18 to 55" (separate numbers).
+        # Before the en-dash range-extraction fix, "18-55" and the
+        # source's "১৮–৫৫" both (incorrectly) merged into one garbled
+        # token and happened to match each other -- two wrongs, not a
+        # real validation. After the fix, the source correctly splits
+        # into two numbers (18, 55); a reply must cite them the same way
+        # to validate -- ASCII-hyphen merging is intentionally preserved
+        # for phone numbers (see TestRangeExtractionFix), so a compact
+        # "18-55" is now (correctly) an unverifiable single number, not a
+        # regression in the guard's safety.
+        reply = "বয়সসীমা 18 to 55 বছর।"
         assert _recruitment_reply_matches_source(reply, SOURCE_OF_TRUTH) is True
+
+    def test_age_limit_ascii_compact_hyphen_no_longer_validates(self, normalized_factcheck):
+        # Documents the trade-off explicitly (see comment above): a
+        # compact ASCII-hyphen range no longer accidentally validates.
+        # This is a stricter outcome, not a weaker one -- the guard still
+        # fails closed (blocks) rather than silently accepting it.
+        reply = "বয়সসীমা 18-55 বছর।"
+        assert _recruitment_reply_matches_source(reply, SOURCE_OF_TRUTH) is False
 
     def test_training_duration_bangla(self, normalized_factcheck):
         reply = "প্রশিক্ষণকাল ৪৫ দিন।"
@@ -211,3 +230,86 @@ class TestEmptyKbContext:
     def test_any_phone_rejected(self, normalized_factcheck):
         reply = "নম্বর 01958-122300।"
         assert _recruitment_reply_matches_source(reply, "") is False
+
+
+class TestRangeExtractionFix:
+    """2026-08-27 fix (live-diagnosed during the post-intake outreach
+    dry-run): _NUMBER_RE must split an en-dash-joined range into its
+    individual bounds instead of merging them into one garbled token.
+
+    UNSPACED_RANGE_SOURCE deliberately mirrors resources/ops/
+    recruitment_source_of_truth.txt's EXACT formatting -- no space
+    around the en-dash ("৳১০,০০০–১৩,০০০।"). This matters: SOURCE_OF_TRUTH
+    above (used by the pre-existing salary/age tests in this file) also
+    happens to include a SPACED variant ("১০,০০০ – ১৫,০০০") that already
+    routed around the bug even before this fix (a space breaks the
+    greedy regex match on its own), which is why those tests were
+    passing in production while the bug was live. These tests use the
+    real file's actual unspaced formatting so they would have genuinely
+    failed before this fix and genuinely prove it now.
+    """
+
+    UNSPACED_RANGE_SOURCE = (
+        "probation salary: ৳১০,০০০–১৩,০০০। "
+        "probation সফলভাবে শেষ করে permanent position পেলে salary ৳২৪,৭০০ হতে পারে। "
+        "training honorarium: ৳১০,০০০–১৫,০০০। "
+        "probation period পদ ও মূল্যায়ন অনুযায়ী ৩–৬ মাস। "
+        "সাধারণ বয়সসীমা ১৮–৫৫ বছর।"
+    )
+
+    def test_lower_bound_of_bangla_salary_range_supported(self, normalized_factcheck):
+        reply = "probation বেতন ১০,০০০ টাকা।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is True
+
+    def test_upper_bound_of_bangla_salary_range_supported(self, normalized_factcheck):
+        reply = "probation বেতন সর্বোচ্চ ১৩,০০০ টাকা।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is True
+
+    def test_both_bounds_ascii_digits_supported(self, normalized_factcheck):
+        reply = "প্রশিক্ষণকালীন সম্মানী 10,000 থেকে 15,000 টাকা।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is True
+
+    def test_probation_range_lower_bound_supported(self, normalized_factcheck):
+        reply = "probation সাধারণত ৩ মাস হতে পারে।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is True
+
+    def test_probation_range_upper_bound_supported(self, normalized_factcheck):
+        reply = "probation সর্বোচ্চ ৬ মাস পর্যন্ত হতে পারে।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is True
+
+    def test_age_range_upper_bound_supported(self, normalized_factcheck):
+        reply = "বয়সসীমা সর্বোচ্চ ৫৫ বছর।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is True
+
+    def test_permanent_salary_single_number_still_supported(self, normalized_factcheck):
+        # Non-range figure (২৪,৭০০) must still validate -- confirms the
+        # fix doesn't regress plain single-number grounding.
+        reply = "স্থায়ী হলে বেতন ২৪,৭০০ টাকা হতে পারে।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is True
+
+    def test_phone_number_still_merges_as_one_token(self, normalized_factcheck):
+        # ASCII hyphen (phone numbers) must be UNAFFECTED by the en-dash fix.
+        source = "যোগাযোগ নম্বর: 01958-122300।"
+        reply = "আমাদের নম্বর 01958-122300।"
+        assert _recruitment_reply_matches_source(reply, source) is True
+
+    def test_genuinely_unsupported_number_still_rejected(self, normalized_factcheck):
+        # A number outside BOTH range bounds must still be blocked --
+        # proves the fix didn't widen the guard into accepting anything
+        # numeric-shaped.
+        reply = "probation বেতন ১৭,০০০ টাকা।"
+        assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is False
+
+    def test_number_extraction_splits_unspaced_range(self):
+        # Direct regex-level proof (not just through the full fact-check
+        # function): an unspaced en-dash range extracts as two tokens.
+        from modules.hermes_dispatch import _NUMBER_RE
+        assert _NUMBER_RE.findall("১০,০০০–১৩,০০০") == ["১০,০০০", "১৩,০০০"]
+        assert _NUMBER_RE.findall("৩–৬ মাস") == ["৩", "৬"]
+
+    def test_number_extraction_does_not_split_ascii_hyphen(self):
+        # Phone-number/date formatting (plain ASCII hyphen) is completely
+        # unaffected -- only the en-dash range separator changed.
+        from modules.hermes_dispatch import _NUMBER_RE
+        assert _NUMBER_RE.findall("01958-122300") == ["01958-122300"]
+        assert _NUMBER_RE.findall("2026-08-21") == ["2026-08-21"]
