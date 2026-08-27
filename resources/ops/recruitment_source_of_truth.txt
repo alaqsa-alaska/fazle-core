@@ -96,7 +96,7 @@ recruitment factual answer নেওয়া যাবে না।
 
 ## Escort / Survey Scout
 
-- Mother Vessel ও Lighter Vessel-এ দায়িত্ব থাকতে পারে।
+- মাদার-ভেসেল ও লাইটার-ভেসেলে দায়িত্ব থাকতে পারে। (Mother Vessel / Lighter Vessel)
 - Cargo Monitoring, Seal Verification, Tally Count এবং Loading/Unloading Monitoring করতে হয়।
 - Release Point Monitoring, Ship Stay এবং River Route Escort দায়িত্ব থাকতে পারে।
 - training period: ৪৫ দিন।
