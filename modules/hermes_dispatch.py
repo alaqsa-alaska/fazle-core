@@ -48,6 +48,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -339,6 +340,20 @@ _PLACE_RE = re.compile(
 )
 _PLACE_INFLECTION_SUFFIXES = ("য়ে", "য়", "তে", "র", "ে", "এ")
 
+# 2026-08-27, Owner directive: canonical office-place spelling updated to
+# "আগ্রাপাড়া"; the legacy spelling "আগ্রপাড়া" refers to the same place and
+# must still match regardless of which form appears in kb_context or in
+# the reply. Keyed/valued on the NFC-normalized, suffix-stripped form (see
+# _normalize_place_token/_place_stem below, which both NFC-normalize
+# before consulting this map) -- Bengali conjuncts like এ "ড়" can be
+# represented as either one precomposed codepoint (U+09DC) or a decomposed
+# "ড" + combining nukta (U+09BC) sequence that LOOK identical but compare
+# unequal as raw strings; NFC normalization is what makes either encoding
+# of either spelling match correctly.
+_PLACE_SPELLING_ALIASES = {
+    "আগ্রপাড়া": "আগ্রাপাড়া",
+}
+
 # Bangla→ASCII digit map for number normalization (2026-08-23, see
 # RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md "Fact-Check
 # False Positives"): lets an approved salary of "১০,০০০" in the source
@@ -365,25 +380,37 @@ def _normalize_number_token(token: str) -> str:
 def _normalize_place_token(token: str) -> str:
     """Strip inflection suffixes + lowercase for stem comparison.
 
-    "আগ্রপাড়া"     → "আগ্রপাড়া"
-    "আগ্রপাড়ায়"   → "আগ্রপাড়া"
-    "আগ্রপাড়ার"    → "আগ্রপাড়া"
+    "আগ্রাপাড়া"     → "আগ্রাপাড়া"
+    "আগ্রাপাড়ায়"   → "আগ্রাপাড়া"
+    "আগ্রাপাড়ার"    → "আগ্রাপাড়া"
+    "আগ্রপাড়া" (legacy spelling) → "আগ্রাপাড়া" (canonical, via
+    _PLACE_SPELLING_ALIASES)
+
+    2026-08-27: NFC-normalizes first -- some Bengali nukta letters (e.g.
+    "ড়") can arrive as either one precomposed codepoint or a decomposed
+    base+nukta pair that render identically but compare unequal as raw
+    strings; without this, otherwise-matching place names could
+    false-block depending on which encoding the text happened to use.
     """
     if not token:
         return ""
+    token = unicodedata.normalize("NFC", token)
     stripped = token
     for sfx in _PLACE_INFLECTION_SUFFIXES:
         if stripped.endswith(sfx) and len(stripped) > len(sfx):
             stripped = stripped[: -len(sfx)]
             break
+    stripped = _PLACE_SPELLING_ALIASES.get(stripped, stripped)
     return stripped.lower()
 
 
 def _place_stem(token: str) -> str:
+    token = unicodedata.normalize("NFC", token or "")
     for sfx in _PLACE_INFLECTION_SUFFIXES:
         if token.endswith(sfx):
-            return token[: -len(sfx)]
-    return token
+            token = token[: -len(sfx)]
+            break
+    return _PLACE_SPELLING_ALIASES.get(token, token)
 
 
 def _candidate_identity_numbers(phone: str, text: str) -> set[str]:
@@ -415,6 +442,165 @@ def _candidate_identity_numbers(phone: str, text: str) -> set[str]:
     return numbers
 
 
+# Owner-directed business-fact tolerance (2026-08-27): a "business"
+# number (salary, training/probation duration, age -- anything that
+# ISN'T a phone-length identity number) that is part of a stated RANGE
+# in kb_context is supported if it's within this margin of that range's
+# bounds, not only on an exact token match. This is what makes a
+# recruitment salary/duration RANGE tolerant of reasonable variation
+# (source ১০,০০০-১৩,০০০ also supports a reply citing ১০,০০০-১৭,০০০)
+# without duplicating every range's bounds. Deliberately scoped to
+# RANGE-shaped facts only, not every standalone business number -- see
+# _extract_range_anchors_by_category() below: a single, non-ranged fact (e.g.
+# "training period: ৪৫ দিন", a fixed 45-day commitment, not a range) still
+# requires an EXACT match, so it can't accidentally validate a fabricated
+# number just because that number happens to be numerically close to some
+# OTHER, unrelated business figure elsewhere in kb_context. Identity-class
+# numbers (phone-length, >=10 digits -- see _IDENTITY_NUMBER_MIN_LEN) are
+# NEVER subject to this tolerance either; the office/recruitment contact
+# number must still match exactly.
+_BUSINESS_NUMBER_TOLERANCE = 0.4  # 40%
+_IDENTITY_NUMBER_MIN_LEN = 10  # matches _candidate_identity_numbers' own BD-mobile-length threshold
+
+# Matches a "NUMBER<separator>NUMBER" range as actually written in
+# recruitment_source_of_truth.txt: the en-dash "–", the Bengali word
+# "থেকে", or "to" -- deliberately EXCLUDES the plain ASCII hyphen "-",
+# which is reserved for keeping a single token together (phone numbers
+# like "01958-122300", dates like "2026-08-21") per the same convention
+# the 2026-08-27 range-extraction fix already established for _NUMBER_RE.
+# Without this exclusion, "01958-122300" would itself look like a
+# "10000-ish to 122300-ish range" and leak the office phone's own second
+# half in as a tolerant salary anchor -- confirmed live while testing
+# this exact fix. This regex exists ONLY to detect which numbers were
+# originally stated as part of a two-sided range, for the tolerance
+# decision below; it does not change how numbers are extracted/
+# normalized/counted anywhere else.
+_RANGE_PAIR_RE = re.compile(
+    r"([0-9০-৯][0-9০-৯,.]*)\s*(?:–|থেকে|to)\s*([0-9০-৯][0-9০-৯,.]*)"
+)
+
+# Owner-directed category separation (2026-08-27): "different facts have
+# different tolerance" -- a number's CATEGORY is decided by the
+# unit/topic keyword found near it in the text, not by magnitude alone.
+# Live-caught while testing this exact fix: without category separation,
+# a fabricated "৬০ দিন" (60-day) training claim validated anyway because
+# 60 happened to fall within the tolerance band of the UNRELATED age
+# range's upper bound (৫৫ বছর) -- two completely different kinds of fact
+# that only coincidentally share a similar magnitude. Money/age/duration
+# are the three ranged categories this KB actually uses; anything else
+# (a number with none of these keywords nearby) is tagged "other" and is
+# NEVER tolerance-matched against anything -- only the ordinary exact
+# match applies, same as before this whole policy update.
+_MONEY_KEYWORDS = ("টাকা", "৳", "salary", "বেতন", "honorarium", "সম্মানী", "ভাতা")
+_AGE_KEYWORDS = ("বয়স", "বছর", "age")
+_DURATION_KEYWORDS = ("দিন", "মাস", "day", "month", "duration", "probation", "প্রশিক্ষণ")
+_NUMERIC_CATEGORY_WINDOW = 20  # characters of context scanned on each side of a number/range match
+
+
+def _classify_numeric_context(text: str, start: int, end: int) -> str:
+    """Classifies a number/range occurrence at text[start:end] as 'money',
+    'age', 'duration', or 'other', by scanning a small window of
+    surrounding text for the nearest category's keywords. Order matters
+    only when a window genuinely contains keywords from more than one
+    category (rare in practice, given how this KB is written) -- money is
+    checked first since a fee/salary figure occasionally sits near a
+    duration word ("৪৫ দিনের সম্মানী") and should still be treated as
+    money. Never raises; returns 'other' on any error."""
+    try:
+        lo = max(0, start - _NUMERIC_CATEGORY_WINDOW)
+        hi = min(len(text), end + _NUMERIC_CATEGORY_WINDOW)
+        context = text[lo:hi]
+    except Exception:  # noqa: BLE001
+        return "other"
+    if any(kw in context for kw in _MONEY_KEYWORDS):
+        return "money"
+    if any(kw in context for kw in _AGE_KEYWORDS):
+        return "age"
+    if any(kw in context for kw in _DURATION_KEYWORDS):
+        return "duration"
+    return "other"
+
+
+def _extract_range_anchors_by_category(text: str) -> dict:
+    """Returns {"money": set(...), "age": set(...), "duration": set(...),
+    "other": set(...)} -- the ALREADY-NORMALIZED numbers that appear as
+    one side of an explicit two-sided range in `text` (see
+    _RANGE_PAIR_RE), bucketed by _classify_numeric_context() so a
+    tolerance check only ever compares within the SAME category (never
+    age against duration, never a fee against an unrelated salary range).
+    A standalone number with no paired second bound (e.g. "৪৫ দিন") never
+    appears here at all, even though it's still a valid business fact for
+    the ordinary EXACT-match check. Defense in depth: also drops any
+    match that is itself phone-length (>=_IDENTITY_NUMBER_MIN_LEN digits)
+    even though _RANGE_PAIR_RE's en-dash-only separator should already
+    make that unreachable for this codebase's actual KB text -- identity
+    numbers must never become tolerance anchors under any circumstance.
+    Never raises; returns all-empty buckets on any error."""
+    anchors = {"money": set(), "age": set(), "duration": set(), "other": set()}
+    try:
+        for m in _RANGE_PAIR_RE.finditer(text or ""):
+            category = _classify_numeric_context(text, m.start(), m.end())
+            for raw in (m.group(1), m.group(2)):
+                norm = _normalize_number_token(raw)
+                if norm and len(norm) < _IDENTITY_NUMBER_MIN_LEN:
+                    anchors[category].add(norm)
+    except Exception:  # noqa: BLE001 — fail closed to "no tolerant anchors"
+        return {"money": set(), "age": set(), "duration": set(), "other": set()}
+    return anchors
+
+
+def _split_identity_and_business(numbers: set) -> tuple:
+    """Split a set of ALREADY-NORMALIZED digit-string tokens into
+    (identity_numbers, business_numbers). identity = phone-length (>=10
+    digits, e.g. the office number or a candidate's phone) -- always
+    exact-match only. business = everything else (salary figures, ages,
+    training/probation durations) -- exact-match always supported; ALSO
+    tolerance-band eligible when the source number is a range anchor, see
+    _business_number_supported(). Never raises."""
+    identity: set = set()
+    business: set = set()
+    for n in numbers:
+        if n and len(n) >= _IDENTITY_NUMBER_MIN_LEN:
+            identity.add(n)
+        else:
+            business.add(n)
+    return identity, business
+
+
+def _business_number_supported(value: str, source_business_numbers: set, source_range_anchors: set) -> bool:
+    """True if `value` (an already-normalized digit string) exactly
+    matches ANY source business number (standalone facts like a fixed
+    45-day training period, or either bound of a range, always exact-
+    eligible), OR falls within _BUSINESS_NUMBER_TOLERANCE of a number
+    that is specifically a RANGE anchor (source_range_anchors -- see
+    _extract_range_anchors_by_category()). A business number that never
+    appeared as part of any stated range is NEVER tolerance-matched, only
+    exact-matched -- this is what keeps a fabricated but numerically
+    nearby figure (e.g. a fee claim that happens to be close to an
+    unrelated salary range) from slipping through. Fails closed (False)
+    on any malformed input rather than raising."""
+    if not value or not value.isdigit():
+        return False
+    if value in source_business_numbers:
+        return True
+    try:
+        v = int(value)
+    except ValueError:
+        return False
+    for src in source_range_anchors:
+        if not src or not src.isdigit():
+            continue
+        try:
+            s = int(src)
+        except ValueError:
+            continue
+        if s == 0:
+            continue
+        if abs(v - s) <= s * _BUSINESS_NUMBER_TOLERANCE:
+            return True
+    return False
+
+
 def _recruitment_reply_matches_source(
     reply: str, kb_context: str, *, extra_supported_numbers: Optional[set] = None,
 ) -> bool:
@@ -440,11 +626,28 @@ def _recruitment_reply_matches_source(
     top of whatever kb_context contains -- see _candidate_identity_numbers()
     above, the only intended source of this set. Only consulted in the
     normalized path (where the concept of "normalized number identity"
-    exists at all); the legacy path is unaffected/unchanged. Every other
-    numeric fact (salary, fee, duration, age, or any number not in this
-    set or in kb_context) is still rejected exactly as before -- this
-    narrows what counts as "the candidate's own identity", it does not
-    widen recruitment-policy grounding in any way.
+    exists at all); the legacy path is unaffected/unchanged. This is
+    identity-class data (a candidate's own phone) -- it does not weaken
+    business-fact grounding in any way.
+
+    2026-08-27, Owner fact-check policy update -- category-based
+    tolerance, not one uniform rule: numbers are split into IDENTITY
+    (phone-length, >=10 digits -- the office/recruitment contact number,
+    a candidate's own phone) and BUSINESS (salary, training/probation
+    duration, age -- everything else). Identity numbers still require an
+    EXACT match (the office number must never approximately match, per
+    explicit Owner directive) against kb_context + extra_supported_numbers.
+    Business numbers are TOLERANT: supported if within
+    _BUSINESS_NUMBER_TOLERANCE of ANY known source business number, not
+    only on an exact token match -- see _business_number_supported().
+    This is a business-tolerance band for ONE fact category, not a
+    general numeric-similarity formula applied to everything (that
+    remains explicitly out of scope). Place names go through the same
+    tolerant, grounded-in-Knowledge check as before, now also aware of
+    _PLACE_SPELLING_ALIASES (legacy vs. canonical office-place spelling)
+    and NFC-normalized so either Unicode encoding of the same word
+    matches. A clearly unrelated/fabricated number or place is still
+    rejected either way.
     """
     # Lazy import to avoid circular imports at module load.
     try:
@@ -454,8 +657,9 @@ def _recruitment_reply_matches_source(
         normalized_mode = False
 
     if normalized_mode:
+        reply_matches = list(_NUMBER_RE.finditer(reply))
         reply_numbers = {
-            _normalize_number_token(t) for t in _NUMBER_RE.findall(reply)
+            _normalize_number_token(m.group(0)) for m in reply_matches
         }
         source_numbers = {
             _normalize_number_token(t) for t in _NUMBER_RE.findall(kb_context)
@@ -463,14 +667,43 @@ def _recruitment_reply_matches_source(
         if extra_supported_numbers:
             source_numbers |= set(extra_supported_numbers)
         reply_numbers.discard("")
-        if not reply_numbers.issubset(source_numbers):
+
+        reply_identity, _reply_business_unused = _split_identity_and_business(reply_numbers)
+        source_identity, source_business = _split_identity_and_business(source_numbers)
+        source_anchors_by_category = _extract_range_anchors_by_category(kb_context)
+
+        unsupported_identity = reply_identity - source_identity
+
+        # Business numbers are checked per OCCURRENCE (not as a flat set)
+        # so each one is tolerance-matched only against its OWN category's
+        # anchors (money/age/duration) -- see _classify_numeric_context().
+        unsupported_business: set = set()
+        for m in reply_matches:
+            norm = _normalize_number_token(m.group(0))
+            if not norm or len(norm) >= _IDENTITY_NUMBER_MIN_LEN:
+                continue  # identity-length numbers already handled above
+            if norm in source_business:
+                continue  # exact match against any known business fact
+            category = _classify_numeric_context(reply, m.start(), m.end())
+            anchors = source_anchors_by_category.get(category, set())
+            if not _business_number_supported(norm, source_business, anchors):
+                unsupported_business.add(norm)
+
+        unsupported = unsupported_identity | unsupported_business
+        if unsupported:
             log.warning(
                 "[hermes_dispatch] recruitment reply blocked -- unsupported numbers: %s",
-                sorted(reply_numbers - source_numbers),
+                sorted(unsupported),
             )
             return False
         place_hits = _PLACE_RE.findall(reply)
-        kb_lower = kb_context.lower()
+        kb_lower = unicodedata.normalize("NFC", kb_context).lower()
+        # Resolve legacy<->canonical spelling in the SOURCE text too (not
+        # just the extracted reply token) so either direction matches:
+        # source still has the legacy spelling and reply uses the new
+        # canonical one, or vice versa.
+        for _legacy, _canonical in _PLACE_SPELLING_ALIASES.items():
+            kb_lower = kb_lower.replace(_legacy.lower(), _canonical.lower())
         unsupported_places = [
             p for p in place_hits
             if _normalize_place_token(p) not in kb_lower

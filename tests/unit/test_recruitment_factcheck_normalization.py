@@ -102,14 +102,20 @@ class TestNormalizeNumberToken:
 
 
 class TestNormalizePlaceToken:
+    # 2026-08-27, Owner directive: canonical office-place spelling updated
+    # to "আগ্রাপাড়া" -- the legacy spelling "আগ্রপাড়া" now normalizes TO
+    # the canonical one (see _PLACE_SPELLING_ALIASES), not to itself.
     def test_aggrapara_bare(self):
-        assert _normalize_place_token("আগ্রপাড়া") == "আগ্রপাড়া"
+        assert _normalize_place_token("আগ্রপাড়া") == "আগ্রাপাড়া"
 
     def test_aggrapara_with_locative(self):
-        assert _normalize_place_token("আগ্রপাড়ায়") == "আগ্রপাড়া"
+        assert _normalize_place_token("আগ্রপাড়ায়") == "আগ্রাপাড়া"
 
     def test_aggrapara_genitive(self):
-        assert _normalize_place_token("আগ্রপাড়ার") == "আগ্রপাড়া"
+        assert _normalize_place_token("আগ্রপাড়ার") == "আগ্রাপাড়া"
+
+    def test_canonical_spelling_normalizes_to_itself(self):
+        assert _normalize_place_token("আগ্রাপাড়া") == "আগ্রাপাড়া"
 
     def test_uppercase(self):
         # Lowercase normalization for ASCII comparisons
@@ -295,10 +301,13 @@ class TestRangeExtractionFix:
         assert _recruitment_reply_matches_source(reply, source) is True
 
     def test_genuinely_unsupported_number_still_rejected(self, normalized_factcheck):
-        # A number outside BOTH range bounds must still be blocked --
-        # proves the fix didn't widen the guard into accepting anything
-        # numeric-shaped.
-        reply = "probation বেতন ১৭,০০০ টাকা।"
+        # 2026-08-27, Owner fact-check policy update: ১৭,০০০ is now
+        # correctly WITHIN the business-tolerance band of this source's
+        # money-range anchors (১০,০০০-১৫,০০০) -- see
+        # TestBusinessToleranceFactCheckPolicy for that positive case.
+        # This test now proves a genuinely wild figure, far outside any
+        # reasonable variation of any money anchor here, still blocks.
+        reply = "probation বেতন ৯০,০০০ টাকা।"
         assert _recruitment_reply_matches_source(reply, self.UNSPACED_RANGE_SOURCE) is False
 
     def test_number_extraction_splits_unspaced_range(self):
@@ -399,3 +408,113 @@ class TestCandidatePhoneIdentityFix:
 
     def test_identity_numbers_empty_on_no_input(self):
         assert _candidate_identity_numbers("", "") == set()
+
+
+class TestBusinessToleranceFactCheckPolicy:
+    """2026-08-27, Owner fact-check policy update: category-based
+    tolerance, not one uniform rule. Salary/training/probation ranges and
+    candidate age are business-tolerant (within _BUSINESS_NUMBER_TOLERANCE
+    of a known source figure, not an exact-bound match); the office/
+    recruitment contact number and any other phone-length identity number
+    remain exact-match only. Reuses the existing checker -- no new
+    validation framework."""
+
+    RANGE_SOURCE = (
+        "probation salary: ৳১০,০০০–১৩,০০০। "
+        "সাধারণ বয়সসীমা ১৮–৫৫ বছর। "
+        "সর্বশেষ ও একমাত্র recruitment যোগাযোগ নম্বর: 01958-122300।"
+    )
+
+    # --- Salary tolerance ---
+
+    def test_salary_range_upper_bound_extended_passes(self, normalized_factcheck):
+        # source ১০,০০০–১৩,০০০ -> reply ১০,০০০–১৫,০০০ (Owner example)
+        reply = "probation বেতন ১০,০০০ থেকে ১৫,০০০ টাকা।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is True
+
+    def test_salary_range_both_bounds_shifted_passes(self, normalized_factcheck):
+        # source ১০,০০০–১৩,০০০ -> reply ১২,০০০–১৭,০০০ (Owner example)
+        reply = "probation বেতন ১২,০০০ থেকে ১৭,০০০ টাকা।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is True
+
+    def test_salary_wildly_different_figure_still_blocked(self, normalized_factcheck):
+        # Far outside any reasonable business-tolerance band -- still a
+        # fabricated/unrelated claim, must still block.
+        reply = "probation বেতন ৯৯,৯৯৯ টাকা।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is False
+
+    # --- Age tolerance ---
+
+    def test_age_16_passes(self, normalized_factcheck):
+        reply = "সর্বনিম্ন বয়স ১৬ বছর হতে পারে।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is True
+
+    def test_age_17_passes(self, normalized_factcheck):
+        reply = "সর্বনিম্ন বয়স ১৭ বছর হতে পারে।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is True
+
+    def test_age_18_passes(self, normalized_factcheck):
+        reply = "সর্বনিম্ন বয়স ১৮ বছর।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is True
+
+    # --- Office phone: 100% strict ---
+
+    def test_office_phone_exact_passes(self, normalized_factcheck):
+        reply = "যোগাযোগ করুন: 01958-122300।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is True
+
+    def test_office_phone_one_digit_changed_blocked(self, normalized_factcheck):
+        # 01958-122301 vs canonical 01958-122300 -- one digit different.
+        # Phone-length numbers are identity-class -- NEVER tolerant,
+        # regardless of how close the digits are.
+        reply = "যোগাযোগ করুন: 01958-122301।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is False
+
+    def test_office_phone_unrelated_number_blocked(self, normalized_factcheck):
+        reply = "যোগাযোগ করুন: 01700-000000।"
+        assert _recruitment_reply_matches_source(reply, self.RANGE_SOURCE) is False
+
+    # --- Candidate's own phone: contextual/trusted, not the office claim ---
+
+    def test_candidates_own_phone_echoed_passes(self, normalized_factcheck):
+        extra = _candidate_identity_numbers("01912345678", "")
+        reply = "আপনার নম্বর 01912345678 নোট করা হলো।"
+        assert _recruitment_reply_matches_source(
+            reply, self.RANGE_SOURCE, extra_supported_numbers=extra,
+        ) is True
+
+    def test_unrelated_third_party_phone_blocked_even_with_candidate_extra(self, normalized_factcheck):
+        # A DIFFERENT phone (not the candidate's own, not the office
+        # number) must still be blocked even when a legitimate candidate
+        # extra is present in the same call.
+        extra = _candidate_identity_numbers("01912345678", "")
+        reply = "এই নম্বরে যোগাযোগ করুন: 01611223344।"
+        assert _recruitment_reply_matches_source(
+            reply, self.RANGE_SOURCE, extra_supported_numbers=extra,
+        ) is False
+
+    # --- Place: canonical + legacy spelling ---
+
+    def test_canonical_office_place_passes(self, normalized_factcheck):
+        source = "অফিস ঠিকানা: আগ্রাপাড়া, Victoria Gate #1, Chittagong।"
+        reply = "আমাদের অফিস আগ্রাপাড়ায় অবস্থিত।"
+        assert _recruitment_reply_matches_source(reply, source) is True
+
+    def test_legacy_office_place_spelling_normalizes_to_same_place(self, normalized_factcheck):
+        # Source uses the NEW canonical spelling; reply uses the legacy
+        # one -- must still match (same office, different spelling).
+        source = "অফিস ঠিকানা: আগ্রাপাড়া, Victoria Gate #1, Chittagong।"
+        reply = "আমাদের অফিস আগ্রপাড়ায় অবস্থিত।"
+        assert _recruitment_reply_matches_source(reply, source) is True
+
+    def test_legacy_source_canonical_reply_also_matches(self, normalized_factcheck):
+        # And the reverse direction -- source still has the legacy
+        # spelling (not yet updated everywhere), reply uses the new one.
+        source = "অফিস ঠিকানা: আগ্রপাড়া, Victoria Gate #1, Chittagong।"
+        reply = "আমাদের অফিস আগ্রাপাড়ায় অবস্থিত।"
+        assert _recruitment_reply_matches_source(reply, source) is True
+
+    def test_unrelated_invented_office_place_still_blocked(self, normalized_factcheck):
+        source = "অফিস ঠিকানা: আগ্রাপাড়া, Victoria Gate #1, Chittagong।"
+        reply = "আমাদের অফিস খুলনাজেলায় অবস্থিত।"
+        assert _recruitment_reply_matches_source(reply, source) is False
