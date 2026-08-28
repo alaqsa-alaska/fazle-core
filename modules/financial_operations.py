@@ -46,7 +46,7 @@ _TXN_FIELDS = (
     "id, txn_ref, employee_id, employee_name_raw, employee_id_phone, "
     "employee_phone, amount, payout_method, transaction_status, is_reversal, "
     "txn_category, accounting_period, reversed_txn_id, txn_date, created_at, "
-    "source_message_id, source"
+    "source_message_id, source, deleted_at, deleted_by"
 )
 
 
@@ -56,7 +56,18 @@ async def resolve_cash_transaction(ref: str) -> dict:
     characters (short enough to type, long enough that a collision is
     exceedingly unlikely -- and if one still occurs, the caller gets the
     candidate list, never a silent pick). Never returns an ambiguous match
-    as if it were resolved."""
+    as if it were resolved.
+
+    Stage I (I2, real finding): a numeric-id/txn-ref lookup can match a
+    row that was already soft-deleted (fpe_cash_transactions.deleted_at
+    IS NOT NULL, modules.admin_transactions.soft_delete_transaction() --
+    the one authoritative deletion path, reverses ledger, never a
+    physical delete). Resolution itself does not filter these out (an
+    Admin asking "what happened to this ref" should still get an answer,
+    not a bare "not found") -- but the row is returned WITH deleted_at
+    populated, so every caller (cash_approve/cash_reject/cash_reverse)
+    can refuse to act on it explicitly, by name, rather than silently
+    re-processing a transaction someone already resolved."""
     ref = (ref or "").strip()
     if not ref:
         return {"ok": False, "error": "empty reference"}
@@ -87,6 +98,24 @@ async def resolve_cash_transaction(ref: str) -> dict:
     return {"ok": True, "txn": dict(rows[0])}
 
 
+def _refuse_if_deleted(txn: dict) -> Optional[dict]:
+    """Shared guard for every mutation entry point below -- a soft-
+    deleted transaction (see resolve_cash_transaction's own docstring)
+    must never be approved/rejected/reversed. Returns an error dict if
+    deleted, None if safe to proceed."""
+    if txn.get("deleted_at"):
+        return {
+            "ok": False,
+            "error": (
+                f"transaction {txn['txn_ref']} was already deleted "
+                f"(deleted_at={txn['deleted_at']}, deleted_by={txn.get('deleted_by')}) -- "
+                "refusing to act on a deleted transaction"
+            ),
+            "txn": txn,
+        }
+    return None
+
+
 async def _find_linked_pending_review(txn_id: int) -> Optional[dict]:
     """The operator_approve()/operator_reject() authoritative functions
     key off fpe_unmatched_messages.id (the review submission), not the
@@ -111,6 +140,10 @@ async def cash_approve(ref: str, admin_phone: str) -> dict:
     if not resolved.get("ok"):
         return resolved
     txn = resolved["txn"]
+
+    deleted = _refuse_if_deleted(txn)
+    if deleted:
+        return deleted
 
     if txn["transaction_status"] != "pending":
         return {
@@ -169,6 +202,10 @@ async def cash_reject(ref: str, reason: str, admin_phone: str) -> dict:
         return resolved
     txn = resolved["txn"]
 
+    deleted = _refuse_if_deleted(txn)
+    if deleted:
+        return deleted
+
     if txn["transaction_status"] != "pending":
         return {
             "ok": False,
@@ -217,6 +254,10 @@ async def cash_reverse(ref: str, reason: str, admin_phone: str) -> dict:
     if not resolved.get("ok"):
         return resolved
     txn = resolved["txn"]
+
+    deleted = _refuse_if_deleted(txn)
+    if deleted:
+        return deleted
 
     if txn["transaction_status"] != "final":
         return {
@@ -315,6 +356,42 @@ async def get_cash_review_card_for_transaction(ref: str) -> dict:
         txn["id"],
     )
     return {"ok": True, "txn": txn, "card": format_cash_review_card(txn, dict(provenance) if provenance else None)}
+
+
+async def cash_details(ref: str) -> dict:
+    """I5 -- CASH DETAILS <txn-ref>. Trusted-Admin READ-ONLY command:
+    the full review context for one transaction (I4's field list), never
+    mutates anything -- structurally the only DB calls here are SELECTs
+    via resolve_cash_transaction()/fetch_one(). Adds age and a duplicate-
+    suspect flag (same definition classify_all_pending_cash_transactions
+    already uses) on top of get_cash_review_card_for_transaction()'s
+    employee/amount/date/evidence/status fields."""
+    result = await get_cash_review_card_for_transaction(ref)
+    if not result.get("ok"):
+        return result
+    txn = result["txn"]
+
+    age_note = ""
+    if txn.get("created_at"):
+        from datetime import datetime, timezone
+        created = txn["created_at"]
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - created).total_seconds() / 86400.0
+        age_note = f"\nAge: {age_days:.1f} days"
+
+    dup_note = ""
+    if txn.get("transaction_status") == "pending" and not txn.get("deleted_at"):
+        dup = await fetch_one(
+            "SELECT COUNT(*) AS n FROM fpe_cash_transactions "
+            "WHERE transaction_status='pending' AND deleted_at IS NULL AND id != $1 "
+            "AND employee_id = $2 AND amount = $3 AND txn_date = $4",
+            txn["id"], txn.get("employee_id"), txn.get("amount"), txn.get("txn_date"),
+        )
+        if dup and dup["n"]:
+            dup_note = f"\n⚠️ {dup['n']} other pending transaction(s) share the same employee/amount/date -- possible duplicate"
+
+    return {"ok": True, "txn": txn, "card": result["card"] + age_note + dup_note}
 
 
 def format_cash_result(op: str, r: dict) -> str:

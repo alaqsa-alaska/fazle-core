@@ -72,6 +72,7 @@ async def find_orphaned_operator_transactions() -> list[dict]:
         LEFT JOIN fpe_wa_messages w ON w.id = t.fpe_wa_message_id
         LEFT JOIN fpe_unmatched_messages u ON u.id = t.source_message_id::bigint
         WHERE t.transaction_status = 'pending'
+          AND t.deleted_at IS NULL
           AND t.source = 'operator'
           AND t.source_message_id IS NOT NULL
         ORDER BY t.created_at ASC
@@ -193,14 +194,14 @@ async def classify_all_pending_cash_transactions() -> list[dict]:
         FROM fpe_cash_transactions t
         LEFT JOIN fpe_wa_messages w ON w.id = t.fpe_wa_message_id
         LEFT JOIN fpe_unmatched_messages u ON u.id = t.source_message_id::bigint
-        WHERE t.transaction_status = 'pending'
+        WHERE t.transaction_status = 'pending' AND t.deleted_at IS NULL
         ORDER BY t.created_at ASC
         """
     )
     dupes = await fetch_all(
         """
         SELECT employee_id, amount, txn_date, COUNT(*) AS n
-        FROM fpe_cash_transactions WHERE transaction_status='pending'
+        FROM fpe_cash_transactions WHERE transaction_status='pending' AND deleted_at IS NULL
         GROUP BY employee_id, amount, txn_date HAVING COUNT(*) > 1
         """
     )

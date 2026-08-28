@@ -485,7 +485,7 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         "SELECT COUNT(*) FROM wbom_attendance WHERE approved_at IS NULL"
     )
     cash_needs_action = await fetch_val(
-        "SELECT COUNT(*) FROM fpe_cash_transactions WHERE transaction_status='pending'"
+        "SELECT COUNT(*) FROM fpe_cash_transactions WHERE transaction_status='pending' AND deleted_at IS NULL"
     )
     escort_needs_action = await fetch_val(
         "SELECT COUNT(*) FROM wbom_escort_programs WHERE status='draft'"
@@ -676,13 +676,13 @@ async def _b_system_observation() -> dict:
     old_pending_cash = await fetch_all(
         "SELECT id, txn_ref, employee_name_raw, amount, "
         "EXTRACT(EPOCH FROM (NOW() - created_at))::int / 86400.0 AS age_days "
-        "FROM fpe_cash_transactions WHERE transaction_status='pending' "
+        "FROM fpe_cash_transactions WHERE transaction_status='pending' AND deleted_at IS NULL "
         "AND created_at < NOW() - INTERVAL '3 days' ORDER BY created_at ASC LIMIT 15"
     )
     duplicate_pending_cash = await fetch_all(
         "SELECT employee_id, amount, txn_date, COUNT(*) AS n, "
         "array_agg(txn_ref) AS txn_refs "
-        "FROM fpe_cash_transactions WHERE transaction_status='pending' "
+        "FROM fpe_cash_transactions WHERE transaction_status='pending' AND deleted_at IS NULL "
         "GROUP BY employee_id, amount, txn_date HAVING COUNT(*) > 1 LIMIT 15"
     )
     financial_anomalies = (
@@ -746,9 +746,74 @@ async def _b_system_observation() -> dict:
 
 
 # ── registry + dispatch ─────────────────────────────────────────────────────
+# ── Stage I23/I24: production data-hygiene report (READ-only) ───────────────
+# Covers: production test artifacts (Stage I2/I3 finding), broken financial
+# provenance (Stage H.5), stale/legacy proposals (Stage H15/H5.14), DLQ
+# classification (I23). Reuses every existing classification function --
+# no new queries duplicating logic that already exists elsewhere.
+async def _b_data_hygiene() -> dict:
+    from modules.fazle_payroll_engine.review_linkage_repair import (
+        classify_all_pending_cash_transactions, VALID_PENDING_REVIEWABLE, VALID_PENDING_DIRECT,
+    )
+    from modules.business_action_execution import audit_proposal_references
+    from modules.outbound import list_dlq_entries, dlq_count, actionable_dlq_count
+
+    classified_cash = await classify_all_pending_cash_transactions()
+    broken_provenance = [r for r in classified_cash if r["classification"] not in (VALID_PENDING_REVIEWABLE, VALID_PENDING_DIRECT)]
+
+    proposals = await audit_proposal_references()
+    stale_or_legacy = [p for p in proposals if p["status"] == "pending" and (not p["executable"] or p.get("stale"))]
+
+    dlq_total = await dlq_count()
+    dlq_actionable_count = await actionable_dlq_count()
+    dlq_rows = await list_dlq_entries(limit=100)
+    dlq_by_purpose: dict[str, int] = {}
+    for r in dlq_rows:
+        purpose = r.get("purpose") or "unknown"
+        dlq_by_purpose[purpose] = dlq_by_purpose.get(purpose, 0) + 1
+    dlq_actionable_rows = [dict(r) for r in dlq_rows if r.get("actionable")]
+
+    # Stale scheduler rows (obsolete_job_names) -- reuse the same
+    # registered-jobs-now comparison _b_system_observation already does,
+    # without duplicating the job_rows fetch here.
+    from modules.scheduler import list_job_names
+    registered_now = set(list_job_names())
+    job_rows = await fetch_all("SELECT job_name FROM fazle_scheduled_jobs")
+    orphan_scheduler_rows = [r["job_name"] for r in job_rows if r["job_name"] not in registered_now]
+
+    return {
+        "report": "data_hygiene",
+        "args": {},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "broken_provenance_cash_count": len(broken_provenance),
+            "stale_or_legacy_proposal_count": len(stale_or_legacy),
+            "dlq_total": dlq_total,
+            "dlq_actionable": dlq_actionable_count,
+            "dlq_by_purpose": dlq_by_purpose,
+            "orphan_scheduler_row_count": len(orphan_scheduler_rows),
+        },
+        "broken_provenance_cash": [
+            {"txn_id": r["txn_id"], "txn_ref": r["txn_ref"], "classification": r["classification"]}
+            for r in broken_provenance
+        ],
+        "stale_or_legacy_proposals": [
+            {"proposal_id": p["proposal_id"], "domain": p["domain"], "reference_kind": p["reference_kind"], "reason": "legacy reference" if not p["executable"] else "stale state"}
+            for p in stale_or_legacy
+        ],
+        "dlq_actionable_rows": [
+            {"id": r["id"], "recipient": r.get("recipient"), "purpose": r.get("purpose"), "attempts": r.get("attempts"), "last_error": (r.get("last_error") or "")[:200], "created_at": r.get("created_at")}
+            for r in dlq_actionable_rows
+        ],
+        "orphan_scheduler_rows": orphan_scheduler_rows,
+        "rows": [],
+    }
+
+
 _BUILDERS: dict[str, Callable[..., Awaitable[dict]]] = {
     "business_communication_summary": _b_business_communication_summary,
     "system_observation":             _b_system_observation,
+    "data_hygiene":                   _b_data_hygiene,
     "daily_summary":          _b_daily_summary,
     "monthly_payroll":        _b_monthly_payroll,
     "escort_utilization":     _b_escort_utilization,
@@ -816,6 +881,62 @@ async def run_report(name: str, args: Optional[dict] = None,
         await _cache_set(key, name, payload, ttl)
     payload["_cached"] = False
     return payload
+
+
+# ── Stage I19/I20: Owner operational overview ────────────────────────────────
+# Reuses _b_business_communication_summary()'s own already-computed
+# approval_queue/summary -- no second reporting engine, no new queries.
+# Shared by the twice-daily scheduled summary (I19, reorganized into
+# sections) and the STATUS admin command (I20, same data, compact).
+async def build_owner_overview(hours: int = 24) -> dict:
+    summary = await _b_business_communication_summary(hours=hours)
+    s = summary["summary"]
+    queue = summary["approval_queue"]
+
+    action_required = [item for item in queue if "[LEGACY" not in item]
+    exceptions = [item for item in queue if "[LEGACY" in item]
+    if s.get("cash_needs_review_broken_provenance"):
+        exceptions.append(
+            f"{s['cash_needs_review_broken_provenance']} pending cash transaction(s) have broken/test provenance -- see financial anomaly report, not directly actionable"
+        )
+    if s.get("financial_ops_failed_recent"):
+        exceptions.append(f"{s['financial_ops_failed_recent']} financial op(s) rejected/reversed in the last {hours}h")
+    if s.get("complaints"):
+        exceptions.append(f"{s['complaints']} complaint-flagged conversation(s) in the last {hours}h")
+
+    fyi = []
+    for category, count in s.get("by_category", {}).items():
+        if category in ("recruitment", "employee"):
+            fyi.append(f"{category}: {count} conversation(s), handled autonomously")
+    if s.get("autonomous_replies_sent"):
+        fyi.append(f"{s['autonomous_replies_sent']} autonomous reply(ies) sent, no action needed")
+
+    return {
+        "report": "owner_overview",
+        "generated_at": summary["generated_at"],
+        "action_required": action_required,
+        "fyi": fyi,
+        "exceptions": exceptions,
+        "action_required_total": s.get("action_required_total", 0),
+    }
+
+
+def render_owner_overview(overview: dict) -> str:
+    lines = ["📋 OWNER OVERVIEW", "─" * 24]
+    lines.append(f"ACTION REQUIRED ({len(overview['action_required'])}):")
+    if overview["action_required"]:
+        lines.extend(f"  {item}" for item in overview["action_required"][:20])
+    else:
+        lines.append("  (none)")
+    if overview["exceptions"]:
+        lines.append("")
+        lines.append(f"EXCEPTIONS ({len(overview['exceptions'])}):")
+        lines.extend(f"  ⚠️ {item}" for item in overview["exceptions"][:10])
+    if overview["fyi"]:
+        lines.append("")
+        lines.append("FYI / AUTONOMOUSLY HANDLED:")
+        lines.extend(f"  {item}" for item in overview["fyi"][:10])
+    return "\n".join(lines)
 
 
 # ── rendering helpers ───────────────────────────────────────────────────────

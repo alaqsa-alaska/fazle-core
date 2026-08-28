@@ -81,7 +81,7 @@ async def _current_state_for_reference(kind: str, ref_id: str) -> dict:
     the same one the proposal was about)."""
     if kind == "cash_txn":
         row = await fetch_one(
-            "SELECT id, transaction_status, employee_id, amount, txn_ref "
+            "SELECT id, transaction_status, employee_id, amount, txn_ref, deleted_at "
             "FROM fpe_cash_transactions WHERE id = $1",
             int(ref_id),
         )
@@ -121,7 +121,7 @@ def _is_actionable(kind: str, state: dict, proposed_at=None) -> bool:
     if not state:
         return False
     if kind == "cash_txn":
-        return state.get("transaction_status") == "pending"
+        return state.get("transaction_status") == "pending" and not state.get("deleted_at")
     if kind == "draft":
         return state.get("status") == "pending"
     if kind == "conversation":

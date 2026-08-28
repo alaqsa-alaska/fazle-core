@@ -44,6 +44,7 @@ _HELP_TEXT = (
     "  PAID <id> <amount> <method>\n"
     "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
     "Cash transaction review (Stage H):\n"
+    "  CASH DETAILS <txn-ref>          — inspect only, no mutation\n"
     "  CASH APPROVE <txn-ref>\n"
     "  CASH REJECT <txn-ref> <reason>   — rejects the REVIEW SUBMISSION only;\n"
     "                                      the transaction itself stays pending\n"
@@ -216,6 +217,10 @@ _ADJUST_RE = re.compile(r"^adjust\s+\d+.*$", re.IGNORECASE)
 _CASH_APPROVE_RE = re.compile(r"^cash\s+approve\s+(\S+)\s*$", re.IGNORECASE)
 _CASH_REJECT_RE  = re.compile(r"^cash\s+reject\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _CASH_REVERSE_RE = re.compile(r"^cash\s+reverse\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+# Stage I5 (2026-08-29): read-only inspection, checked as its own
+# pattern (not folded into _CASH_APPROVE_RE) so "CASH DETAILS ..." never
+# accidentally matches a mutating command.
+_CASH_DETAILS_RE = re.compile(r"^cash\s+details\s+(\S+)\s*$", re.IGNORECASE)
 
 
 def is_report_command(text: str) -> bool:
@@ -266,7 +271,9 @@ def is_admin_command(text: str) -> bool:
         # Step 5 (2026-08-01) escort confirmation review
         _ESCORT_REVIEW_RE.match(t) or
         # Stage H6/H7/H8 (2026-08-28)
-        _CASH_APPROVE_RE.match(t) or _CASH_REJECT_RE.match(t) or _CASH_REVERSE_RE.match(t)
+        _CASH_APPROVE_RE.match(t) or _CASH_REJECT_RE.match(t) or _CASH_REVERSE_RE.match(t) or
+        # Stage I5 (2026-08-29)
+        _CASH_DETAILS_RE.match(t)
     )
 
 
@@ -311,6 +318,8 @@ def _classify_command(t: str) -> Optional[str]:
         (_CASH_APPROVE_RE, "cash_approve"),
         (_CASH_REJECT_RE, "cash_reject"),
         (_CASH_REVERSE_RE, "cash_reverse"),
+        # Stage I5 (2026-08-29) — CASH DETAILS (read-only)
+        (_CASH_DETAILS_RE, "cash_details"),
     )
     for rx, name in pairs:
         if rx.match(t):
@@ -455,6 +464,11 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
         draft_id = int(m.group(1))
         reason   = m.group(2).strip() if m.group(2) else None
         return await _cmd_dreject(draft_id, admin_phone, reason)
+
+    # ── Stage I5 (2026-08-29): CASH DETAILS (read-only) ─────────────────────
+    m = _CASH_DETAILS_RE.match(t)
+    if m:
+        return await _cmd_cash_details(m.group(1))
 
     # ── Stage H6/H7/H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE ────────────
     m = _CASH_APPROVE_RE.match(t)
@@ -1041,6 +1055,21 @@ async def _cmd_dreject(
         return f"❌ ত্রুটি: {e}"
 
 
+async def _cmd_cash_details(ref: str) -> str:
+    """Stage I5 -- CASH DETAILS <txn-ref>. READ-ONLY: never mutates
+    anything, the preferred way for an Owner to inspect a transaction
+    before deciding APPROVE/REJECT/REVERSE."""
+    from modules.financial_operations import cash_details, format_cash_result
+    try:
+        result = await cash_details(ref)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH DETAILS error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    if not result.get("ok"):
+        return format_cash_result("details", result)
+    return result["card"]
+
+
 async def _cmd_cash_approve(ref: str, admin_phone: str) -> str:
     """Stage H6 -- CASH APPROVE <txn-ref>. Thin wrapper: RBAC already
     passed (this function is only reached after process_admin_command's
@@ -1254,24 +1283,36 @@ async def _cmd_escort_confirm(
 
 
 async def _cmd_status() -> str:
-    """Return pending drafts count."""
+    """Stage I20: STATUS now answers "what needs my approval?" across the
+    whole business, not just drafts -- reuses modules.reports.
+    build_owner_overview(), itself built entirely from
+    _b_business_communication_summary()'s already-computed data (no
+    second reporting engine, no new queries). Falls back to the old
+    drafts-only view if the overview builder itself fails, so STATUS
+    never goes fully silent on an unrelated report-layer error."""
     try:
-        draft_count = await fetch_val(
-            "SELECT COUNT(*) FROM fazle_draft_replies WHERE COALESCE(status,'pending') = 'pending'"
-        )
-        pay_count = await fetch_val(
-            "SELECT COUNT(*) FROM fazle_payment_drafts WHERE status='pending'"
-        )
-        rows = await fetch_all(
-            "SELECT id, recipient, intent, LEFT(reply_text,60) AS preview FROM fazle_draft_replies "
-            "WHERE COALESCE(status,'pending') = 'pending' ORDER BY created_at DESC LIMIT 5"
-        )
-        lines = [f"📊 পেন্ডিং ড্রাফট: {draft_count} | পেমেন্ট ড্রাফট: {pay_count}\n"]
-        for r in rows:
-            lines.append(f"#{r['id']} [{r.get('intent','?')}] → {r.get('recipient','?')}: {r.get('preview','')!r}")
-        return "\n".join(lines)
+        from modules.reports import build_owner_overview, render_owner_overview
+        overview = await build_owner_overview(hours=24)
+        return render_owner_overview(overview)
     except Exception as e:
-        return f"❌ স্ট্যাটাস লোড ব্যর্থ: {e}"
+        log.error(f"[admin_cmd] STATUS overview failed, falling back to drafts-only: {e}")
+        try:
+            draft_count = await fetch_val(
+                "SELECT COUNT(*) FROM fazle_draft_replies WHERE COALESCE(status,'pending') = 'pending'"
+            )
+            pay_count = await fetch_val(
+                "SELECT COUNT(*) FROM fazle_payment_drafts WHERE status='pending'"
+            )
+            rows = await fetch_all(
+                "SELECT id, recipient, intent, LEFT(reply_text,60) AS preview FROM fazle_draft_replies "
+                "WHERE COALESCE(status,'pending') = 'pending' ORDER BY created_at DESC LIMIT 5"
+            )
+            lines = [f"📊 পেন্ডিং ড্রাফট: {draft_count} | পেমেন্ট ড্রাফট: {pay_count}\n"]
+            for r in rows:
+                lines.append(f"#{r['id']} [{r.get('intent','?')}] → {r.get('recipient','?')}: {r.get('preview','')!r}")
+            return "\n".join(lines)
+        except Exception as e2:
+            return f"❌ স্ট্যাটাস লোড ব্যর্থ: {e2}"
 
 
 async def _send_attendance_confirmation(result: dict, source: str) -> None:

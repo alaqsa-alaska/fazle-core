@@ -2935,6 +2935,35 @@ async def operator_submit(req: OperatorSubmitRequest):
     AND a pending fpe_cash_transactions row (transaction_status='pending').
     Ledger is NOT touched until admin approval.
     """
+    # Stage I (I3, 2026-08-29): a real finding -- 4 REGTEST_-tagged
+    # synthetic transactions reached this exact route in production
+    # (2026-07-02, since soft-deleted by an admin -- see modules.
+    # fazle_payroll_engine.review_linkage_repair's own docstring for the
+    # full RCA). Root cause: scripts/payroll_regression_suite.py is a
+    # manual test utility whose --base-url defaults to 127.0.0.1:8200,
+    # which on this VPS IS the live production service (there is no
+    # separate staging environment) -- with --write and a real
+    # INTERNAL_API_KEY it has full authoritative write access here. This
+    # guard is the narrow, explicit "destructive-production-test guard"
+    # I3 asks for: any REGTEST_-tagged submission is refused unless the
+    # operator explicitly opts in via ALLOW_TEST_ARTIFACT_WRITES=true
+    # (absent/false in the real .env, confirmed) -- never silently
+    # dropped, always a clear 403 so the regression suite's own output
+    # says exactly why it failed. A genuine operator's notes/employee
+    # name would never naturally contain this exact marker.
+    _test_marker_text = f"{req.notes or ''} {req.employee_name_raw or ''}"
+    if "REGTEST_" in _test_marker_text:
+        import os as _os
+        if _os.getenv("ALLOW_TEST_ARTIFACT_WRITES", "").lower() != "true":
+            raise HTTPException(
+                403,
+                "Refused: this submission is tagged REGTEST_ (a regression-test marker) and "
+                "ALLOW_TEST_ARTIFACT_WRITES is not set -- this route is production by default "
+                "on this deployment (no separate staging environment). Set "
+                "ALLOW_TEST_ARTIFACT_WRITES=true in the environment actually running this "
+                "request if this is a deliberate, reviewed test run.",
+            )
+
     # Validate employee exists
     emp = await fetch_one(
         "SELECT id, full_name, status FROM fpe_employees WHERE id = $1",

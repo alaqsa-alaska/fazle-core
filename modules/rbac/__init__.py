@@ -107,6 +107,10 @@ COMMAND_ROLE: dict[str, str] = {
     "cash_approve":        "admin",
     "cash_reject":         "admin",
     "cash_reverse":        "superadmin",
+    # Stage I5 (2026-08-29): read-only inspection -- same tier as the
+    # other read-only cash/report commands (report_cash="viewer"), not
+    # the mutation tier.
+    "cash_details":        "viewer",
 }
 
 DEFAULT_REQUIRED_ROLE = "admin"  # unknown cmd defaults to admin
