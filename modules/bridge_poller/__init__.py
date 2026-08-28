@@ -1816,6 +1816,27 @@ def _core_message_hash(source: str, source_message_ref: str) -> str:
     return hashlib.sha256(f"{source}|{source_message_ref}".encode("utf-8")).hexdigest()
 
 
+def _is_hermes_cross_bridge_echo(source: str, sender: str, text: str) -> bool:
+    """2026-08-28 (Stage B.5-2): the exact same signature
+    modules.message_router's own cross-bridge Hermes-reply echo guard
+    already uses (source=="bridge2" and sender==bridge1_number and
+    text.lstrip().startswith("🤖 Hermes:")) -- reused verbatim here, not
+    a second, independently-drifting rule. That guard runs at the
+    ROUTING layer, after _save_raw_core_copy() has already persisted the
+    raw row below with a fixed actor_type -- this lets the persistence
+    layer apply the identical, already-trusted classification instead of
+    a blanket 'external_user' for every is_from_me=0 row. Structural
+    signature match only (sender identity + the literal, stable prefix
+    _deliver_hermes_reply's own outbound.enqueue() call always uses) --
+    never a semantic/keyword inference over arbitrary message content,
+    same distinction the existing guard's own docstring already draws."""
+    return (
+        source == "bridge2"
+        and sender == (_settings.bridge1_number or "")
+        and text.lstrip().startswith("🤖 Hermes:")
+    )
+
+
 def _parse_source_timestamp(value) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -1850,15 +1871,22 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
         "has_processed_text": bool(msg.get("processed_text")),
         "bridge_store_preserved": True,
     }
+    # 2026-08-28 (Stage B1/B4, refined B.5-2): actor_type='external_user'
+    # for a genuine is_from_me=0 inbound message -- EXCEPT the one known,
+    # now-fixed exception: a Hermes admin-relay reply sent via bridge1
+    # landing here as a genuine is_from_me=0 row on bridge2 (confirmed
+    # live in production, e.g. message_ids 19294/19297/19300/19305/19308
+    # echoing 19293/19296/19299/19304/19307 verbatim, ~12s later). Uses
+    # the exact same signature modules.message_router's own echo guard
+    # already relies on (see _is_hermes_cross_bridge_echo's docstring) --
+    # this does NOT change `direction` (still genuinely 'inbound' at the
+    # transport level, preserved) and does NOT suppress or delete the
+    # row -- it only corrects WHO produced the content: the real Hermes
+    # agent bouncing its own reply back, not a new external sender.
+    _is_echo = _is_hermes_cross_bridge_echo(source, phone, raw_text)
+    _actor_type = "hermes" if _is_echo else "external_user"
+    _actor_id = "hermes-runner" if _is_echo else None
     try:
-        # 2026-08-28 (Stage B1/B4): actor_type='external_user' -- the sender
-        # of a genuine is_from_me=0 inbound message. One disclosed, known
-        # exception (not fixed here, see migration 073's own comment): a
-        # Hermes admin-relay reply sent via bridge1 can land as a genuine
-        # is_from_me=0 inbound row here on bridge2 -- the cross-bridge echo
-        # case modules.message_router's own echo guard recognizes and
-        # silently ignores at the routing layer, which runs after this raw
-        # copy is already saved.
         row = await fetch_one(
             """
             INSERT INTO wbom_whatsapp_messages
@@ -1866,9 +1894,9 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
                  direction, platform, is_processed, contact_identifier,
                  receiver_number, conversation_key, source_message_ref,
                  source_timestamp, source_context, message_hash,
-                 canonical_phone, phone_last10, metadata_json, actor_type)
+                 canonical_phone, phone_last10, metadata_json, actor_type, actor_id)
             VALUES ($1, $2, $3, $4, 'inbound', $5, false, $1,
-                    $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14::jsonb, 'external_user')
+                    $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14::jsonb, $15, $16)
             ON CONFLICT (message_hash) DO UPDATE SET
                  source_timestamp = COALESCE(wbom_whatsapp_messages.source_timestamp, EXCLUDED.source_timestamp),
                  metadata_json = COALESCE(wbom_whatsapp_messages.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json
@@ -1880,6 +1908,7 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
             phone if phone and not phone.startswith("unresolved:") else None,
             re.sub(r"\D", "", phone or "")[-10:] if phone else None,
             json.dumps(context, ensure_ascii=False),
+            _actor_type, _actor_id,
         )
         core_id = int(row["message_id"]) if row and row.get("message_id") is not None else None
         try:

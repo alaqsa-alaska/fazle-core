@@ -347,3 +347,99 @@ class TestB5InboundIntentPersistence:
         import inspect as _inspect
         sig = _inspect.signature(bp.process_bridge_inbound)
         assert sig.parameters["core_message_id"].default is None
+
+
+# ── B.5-2: cross-bridge Hermes-reply echo attribution ───────────────────────
+
+class TestCrossBridgeEchoAttribution:
+    """Live-confirmed in production (2026-08-28): message_ids
+    19294/19297/19300/19305/19308 on bridge2 were verbatim echoes of
+    Hermes replies 19293/19296/19299/19304/19307 sent via bridge1 seconds
+    earlier, all persisted as actor_type='external_user' before this fix.
+    _is_hermes_cross_bridge_echo() reuses modules.message_router's own
+    already-trusted echo-guard signature verbatim, not a second rule."""
+
+    def test_reuses_same_signature_as_message_router_guard(self):
+        """Structural proof this isn't a second, independently-drifting
+        rule -- both check the identical three conditions."""
+        import modules.message_router as router
+        router_source = inspect.getsource(router)
+        guard_idx = router_source.index('sender == (settings.bridge1_number or "")')
+        guard_block = router_source[guard_idx - 100:guard_idx + 200]
+        assert 'source == "bridge2"' in guard_block
+        assert 'text.lstrip().startswith("🤖 Hermes:")' in guard_block
+
+        bp_source = inspect.getsource(bp._is_hermes_cross_bridge_echo)
+        assert 'source == "bridge2"' in bp_source
+        assert 'sender == (_settings.bridge1_number or "")' in bp_source
+        assert 'text.lstrip().startswith("🤖 Hermes:")' in bp_source
+
+    def test_genuine_external_inbound_is_not_flagged_as_echo(self, monkeypatch):
+        monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        assert bp._is_hermes_cross_bridge_echo("bridge2", "8801700000000", "আমি চাকরি চাই") is False
+        # Same sender/channel as bridge1, but not the Hermes reply prefix --
+        # still not an echo (the signature requires all three conditions).
+        assert bp._is_hermes_cross_bridge_echo("bridge2", "8801958122300", "hello there") is False
+        # Same content prefix, but arrived on bridge1 (not bridge2) or from
+        # a different sender -- still not an echo.
+        assert bp._is_hermes_cross_bridge_echo("bridge1", "8801958122300", "🤖 Hermes:\nhi") is False
+        assert bp._is_hermes_cross_bridge_echo("bridge2", "8801700000000", "🤖 Hermes:\nhi") is False
+
+    def test_known_echo_signature_is_recognized(self, monkeypatch):
+        monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        assert bp._is_hermes_cross_bridge_echo(
+            "bridge2", "8801958122300", "🤖 Hermes:\nএই যে Boss — এখানেই আছি",
+        ) is True
+
+    async def test_persisted_actor_type_reflects_echo_classification(self, monkeypatch):
+        """_save_raw_core_copy() must use 'hermes'/'hermes-runner' for a
+        recognized echo, and never suppress/delete the row or change its
+        direction -- only actor_type/actor_id."""
+        monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        captured = {}
+
+        async def _fake_fetch_one(sql, *args):
+            captured["sql"] = sql
+            captured["args"] = args
+            return {"message_id": 1}
+
+        monkeypatch.setattr(bp, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(bp, "execute", AsyncMock())
+
+        msg = {"id": "MSGID1", "content": "🤖 Hermes:\nBoss, real answer here", "timestamp": None}
+        await bp._save_raw_core_copy("bridge2", msg, "8801958122300", "ignored")
+
+        assert "'inbound'" in captured["sql"]  # direction literal, unchanged
+        assert captured["args"][-2] == "hermes"
+        assert captured["args"][-1] == "hermes-runner"
+
+    async def test_genuine_inbound_still_gets_external_user(self, monkeypatch):
+        monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+
+        async def _fake_fetch_one(sql, *args):
+            return {"message_id": 2}
+
+        monkeypatch.setattr(bp, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(bp, "execute", AsyncMock())
+
+        msg = {"id": "MSGID2", "content": "আমি চাকরি খুঁজছি", "timestamp": None}
+        result_args = []
+
+        async def _capture(sql, *args):
+            result_args.append(args)
+            return {"message_id": 2}
+
+        monkeypatch.setattr(bp, "fetch_one", _capture)
+        await bp._save_raw_core_copy("bridge3", msg, "8801700000000", "ignored")
+
+        assert result_args[0][-2] == "external_user"
+        assert result_args[0][-1] is None
+
+    def test_message_router_echo_guard_itself_untouched(self):
+        """Routing behavior (what the guard actually does once it fires)
+        must remain completely unchanged by this persistence-layer fix --
+        only proven not to have been edited alongside it."""
+        import modules.message_router as router
+        source = inspect.getsource(router)
+        assert '_hk_fire("admin", "hermes_reply_echo", "no_action", "hermes-cross-bridge-echo-guard")' in source
+        assert 'return "", None' in source
