@@ -793,22 +793,29 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
             id="daily_admin_digest", replace_existing=True,
         )
 
-    # Stage G18/G24 — twice daily, default 08:00 and 20:00 Asia/Dhaka
+    # Stage G18/G24 — twice daily, default 09:00 and 21:00 Asia/Dhaka
     # (same TZ as every other cron job in this function, see _tz() above),
     # independently configurable via env so this doesn't collide with
     # daily_admin_digest's own hour without an explicit change.
+    #
+    # A single add_job() call with a comma-separated CronTrigger hour
+    # string (APScheduler's own supported cron syntax) rather than two
+    # separate add_job() calls with "_am"/"_pm"-suffixed ids -- the
+    # latter was tried first and found live-broken during this stage's
+    # own verification: _next_run_for(name) (used by GET /scheduler/status)
+    # looks up _scheduler.get_job(name) by the bare registry name, so a
+    # job registered only under suffixed ids always reports
+    # next_run_at=null on that status endpoint even though it was still
+    # genuinely scheduled to fire. One job, one id, matching every other
+    # job in this file, fixes the status reporting without changing the
+    # actual twice-daily firing behavior at all.
     if "business_summary_report" in _job_registry:
         bs_hour1 = int(os.getenv("BUSINESS_SUMMARY_HOUR_1", "9"))
         bs_hour2 = int(os.getenv("BUSINESS_SUMMARY_HOUR_2", "21"))
         _scheduler.add_job(
             _wrap("business_summary_report", _job_registry["business_summary_report"]),
-            CronTrigger(hour=bs_hour1, minute=0),
-            id="business_summary_report_am", replace_existing=True,
-        )
-        _scheduler.add_job(
-            _wrap("business_summary_report", _job_registry["business_summary_report"]),
-            CronTrigger(hour=bs_hour2, minute=0),
-            id="business_summary_report_pm", replace_existing=True,
+            CronTrigger(hour=f"{bs_hour1},{bs_hour2}", minute=0),
+            id="business_summary_report", replace_existing=True,
         )
 
     if "system_observation_report" in _job_registry:
@@ -816,13 +823,8 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
         so_hour2 = int(os.getenv("SYSTEM_OBSERVATION_HOUR_2", "21"))
         _scheduler.add_job(
             _wrap("system_observation_report", _job_registry["system_observation_report"]),
-            CronTrigger(hour=so_hour1, minute=15),
-            id="system_observation_report_am", replace_existing=True,
-        )
-        _scheduler.add_job(
-            _wrap("system_observation_report", _job_registry["system_observation_report"]),
-            CronTrigger(hour=so_hour2, minute=15),
-            id="system_observation_report_pm", replace_existing=True,
+            CronTrigger(hour=f"{so_hour1},{so_hour2}", minute=15),
+            id="system_observation_report", replace_existing=True,
         )
 
     if "daily_db_backup" in _job_registry:

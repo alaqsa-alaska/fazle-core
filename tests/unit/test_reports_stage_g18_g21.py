@@ -67,6 +67,39 @@ class TestSystemObservationBuilder:
         assert "cpu" in payload["summary"]["degraded_probes"]
 
 
+class TestSchedulerRegistrationUsesOneJobId:
+    """Regression for a real bug caught live during this stage's own
+    deploy verification: registering each twice-daily job under two
+    separate APScheduler ids ("..._am"/"..._pm") made
+    GET /scheduler/status (modules.scheduler._next_run_for, which looks
+    up _scheduler.get_job(bare_registry_name)) always report
+    next_run_at=null for both new jobs, even though they were still
+    genuinely scheduled to fire. Fixed by using one add_job() call per
+    job with a comma-separated CronTrigger hour string."""
+
+    def test_single_add_job_call_per_stage_g_report_job(self):
+        import inspect
+        import modules.scheduler as sch
+        src = inspect.getsource(sch)
+        assert src.count('id="business_summary_report"') == 1
+        assert 'id="business_summary_report_am"' not in src
+        assert 'id="business_summary_report_pm"' not in src
+        assert src.count('id="system_observation_report"') == 1
+        assert 'id="system_observation_report_am"' not in src
+        assert 'id="system_observation_report_pm"' not in src
+
+    def test_cron_trigger_fires_twice_daily(self):
+        from apscheduler.triggers.cron import CronTrigger
+        import datetime
+        t = CronTrigger(hour="9,21", minute=0)
+        now = datetime.datetime(2026, 8, 28, 0, 0, tzinfo=datetime.timezone.utc)
+        first = t.get_next_fire_time(None, now)
+        second = t.get_next_fire_time(first, first)
+        assert first.hour == 9
+        assert second.hour == 21
+        assert second.date() == first.date()
+
+
 class TestScheduledJobsNeverExecuteAutoFix:
     def test_business_summary_job_only_reports(self):
         import inspect
