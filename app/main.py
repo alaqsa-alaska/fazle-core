@@ -1719,6 +1719,64 @@ async def whatsapp_conversations_attention(
         return {"returned": 0, "has_more": False, "conversations": [], "error": str(exc)[:200], "ts": time.time()}
 
 
+@app.get("/api/whatsapp/office-group/activity", dependencies=[Depends(require_api_key)])
+async def office_group_activity(start_time: str = "", limit: int = 20, include_body: bool = False):
+    """Stage F4/F9 (2026-08-28): retrieve/summarize the approved
+    Office-group's recent activity -- READ/INDEX ONLY, exactly as Stage E3
+    established. This endpoint never proposes or executes anything; it is
+    the READ half of "Office group -> retrieve -> summarize/analyze -> NO
+    action execution".
+
+    Approved group(s) are discovered from wbom_group_identities
+    (business_label IS NOT NULL) -- never a hardcoded JID -- and merged
+    across every source_bridge that has observed each one (the same group
+    can carry a different conversation_key per bridge, see Stage E1/E4).
+    Metadata-first by default (include_body=False), same
+    _METADATA_COLUMNS/_CONTENT_COLUMNS and <=50 cap as /query and
+    /conversations/attention -- Stage E9's "preserve metadata-first
+    behavior" carried forward unchanged."""
+    try:
+        limit = min(max(int(limit or 20), 1), 50)
+        approved = await fetch_all(
+            "SELECT DISTINCT group_jid, source_bridge FROM wbom_group_identities WHERE business_label IS NOT NULL"
+        )
+        if not approved:
+            return {"returned": 0, "has_more": False, "messages": [], "groups": [], "ts": time.time()}
+        conv_keys = [f"{r['group_jid']}:{r['source_bridge']}" for r in approved]
+
+        conditions = ["conversation_key = ANY($1::text[])"]
+        params: list = [conv_keys]
+        if start_time:
+            params.append(_parse_time_filter(start_time, "start_time"))
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        columns = _METADATA_COLUMNS + (_CONTENT_COLUMNS if include_body else ())
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        rows = await fetch_all(
+            f"""
+            SELECT {", ".join(columns)}
+              FROM wbom_whatsapp_messages
+             WHERE {' AND '.join(conditions)}
+             ORDER BY received_at DESC, message_id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        return {
+            "groups": sorted({r["group_jid"] for r in approved}),
+            "returned": len(page),
+            "has_more": has_more,
+            "include_body": include_body,
+            "messages": [dict(r) for r in page],
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/office-group/activity error: %s", exc)
+        return {"returned": 0, "has_more": False, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
 @app.get("/api/outbound/status", dependencies=[Depends(require_api_key)])
 async def get_outbound_status(queue_id: int | None = None, recipient: str = "", limit: int = 10):
     """Real delivery-status lookup for one or more fazle_outbound_queue rows

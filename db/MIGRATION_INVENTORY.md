@@ -113,6 +113,7 @@
 073_wbom_whatsapp_messages_actor_attribution.sql
 074_wbom_whatsapp_messages_stage_c_indexes.sql
 075_wbom_group_identities.sql
+076_hermes_action_approvals_business_actions.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -339,7 +340,24 @@ function -- see the migration's own column comments. No FK to
 `wbom_whatsapp_messages` (group messages are not currently ingested into
 that table at all -- see Stage D2's own report for why).
 
-**Next available number for new work: `076`.**
+**`076_hermes_action_approvals_business_actions.sql` (2026-08-28, Stage F
+Business Brain, APPLIED directly to production and tracked in
+`schema_migrations`):** widens `hermes_action_approvals` (migration 068)
+for Business Inbox proposed actions -- adds nullable `domain`,
+`business_reference`, `evidence_refs` (jsonb), `idempotency_key` columns,
+a partial unique index on `idempotency_key` (live while
+pending/approved/executed), and two new `action_type` CHECK values
+(`business_reply_draft`, `business_record_review`, both Class B --
+draft/propose, no business-state mutation). Reuses the existing
+propose->approve->execute->verify gate rather than a second approval
+framework; no new table. `modules/hermes_tasks/__init__.py`'s
+`ACTION_TYPES` frozenset must be kept in sync with this CHECK constraint
+(a real bug caught live during Stage F testing: the Python-level set was
+initially not updated in the same change, causing every business-action
+proposal to fail validation before reaching the database -- fixed same
+session).
+
+**Next available number for new work: `077`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
