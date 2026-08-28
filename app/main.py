@@ -1457,6 +1457,181 @@ async def whatsapp_conversation_history(
         return {"count": 0, "has_more": False, "messages": [], "error": str(exc)[:200], "ts": time.time()}
 
 
+_ATTENTION_DOMAIN_LABELS = {
+    "recruitment": "recruitment",
+    "escort": "escort_duty",
+}
+
+
+@app.get("/api/whatsapp/conversations/attention", dependencies=[Depends(require_api_key)])
+async def whatsapp_conversations_attention(
+    domain: str = "",
+    requires_action: Optional[bool] = None,
+    start_time: str = "",
+    limit: int = 20,
+    cursor: str = "",
+):
+    """Stage D8: "which conversations need company/admin attention" --
+    built only after Stage D3-D7 established which domains have
+    deterministic, authoritative state to derive that from (see
+    modules.conversation_state). Metadata-first, server-side, bounded,
+    paginated -- same cursor convention as Stage C's /query and
+    /conversation. Never returns message_body.
+
+    Two-step implementation, disclosed here rather than hidden: (1) a
+    bounded SQL query finds each matching conversation's LATEST message
+    (DISTINCT ON conversation_key); (2) for that bounded page only, the
+    phones involved are batch-looked-up against wbom_candidates
+    (recruitment) and wbom_escort_programs (escort) -- the actual
+    authoritative business records -- and mapped to state/next_actor/
+    requires_action via modules.conversation_state. Nothing is stored or
+    duplicated; this is a read-time join over existing records, per Stage
+    D5's explicit preference for a derived query over a new mutable
+    status column.
+
+    domain: "recruitment" | "escort" | "" (both, plus any other
+    conversation -- those get state="unclear" since no other domain has a
+    wired authoritative state source yet, see
+    modules.conversation_state.STRUCTURED_STATE_SOURCE_CANDIDATES).
+
+    requires_action filter is applied AFTER the page is fetched and
+    states are resolved (it depends on a join /query's WHERE clause can't
+    express against two different business tables in one bounded scan).
+    This means a page can legitimately return fewer than `limit` rows, or
+    even zero, while has_more is still true -- exactly the Stage C
+    principle carried over: has_more=true means MORE RESULTS AVAILABLE,
+    not analysis complete; keep paging via next_cursor."""
+    try:
+        limit = min(max(int(limit or 20), 1), 50)
+        conditions = ["conversation_key IS NOT NULL"]
+        params: list = []
+
+        if domain:
+            label = _ATTENTION_DOMAIN_LABELS.get(domain, domain)
+            params.append(label)
+            conditions.append(f"(workflow_triggered = ${len(params)} OR intent_detected = ${len(params)})")
+        if start_time:
+            params.append(_parse_time_filter(start_time, "start_time"))
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        if cursor:
+            try:
+                cur_ts, cur_id = _decode_cursor(cursor)
+            except Exception:
+                return {"count": 0, "messages": [], "error": "invalid cursor", "ts": time.time()}
+            params.append(cur_ts)
+            params.append(cur_id)
+            cursor_condition = f"(last_message_at, message_id) < (${len(params)-1}::timestamptz, ${len(params)})"
+        else:
+            cursor_condition = None
+
+        where_clause = f"WHERE {' AND '.join(conditions)}"
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        outer_where = f"WHERE {cursor_condition}" if cursor_condition else ""
+        rows = await fetch_all(
+            f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (conversation_key)
+                    conversation_key, platform, canonical_phone, sender_number,
+                    direction, actor_type, intent_detected, workflow_triggered,
+                    received_at AS last_message_at, message_id
+                  FROM wbom_whatsapp_messages
+                  {where_clause}
+                 ORDER BY conversation_key, received_at DESC, message_id DESC
+            ) latest
+            {outer_where}
+            ORDER BY last_message_at DESC, message_id DESC
+            LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+
+        # Batch-resolve state for this bounded page only.
+        from modules.conversation_state import (
+            resolve_recruitment_state, resolve_escort_state, UNKNOWN_STATE,
+        )
+        from modules.number_identity import canonical_phone as _canon_phone
+
+        phones = sorted({r["canonical_phone"] for r in page if r["canonical_phone"]})
+        candidate_status: dict = {}
+        escort_status: dict = {}
+        if phones:
+            cand_rows = await fetch_all(
+                "SELECT phone, post_intake_status FROM wbom_candidates WHERE phone = ANY($1::text[])",
+                phones,
+            )
+            candidate_status = {r["phone"]: r["post_intake_status"] for r in cand_rows}
+
+            esc_rows = await fetch_all(
+                """
+                SELECT DISTINCT ON (phone) phone, status FROM (
+                    SELECT master_mobile AS phone, status, program_id FROM wbom_escort_programs
+                     WHERE master_mobile IS NOT NULL AND master_mobile != ''
+                    UNION ALL
+                    SELECT escort_mobile AS phone, status, program_id FROM wbom_escort_programs
+                     WHERE escort_mobile IS NOT NULL AND escort_mobile != ''
+                ) both_sides
+                ORDER BY phone, program_id DESC
+                """
+            )
+            for r in esc_rows:
+                norm = _canon_phone(r["phone"])
+                if norm:
+                    escort_status[norm] = r["status"]
+
+        results = []
+        for r in page:
+            phone = r["canonical_phone"]
+            row_domain = None
+            if r["workflow_triggered"] == "recruitment" or r["intent_detected"] == "recruitment":
+                row_domain = "recruitment"
+            elif r["workflow_triggered"] == "escort_duty" or r["intent_detected"] == "escort_duty":
+                row_domain = "escort"
+
+            if row_domain == "recruitment" and phone in candidate_status:
+                state = resolve_recruitment_state(candidate_status[phone])
+            elif row_domain == "escort" and phone in escort_status:
+                state = resolve_escort_state(escort_status[phone])
+            else:
+                state = dict(UNKNOWN_STATE)
+
+            if requires_action is not None and state["requires_action"] != requires_action:
+                continue
+
+            results.append({
+                "conversation_key": r["conversation_key"],
+                "platform": r["platform"],
+                "canonical_phone": phone,
+                "domain": row_domain,
+                "last_intent": r["intent_detected"] or r["workflow_triggered"],
+                "current_state": state["state"],
+                "next_actor": state["next_actor"],
+                "requires_action": state["requires_action"],
+                "state_source": state["state_source"],
+                "last_message_at": r["last_message_at"],
+                "last_actor_type": r["actor_type"],
+            })
+
+        next_cursor = (
+            _encode_cursor(page[-1]["last_message_at"], page[-1]["message_id"])
+            if has_more and page else None
+        )
+        return {
+            "domain_filter": domain or None,
+            "requires_action_filter": requires_action,
+            "returned": len(results),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "conversations": results,
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/conversations/attention error: %s", exc)
+        return {"returned": 0, "has_more": False, "conversations": [], "error": str(exc)[:200], "ts": time.time()}
+
+
 @app.get("/api/outbound/status", dependencies=[Depends(require_api_key)])
 async def get_outbound_status(queue_id: int | None = None, recipient: str = "", limit: int = 10):
     """Real delivery-status lookup for one or more fazle_outbound_queue rows

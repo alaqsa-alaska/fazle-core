@@ -497,3 +497,62 @@ class TestCrossBridgeEchoAttribution:
         source = inspect.getsource(router)
         assert '_hk_fire("admin", "hermes_reply_echo", "no_action", "hermes-cross-bridge-echo-guard")' in source
         assert 'return "", None' in source
+
+
+class TestD2GroupConversationKey:
+    """Stage D2 (2026-08-28): forward-readiness only -- group ingestion
+    itself is still blanket-excluded upstream (_poll_bridge()'s SQL query),
+    so these prove the linkage is CORRECT if/when that separate decision
+    is ever made, without changing any current live behavior."""
+
+    async def test_individual_message_conv_key_unchanged(self, monkeypatch):
+        """Regression: the existing phone-based conv_key for a genuine
+        1:1 message must be byte-identical to before Stage D2."""
+        captured = {}
+
+        async def _fake_fetch_one(sql, *args):
+            captured["args"] = args
+            return {"message_id": 1}
+
+        monkeypatch.setattr(bp, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(bp, "execute", AsyncMock())
+
+        msg = {"id": "MSGID10", "content": "hi", "timestamp": None, "chat_jid": "8801700000000@s.whatsapp.net"}
+        await bp._save_raw_core_copy("bridge3", msg, "8801700000000", "hi")
+        assert captured["args"][6] == "8801700000000:bridge3"
+
+    async def test_group_message_conv_key_uses_chat_jid_not_participant_phone(self, monkeypatch):
+        """A group conversation's identity must be the GROUP, not
+        whichever participant happens to post -- otherwise one group
+        thread would fragment into one fake conversation per member."""
+        captured = {}
+
+        async def _fake_fetch_one(sql, *args):
+            captured["args"] = args
+            return {"message_id": 2}
+
+        monkeypatch.setattr(bp, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(bp, "execute", AsyncMock())
+
+        msg = {
+            "id": "MSGID11", "content": "team update", "timestamp": None,
+            "chat_jid": "120363426895117693@g.us",
+        }
+        # `phone` here is the resolved individual participant's number --
+        # exactly what the (currently dormant) upstream path would pass.
+        await bp._save_raw_core_copy("bridge1", msg, "8801912345678", "team update")
+        assert captured["args"][6] == "120363426895117693@g.us:bridge1"
+
+    async def test_missing_chat_jid_falls_back_to_phone_safely(self, monkeypatch):
+        captured = {}
+
+        async def _fake_fetch_one(sql, *args):
+            captured["args"] = args
+            return {"message_id": 3}
+
+        monkeypatch.setattr(bp, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(bp, "execute", AsyncMock())
+
+        msg = {"id": "MSGID12", "content": "hi", "timestamp": None}  # no chat_jid key at all
+        await bp._save_raw_core_copy("bridge2", msg, "8801700000001", "hi")
+        assert captured["args"][6] == "8801700000001:bridge2"

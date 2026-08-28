@@ -1895,7 +1895,19 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
     raw_text = (msg.get("content") or "").strip()
     if not raw_text:
         raw_text = f"[media:{media_type}]" if media_type != "text" else (text or "")
-    conv_key = f"{phone}:{source}" if phone else None
+    # Stage D2 (2026-08-28, forward-readiness only -- group ingestion
+    # itself is still blanket-excluded upstream, see _poll_bridge()'s SQL
+    # query and this module's own module docstring; that exclusion is a
+    # separate, larger decision Stage D was not asked to flip). A group
+    # conversation's identity is the GROUP (chat_jid), not whichever
+    # individual participant happens to post -- keying conversation_key
+    # off `phone` for a group message would silently fragment one group
+    # thread into one fake "conversation" per participant. If/when the
+    # upstream exclusion is ever lifted, this makes conversation_key
+    # correct from day one with no further change here.
+    _chat_jid = str(msg.get("chat_jid") or "")
+    _group_identity = _chat_jid if _chat_jid.endswith("@g.us") else phone
+    conv_key = f"{_group_identity}:{source}" if _group_identity else None
     receiver = _source_to_receiver(source)
     source_ts = _parse_source_timestamp(msg.get("timestamp"))
     msg_hash = _core_message_hash(source, msg_id)

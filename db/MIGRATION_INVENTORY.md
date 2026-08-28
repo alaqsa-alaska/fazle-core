@@ -112,6 +112,7 @@
 072_wbom_candidates_post_intake_status.sql
 073_wbom_whatsapp_messages_actor_attribution.sql
 074_wbom_whatsapp_messages_stage_c_indexes.sql
+075_wbom_group_identities.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -321,7 +322,24 @@ in `schema_migrations`):** two supporting partial indexes on
 -- read-performance only, for the new `/api/whatsapp/messages/query` and
 `/api/whatsapp/messages/conversation` filtered-retrieval endpoints.
 
-**Next available number for new work: `075`.**
+**`075_wbom_group_identities.sql` (2026-08-28, Stage D1 group identity,
+APPLIED directly to production and tracked in `schema_migrations`):** new
+table `wbom_group_identities` (group_jid, source_bridge, display_name,
+business_label, first_seen_at, last_seen_at, metadata_updated_at; PK
+(group_jid, source_bridge)) -- mirrors each WhatsApp bridge's own
+authoritative `chats` table (populated live by whatsmeow) rather than any
+hand-maintained mapping, synced via `modules/group_identity.py`. Real
+finding from the first live sync: the same group_jid carried two
+different `display_name` values across bridge1 vs bridge2's local caches
+(one bridge's cache was stale relative to the other) -- this is exactly
+why the primary key is (group_jid, source_bridge) and not group_jid
+alone; both observations are preserved, never collapsed to one "true"
+name. `business_label` is nullable and never auto-set by the sync
+function -- see the migration's own column comments. No FK to
+`wbom_whatsapp_messages` (group messages are not currently ingested into
+that table at all -- see Stage D2's own report for why).
+
+**Next available number for new work: `076`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
