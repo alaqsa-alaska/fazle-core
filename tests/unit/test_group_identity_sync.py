@@ -140,6 +140,70 @@ class TestGroupChatDiscovery:
         assert set(result) == {"bridge1", "bridge2", "bridge3"}
 
 
+class TestE1BusinessLabelAssignment:
+    async def test_set_business_label_updates_all_rows_for_the_jid(self):
+        captured = {}
+
+        async def _fake_execute(sql, *args):
+            captured["sql"] = sql
+            captured["args"] = args
+            return "UPDATE 2"
+
+        from modules.group_identity import set_group_business_label
+        with patch("app.database.execute", new=_fake_execute):
+            n = await set_group_business_label("120363426895117693@g.us", "office_internal")
+        assert n == 2
+        assert captured["args"] == ("office_internal", "120363426895117693@g.us")
+        assert "WHERE group_jid = $2" in captured["sql"]
+
+    async def test_is_approved_group_jid_true_only_with_label(self):
+        from modules.group_identity import is_approved_group_jid
+
+        async def _labeled(sql, *args):
+            return {"1": 1}
+
+        async def _unlabeled(sql, *args):
+            return None
+
+        with patch("app.database.fetch_one", new=_labeled):
+            assert await is_approved_group_jid("x@g.us") is True
+        with patch("app.database.fetch_one", new=_unlabeled):
+            assert await is_approved_group_jid("y@g.us") is False
+
+    async def test_list_approved_group_jids_caches_and_can_be_force_refreshed(self):
+        from modules import group_identity as gi
+        gi._approved_jids_cache["jids"] = []
+        gi._approved_jids_cache["checked_at"] = 0.0
+
+        calls = {"n": 0}
+
+        async def _fake_fetch_all(sql, *args):
+            calls["n"] += 1
+            return [{"group_jid": "a@g.us"}]
+
+        with patch("app.database.fetch_all", new=_fake_fetch_all):
+            r1 = await gi.list_approved_group_jids()
+            r2 = await gi.list_approved_group_jids()  # cached, no second DB call
+        assert r1 == r2 == ["a@g.us"]
+        assert calls["n"] == 1
+
+        with patch("app.database.fetch_all", new=_fake_fetch_all):
+            await gi.list_approved_group_jids(force_refresh=True)
+        assert calls["n"] == 2
+
+    async def test_list_approved_group_jids_keeps_stale_cache_on_db_error(self):
+        from modules import group_identity as gi
+        gi._approved_jids_cache["jids"] = ["stale@g.us"]
+        gi._approved_jids_cache["checked_at"] = 0.0
+
+        async def _boom(sql, *args):
+            raise RuntimeError("db down")
+
+        with patch("app.database.fetch_all", new=_boom):
+            result = await gi.list_approved_group_jids(force_refresh=True)
+        assert result == ["stale@g.us"]
+
+
 class TestNoHardcodedGroupGuessing:
     def test_source_never_hardcodes_the_office_group_jid_or_name(self):
         """Stage D1's explicit rule: identity must come ONLY from synced

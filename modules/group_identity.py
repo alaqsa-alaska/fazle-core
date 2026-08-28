@@ -117,3 +117,96 @@ async def sync_all_bridges() -> dict:
     for bridge_name in ("bridge1", "bridge2", "bridge3"):
         result[bridge_name] = await sync_group_identities(bridge_name)
     return result
+
+
+# ── Business identity assignment (Stage E1, explicit/administrative) ────
+# display_name (provider-observed, can differ per source_bridge and can
+# change any time WhatsApp's group subject changes) vs business_label
+# (OUR meaning for the group, e.g. 'office_internal') are deliberately
+# separate concepts -- see migration 075's own column comments. This
+# function is the ONLY writer of business_label; sync_group_identities()
+# above never touches it. Never called with a value derived from
+# display_name text -- every call site must pass an explicit,
+# Owner-directed label.
+#
+# business_label conceptually belongs to the group (the JID), not to any
+# one bridge's observation of it -- applied to every existing
+# (group_jid, source_bridge) row for this JID so it can never disagree
+# with itself across bridges, and every future sync_group_identities()
+# upsert for a NEW source_bridge observing the same JID needs its own
+# explicit set_group_business_label() call (sync itself never invents
+# one) -- see is_approved_group_jid()'s own docstring for why that
+# matters for E3's allowlist gate.
+async def set_group_business_label(group_jid: str, business_label: Optional[str]) -> int:
+    """Explicitly assign (or clear, if business_label=None) the business
+    label for every known row of this group_jid. Returns the number of
+    rows updated. Does not create a new row -- the group must already
+    have been discovered via sync_group_identities() first (identity
+    still comes only from authoritative bridge metadata, never a
+    hand-typed JID here)."""
+    from app.database import execute
+    result = await execute(
+        "UPDATE wbom_group_identities SET business_label = $1, metadata_updated_at = NOW() WHERE group_jid = $2",
+        business_label, group_jid,
+    )
+    try:
+        return int(str(result).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def is_approved_group_jid(group_jid: str) -> bool:
+    """Stage E3's allowlist gate: a group is eligible for canonical
+    persistence/classification if and only if it has an explicit,
+    non-NULL business_label -- never a separate hardcoded JID list. This
+    is the general mechanism: approving a future group is one
+    set_group_business_label() call, not a code change."""
+    from app.database import fetch_one as _fetch_one
+    row = await _fetch_one(
+        "SELECT 1 FROM wbom_group_identities WHERE group_jid = $1 AND business_label IS NOT NULL LIMIT 1",
+        group_jid,
+    )
+    return row is not None
+
+
+async def get_business_label(group_jid: str) -> Optional[str]:
+    from app.database import fetch_one as _fetch_one
+    row = await _fetch_one(
+        "SELECT business_label FROM wbom_group_identities WHERE group_jid = $1 AND business_label IS NOT NULL LIMIT 1",
+        group_jid,
+    )
+    return row["business_label"] if row else None
+
+
+# ── E3: the approved-group allowlist, cached ─────────────────────────────
+# A JID is "approved for canonical persistence" if and only if it has a
+# non-NULL business_label -- the same general mechanism is_approved_
+# group_jid() above already uses, just as a list instead of a single
+# lookup (the poll loop needs the full set once per cycle, not one
+# lookup per candidate JID). Cached with a short TTL so this doesn't add
+# a Postgres round-trip to every poll iteration (bridge1/2 can poll as
+# often as every ~1s under BRIDGE_POLL_MIN_S adaptive backoff) -- a newly
+# -approved group takes effect within the TTL, not instantly, which is
+# fine for an explicit administrative action.
+import time as _time
+
+_approved_jids_cache: dict = {"jids": [], "checked_at": 0.0}
+_APPROVED_JIDS_TTL_S = 60.0
+
+
+async def list_approved_group_jids(force_refresh: bool = False) -> list[str]:
+    now = _time.monotonic()
+    if not force_refresh and (now - _approved_jids_cache["checked_at"]) < _APPROVED_JIDS_TTL_S:
+        return _approved_jids_cache["jids"]
+    from app.database import fetch_all as _fetch_all
+    try:
+        rows = await _fetch_all(
+            "SELECT DISTINCT group_jid FROM wbom_group_identities WHERE business_label IS NOT NULL"
+        )
+        jids = [r["group_jid"] for r in rows]
+    except Exception as exc:
+        log.warning("[group_identity] list_approved_group_jids failed, keeping stale cache: %s", exc)
+        return _approved_jids_cache["jids"]
+    _approved_jids_cache["jids"] = jids
+    _approved_jids_cache["checked_at"] = now
+    return jids

@@ -1460,6 +1460,8 @@ async def whatsapp_conversation_history(
 _ATTENTION_DOMAIN_LABELS = {
     "recruitment": "recruitment",
     "escort": "escort_duty",
+    "attendance": "attendance",
+    "cash": "payment_due",
 }
 
 
@@ -1550,7 +1552,8 @@ async def whatsapp_conversations_attention(
 
         # Batch-resolve state for this bounded page only.
         from modules.conversation_state import (
-            resolve_recruitment_state, resolve_escort_state, UNKNOWN_STATE,
+            resolve_recruitment_state, resolve_escort_state,
+            resolve_attendance_state, resolve_cash_state, UNKNOWN_STATE,
         )
         from modules.number_identity import canonical_phone as _canon_phone
 
@@ -1575,29 +1578,87 @@ async def whatsapp_conversations_attention(
         phones = sorted({p for r in page if (p := _resolved_phone(r))})
         candidate_status: dict = {}
         escort_status: dict = {}
+        attendance_status: dict = {}
+        cash_status: dict = {}
+        # Each lookup only runs when the current domain filter could
+        # actually need it (or no filter is given) -- fpe_cash_transactions
+        # in particular is a large table (~4.4k rows across 3 UNIONed phone
+        # columns); no need to scan it for a domain="recruitment" call.
+        _need = domain or ""
         if phones:
-            cand_rows = await fetch_all(
-                "SELECT phone, post_intake_status FROM wbom_candidates WHERE phone = ANY($1::text[])",
-                phones,
-            )
-            candidate_status = {r["phone"]: r["post_intake_status"] for r in cand_rows}
+            if _need in ("", "recruitment"):
+                cand_rows = await fetch_all(
+                    "SELECT phone, post_intake_status FROM wbom_candidates WHERE phone = ANY($1::text[])",
+                    phones,
+                )
+                candidate_status = {r["phone"]: r["post_intake_status"] for r in cand_rows}
 
-            esc_rows = await fetch_all(
-                """
-                SELECT DISTINCT ON (phone) phone, status FROM (
-                    SELECT master_mobile AS phone, status, program_id FROM wbom_escort_programs
-                     WHERE master_mobile IS NOT NULL AND master_mobile != ''
-                    UNION ALL
-                    SELECT escort_mobile AS phone, status, program_id FROM wbom_escort_programs
-                     WHERE escort_mobile IS NOT NULL AND escort_mobile != ''
-                ) both_sides
-                ORDER BY phone, program_id DESC
-                """
-            )
-            for r in esc_rows:
-                norm = _canon_phone(r["phone"])
-                if norm:
-                    escort_status[norm] = r["status"]
+            if _need in ("", "escort"):
+                esc_rows = await fetch_all(
+                    """
+                    SELECT DISTINCT ON (phone) phone, status FROM (
+                        SELECT master_mobile AS phone, status, program_id FROM wbom_escort_programs
+                         WHERE master_mobile IS NOT NULL AND master_mobile != ''
+                        UNION ALL
+                        SELECT escort_mobile AS phone, status, program_id FROM wbom_escort_programs
+                         WHERE escort_mobile IS NOT NULL AND escort_mobile != ''
+                    ) both_sides
+                    ORDER BY phone, program_id DESC
+                    """
+                )
+                for r in esc_rows:
+                    norm = _canon_phone(r["phone"])
+                    if norm:
+                        escort_status[norm] = r["status"]
+
+            if _need in ("", "attendance"):
+                # Stage E6: wbom_attendance has no phone column -- links
+                # via employee_id only. Reuses the same authoritative
+                # phone->employee resolution already live in production
+                # (modules.identity_brain._lookup_attendance_identity):
+                # wbom_employees.employee_mobile, latest attendance row
+                # per employee.
+                att_rows = await fetch_all(
+                    """
+                    SELECT DISTINCT ON (phone) phone, approved_at FROM (
+                        SELECT e.employee_mobile AS phone, a.approved_at, a.attendance_id
+                          FROM wbom_employees e
+                          JOIN wbom_attendance a ON a.employee_id = e.employee_id
+                         WHERE e.employee_mobile IS NOT NULL AND e.employee_mobile != ''
+                    ) both_sides
+                    ORDER BY phone, attendance_id DESC
+                    """
+                )
+                for r in att_rows:
+                    norm = _canon_phone(r["phone"])
+                    if norm:
+                        attendance_status[norm] = r["approved_at"]
+
+            if _need in ("", "cash"):
+                # Stage E7: fpe_cash_transactions has direct phone columns
+                # in the same canonical BD format -- normalized the same
+                # way. transaction_status is the genuine, dominant,
+                # already-live state field (live distribution:
+                # final=4390, pending=27, reversed=1).
+                cash_rows = await fetch_all(
+                    """
+                    SELECT DISTINCT ON (phone) phone, transaction_status FROM (
+                        SELECT employee_phone AS phone, transaction_status, id FROM fpe_cash_transactions
+                         WHERE employee_phone IS NOT NULL AND employee_phone != ''
+                        UNION ALL
+                        SELECT employee_id_phone AS phone, transaction_status, id FROM fpe_cash_transactions
+                         WHERE employee_id_phone IS NOT NULL AND employee_id_phone != ''
+                        UNION ALL
+                        SELECT payout_phone AS phone, transaction_status, id FROM fpe_cash_transactions
+                         WHERE payout_phone IS NOT NULL AND payout_phone != ''
+                    ) both_sides
+                    ORDER BY phone, id DESC
+                    """
+                )
+                for r in cash_rows:
+                    norm = _canon_phone(r["phone"])
+                    if norm:
+                        cash_status[norm] = r["transaction_status"]
 
         results = []
         for r in page:
@@ -1607,11 +1668,19 @@ async def whatsapp_conversations_attention(
                 row_domain = "recruitment"
             elif r["workflow_triggered"] == "escort_duty" or r["intent_detected"] == "escort_duty":
                 row_domain = "escort"
+            elif r["workflow_triggered"] == "attendance" or r["intent_detected"] == "attendance":
+                row_domain = "attendance"
+            elif r["workflow_triggered"] == "payment_due" or r["intent_detected"] == "payment_due":
+                row_domain = "cash"
 
             if row_domain == "recruitment" and phone in candidate_status:
                 state = resolve_recruitment_state(candidate_status[phone])
             elif row_domain == "escort" and phone in escort_status:
                 state = resolve_escort_state(escort_status[phone])
+            elif row_domain == "attendance" and phone in attendance_status:
+                state = resolve_attendance_state(attendance_status[phone])
+            elif row_domain == "cash" and phone in cash_status:
+                state = resolve_cash_state(cash_status[phone])
             else:
                 state = dict(UNKNOWN_STATE)
 

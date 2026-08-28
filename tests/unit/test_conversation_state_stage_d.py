@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import datetime, timezone
+
 from modules.conversation_state import (
     resolve_recruitment_state,
     resolve_escort_state,
+    resolve_attendance_state,
+    resolve_cash_state,
     RECRUITMENT_STATE_MAP,
     ESCORT_STATE_MAP,
+    ATTENDANCE_STATE_MAP,
+    CASH_STATE_MAP,
     UNKNOWN_STATE,
     STRUCTURED_STATE_SOURCE_CANDIDATES,
 )
@@ -106,10 +112,67 @@ class TestEscortStateMapping:
         )
 
 
+class TestAttendanceStateMapping:
+    """Stage E6: linkage proven deterministic (wbom_employees.employee_mobile
+    -> employee_id -> wbom_attendance, the same resolution
+    modules.identity_brain._lookup_attendance_identity already uses live).
+    State derives from approved_at nullability (modules.attendance's own
+    save_attendance(): approved_at = NOW() if approved_by else None),
+    never from the DUTY_STATUS_VALUES business fact (Present/Half Day/
+    Absent) which is a different concept."""
+
+    def test_approved_record_is_resolved(self):
+        state = resolve_attendance_state(datetime(2026, 8, 28, tzinfo=timezone.utc))
+        assert state["state"] == "resolved"
+        assert state["requires_action"] is False
+
+    def test_unapproved_record_requires_company_action(self):
+        state = resolve_attendance_state(None)
+        assert state["state"] == "waiting_for_company"
+        assert state["next_actor"] == "company"
+        assert state["requires_action"] is True
+
+    def test_map_has_exactly_two_states_true_and_false(self):
+        assert set(ATTENDANCE_STATE_MAP) == {True, False}
+
+
+class TestCashStateMapping:
+    """Stage E7: linkage via fpe_cash_transactions.{employee_phone,
+    employee_id_phone,payout_phone} (same canonical BD phone format,
+    normalized the same way). transaction_status is the genuine, dominant,
+    already-live state field (live distribution confirmed during
+    investigation: final=4390, pending=27, reversed=1)."""
+
+    def test_pending_requires_company_action(self):
+        state = resolve_cash_state("pending")
+        assert state["state"] == "waiting_for_company"
+        assert state["next_actor"] == "company"
+        assert state["requires_action"] is True
+
+    @pytest.mark.parametrize("status", ["final", "reversed"])
+    def test_final_and_reversed_are_resolved(self, status):
+        state = resolve_cash_state(status)
+        assert state["state"] == "resolved"
+        assert state["requires_action"] is False
+
+    def test_none_is_unclear(self):
+        assert resolve_cash_state(None)["state"] == "unclear"
+
+    def test_unmapped_value_falls_back_to_unknown(self):
+        assert resolve_cash_state("some_future_status") == UNKNOWN_STATE
+
+    def test_only_uses_states_actually_present_in_schema_not_invented(self):
+        """Never invents e.g. 'submitted'/'disputed' from the Stage E7
+        example list -- only the 3 real transaction_status values found
+        live are mapped."""
+        assert set(k for k in CASH_STATE_MAP if k is not None) == {"pending", "final", "reversed"}
+
+
 class TestDisclosedGaps:
-    def test_operations_candidates_are_reported_not_silently_wired(self):
-        assert "attendance" in STRUCTURED_STATE_SOURCE_CANDIDATES
-        assert "cash" in STRUCTURED_STATE_SOURCE_CANDIDATES
+    def test_attendance_and_cash_are_no_longer_reported_as_unwired(self):
+        """Stage E6/E7 wired what Stage D7 had only found -- the
+        candidates dict must now be empty, not stale."""
+        assert STRUCTURED_STATE_SOURCE_CANDIDATES == {}
 
     def test_unknown_state_never_claims_action_required(self):
         assert UNKNOWN_STATE["requires_action"] is False

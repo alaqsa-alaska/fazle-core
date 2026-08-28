@@ -197,6 +197,106 @@ class TestDomainAndStateResolution:
         assert conv["current_state"] == "unclear"
 
 
+class TestStageEAttendanceAndCashDomains:
+    async def test_attendance_domain_resolves_via_employee_mobile_join(self, auth_headers):
+        calls = {"n": 0}
+
+        async def _fake_fetch_all(sql, *args):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [_conv_row(
+                    conversation_key="8801812462634:bridge2", canonical_phone="8801812462634",
+                    intent_detected=None, workflow_triggered="attendance",
+                )]
+            if "wbom_attendance" in sql:
+                return [{"phone": "8801812462634", "approved_at": None}]
+            return []
+
+        with patch("app.main.fetch_all", new=_fake_fetch_all):
+            async with await _client() as ac:
+                resp = await ac.get(
+                    "/api/whatsapp/conversations/attention",
+                    params={"domain": "attendance"}, headers=auth_headers,
+                )
+        conv = resp.json()["conversations"][0]
+        assert conv["domain"] == "attendance"
+        assert conv["current_state"] == "waiting_for_company"
+        assert conv["requires_action"] is True
+
+    async def test_cash_domain_resolves_via_transaction_status(self, auth_headers):
+        calls = {"n": 0}
+
+        async def _fake_fetch_all(sql, *args):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [_conv_row(
+                    conversation_key="8801786178090:bridge1", canonical_phone="8801786178090",
+                    intent_detected="payment_due", workflow_triggered=None,
+                )]
+            if "fpe_cash_transactions" in sql:
+                return [{"phone": "8801786178090", "transaction_status": "pending"}]
+            return []
+
+        with patch("app.main.fetch_all", new=_fake_fetch_all):
+            async with await _client() as ac:
+                resp = await ac.get(
+                    "/api/whatsapp/conversations/attention",
+                    params={"domain": "cash"}, headers=auth_headers,
+                )
+        conv = resp.json()["conversations"][0]
+        assert conv["domain"] == "cash"
+        assert conv["current_state"] == "waiting_for_company"
+        assert conv["requires_action"] is True
+
+    async def test_unfiltered_domain_skips_the_expensive_cash_scan_only_when_narrowed(self, auth_headers):
+        """domain=recruitment must not trigger a fpe_cash_transactions scan
+        -- that table is large (~4.4k rows across 3 unioned phone columns);
+        no reason to pay for it on a narrowed, unrelated query."""
+        queried_tables = []
+
+        async def _fake_fetch_all(sql, *args):
+            for t in ("wbom_candidates", "wbom_escort_programs", "wbom_attendance", "fpe_cash_transactions"):
+                if t in sql:
+                    queried_tables.append(t)
+            if "conversation_key" in sql and "DISTINCT ON" in sql and "wbom_whatsapp_messages" in sql:
+                return [_conv_row(intent_detected="recruitment")]
+            return []
+
+        with patch("app.main.fetch_all", new=_fake_fetch_all):
+            async with await _client() as ac:
+                await ac.get(
+                    "/api/whatsapp/conversations/attention",
+                    params={"domain": "recruitment"}, headers=auth_headers,
+                )
+        assert "fpe_cash_transactions" not in queried_tables
+        assert "wbom_attendance" not in queried_tables
+        assert "wbom_escort_programs" not in queried_tables
+        assert "wbom_candidates" in queried_tables
+
+    async def test_unsupported_domain_string_never_fabricates_state(self, auth_headers):
+        """An unrecognized domain= value must not silently match anything
+        -- Stage E9's "do not make the endpoint pretend unsupported
+        domains are supported"."""
+        calls = {"n": 0}
+
+        async def _fake_fetch_all(sql, *args):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [_conv_row(intent_detected="some_unmapped_domain", workflow_triggered="some_unmapped_domain")]
+            return []
+
+        with patch("app.main.fetch_all", new=_fake_fetch_all):
+            async with await _client() as ac:
+                resp = await ac.get(
+                    "/api/whatsapp/conversations/attention",
+                    params={"domain": "some_unmapped_domain"}, headers=auth_headers,
+                )
+        conv = resp.json()["conversations"][0]
+        assert conv["domain"] is None
+        assert conv["current_state"] == "unclear"
+        assert conv["requires_action"] is False
+
+
 class TestFilters:
     async def test_domain_filter_adds_condition(self, auth_headers):
         captured = {}

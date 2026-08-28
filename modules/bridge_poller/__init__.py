@@ -294,11 +294,21 @@ def _fetch_new_messages(
     messages_db: str,
     whatsapp_db: str,
     since_ts: datetime,
+    approved_group_jids: tuple = (),
 ) -> tuple[list[dict], datetime]:
     """
     Fetch inbound personal messages newer than since_ts from SQLite.
     Returns (messages, max_ts_seen).
     Runs synchronously — call via run_in_executor.
+
+    approved_group_jids (Stage E3, 2026-08-28): the blanket "@g.us
+    excluded" rule (Owner directive 2026-04-27, see this module's own
+    docstring) still applies to every group EXCEPT the explicit JIDs in
+    this tuple -- sourced only from modules.group_identity.
+    list_approved_group_jids() (business_label IS NOT NULL), never a
+    literal hand-typed here. Empty tuple (the default, and every caller
+    except _poll_bridge's own live call site) reproduces the exact prior
+    behavior byte-for-byte -- no group ever gets through.
     """
     messages: list[dict] = []
     max_ts = since_ts
@@ -316,8 +326,18 @@ def _fetch_new_messages(
         ts_utc = since_ts.astimezone(timezone.utc).replace(microsecond=0)
         ts_iso = ts_utc.isoformat(sep=" ")
 
+        _query_params: dict = {"since": ts_iso}
+        _group_exception_sql = "0"  # SQLite: always-false placeholder when no group is approved
+        if approved_group_jids:
+            _placeholders = []
+            for i, jid in enumerate(approved_group_jids):
+                key = f"approved_jid_{i}"
+                _query_params[key] = jid
+                _placeholders.append(f":{key}")
+            _group_exception_sql = f"chat_jid IN ({', '.join(_placeholders)})"
+
         rows = con.execute(
-            """
+            f"""
             SELECT id, chat_jid, sender, content, timestamp, media_type, processed_text,
                    filename, url
             FROM messages
@@ -325,7 +345,7 @@ def _fetch_new_messages(
               AND datetime(timestamp) > datetime(:since)
               AND chat_jid NOT LIKE '%@newsletter'
               AND chat_jid != 'status@broadcast'
-              AND chat_jid NOT LIKE '%@g.us'
+              AND (chat_jid NOT LIKE '%@g.us' OR {_group_exception_sql})
               AND (media_type IS NULL
                    OR media_type NOT IN ('reaction', 'receipt', 'revoke', 'deleted', 'protocol'))
               AND (
@@ -336,22 +356,26 @@ def _fetch_new_messages(
             ORDER BY datetime(timestamp) ASC
             LIMIT 50
             """,
-            {"since": ts_iso},
+            _query_params,
         ).fetchall()
 
         # v1.0.2: visibility on what we filter out (groups/newsletters/status)
+        # Stage E3: an approved group is genuinely persisted, not skipped
+        # -- excluded from the "groups" skip count so this metric stays
+        # accurate (same _group_exception_sql/_query_params as the main
+        # query above).
         try:
             skipped_row = con.execute(
-                """
+                f"""
                 SELECT
-                  SUM(CASE WHEN chat_jid LIKE '%@g.us' THEN 1 ELSE 0 END) AS groups,
+                  SUM(CASE WHEN chat_jid LIKE '%@g.us' AND NOT ({_group_exception_sql}) THEN 1 ELSE 0 END) AS groups,
                   SUM(CASE WHEN chat_jid LIKE '%@newsletter' THEN 1 ELSE 0 END) AS newsletters,
                   SUM(CASE WHEN chat_jid = 'status@broadcast' THEN 1 ELSE 0 END) AS status
                 FROM messages
                 WHERE is_from_me = 0
                   AND datetime(timestamp) > datetime(:since)
                 """,
-                {"since": ts_iso},
+                _query_params,
             ).fetchone()
             if skipped_row:
                 from modules import observability as _obs
@@ -855,8 +879,14 @@ async def _poll_bridge(config: dict):
         try:
             _had_activity = False
             loop = asyncio.get_event_loop()
+            # Stage E3: local import to avoid a circular top-level import
+            # (modules.group_identity itself imports from this module) --
+            # same deferred-import convention already used throughout this
+            # file for modules.escort/modules.identity_brain/etc.
+            from modules.group_identity import list_approved_group_jids
+            _approved_group_jids = tuple(await list_approved_group_jids())
             messages, new_cursor = await loop.run_in_executor(
-                None, _fetch_new_messages, messages_db, whatsapp_db, cursor
+                None, _fetch_new_messages, messages_db, whatsapp_db, cursor, _approved_group_jids
             )
 
             if messages:
@@ -866,6 +896,7 @@ async def _poll_bridge(config: dict):
             dedup_skipped = 0
             inbound_saved = 0
             unresolved_router_skipped = 0
+            group_read_index_saved = 0  # Stage E3: approved-group messages, persisted, never routed
 
             for msg in messages:
                 msg_id: str = msg["id"]
@@ -886,6 +917,41 @@ async def _poll_bridge(config: dict):
                 # safe branch). See process_message()'s docstring.
                 _is_extracted_media = False
                 core_message_id = await _save_raw_core_copy(bridge_name, msg, phone, text)
+
+                # Stage E3 (2026-08-28, controlled Office-group ingestion):
+                # PERSISTENCE != AUTOMATION. This point is only ever
+                # reached for a group JID present in _fetch_new_messages'
+                # own approved-group allowlist -- the SQL query itself
+                # still blanket-excludes every other @g.us chat (Owner
+                # directive 2026-04-27, see this module's own docstring).
+                # Re-checked here as a second, independent enforcement
+                # point regardless -- same defense-in-depth pattern
+                # modules.escort's trusted_group_jid exception already
+                # established (SQL-level restriction + an explicit
+                # code-level check that doesn't trust the SQL alone) --
+                # so a future refactor of the SQL query can never silently
+                # widen automation exposure to an unapproved group.
+                # Deliberately stops HERE: no OCR, no identity detection,
+                # no process_bridge_inbound() (routing/recruitment/
+                # employee/customer automation, admin-command parsing,
+                # Hermes relay, AI auto-reply) for ANY group message,
+                # approved or not -- the raw copy is already persisted
+                # with conversation_key/actor_type/direction/timestamp/
+                # provider message ref (Stage D2/D1). intent_detected/
+                # workflow_triggered are deliberately left NULL for group
+                # messages this stage (Stage E4: "intent/domain only where
+                # classifier semantics are valid" -- not yet judged valid
+                # for group content, which can be very different in
+                # character from a 1:1 conversation). Marks the queue row
+                # to a terminal state so fazle_message_queue never sits
+                # stuck at "processing" -- the exact incident class the
+                # 2026-07-09..12 fix above (see that comment) closed for a
+                # different cause; same discipline applied here.
+                _group_chat_jid = str(msg.get("chat_jid") or "")
+                if _group_chat_jid.endswith("@g.us"):
+                    group_read_index_saved += 1
+                    await _mark_core_queue_status(bridge_name, msg, "skipped", "group_read_index_only")
+                    continue
 
                 # Bridge-side OCR may already populate processed_text. Previously
                 # release images with processed_text skipped the release workflow
@@ -1315,12 +1381,13 @@ async def _poll_bridge(config: dict):
 
             if bridge_name == "bridge1":
                 log.info(
-                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d cursor_from=%s cursor_to=%s",
+                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d cursor_from=%s cursor_to=%s",
                     bridge_name,
                     len(messages),
                     dedup_skipped,
                     inbound_saved,
                     unresolved_router_skipped,
+                    group_read_index_saved,
                     cursor.isoformat(),
                     new_cursor.isoformat(),
                 )

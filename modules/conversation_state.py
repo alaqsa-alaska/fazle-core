@@ -104,17 +104,64 @@ def resolve_escort_state(status: Optional[str]) -> ConversationState:
     return ESCORT_STATE_MAP.get(status, dict(UNKNOWN_STATE))  # type: ignore[return-value]
 
 
-# ── Operations domains investigated but NOT wired (Stage D7, disclosed) ──
-# wbom_attendance.status and fpe_cash_transactions.{transaction_status,
-# approval_status,review_status} both exist as real, deterministic,
-# already-live structured state -- confirmed present, NOT confirmed
-# reliably joinable to a WhatsApp conversation_key within this stage
-# (would need the same per-domain phone/message-linkage verification pass
-# escort received; not done here). Reported as
-# STRUCTURED_STATE_SOURCE_CANDIDATE, not wired into the attention query,
-# rather than wiring an unverified join and risking a false
-# requires_action claim.
-STRUCTURED_STATE_SOURCE_CANDIDATES: dict[str, str] = {
-    "attendance": "wbom_attendance.status (join-verification not done this stage)",
-    "cash": "fpe_cash_transactions.{transaction_status,approval_status,review_status} (join-verification not done this stage)",
+# ── Attendance (Stage E6) ─────────────────────────────────────────────
+# Stage D7 found wbom_attendance.status but did not verify linkage. Traced
+# this stage: wbom_attendance has no phone column at all -- it links via
+# employee_id only. The authoritative phone->employee_id resolution
+# already exists in production (modules.identity_brain._lookup_employee /
+# _lookup_attendance_identity: wbom_employees.employee_mobile, normalized
+# via the same _phone_variants() every other identity-resolution call in
+# this codebase already uses) -- reused here, not reinvented.
+#
+# The genuine WORKFLOW state (what "requires action" needs) is NOT
+# status ('Present'/'Half Day'/'Absent' -- a business FACT about the day,
+# see modules.attendance.crud.DUTY_STATUS_VALUES, not a pending/done
+# signal) -- it's the approval pipeline: modules.attendance.__init__.
+# save_attendance() sets `approved_at = NOW() if approved_by else None`
+# (confirmed by reading that function directly, migration 040, Owner
+# decision 2026-07-11) -- so approved_at IS NULL is a real, code-enforced
+# "not yet approved" signal, not a guess.
+ATTENDANCE_STATE_MAP: dict[bool, ConversationState] = {
+    True: {"state": "resolved", "next_actor": "none", "requires_action": False, "state_source": "wbom_attendance.approved_at"},
+    False: {"state": "waiting_for_company", "next_actor": "company", "requires_action": True, "state_source": "wbom_attendance.approved_at"},
 }
+
+
+def resolve_attendance_state(approved_at) -> ConversationState:
+    """approved_at: the latest wbom_attendance row's approved_at value for
+    this employee (a datetime, or None if that row is not yet approved).
+    Only call this once an actual attendance row was found for the
+    employee -- a phone that resolves to an employee with NO attendance
+    row at all should be reported as UNKNOWN_STATE by the caller instead,
+    not routed through here (a missing record is not the same claim as
+    "record exists but pending approval")."""
+    return dict(ATTENDANCE_STATE_MAP[approved_at is not None])  # type: ignore[return-value]
+
+
+# ── Cash / Payment (Stage E7) ────────────────────────────────────────────
+# fpe_cash_transactions has direct phone columns (employee_phone,
+# employee_id_phone, payout_phone -- same "01XXXXXXXXX" canonical BD
+# format as escort's master_mobile/wbom_employees.employee_mobile,
+# normalized via the same modules.number_identity.canonical_phone()) and
+# a real FK to fpe_employees(id) -- the OTHER employee identity system
+# (see CLAUDE.md: wbom_employees/fpe_employees are bridged, not merged).
+# transaction_status is the genuine, dominant, already-live state field
+# (confirmed live distribution: final=4390, pending=27, reversed=1) --
+# approval_status/review_status track the SAME pending/approved
+# distinction from two other angles on the same 27 pending rows, kept as
+# additional evidence but transaction_status alone already answers
+# "does this need company attention".
+CASH_STATE_MAP: dict[Optional[str], ConversationState] = {
+    None: {"state": "unclear", "next_actor": "unknown", "requires_action": False, "state_source": "fpe_cash_transactions.transaction_status"},
+    "pending": {"state": "waiting_for_company", "next_actor": "company", "requires_action": True, "state_source": "fpe_cash_transactions.transaction_status"},
+    "final": {"state": "resolved", "next_actor": "none", "requires_action": False, "state_source": "fpe_cash_transactions.transaction_status"},
+    "reversed": {"state": "resolved", "next_actor": "none", "requires_action": False, "state_source": "fpe_cash_transactions.transaction_status"},
+}
+
+
+def resolve_cash_state(transaction_status: Optional[str]) -> ConversationState:
+    return CASH_STATE_MAP.get(transaction_status, dict(UNKNOWN_STATE))  # type: ignore[return-value]
+
+
+# ── Operations domains still NOT wired (unchanged from Stage D7) ────────
+STRUCTURED_STATE_SOURCE_CANDIDATES: dict[str, str] = {}
