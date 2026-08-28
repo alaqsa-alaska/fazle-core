@@ -1898,6 +1898,7 @@ async def _handle_meta_message(msg: dict, value: dict):
         direction="inbound",
         msg_type=msg_type or "text",
         extracted_text=extracted_text,
+        actor_type="external_user",
         source_message_ref=message_id,
         metadata={"delivery_state": "received", "meta_message_id": message_id},
     )
@@ -1950,7 +1951,7 @@ async def _handle_meta_message(msg: dict, value: dict):
                     await _save_draft("meta", sender, reply, "recruitment")
                     return
                 if qid:
-                    await _save_message("meta", sender, reply, direction="outbound")
+                    await _save_message("meta", sender, reply, direction="outbound", actor_type="automation")
                     await _record_meta_delivery_state(message_id, "queued")
                     log.info("[META] queued recruitment reply sender=%s qid=%s", sender, qid)
                 else:
@@ -2042,7 +2043,7 @@ async def _dispatch_meta_channel_message(
                 meta={"customer_reply": True, "channel": channel},
             )
             if qid:
-                await _save_message(channel, sender_id, reply, direction="outbound")
+                await _save_message(channel, sender_id, reply, direction="outbound", actor_type="automation")
                 _meta_log_event("meta_outbound_queued", channel=channel, queue_id=qid)
             else:
                 log.info(f"[{channel.upper()}] reply enqueue deduplicated for {sender_id}")
@@ -2125,7 +2126,7 @@ async def _handle_messenger_message(messaging: dict):
         return
 
     log.info(f"[MESSENGER] from={sender_id} text={text[:60]!r}")
-    await _save_message("messenger", sender_id, text, direction="inbound", source_message_ref=message_id or "")
+    await _save_message("messenger", sender_id, text, direction="inbound", source_message_ref=message_id or "", actor_type="external_user")
 
     from modules.preflight_guard import is_feature_active
     if is_feature_active("meta_messenger_inbound", default=False):
@@ -2167,7 +2168,7 @@ async def _handle_messenger_message(messaging: dict):
                 log.info(f"[RECRUIT-AUTOREPLY] sending Messenger reply to {sender_id} (SAFE MODE bypass)")
             ok = await _send_messenger(sender_id, reply)
             if ok:
-                await _save_message("messenger", sender_id, reply, direction="outbound")
+                await _save_message("messenger", sender_id, reply, direction="outbound", actor_type="automation")
         else:
             log.info(f"[MESSENGER] SAFE MODE: reply suppressed for {sender_id}")
 
@@ -2206,7 +2207,7 @@ async def _handle_instagram_message(messaging: dict):
         return
 
     log.info(f"[INSTAGRAM] from={sender_id} text={text[:60]!r}")
-    await _save_message("instagram", sender_id, text, direction="inbound", source_message_ref=message_id or "")
+    await _save_message("instagram", sender_id, text, direction="inbound", source_message_ref=message_id or "", actor_type="external_user")
 
     from modules.preflight_guard import is_feature_active
     if not is_feature_active("meta_instagram_inbound", default=False):
@@ -2245,7 +2246,7 @@ async def _handle_fb_comment(value: dict):
         return
 
     log.info(f"[FB-COMMENT] from={sender_name}({sender_id}) comment_id={comment_id} text={text[:60]!r}")
-    await _save_message("fb_comment", sender_id or comment_id, text, direction="inbound")
+    await _save_message("fb_comment", sender_id or comment_id, text, direction="inbound", actor_type="external_user")
 
     try:
         await ingest_social_event(
@@ -2280,7 +2281,7 @@ async def _handle_fb_comment(value: dict):
     )
     ok = await _send_fb_comment_reply(comment_id, recruit_reply)
     if ok:
-        await _save_message("fb_comment", sender_id or comment_id, recruit_reply, direction="outbound")
+        await _save_message("fb_comment", sender_id or comment_id, recruit_reply, direction="outbound", actor_type="automation")
 
 
 # ── Bridge 1 Webhook ───────────────────────────────────────────────────────────
@@ -2423,6 +2424,7 @@ async def _handle_bridge_event(payload: dict, source: str):
                 source, sender_clean, text, direction="inbound",
                 identity_role=_id_role, identity_confidence=_id_conf,
                 msg_type=media_type if media_type else "text",
+                actor_type="external_user",
             )
         except Exception as _save_err:
             if dedup_id and pre_marked:
@@ -2867,7 +2869,17 @@ async def _save_message(
     msg_type: str = "text",
     source_message_ref: str = "",
     metadata: Optional[dict] = None,
+    actor_type: str = "",
+    actor_id: str = "",
 ):
+    """actor_type/actor_id (2026-08-28, Stage B1/B4): same attribution
+    concept as modules.bridge_poller._save_message's own actor_type/
+    actor_id -- who/what produced this row, never identity_role (the
+    counterparty). Every existing caller here is either genuine inbound
+    (external_user) or fazle-core's own Meta auto-reply cascade
+    (automation) -- passed explicitly at each call site below, never
+    inferred from message text. Optional/blank keeps this backward
+    compatible with any caller that doesn't pass it."""
     _receiver = receiver_number or _source_to_receiver(source)
     _conv_key = f"{sender}:{source}" if sender else None
     try:
@@ -2888,6 +2900,8 @@ async def _save_message(
             "extracted_text",
             "source_message_ref",
             "metadata_json",
+            "actor_type",
+            "actor_id",
         )
         present_columns = await _existing_columns(table, candidate_columns)
 
@@ -2908,6 +2922,8 @@ async def _save_message(
             "extracted_text": extracted_text or None,
             "source_message_ref": source_message_ref or None,
             "metadata_json": json.dumps(metadata or {}),
+            "actor_type": actor_type or None,
+            "actor_id": actor_id or None,
         }
 
         core_columns = ["sender_number", "message_body", "direction", "platform"]
@@ -2924,6 +2940,8 @@ async def _save_message(
             "extracted_text",
             "source_message_ref",
             "metadata_json",
+            "actor_type",
+            "actor_id",
         ]
         columns.extend(c for c in optional_columns if c in present_columns)
 

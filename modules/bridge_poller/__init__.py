@@ -1306,6 +1306,7 @@ async def _poll_bridge(config: dict):
                         chat_jid=msg.get("chat_jid") or "",
                         msg_timestamp=_parse_source_timestamp(msg.get("timestamp")),
                         is_extracted_media=_is_extracted_media,
+                        core_message_id=core_message_id,
                     )
                     await _mark_core_queue_status(bridge_name, msg, "done")
                 except Exception as route_err:
@@ -1545,6 +1546,42 @@ async def _poll_bridge(config: dict):
                     # _deliver_hermes_reply(), unchanged and unaffected by
                     # this fallback.
                     if bridge_name == "bridge2" and not is_trusted_group_msg:
+                        # 2026-08-28 (Stage B3 -- canonical-history
+                        # persistence): records this device-originated
+                        # Admin message, independent of and before the
+                        # command processing below. direction='outbound'
+                        # -- this is a genuine is_from_me=1 WhatsApp
+                        # transport-outbound message; Fazle Core consuming
+                        # it as an admin instruction is a business-purpose
+                        # classification (workflow_triggered=
+                        # "admin_instruction"), never a transport-direction
+                        # reinterpretation (Owner directive, Stage A
+                        # Correction 1). actor_type='human_device' -- typed
+                        # on the linked phone itself, not fazle-core
+                        # automation and not the real Hermes agent.
+                        # Idempotent via source_message_ref=omsg_id (the
+                        # same WhatsApp message id _mark_outgoing_processed()
+                        # already dedups command-processing on, above --
+                        # reused here only as a stable message_hash
+                        # reference, not a second command-dedup mechanism:
+                        # this INSERT can never itself execute anything, so
+                        # canonical persistence and command processing stay
+                        # independently idempotent). Best-effort, its own
+                        # try/except, never able to block or alter the
+                        # routing/execution below.
+                        try:
+                            await _save_message(
+                                bridge_name, admin_number, otext, "outbound",
+                                workflow="admin_instruction",
+                                actor_type="human_device",
+                                actor_id=admin_number,
+                                source_message_ref=omsg_id,
+                            )
+                        except Exception as _persist_exc:
+                            log.error(
+                                f"[{bridge_name}] self-chat canonical-history persist failed for msg {omsg_id}: {_persist_exc}"
+                            )
+
                         log.info(f"[{bridge_name}] outgoing unprefixed self-chat → routing to Hermes natural-query, msg={omsg_id}")
                         try:
                             ack = await process_admin_natural_query(
@@ -1814,6 +1851,14 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
         "bridge_store_preserved": True,
     }
     try:
+        # 2026-08-28 (Stage B1/B4): actor_type='external_user' -- the sender
+        # of a genuine is_from_me=0 inbound message. One disclosed, known
+        # exception (not fixed here, see migration 073's own comment): a
+        # Hermes admin-relay reply sent via bridge1 can land as a genuine
+        # is_from_me=0 inbound row here on bridge2 -- the cross-bridge echo
+        # case modules.message_router's own echo guard recognizes and
+        # silently ignores at the routing layer, which runs after this raw
+        # copy is already saved.
         row = await fetch_one(
             """
             INSERT INTO wbom_whatsapp_messages
@@ -1821,9 +1866,9 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
                  direction, platform, is_processed, contact_identifier,
                  receiver_number, conversation_key, source_message_ref,
                  source_timestamp, source_context, message_hash,
-                 canonical_phone, phone_last10, metadata_json)
+                 canonical_phone, phone_last10, metadata_json, actor_type)
             VALUES ($1, $2, $3, $4, 'inbound', $5, false, $1,
-                    $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14::jsonb)
+                    $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14::jsonb, 'external_user')
             ON CONFLICT (message_hash) DO UPDATE SET
                  source_timestamp = COALESCE(wbom_whatsapp_messages.source_timestamp, EXCLUDED.source_timestamp),
                  metadata_json = COALESCE(wbom_whatsapp_messages.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json
@@ -1963,26 +2008,66 @@ async def _save_message(
     intent_detected: str = "",
     msg_type: str = "text",
     extracted_text: str = "",
-):
+    actor_type: str = "",
+    actor_id: str = "",
+    source_message_ref: str = "",
+) -> Optional[int]:
+    """actor_type/actor_id (2026-08-28, Stage B1/B4 -- canonical-history
+    attribution): who/what produced THIS row's content -- a different
+    concept from identity_role (the counterparty's business identity,
+    unchanged). Every existing caller of this function is fazle-core's
+    own automated reply-generation (the customer-reply and internal
+    "admin-hermes-reply" AI-console cascades, and
+    recruitment_recovery_sweep's reconciliation of confirmed-sent
+    automation replies) -- each already passes actor_type="automation"
+    at its own call site, known with certainty there, never guessed here.
+    Optional/blank so every pre-existing caller (and any future one that
+    doesn't yet know its actor) keeps working unchanged -- stored as NULL,
+    not a fabricated default.
+
+    source_message_ref (2026-08-28, Stage B2/B3): optional stable
+    reference (an outbound queue row id, a WhatsApp message id, ...) that,
+    when given, is hashed with the exact same _core_message_hash()
+    convention _save_raw_core_copy() already uses for inbound rows, and
+    the INSERT becomes ON CONFLICT (message_hash) DO NOTHING -- genuine
+    idempotency on retry, reusing the table's own pre-existing unique
+    index (uq_wbom_messages_hash) rather than inventing a second dedup
+    mechanism. Omitted (the default): message_hash is stored as NULL,
+    byte-identical to this function's behavior before this parameter
+    existed -- NULL is never equal to any other value under the unique
+    index's own semantics, so pre-existing callers that don't pass this
+    can never spuriously collide with each other or with a caller that
+    does. Returns the inserted row's message_id, or None if the row
+    already existed (a genuine retry-noop) or an error occurred."""
     _receiver = _source_to_receiver(source)
     _conv_key = f"{sender}:{source}" if sender else None
+    _msg_hash = (
+        _core_message_hash(f"outbound:{source}", source_message_ref)
+        if source_message_ref else None
+    )
     try:
-        await execute(
+        row = await fetch_one(
             """
             INSERT INTO wbom_whatsapp_messages
                 (sender_number, message_body, message_type, direction,
                  platform, is_processed, contact_identifier,
                  identity_role, identity_confidence, workflow_triggered,
-                 receiver_number, conversation_key, intent_detected, extracted_text)
-            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12)
+                 receiver_number, conversation_key, intent_detected, extracted_text,
+                 actor_type, actor_id, message_hash)
+            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (message_hash) DO NOTHING
+            RETURNING message_id
             """,
             sender, text, msg_type, direction, source,
             identity_role or None, identity_confidence or None, workflow or None,
             _receiver or None, _conv_key,
             intent_detected or None, extracted_text or None,
+            actor_type or None, actor_id or None, _msg_hash,
         )
+        return int(row["message_id"]) if row else None
     except Exception as e:
         log.warning(f"Message save error: {e}")
+        return None
 
 
 def _source_to_receiver(source: str) -> str:
@@ -2083,12 +2168,23 @@ async def process_bridge_inbound(
     chat_jid: str = "",
     msg_timestamp=None,
     is_extracted_media: bool = False,
+    core_message_id: Optional[int] = None,
 ) -> None:
     """Unified bridge inbound processing pipeline.
 
     Called by both _poll_bridge() and the webhook handler in main.py after
     inbound save and identity detection.  Contains all safety gates so both
     entry paths behave identically.
+
+    core_message_id (2026-08-28, Stage B5): the wbom_whatsapp_messages row
+    id _save_raw_core_copy() already returned for this exact message, when
+    the caller has it (only _poll_bridge()'s own SQLite-polling path does
+    today -- the webhook path defaults to None and simply skips the
+    intent-persistence step below, unchanged from before this parameter
+    existed). Threaded through so the genuine inbound intent
+    classify_intent() computes below can be written onto the SAME row the
+    raw text was already captured on -- "capture/persist first, classify
+    later," never a second copy of the message.
 
     Does NOT save the inbound message — callers must do that beforehand.
 
@@ -2130,11 +2226,35 @@ async def process_bridge_inbound(
     # does NOT block, step 3 below still runs its own (idempotent, cheap)
     # eligibility check for msg_intent/draft-gate purposes as it always did.
     msg_intent = classify_intent(text)
+    # 2026-08-28 (Stage B5 -- genuine inbound intent persistence): snapshot
+    # classify_intent()'s own raw output (e.g. "salary_query",
+    # "escort_duty", "complaint" -- see modules.intent.INTENT_KEYWORDS)
+    # BEFORE the recruitment-eligibility override two lines below can
+    # coarsen it to "recruitment". msg_intent itself is left completely
+    # unchanged for every existing downstream use (workflow_triggered
+    # tagging, draft-gate logic, etc.) -- this snapshot is a read-only
+    # side observation, never fed back into routing/reply logic. This is
+    # the actual, already-computed inbound intent the workflow_triggered
+    # column has never carried (that column reflects the coarser
+    # domain/workflow OUTCOME on the reply, not this).
+    _raw_inbound_intent = msg_intent
     recruit_decision = await recruitment_eligibility(
         phone, text, role=id_role, intent=msg_intent, source=bridge_name,
     )
     if recruit_decision["eligible"]:
         msg_intent = "recruitment"
+    if core_message_id is not None and _raw_inbound_intent:
+        try:
+            await execute(
+                "UPDATE wbom_whatsapp_messages SET intent_detected = $1 "
+                "WHERE message_id = $2 AND intent_detected IS NULL",
+                _raw_inbound_intent, core_message_id,
+            )
+        except Exception as _intent_persist_exc:
+            log.warning(
+                "[%s] intent_detected persist failed for message_id=%s: %s",
+                bridge_name, core_message_id, _intent_persist_exc,
+            )
 
     # 1. Cooldown
     _cooldown_blocked = not await _can_reply(phone)
@@ -2309,7 +2429,7 @@ async def process_bridge_inbound(
                     await _record_reply(phone)
                     await _save_message(bridge_name, phone, reply, "outbound",
                                         identity_role=id_role, identity_confidence=id_conf,
-                                        workflow=msg_intent)
+                                        workflow=msg_intent, actor_type="automation")
                     log.info(
                         "[%s] Admin-Hermes reply sent directly (customer safety "
                         "cascade bypassed for admin role) to %s qid=%s",
@@ -2517,7 +2637,7 @@ async def process_bridge_inbound(
                         await _record_reply(phone)
                         await _save_message(bridge_name, phone, reply, "outbound",
                                             identity_role=id_role, identity_confidence=id_conf,
-                                            workflow=msg_intent)
+                                            workflow=msg_intent, actor_type="automation")
                         log.info("[%s] Queued reply to %s qid=%s", bridge_name, phone, qid)
                     else:
                         log.warning("[%s] Reply enqueue failed/deduped for %s", bridge_name, phone)

@@ -580,15 +580,44 @@ async def _deliver_hermes_reply(request_text: str, sender_phone: str, source_bri
     )
     _remember_hermes_session(source_bridge, sender_phone, new_session_id)
 
+    _delivered_body = f"🤖 Hermes:\n{reply_text}"
+    _qid = None
     try:
-        await outbound.enqueue(
+        _qid = await outbound.enqueue(
             sender_phone,
-            f"🤖 Hermes:\n{reply_text}",
+            _delivered_body,
             source_bridge=source_bridge,
             purpose="hermes_relay_reply",
         )
     except Exception as exc:
         log.error("[admin_ai_router] hermes relay reply enqueue failed for %s: %s", sender_phone, exc)
+
+    # 2026-08-28 (Stage B2 -- canonical-history persistence): a separate,
+    # best-effort step from the delivery above, never able to affect it --
+    # this only records what was already (successfully) queued into the
+    # canonical wbom_whatsapp_messages table; fazle_outbound_queue remains
+    # the sole delivery authority, this is history, not a second queue.
+    # Skipped when _qid is None (enqueue failed, or outbound.enqueue()'s
+    # own idempotency_key dedup already absorbed a genuine retry) --
+    # nothing new was actually queued in that case, so there is nothing
+    # new to record. source_message_ref=f"hermes_relay_reply:{_qid}" makes
+    # this idempotent on any future retry of this same delivered row via
+    # the same _core_message_hash/ON CONFLICT mechanism
+    # _save_raw_core_copy() already uses for inbound.
+    if _qid:
+        try:
+            from modules.bridge_poller import _save_message
+            await _save_message(
+                source_bridge, sender_phone, _delivered_body, "outbound",
+                workflow="hermes_relay_reply",
+                actor_type="hermes", actor_id="hermes-runner",
+                source_message_ref=f"hermes_relay_reply:{_qid}",
+            )
+        except Exception as _persist_exc:
+            log.error(
+                "[admin_ai_router] hermes relay reply canonical-history persist failed for %s: %s",
+                sender_phone, _persist_exc,
+            )
 
 
 # ── Phase 5B (2026-08-04): proactive alert-triggered investigation ──────────

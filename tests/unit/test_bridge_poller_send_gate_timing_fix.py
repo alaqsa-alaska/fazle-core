@@ -135,11 +135,16 @@ class TestElapsedTimeConditionReal:
     not the full async loop itself."""
 
     def test_check_does_not_fire_before_interval_elapses(self):
-        interval = 0.2  # seconds -- scaled down from 300s for a fast test
+        # Generous margin (interval far exceeds the nominal sleep total)
+        # so scheduler jitter under host load can't flip this real-time
+        # assertion -- this session independently observed genuine ambient
+        # CPU spikes up to 135% load on this box, so a tight margin here
+        # would itself be flaky, unrelated to the mechanism under test.
+        interval = 2.0  # seconds -- scaled down from 300s for a fast test
         last_check = time.monotonic()
         # Simulate several "idle" iterations, each shorter than the interval.
         for _ in range(5):
-            time.sleep(interval / 10)
+            time.sleep(0.05)
             now = time.monotonic()
             fired = (now - last_check) >= interval
             assert fired is False, "must not fire before the real interval has elapsed"

@@ -83,7 +83,9 @@ class TestDispatchMetaChannelMessage:
         assert kwargs["source_bridge"] == "messenger"
         assert kwargs["purpose"] == "customer-reply:messenger"
         assert kwargs["idempotency_key"]  # non-empty, derived from sender+message id
-        mock_save.assert_awaited_once_with("messenger", "PSID123", "reply text", direction="outbound")
+        mock_save.assert_awaited_once_with(
+            "messenger", "PSID123", "reply text", direction="outbound", actor_type="automation",
+        )
         mock_draft.assert_not_awaited()
 
     async def test_live_send_off_drafts_instead_of_sending(self):

@@ -66,11 +66,15 @@ class TestExplicitHermesPrefixPathUnchanged:
 
 class TestNaturalLanguageFallbackWiring:
     def test_fallback_block_present_and_calls_process_admin_natural_query(self):
+        # 2026-08-28 (Stage B3): a canonical-history persistence block
+        # (its own comment + try/except) was added at the very start of
+        # this `if` body, ahead of the natural-query call -- widening the
+        # search windows below accordingly, same content, further away.
         source = _outgoing_scan_source()
         assert 'if bridge_name == "bridge2" and not is_trusted_group_msg:' in source
         fallback_idx = source.index('if bridge_name == "bridge2" and not is_trusted_group_msg:')
         call_idx = source.index("ack = await process_admin_natural_query(", fallback_idx)
-        assert call_idx - fallback_idx < 400
+        assert call_idx - fallback_idx < 3000
 
     def test_fallback_passes_admin_number_and_bridge_name_not_free_text_identity(self):
         """sender_phone must come from the trusted admin_number local (derived
@@ -78,7 +82,7 @@ class TestNaturalLanguageFallbackWiring:
         content -- so non-admin/spoofed text can never reach the relay."""
         source = _outgoing_scan_source()
         fallback_idx = source.index('if bridge_name == "bridge2" and not is_trusted_group_msg:')
-        block = source[fallback_idx:fallback_idx + 700]
+        block = source[fallback_idx:fallback_idx + 3300]
         assert "sender_phone=admin_number" in block
         assert "source_bridge=bridge_name" in block
 
@@ -91,14 +95,14 @@ class TestNaturalLanguageFallbackWiring:
         up."""
         source = _outgoing_scan_source()
         fallback_idx = source.index('if bridge_name == "bridge2" and not is_trusted_group_msg:')
-        block = source[fallback_idx:fallback_idx + 900]
+        block = source[fallback_idx:fallback_idx + 3500]
         assert "if ack:" in block
         assert 'idempotency_key=f"hermes-self-relay-nl:{omsg_id}"' in block
 
     def test_fallback_never_raises_out_of_the_scan_loop(self):
         source = _outgoing_scan_source()
         fallback_idx = source.index('if bridge_name == "bridge2" and not is_trusted_group_msg:')
-        block = source[fallback_idx:fallback_idx + 1400]
+        block = source[fallback_idx:fallback_idx + 4000]
         assert "except Exception as _hermes_nl_err:" in block
 
 
