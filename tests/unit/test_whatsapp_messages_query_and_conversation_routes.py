@@ -154,6 +154,45 @@ class TestFilters:
         assert "received_at >=" in captured["sql"]
         assert "received_at <=" in captured["sql"]
 
+    async def test_time_range_filters_are_bound_as_real_datetimes_not_strings(self, auth_headers):
+        """Regression test for a live bug: asyncpg rejects a raw str bound
+        parameter even with an explicit ::timestamptz SQL cast -- it
+        requires an actual datetime.datetime instance. The previous test
+        only checked the SQL fragment and would NOT have caught this;
+        this one asserts the actual bound-argument types, matching what
+        asyncpg itself enforces."""
+        captured = {}
+
+        async def _fake_fetch_all(sql, *args):
+            captured["args"] = args
+            return []
+
+        with patch("app.main.fetch_all", new=_fake_fetch_all):
+            async with await _client() as ac:
+                resp = await ac.get(
+                    "/api/whatsapp/messages/query",
+                    params={"start_time": "2026-08-28T00:00:00Z", "end_time": "2026-08-28T23:59:59Z"},
+                    headers=auth_headers,
+                )
+        assert resp.status_code == 200
+        assert resp.json().get("error") is None
+        dt_args = [a for a in captured["args"] if isinstance(a, datetime)]
+        assert len(dt_args) == 2
+        assert dt_args[0] == datetime(2026, 8, 28, 0, 0, 0, tzinfo=timezone.utc)
+        assert dt_args[1] == datetime(2026, 8, 28, 23, 59, 59, tzinfo=timezone.utc)
+
+    async def test_invalid_start_time_returns_clean_error_not_500(self, auth_headers):
+        with patch("app.main.fetch_all", new=AsyncMock(return_value=[])):
+            async with await _client() as ac:
+                resp = await ac.get(
+                    "/api/whatsapp/messages/query",
+                    params={"start_time": "not-a-timestamp"}, headers=auth_headers,
+                )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["messages"] == []
+        assert "error" in body and "start_time" in body["error"]
+
     async def test_combined_filters(self, auth_headers):
         captured = {}
 
@@ -367,3 +406,41 @@ class TestConversationHistory:
         assert body["count"] == 0
         assert body["messages"] == []
         assert body["has_more"] is False
+
+    async def test_time_range_filters_are_bound_as_real_datetimes_not_strings(self, auth_headers):
+        """Same regression as the /query endpoint's equivalent test --
+        this endpoint parses start_time/end_time independently and had
+        the identical live bug."""
+        captured = {}
+
+        async def _fake_fetch_all(sql, *args):
+            captured["args"] = args
+            return []
+
+        with patch("app.main.fetch_all", new=_fake_fetch_all):
+            async with await _client() as ac:
+                resp = await ac.get(
+                    "/api/whatsapp/messages/conversation",
+                    params={
+                        "conversation_key": "8801700000000:bridge3",
+                        "start_time": "2026-08-28T00:00:00Z",
+                        "end_time": "2026-08-28T23:59:59Z",
+                    },
+                    headers=auth_headers,
+                )
+        assert resp.status_code == 200
+        assert resp.json().get("error") is None
+        dt_args = [a for a in captured["args"] if isinstance(a, datetime)]
+        assert len(dt_args) == 2
+
+    async def test_invalid_end_time_returns_clean_error_not_500(self, auth_headers):
+        with patch("app.main.fetch_all", new=AsyncMock(return_value=[])):
+            async with await _client() as ac:
+                resp = await ac.get(
+                    "/api/whatsapp/messages/conversation",
+                    params={"conversation_key": "8801700000000:bridge3", "end_time": "garbage"},
+                    headers=auth_headers,
+                )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "error" in body and "end_time" in body["error"]

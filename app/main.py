@@ -1250,6 +1250,23 @@ def _decode_cursor(cursor: str):
     return _dt.fromisoformat(ts_str), int(mid_str)
 
 
+def _parse_time_filter(value: str, param_name: str):
+    """Parse a start_time/end_time query filter into a timezone-aware
+    datetime object. asyncpg requires an actual datetime.datetime
+    instance for a timestamptz bound parameter -- an explicit
+    ::timestamptz cast on the SQL side does NOT make it accept a raw
+    Python str (confirmed live: 'expected a datetime.date or
+    datetime.datetime instance, got str'). Same ISO-parse + Z-suffix +
+    UTC-default convention as modules.bridge_poller._parse_source_timestamp,
+    reused here for consistency rather than inventing a second one."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        ts = _dt.fromisoformat(str(value).replace("Z", "+00:00"))
+        return ts if ts.tzinfo else ts.replace(tzinfo=_tz.utc)
+    except Exception as exc:
+        raise ValueError(f"invalid {param_name}: {value!r}") from exc
+
+
 @app.get("/api/whatsapp/messages/query", dependencies=[Depends(require_api_key)])
 async def whatsapp_messages_query(
     start_time: str = "",
@@ -1293,10 +1310,10 @@ async def whatsapp_messages_query(
         params: list = []
 
         if start_time:
-            params.append(start_time)
+            params.append(_parse_time_filter(start_time, "start_time"))
             conditions.append(f"received_at >= ${len(params)}::timestamptz")
         if end_time:
-            params.append(end_time)
+            params.append(_parse_time_filter(end_time, "end_time"))
             conditions.append(f"received_at <= ${len(params)}::timestamptz")
         if platform:
             params.append(platform)
@@ -1392,10 +1409,10 @@ async def whatsapp_conversation_history(
         params: list = [conversation_key]
 
         if start_time:
-            params.append(start_time)
+            params.append(_parse_time_filter(start_time, "start_time"))
             conditions.append(f"received_at >= ${len(params)}::timestamptz")
         if end_time:
-            params.append(end_time)
+            params.append(_parse_time_filter(end_time, "end_time"))
             conditions.append(f"received_at <= ${len(params)}::timestamptz")
         if cursor:
             try:
