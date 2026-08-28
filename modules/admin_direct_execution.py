@@ -143,3 +143,35 @@ async def execute_trusted_employee_creation(
     body = EmployeeCreate(employee_name=parsed["employee_name"], employee_mobile=parsed["employee_mobile"])
     result = await create_employee(body)
     return {"ok": True, "stage": "executed", "result": result}
+
+
+def format_employee_create_card(result: dict) -> str:
+    """Stage H12 -- user-visible EMPLOYEE CREATE preview/result card.
+    Renders exactly what execute_trusted_employee_creation() returned --
+    never adds or invents a field the function itself did not produce."""
+    stage = result.get("stage")
+    if not result.get("ok"):
+        if result.get("needs_clarification"):
+            return f"⚠️ EMPLOYEE CREATE — স্পষ্ট করুন\n{result.get('error')}"
+        if stage == "duplicate_check":
+            return f"❌ EMPLOYEE CREATE — ইতিমধ্যে বিদ্যমান\n{result.get('error')}"
+        return f"❌ EMPLOYEE CREATE — ত্রুটি ({stage})\n{result.get('error')}"
+
+    if stage == "dry_run":
+        wc = result.get("would_create", {})
+        return (
+            "EMPLOYEE CREATE — PREVIEW (dry_run)\n"
+            f"Name: {wc.get('employee_name')}\n"
+            f"Mobile: {wc.get('employee_mobile')}\n"
+            "No record created yet."
+        )
+
+    r = result.get("result")
+    emp_id = getattr(r, "employee_id", None) or (r.get("employee_id") if isinstance(r, dict) else None)
+    emp_name = getattr(r, "employee_name", None) or (r.get("employee_name") if isinstance(r, dict) else None)
+    return (
+        "✅ EMPLOYEE CREATE — CREATED\n"
+        f"Employee ID: {emp_id}\n"
+        f"Name: {emp_name}\n"
+        "Created exactly once via the same create_employee() the frontend uses."
+    )

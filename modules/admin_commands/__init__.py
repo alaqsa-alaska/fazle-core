@@ -43,6 +43,10 @@ _HELP_TEXT = (
     "  EDIT <id> <নতুন বার্তা>\n"
     "  PAID <id> <amount> <method>\n"
     "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
+    "Cash transaction review (Stage H):\n"
+    "  CASH APPROVE <txn-ref>\n"
+    "  CASH REJECT <txn-ref> <reason>\n"
+    "  CASH REVERSE <txn-ref> <reason>   — final transactions only, always requires a reason\n\n"
     "বাংলা সংখ্যাও কাজ করে: APPROVE ১৬৫"
 )
 
@@ -201,6 +205,17 @@ _REVERSE_RE = re.compile(r"^reverse\s+\d+.*$", re.IGNORECASE)
 # ADJUST <draft_id> <amount> <method>
 _ADJUST_RE = re.compile(r"^adjust\s+\d+.*$", re.IGNORECASE)
 
+# ── Stage H6/H7/H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE ──────────────
+# Distinct from the bare (pre-existing, never-wired) REVERSE/ADJUST above --
+# those match a plain fpe_payment_drafts-style numeric id with no "CASH"
+# prefix and are dead code (recognized by is_admin_command() but never
+# classified/dispatched); left untouched, out of this stage's scope. These
+# operate on modules.financial_operations, resolving a txn-ref (or numeric
+# id) against the ALREADY-CREATED fpe_cash_transactions row, not a draft.
+_CASH_APPROVE_RE = re.compile(r"^cash\s+approve\s+(\S+)\s*$", re.IGNORECASE)
+_CASH_REJECT_RE  = re.compile(r"^cash\s+reject\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_CASH_REVERSE_RE = re.compile(r"^cash\s+reverse\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
 
 def is_report_command(text: str) -> bool:
     """Narrow subset of is_admin_command() — matches ONLY the report_*
@@ -248,7 +263,9 @@ def is_admin_command(text: str) -> bool:
         # Sprint-3B
         _APPROVED_RE.match(t) or _DREDIT_RE.match(t) or _DREJECT_RE.match(t) or
         # Step 5 (2026-08-01) escort confirmation review
-        _ESCORT_REVIEW_RE.match(t)
+        _ESCORT_REVIEW_RE.match(t) or
+        # Stage H6/H7/H8 (2026-08-28)
+        _CASH_APPROVE_RE.match(t) or _CASH_REJECT_RE.match(t) or _CASH_REVERSE_RE.match(t)
     )
 
 
@@ -286,9 +303,13 @@ def _classify_command(t: str) -> Optional[str]:
         (_APPROVED_RE, "paid"),
         (_DREDIT_RE, "edit"),
         (_DREJECT_RE, "reject"),
-        # Step 5 (2026-08-01) — same RBAC tier as escortconfirm (admin
+                # Step 5 (2026-08-01) — same RBAC tier as escortconfirm (admin
         # managing escort assignments)
         (_ESCORT_REVIEW_RE, "escortconfirm"),
+        # Stage H6/H7/H8 (2026-08-28) — CASH APPROVE/REJECT/REVERSE
+        (_CASH_APPROVE_RE, "cash_approve"),
+        (_CASH_REJECT_RE, "cash_reject"),
+        (_CASH_REVERSE_RE, "cash_reverse"),
     )
     for rx, name in pairs:
         if rx.match(t):
@@ -433,6 +454,19 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
         draft_id = int(m.group(1))
         reason   = m.group(2).strip() if m.group(2) else None
         return await _cmd_dreject(draft_id, admin_phone, reason)
+
+    # ── Stage H6/H7/H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE ────────────
+    m = _CASH_APPROVE_RE.match(t)
+    if m:
+        return await _cmd_cash_approve(m.group(1), admin_phone)
+
+    m = _CASH_REJECT_RE.match(t)
+    if m:
+        return await _cmd_cash_reject(m.group(1), m.group(2).strip(), admin_phone)
+
+    m = _CASH_REVERSE_RE.match(t)
+    if m:
+        return await _cmd_cash_reverse(m.group(1), m.group(2).strip(), admin_phone)
 
     if _STATUS_RE.match(t):
         return await _cmd_status()
@@ -1004,6 +1038,47 @@ async def _cmd_dreject(
     except Exception as e:
         log.error(f"[admin_cmd] DREJECT error: {e}")
         return f"❌ ত্রুটি: {e}"
+
+
+async def _cmd_cash_approve(ref: str, admin_phone: str) -> str:
+    """Stage H6 -- CASH APPROVE <txn-ref>. Thin wrapper: RBAC already
+    passed (this function is only reached after process_admin_command's
+    cash_approve RBAC gate above), delegates the actual resolve/validate/
+    execute work entirely to modules.financial_operations (the one
+    authoritative adapter -- never duplicated here)."""
+    from modules.financial_operations import cash_approve, format_cash_result
+    try:
+        result = await cash_approve(ref, admin_phone)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH APPROVE error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return format_cash_result("approve", result)
+
+
+async def _cmd_cash_reject(ref: str, reason: str, admin_phone: str) -> str:
+    """Stage H7 -- CASH REJECT <txn-ref> <reason>."""
+    from modules.financial_operations import cash_reject, format_cash_result
+    try:
+        result = await cash_reject(ref, reason, admin_phone)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH REJECT error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return format_cash_result("reject", result)
+
+
+async def _cmd_cash_reverse(ref: str, reason: str, admin_phone: str) -> str:
+    """Stage H8 (highest risk) -- CASH REVERSE <txn-ref> <reason>. NO
+    standing autonomous reverse: this is only ever invoked from an
+    explicit, this-transaction-specific admin command with a reason --
+    there is no scheduled job, no auto-trigger, nothing else in this repo
+    that calls modules.financial_operations.cash_reverse()."""
+    from modules.financial_operations import cash_reverse, format_cash_result
+    try:
+        result = await cash_reverse(ref, reason, admin_phone)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH REVERSE error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return format_cash_result("reverse", result)
 
 
 async def _cmd_paid(

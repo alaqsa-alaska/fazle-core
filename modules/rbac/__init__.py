@@ -95,6 +95,18 @@ COMMAND_ROLE: dict[str, str] = {
     "task_read":           "viewer",
     "task_write":          "operator",
     "task_approve":        "superadmin",
+    # Stage H5-H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE trusted-admin
+    # WhatsApp commands -- same tier as _require_admin_role (the existing
+    # HTTP-route guard on operator_approve/operator_reject/reverse_txn in
+    # modules.fazle_payroll_engine.routes) for approve/reject. REVERSE is
+    # deliberately one tier higher (superadmin, same as user_add/
+    # user_role/user_remove/hermes_relay/send_whatsapp_message) -- H8's
+    # own framing ("highest risk... NO standing autonomous reverse") is
+    # the closest match to those existing superadmin-only, real-external-
+    # effect commands, not the ordinary admin tier.
+    "cash_approve":        "admin",
+    "cash_reject":         "admin",
+    "cash_reverse":        "superadmin",
 }
 
 DEFAULT_REQUIRED_ROLE = "admin"  # unknown cmd defaults to admin

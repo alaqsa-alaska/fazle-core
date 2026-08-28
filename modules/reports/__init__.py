@@ -494,6 +494,22 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         "SELECT id, domain, action_type, business_reference, created_at FROM hermes_action_approvals "
         "WHERE status='pending' ORDER BY created_at DESC LIMIT 15"
     )
+    # Stage H19 (2026-08-28): individual pending CASH transactions, with
+    # their own txn_ref as the Review ID -- previously only a count
+    # (cash_needs_action) was surfaced; an Owner reading this report
+    # could not act on cash without a separate lookup. No raw payroll
+    # figures beyond amount (already shown elsewhere, e.g. report cash).
+    pending_cash_txns = await fetch_all(
+        "SELECT id, txn_ref, employee_name_raw, amount, payout_method, created_at "
+        "FROM fpe_cash_transactions WHERE transaction_status='pending' "
+        "ORDER BY created_at ASC LIMIT 15"
+    )
+    # Stage H19: rejected/failed financial ops in the window -- sourced
+    # from the existing fpe_accounting_audit_logs (no new audit table).
+    financial_ops_failed_recent = await fetch_val(
+        f"SELECT COUNT(*) FROM fpe_accounting_audit_logs "
+        f"WHERE action IN ('reject', 'reverse') AND created_at >= {since}"
+    )
 
     # Stage G5.14 (2026-08-28): lead with WHAT NEEDS ACTION and its
     # reference IDs, not merely category counts -- an Owner reading this
@@ -515,6 +531,9 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         + [f"Draft {r['id']} — Office/Internal — APPROVE / EDIT / REJECT" for r in office_pending]
         + [f"Draft {r['id']} — Attendance — APPROVE / EDIT / REJECT" for r in attendance_pending_drafts]
         + [f"Proposal {r['id']} — {r['domain']} — review via /api/actions/{r['id']}/approve" for r in pending_business_actions]
+        # Stage H19: cash — CASH APPROVE/REJECT <txn-ref>, the exact
+        # Stage H6/H7 command syntax, so this line is directly actionable.
+        + [f"Txn {r['txn_ref'][:16]} — Cash — CASH APPROVE {r['txn_ref']} / CASH REJECT {r['txn_ref']} <reason>" for r in pending_cash_txns]
     )
 
     return {
@@ -532,6 +551,11 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
             "attendance_needs_action": int(attendance_needs_action or 0),
             "cash_needs_action": int(cash_needs_action or 0),
             "escort_needs_action": int(escort_needs_action or 0),
+            # Stage H19: financial ops that were rejected/reversed in this
+            # window -- rejected/failed financial ops needing Admin
+            # awareness, even though they were already actioned (not a
+            # "needs action" item, an "FYI this happened" item).
+            "financial_ops_failed_recent": int(financial_ops_failed_recent or 0),
             "complaints": int(complaints or 0),
             "window_hours": hours,
             "by_category": {r["category"]: r["contacts"] for r in domain_counts},
@@ -541,8 +565,9 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         "approval_queue": approval_queue,
         # Priority items FIRST (structured business proposals -- precise
         # domain + business_reference, the real "Owner must decide" list),
-        # then the broader pending-draft reference IDs for context.
-        "rows": [dict(r) for r in pending_business_actions] + [dict(r) for r in pending_drafts],
+        # then pending cash transactions (Stage H19), then the broader
+        # pending-draft reference IDs for context.
+        "rows": [dict(r) for r in pending_business_actions] + [dict(r) for r in pending_cash_txns] + [dict(r) for r in pending_drafts],
     }
 
 
@@ -605,6 +630,27 @@ async def _b_system_observation() -> dict:
     if any(r["severity"] == "critical" for r in incident_rows):
         priority = "CRITICAL"
 
+    # Stage H20 (2026-08-28): READ-only financial anomaly observation.
+    # Evidence surfaced for a human to look at -- this builder never
+    # writes anything (see test_read_only_no_execute_calls below); no
+    # automatic reject/reverse/fix is ever taken on any row found here.
+    old_pending_cash = await fetch_all(
+        "SELECT id, txn_ref, employee_name_raw, amount, "
+        "EXTRACT(EPOCH FROM (NOW() - created_at))::int / 86400.0 AS age_days "
+        "FROM fpe_cash_transactions WHERE transaction_status='pending' "
+        "AND created_at < NOW() - INTERVAL '3 days' ORDER BY created_at ASC LIMIT 15"
+    )
+    duplicate_pending_cash = await fetch_all(
+        "SELECT employee_id, amount, txn_date, COUNT(*) AS n, "
+        "array_agg(txn_ref) AS txn_refs "
+        "FROM fpe_cash_transactions WHERE transaction_status='pending' "
+        "GROUP BY employee_id, amount, txn_date HAVING COUNT(*) > 1 LIMIT 15"
+    )
+    financial_anomalies = (
+        [{"kind": "old_pending_cash_txn", **dict(r)} for r in old_pending_cash]
+        + [{"kind": "duplicate_looking_pending_cash", **dict(r)} for r in duplicate_pending_cash]
+    )
+
     return {
         "report": "system_observation",
         "args": {},
@@ -619,7 +665,9 @@ async def _b_system_observation() -> dict:
             "obsolete_job_count": len(obsolete_job_names),
             "failed_job_count": len(failed_jobs),
             "open_incident_count": len(incident_rows),
+            "financial_anomaly_count": len(financial_anomalies),
         },
+        "financial_anomalies": financial_anomalies,
         "rows": (
             [{"probe": k, **v} for k, v in degraded.items()] + stale_jobs + failed_jobs
             + [dict(r) for r in incident_rows]
@@ -728,6 +776,17 @@ def render_text(payload: dict, max_rows: int = 25) -> str:
             lines.append(f"  {item}")
         if len(approval_queue) > max_rows:
             lines.append(f"  … আরও {len(approval_queue) - max_rows}টি")
+    # Stage H20: financial anomaly evidence -- READ-only observation,
+    # rendered with its evidence (kind + reference), not just the count
+    # already in `summary`.
+    financial_anomalies = payload.get("financial_anomalies")
+    if financial_anomalies:
+        lines.append("")
+        lines.append("⚠️ Financial anomalies (read-only, no auto-fix):")
+        for a in financial_anomalies[:max_rows]:
+            lines.append("  " + " | ".join(f"{k}={_fmt(v)}" for k, v in a.items()))
+        if len(financial_anomalies) > max_rows:
+            lines.append(f"  … আরও {len(financial_anomalies) - max_rows}টি")
     if rows:
         lines.append("")
         lines.append(f"rows ({min(len(rows), max_rows)}/{len(rows)}):")

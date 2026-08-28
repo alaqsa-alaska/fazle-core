@@ -20,6 +20,7 @@ class TestBusinessSummaryBuilder:
             [],  # office_pending
             [],  # attendance_pending_drafts
             [],  # pending_business_actions
+            [],  # pending_cash_txns (Stage H19)
         ])), \
              patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[
                  2,   # complaints
@@ -29,6 +30,7 @@ class TestBusinessSummaryBuilder:
                  0,   # attendance_needs_action
                  4,   # cash_needs_action
                  1,   # escort_needs_action
+                 0,   # financial_ops_failed_recent (Stage H19)
              ])):
             payload = await _b_business_communication_summary(hours=12)
 
@@ -56,8 +58,9 @@ class TestBusinessSummaryBuilder:
             [{"id": 4100, "recipient": "y", "created_at": None}],  # office_pending
             [{"id": 4101, "recipient": "z", "created_at": None}],  # attendance_pending_drafts
             [{"id": 31, "domain": "cash", "action_type": "business_record_review", "business_reference": "cash_txn:4171", "created_at": None}],  # pending_business_actions
+            [{"id": 4171, "txn_ref": "abc123def456", "employee_name_raw": "X", "amount": 500, "payout_method": "cash", "created_at": None}],  # pending_cash_txns
         ])), \
-             patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[0, 0, 0, 0, 0, 0, 0])):
+             patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[0, 0, 0, 0, 0, 0, 0, 0])):
             payload = await _b_business_communication_summary(hours=12)
 
         queue = payload["approval_queue"]
@@ -65,9 +68,22 @@ class TestBusinessSummaryBuilder:
         assert "Draft 4100 — Office/Internal — APPROVE / EDIT / REJECT" in queue
         assert "Draft 4101 — Attendance — APPROVE / EDIT / REJECT" in queue
         assert any("Proposal 31" in item and "cash" in item for item in queue)
-        assert payload["summary"]["approval_queue_count"] == 4
+        assert any("abc123def456" in item and "CASH APPROVE" in item for item in queue)
+        assert payload["summary"]["approval_queue_count"] == 5
         assert payload["summary"]["client_pending_drafts"] == 1
         assert payload["summary"]["office_internal_pending_drafts"] == 1
+
+    async def test_render_text_shows_financial_anomalies_section_stage_h20(self):
+        from modules.reports import render_text
+        payload = {
+            "report": "system_observation", "args": {},
+            "summary": {"financial_anomaly_count": 1},
+            "financial_anomalies": [{"kind": "old_pending_cash_txn", "txn_ref": "abc123def456", "age_days": 9.5}],
+            "rows": [],
+        }
+        text = render_text(payload)
+        assert "Financial anomalies" in text
+        assert "abc123def456" in text
 
     async def test_render_text_shows_approval_queue_section(self):
         from modules.reports import render_text
@@ -100,7 +116,7 @@ class TestSystemObservationBuilder:
         fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}, "cpu": {"status": "critical", "load_pct": 90}}}
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
              patch("modules.scheduler.list_job_names", return_value=[]), \
-             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], [], [], []])):
             payload = await _b_system_observation()
         assert payload["report"] == "system_observation"
         assert payload["summary"]["overall_status"] == "ok"
@@ -114,7 +130,7 @@ class TestSystemObservationBuilder:
         fake_health = {"status": "critical", "probes": {"db": {"status": "ok"}, "cpu": {"status": "critical", "load_pct": 150}}}
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
              patch("modules.scheduler.list_job_names", return_value=[]), \
-             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], [], [], []])):
             payload = await _b_system_observation()
         assert payload["summary"]["priority"] == "TRANSIENT"
         assert payload["summary"]["action_required_probes"] == []
@@ -124,7 +140,7 @@ class TestSystemObservationBuilder:
         fake_health = {"status": "critical", "probes": {"db": {"status": "critical"}, "cpu": {"status": "ok"}}}
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
              patch("modules.scheduler.list_job_names", return_value=[]), \
-             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], [], [], []])):
             payload = await _b_system_observation()
         assert payload["summary"]["priority"] == "ACTION_REQUIRED"
         assert "db" in payload["summary"]["action_required_probes"]
@@ -134,7 +150,7 @@ class TestSystemObservationBuilder:
         fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}, "cpu": {"status": "ok"}}}
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
              patch("modules.scheduler.list_job_names", return_value=[]), \
-             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], [], [], []])):
             payload = await _b_system_observation()
         assert payload["summary"]["priority"] == "HEALTHY"
 
@@ -144,9 +160,26 @@ class TestSystemObservationBuilder:
         incident_rows = [{"severity": "critical", "source": "guardian", "title": "fazle_core_unreachable", "n": 1}]
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
              patch("modules.scheduler.list_job_names", return_value=[]), \
-             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], incident_rows])):
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], incident_rows, [], []])):
             payload = await _b_system_observation()
         assert payload["summary"]["priority"] == "CRITICAL"
+
+    async def test_financial_anomalies_surfaced_read_only_stage_h20(self):
+        """Stage H20: old pending cash txns and duplicate-looking pending
+        cash txns are surfaced as evidence, with no fix/reject/reverse
+        taken automatically (test_read_only_no_execute_calls above already
+        proves the builder writes nothing)."""
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}}}
+        old_txn = {"id": 1, "txn_ref": "old123", "employee_name_raw": "A", "amount": 100, "age_days": 9.5}
+        dup = {"employee_id": 5, "amount": 100, "txn_date": None, "n": 2, "txn_refs": ["a", "b"]}
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], [], [old_txn], [dup]])):
+            payload = await _b_system_observation()
+        assert payload["summary"]["financial_anomaly_count"] == 2
+        kinds = {a["kind"] for a in payload["financial_anomalies"]}
+        assert kinds == {"old_pending_cash_txn", "duplicate_looking_pending_cash"}
 
     async def test_job_not_in_current_registry_is_obsolete_not_stale(self):
         """Stage G5.11/G5.15: a job whose code was removed (found this
@@ -159,7 +192,7 @@ class TestSystemObservationBuilder:
         stale_row = {"job_name": "gap_scan_daily", "last_status": "ok", "last_run_at": None, "run_count": 9, "seconds_since_last_run": 999999}
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
              patch("modules.scheduler.list_job_names", return_value=["business_summary_report"]), \
-             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[stale_row], []])):
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[stale_row], [], [], []])):
             payload = await _b_system_observation()
         assert payload["summary"]["stale_job_count"] == 0
         assert payload["summary"]["obsolete_job_count"] == 1
@@ -170,7 +203,7 @@ class TestSystemObservationBuilder:
         stale_row = {"job_name": "business_summary_report", "last_status": "ok", "last_run_at": None, "run_count": 1, "seconds_since_last_run": 999999}
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
              patch("modules.scheduler.list_job_names", return_value=["business_summary_report"]), \
-             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[stale_row], []])):
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[stale_row], [], [], []])):
             payload = await _b_system_observation()
         assert payload["summary"]["stale_job_count"] == 1
         assert payload["summary"]["priority"] == "ACTION_REQUIRED"

@@ -1005,6 +1005,31 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
     if not settings.hermes_runner_secret:
         return _HERMES_NOT_CONFIGURED_MSG
 
+    # Stage H12 (2026-08-28): a deterministic, non-Ollama/non-Hermes
+    # employee-creation instruction on this exact trusted channel is
+    # intercepted BEFORE the Hermes dispatch below -- the direct
+    # instruction IS the authorization (modules.admin_direct_execution's
+    # own docstring), so this must not go through the AI relay at all.
+    # A non-match (parse_employee_creation_instruction returns None)
+    # falls straight through to the unchanged Hermes relay path -- every
+    # other Hermes control-channel message is completely unaffected.
+    from modules.admin_direct_execution import (
+        parse_employee_creation_instruction as _parse_emp_create,
+        execute_trusted_employee_creation as _exec_emp_create,
+        format_employee_create_card as _fmt_emp_create,
+    )
+    if _parse_emp_create(request_text):
+        emp_result = await _exec_emp_create(request_text, sender_phone, source_bridge, dry_run=False)
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command="employee_create", actor_phone=sender_phone,
+                actor_admin=admin, allowed=emp_result.get("ok", False),
+                denied_reason=None if emp_result.get("ok") else emp_result.get("error"),
+            )
+        except Exception:
+            log.error("[admin_ai_router] record_audit failed for employee_create, phone=%s", sender_phone)
+        return _fmt_emp_create(emp_result)
+
     now = time.monotonic()
     last = _hermes_cooldown.get(sender_phone, 0.0)
     if now - last < _HERMES_COOLDOWN_SECONDS:

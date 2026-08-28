@@ -170,3 +170,41 @@ def resolve_authority_lane(ctx: LaneContext) -> LaneDecision:
     # autonomous-send and never trusted-admin. Unknown/ambiguous identity
     # must not receive autonomous treatment (Stage G3's explicit rule).
     return LaneDecision(OWNER_SUPERVISED_DRAFT, f"identity_role={ctx.identity_role!r} not positively classified -- safe default, never autonomous")
+
+
+# ── H17 (2026-08-28): standing-authorization model -- REPRESENTED, not
+# broadly granted. Every write this codebase can perform traces to
+# exactly one of these four categories; the system can always answer
+# "why was this action allowed?" with exactly one of them, never a vague
+# "the AI decided". This dict is documentation-as-code (used by the
+# consistency test in tests/unit/test_stage_h_financial_operations.py),
+# not a runtime gate -- the real gates remain modules.rbac.check_permission
+# (RBAC), resolve_authority_lane() above (which lane), and each domain's
+# own precondition checks (modules.financial_operations,
+# modules.business_action_execution). Nothing here grants anything by
+# itself.
+AUTONOMOUS = "AUTONOMOUS"                                  # no human decision needed per-instance (recruitment/employee self-service replies)
+TRUSTED_DIRECT_ADMIN_COMMAND = "TRUSTED_DIRECT_ADMIN_COMMAND"  # an explicit, this-instance admin WhatsApp command (APPROVE/CASH APPROVE/EMPLOYEE CREATE/...)
+ONE_TIME_APPROVAL = "ONE_TIME_APPROVAL"                     # an explicit approve_action()/APPROVE <draft-id> decision on one specific proposal, consumed once
+FUTURE_STANDING_AUTHORIZATION = "FUTURE_STANDING_AUTHORIZATION"  # a persistent "always allow X" grant -- NOT IMPLEMENTED, disabled for every financial write this stage
+
+# domain -> {action: authorization_source}. Financial writes (cash_*) are
+# TRUSTED_DIRECT_ADMIN_COMMAND or ONE_TIME_APPROVAL only -- never
+# AUTONOMOUS, never FUTURE_STANDING_AUTHORIZATION (H17's explicit rule:
+# "standing authorization for financial writes must stay DISABLED this
+# stage"). FINANCIAL_AUTONOMY and STANDING_FINANCIAL_AUTHORIZATION below
+# are both hard-coded False -- not env flags, not settings -- there is no
+# switch to flip; enabling either requires new code, a future stage.
+FINANCIAL_AUTONOMY = False
+STANDING_FINANCIAL_AUTHORIZATION = False
+
+ACTION_AUTHORIZATION_SOURCES: dict[str, str] = {
+    "recruitment_reply":        AUTONOMOUS,
+    "employee_salary_reply":    AUTONOMOUS,
+    "draft_approve":            TRUSTED_DIRECT_ADMIN_COMMAND,
+    "employee_create":          TRUSTED_DIRECT_ADMIN_COMMAND,
+    "cash_approve":             TRUSTED_DIRECT_ADMIN_COMMAND,
+    "cash_reject":              TRUSTED_DIRECT_ADMIN_COMMAND,
+    "cash_reverse":             TRUSTED_DIRECT_ADMIN_COMMAND,
+    "business_action_execute":  ONE_TIME_APPROVAL,
+}
