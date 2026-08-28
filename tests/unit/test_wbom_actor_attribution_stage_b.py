@@ -349,19 +349,27 @@ class TestB5InboundIntentPersistence:
         assert sig.parameters["core_message_id"].default is None
 
 
-# ── B.5-2: cross-bridge Hermes-reply echo attribution ───────────────────────
+# ── B.5-2/C7: internal/cross-bridge echo attribution ────────────────────────
 
 class TestCrossBridgeEchoAttribution:
-    """Live-confirmed in production (2026-08-28): message_ids
-    19294/19297/19300/19305/19308 on bridge2 were verbatim echoes of
-    Hermes replies 19293/19296/19299/19304/19307 sent via bridge1 seconds
-    earlier, all persisted as actor_type='external_user' before this fix.
-    _is_hermes_cross_bridge_echo() reuses modules.message_router's own
-    already-trusted echo-guard signature verbatim, not a second rule."""
+    """B.5-2 live-confirmed message_ids 19294/19297/19300/19305/19308 on
+    bridge2 were verbatim echoes of Hermes replies 19293/19296/19299/
+    19304/19307 sent via bridge1 seconds earlier, all persisted as
+    actor_type='external_user' before that fix. Stage C7 then
+    generalized it further: message_ids 19309/19314, also live-confirmed,
+    were a recovery-sweep digest and an AI Console alert echoing the same
+    way -- neither carries the "🤖 Hermes:" prefix, proving a
+    single-prefix rule could never generalize. _classify_internal_echo()
+    detects ANY internal echo via sender-identity provenance alone (one
+    of our own bridge numbers arriving on a different bridge) -- zero
+    content inspection for the primary signal -- and only uses the
+    "🤖 Hermes:" prefix as a refinement on top, to narrow 'system' down
+    to the more precise 'hermes' when that specific content is present."""
 
-    def test_reuses_same_signature_as_message_router_guard(self):
-        """Structural proof this isn't a second, independently-drifting
-        rule -- both check the identical three conditions."""
+    def test_hermes_refinement_reuses_same_prefix_as_message_router_guard(self):
+        """Structural proof the 'hermes' refinement isn't a second,
+        independently-drifting rule -- both check the identical literal
+        prefix."""
         import modules.message_router as router
         router_source = inspect.getsource(router)
         guard_idx = router_source.index('sender == (settings.bridge1_number or "")')
@@ -369,33 +377,58 @@ class TestCrossBridgeEchoAttribution:
         assert 'source == "bridge2"' in guard_block
         assert 'text.lstrip().startswith("🤖 Hermes:")' in guard_block
 
-        bp_source = inspect.getsource(bp._is_hermes_cross_bridge_echo)
-        assert 'source == "bridge2"' in bp_source
-        assert 'sender == (_settings.bridge1_number or "")' in bp_source
+        bp_source = inspect.getsource(bp._classify_internal_echo)
         assert 'text.lstrip().startswith("🤖 Hermes:")' in bp_source
 
     def test_genuine_external_inbound_is_not_flagged_as_echo(self, monkeypatch):
         monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
-        assert bp._is_hermes_cross_bridge_echo("bridge2", "8801700000000", "আমি চাকরি চাই") is False
-        # Same sender/channel as bridge1, but not the Hermes reply prefix --
-        # still not an echo (the signature requires all three conditions).
-        assert bp._is_hermes_cross_bridge_echo("bridge2", "8801958122300", "hello there") is False
-        # Same content prefix, but arrived on bridge1 (not bridge2) or from
-        # a different sender -- still not an echo.
-        assert bp._is_hermes_cross_bridge_echo("bridge1", "8801958122300", "🤖 Hermes:\nhi") is False
-        assert bp._is_hermes_cross_bridge_echo("bridge2", "8801700000000", "🤖 Hermes:\nhi") is False
+        monkeypatch.setattr(bp._settings, "bridge2_number", "8801880446111")
+        monkeypatch.setattr(bp._settings, "bridge3_number", "8801805529211")
+        assert bp._classify_internal_echo("bridge2", "8801700000000", "আমি চাকরি চাই") == (None, None)
+        # Same bridge number as the message arrived on -- not a cross-bridge
+        # echo (it's simply that bridge's own number, no bounce happened).
+        assert bp._classify_internal_echo("bridge1", "8801958122300", "hello there") == (None, None)
 
-    def test_known_echo_signature_is_recognized(self, monkeypatch):
+    def test_known_hermes_echo_signature_is_recognized(self, monkeypatch):
         monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
-        assert bp._is_hermes_cross_bridge_echo(
+        monkeypatch.setattr(bp._settings, "bridge2_number", "8801880446111")
+        monkeypatch.setattr(bp._settings, "bridge3_number", "8801805529211")
+        assert bp._classify_internal_echo(
             "bridge2", "8801958122300", "🤖 Hermes:\nএই যে Boss — এখানেই আছি",
-        ) is True
+        ) == ("hermes", "hermes-runner")
 
-    async def test_persisted_actor_type_reflects_echo_classification(self, monkeypatch):
-        """_save_raw_core_copy() must use 'hermes'/'hermes-runner' for a
-        recognized echo, and never suppress/delete the row or change its
-        direction -- only actor_type/actor_id."""
+    def test_generic_internal_echo_without_hermes_prefix_is_recognized_as_system(self, monkeypatch):
+        """Live-confirmed shape (message_ids 19309/19314): a
+        recovery-sweep digest and an AI Console alert, neither carrying
+        the Hermes prefix -- must still be recognized as internal via
+        sender-identity provenance alone, not left as 'external_user'."""
         monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        monkeypatch.setattr(bp._settings, "bridge2_number", "8801880446111")
+        monkeypatch.setattr(bp._settings, "bridge3_number", "8801805529211")
+        assert bp._classify_internal_echo(
+            "bridge2", "8801958122300", "🔁 Recruitment/Employee recovery sweep (LIVE): 17 stale...",
+        ) == ("system", "bridge1")
+        assert bp._classify_internal_echo(
+            "bridge2", "8801958122300", "🚨 AI Console ALERT [vmi3117764]\nsomething broke",
+        ) == ("system", "bridge1")
+
+    def test_never_infers_from_content_alone_without_sender_provenance(self, monkeypatch):
+        """The 'hermes' refinement is additive on top of the primary
+        provenance signal, never a substitute for it -- content alone,
+        from a genuinely external sender, must never be classified as an
+        internal echo."""
+        monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        monkeypatch.setattr(bp._settings, "bridge2_number", "8801880446111")
+        monkeypatch.setattr(bp._settings, "bridge3_number", "8801805529211")
+        assert bp._classify_internal_echo("bridge2", "8801700000000", "🤖 Hermes:\nhi") == (None, None)
+
+    async def test_persisted_actor_type_reflects_hermes_echo_classification(self, monkeypatch):
+        """_save_raw_core_copy() must use 'hermes'/'hermes-runner' for a
+        recognized Hermes echo, and never suppress/delete the row or
+        change its direction -- only actor_type/actor_id."""
+        monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        monkeypatch.setattr(bp._settings, "bridge2_number", "8801880446111")
+        monkeypatch.setattr(bp._settings, "bridge3_number", "8801805529211")
         captured = {}
 
         async def _fake_fetch_one(sql, *args):
@@ -413,8 +446,29 @@ class TestCrossBridgeEchoAttribution:
         assert captured["args"][-2] == "hermes"
         assert captured["args"][-1] == "hermes-runner"
 
+    async def test_persisted_actor_type_reflects_generic_system_echo(self, monkeypatch):
+        monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        monkeypatch.setattr(bp._settings, "bridge2_number", "8801880446111")
+        monkeypatch.setattr(bp._settings, "bridge3_number", "8801805529211")
+        captured = {}
+
+        async def _fake_fetch_one(sql, *args):
+            captured["args"] = args
+            return {"message_id": 3}
+
+        monkeypatch.setattr(bp, "fetch_one", _fake_fetch_one)
+        monkeypatch.setattr(bp, "execute", AsyncMock())
+
+        msg = {"id": "MSGID3", "content": "🚨 AI Console ALERT [x]\nsomething", "timestamp": None}
+        await bp._save_raw_core_copy("bridge2", msg, "8801958122300", "ignored")
+
+        assert captured["args"][-2] == "system"
+        assert captured["args"][-1] == "bridge1"
+
     async def test_genuine_inbound_still_gets_external_user(self, monkeypatch):
         monkeypatch.setattr(bp._settings, "bridge1_number", "8801958122300")
+        monkeypatch.setattr(bp._settings, "bridge2_number", "8801880446111")
+        monkeypatch.setattr(bp._settings, "bridge3_number", "8801805529211")
 
         async def _fake_fetch_one(sql, *args):
             return {"message_id": 2}

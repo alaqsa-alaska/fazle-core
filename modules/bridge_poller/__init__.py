@@ -1816,25 +1816,62 @@ def _core_message_hash(source: str, source_message_ref: str) -> str:
     return hashlib.sha256(f"{source}|{source_message_ref}".encode("utf-8")).hexdigest()
 
 
-def _is_hermes_cross_bridge_echo(source: str, sender: str, text: str) -> bool:
-    """2026-08-28 (Stage B.5-2): the exact same signature
-    modules.message_router's own cross-bridge Hermes-reply echo guard
-    already uses (source=="bridge2" and sender==bridge1_number and
-    text.lstrip().startswith("🤖 Hermes:")) -- reused verbatim here, not
-    a second, independently-drifting rule. That guard runs at the
-    ROUTING layer, after _save_raw_core_copy() has already persisted the
-    raw row below with a fixed actor_type -- this lets the persistence
-    layer apply the identical, already-trusted classification instead of
-    a blanket 'external_user' for every is_from_me=0 row. Structural
-    signature match only (sender identity + the literal, stable prefix
-    _deliver_hermes_reply's own outbound.enqueue() call always uses) --
-    never a semantic/keyword inference over arbitrary message content,
-    same distinction the existing guard's own docstring already draws."""
-    return (
-        source == "bridge2"
-        and sender == (_settings.bridge1_number or "")
-        and text.lstrip().startswith("🤖 Hermes:")
-    )
+def _own_bridge_numbers() -> dict[str, str]:
+    """Map each of our own configured bridge numbers to the bridge name
+    that owns it. A genuine external customer/candidate can never have a
+    sender number equal to one of these -- these are our own business
+    WhatsApp numbers."""
+    return {
+        num: name
+        for num, name in (
+            (_settings.bridge1_number, "bridge1"),
+            (_settings.bridge2_number, "bridge2"),
+            (_settings.bridge3_number, "bridge3"),
+        )
+        if num
+    }
+
+
+def _classify_internal_echo(source: str, sender: str, text: str) -> tuple[Optional[str], Optional[str]]:
+    """2026-08-28 (Stage C7, generalizing B.5-2's narrower Hermes-only
+    version): a GENERAL internal-message attribution mechanism, not an
+    expanding list of message-text signatures -- see this function's own
+    live motivation below.
+
+    PRIMARY signal, pure provenance, zero content inspection: `sender` is
+    one of OUR OWN configured bridge numbers (see _own_bridge_numbers()),
+    but this message arrived on a DIFFERENT bridge's inbound (`source`).
+    That combination alone -- sender identity, never message text --
+    already proves fazle-core itself sent this content via some bridge,
+    and it bounced back as a genuine is_from_me=0 row on a different
+    bridge's own account. This one check covers every current AND future
+    internal notification type (Hermes admin-relay replies,
+    recruitment_recovery_sweep's digest, scripts/ai_console_monitor.sh's
+    health alert -- confirmed live, 2026-08-28: message_ids 19309/19314
+    were exactly this shape, sender=bridge1_number arriving on bridge2,
+    for a recovery-sweep digest and an AI Console alert respectively,
+    neither of which carries the "🤖 Hermes:" prefix) without ever adding
+    a new prefix rule for the next one. Returns actor_type='system' by
+    default here -- the most this signal alone can prove ("fazle-core's
+    own number sent this"), actor_id=the origin bridge name.
+
+    REFINEMENT, on top of (never instead of) the primary signal: when the
+    content ALSO carries the exact, stable "🤖 Hermes:" prefix
+    _deliver_hermes_reply's own outbound.enqueue() call always uses (the
+    same literal modules.message_router's own cross-bridge echo guard
+    checks), narrow the classification to the more precise
+    actor_type='hermes', actor_id='hermes-runner' -- this is the one case
+    where content genuinely adds provable information beyond sender
+    identity alone, not a substitute for it.
+
+    Returns (None, None) when this is not an internal echo at all --
+    caller falls through to its normal external_user classification."""
+    origin_bridge = _own_bridge_numbers().get(sender)
+    if not origin_bridge or origin_bridge == source:
+        return None, None
+    if text.lstrip().startswith("🤖 Hermes:"):
+        return "hermes", "hermes-runner"
+    return "system", origin_bridge
 
 
 def _parse_source_timestamp(value) -> Optional[datetime]:
@@ -1871,21 +1908,22 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
         "has_processed_text": bool(msg.get("processed_text")),
         "bridge_store_preserved": True,
     }
-    # 2026-08-28 (Stage B1/B4, refined B.5-2): actor_type='external_user'
-    # for a genuine is_from_me=0 inbound message -- EXCEPT the one known,
-    # now-fixed exception: a Hermes admin-relay reply sent via bridge1
-    # landing here as a genuine is_from_me=0 row on bridge2 (confirmed
-    # live in production, e.g. message_ids 19294/19297/19300/19305/19308
-    # echoing 19293/19296/19299/19304/19307 verbatim, ~12s later). Uses
-    # the exact same signature modules.message_router's own echo guard
-    # already relies on (see _is_hermes_cross_bridge_echo's docstring) --
-    # this does NOT change `direction` (still genuinely 'inbound' at the
-    # transport level, preserved) and does NOT suppress or delete the
-    # row -- it only corrects WHO produced the content: the real Hermes
-    # agent bouncing its own reply back, not a new external sender.
-    _is_echo = _is_hermes_cross_bridge_echo(source, phone, raw_text)
-    _actor_type = "hermes" if _is_echo else "external_user"
-    _actor_id = "hermes-runner" if _is_echo else None
+    # 2026-08-28 (Stage B1/B4, generalized Stage C7): actor_type=
+    # 'external_user' for a genuine is_from_me=0 inbound message -- EXCEPT
+    # when _classify_internal_echo() proves (by sender-identity provenance,
+    # never message text alone) that this is fazle-core's own content
+    # bouncing back on a different bridge. Confirmed live in production,
+    # 2026-08-28: message_ids 19294/19297/19300/19305/19308 (Hermes-reply
+    # echoes) and separately 19309/19314 (a recovery-sweep digest and an
+    # AI Console alert echo -- neither carries the "🤖 Hermes:" prefix,
+    # which is exactly why the general provenance check exists, not a
+    # third hardcoded prefix). This does NOT change `direction` (still
+    # genuinely 'inbound' at the transport level, preserved) and does NOT
+    # suppress or delete the row -- it only corrects WHO produced the
+    # content.
+    _echo_actor_type, _echo_actor_id = _classify_internal_echo(source, phone, raw_text)
+    _actor_type = _echo_actor_type or "external_user"
+    _actor_id = _echo_actor_id
     try:
         row = await fetch_one(
             """

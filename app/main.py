@@ -1220,6 +1220,226 @@ async def whatsapp_messages_lookup(
         return {"count": 0, "messages": [], "error": str(exc)[:200], "ts": time.time()}
 
 
+# ── Stage C (2026-08-28): filtered conversation retrieval ───────────────────
+# Objective: stop treating get_recent_messages(limit=N)-style raw dumps as
+# the normal way Hermes investigates conversations -- filtering/bounding
+# happens in SQL, before message bodies are ever returned, not after.
+# Extends this same canonical table/endpoint family (wbom_whatsapp_messages,
+# /api/whatsapp/messages/*) rather than a new framework/service.
+
+_METADATA_COLUMNS = (
+    "message_id", "direction", "platform", "sender_number", "canonical_phone",
+    "conversation_key", "actor_type", "actor_id", "identity_role",
+    "identity_confidence", "intent_detected", "workflow_triggered",
+    "message_type", "is_processed", "status", "received_at", "processed_at",
+)
+_CONTENT_COLUMNS = ("message_body", "extracted_text")
+
+
+def _encode_cursor(received_at, message_id: int) -> str:
+    import base64
+    raw = f"{received_at.isoformat()}|{message_id}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _decode_cursor(cursor: str):
+    import base64
+    from datetime import datetime as _dt
+    raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+    ts_str, mid_str = raw.rsplit("|", 1)
+    return _dt.fromisoformat(ts_str), int(mid_str)
+
+
+@app.get("/api/whatsapp/messages/query", dependencies=[Depends(require_api_key)])
+async def whatsapp_messages_query(
+    start_time: str = "",
+    end_time: str = "",
+    platform: str = "",
+    conversation_key: str = "",
+    direction: str = "",
+    actor_type: str = "",
+    actor_id: str = "",
+    identity_role: str = "",
+    intent_detected: str = "",
+    workflow_triggered: str = "",
+    include_body: bool = False,
+    limit: int = 20,
+    cursor: str = "",
+):
+    """General bounded, filtered retrieval over canonical
+    wbom_whatsapp_messages -- the Stage C answer to "don't dump 300 raw
+    messages and make Hermes discard 250 of them". All filters are bound
+    query parameters (no arbitrary SQL, same contract as the sibling
+    /lookup endpoint above). Deterministic pagination via
+    (received_at DESC, message_id DESC) with an opaque cursor -- stable
+    across pages, no duplicate/skipped rows even when timestamps collide.
+
+    include_body=False (the default): returns ONLY metadata columns --
+    message_id, direction, platform, conversation_key, actor_type,
+    actor_id, identity_role, intent_detected, workflow_triggered,
+    timestamps -- never message_body/extracted_text. This is the
+    metadata-first "which conversations need attention?" stage; pass
+    include_body=True only once specific rows/conversations have already
+    been selected from a first metadata-only call (or use
+    /api/whatsapp/messages/conversation for one conversation's full
+    chronological history instead).
+
+    A response reaching `limit` sets has_more=true -- callers must never
+    treat that as "analysis complete"; either page further via
+    next_cursor or narrow the filters."""
+    try:
+        limit = min(max(int(limit or 20), 1), 50)  # conservative default+ceiling, smaller than /lookup's 100
+        conditions = []
+        params: list = []
+
+        if start_time:
+            params.append(start_time)
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        if end_time:
+            params.append(end_time)
+            conditions.append(f"received_at <= ${len(params)}::timestamptz")
+        if platform:
+            params.append(platform)
+            conditions.append(f"platform = ${len(params)}")
+        if conversation_key:
+            params.append(conversation_key)
+            conditions.append(f"conversation_key = ${len(params)}")
+        if direction:
+            params.append(direction)
+            conditions.append(f"direction = ${len(params)}")
+        if actor_type:
+            params.append(actor_type)
+            conditions.append(f"actor_type = ${len(params)}")
+        if actor_id:
+            params.append(actor_id)
+            conditions.append(f"actor_id = ${len(params)}")
+        if identity_role:
+            params.append(identity_role)
+            conditions.append(f"identity_role = ${len(params)}")
+        if intent_detected:
+            params.append(intent_detected)
+            conditions.append(f"intent_detected = ${len(params)}")
+        if workflow_triggered:
+            params.append(workflow_triggered)
+            conditions.append(f"workflow_triggered = ${len(params)}")
+
+        if cursor:
+            try:
+                cur_ts, cur_id = _decode_cursor(cursor)
+            except Exception:
+                return {"count": 0, "messages": [], "error": "invalid cursor", "ts": time.time()}
+            params.append(cur_ts)
+            params.append(cur_id)
+            conditions.append(f"(received_at, message_id) < (${len(params)-1}::timestamptz, ${len(params)})")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        columns = _METADATA_COLUMNS + (_CONTENT_COLUMNS if include_body else ())
+        # Fetch one extra row to determine has_more without a second COUNT query.
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        rows = await fetch_all(
+            f"""
+            SELECT {", ".join(columns)}
+              FROM wbom_whatsapp_messages
+              {where_clause}
+             ORDER BY received_at DESC, message_id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        next_cursor = _encode_cursor(page[-1]["received_at"], page[-1]["message_id"]) if has_more and page else None
+        return {
+            "filters_applied": bool(conditions),
+            "count": len(page),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "include_body": include_body,
+            "messages": [dict(r) for r in page],
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/messages/query error: %s", exc)
+        return {"count": 0, "has_more": False, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+@app.get("/api/whatsapp/messages/conversation", dependencies=[Depends(require_api_key)])
+async def whatsapp_conversation_history(
+    conversation_key: str,
+    start_time: str = "",
+    end_time: str = "",
+    limit: int = 50,
+    cursor: str = "",
+):
+    """Stage C5: chronological (oldest-first within each page; pages
+    themselves walk newest-to-oldest via the cursor, same convention as
+    /query above) inbound+outbound history for ONE conversation, always
+    including message content -- this is the deliberate "stage 2" of
+    Stage C4's two-stage model: call /query (metadata-only) first to
+    discover which conversation_key needs attention, then call this
+    endpoint for that one conversation's actual history. Never touches
+    or duplicates raw storage -- reads the same canonical table, same
+    columns, message_body remains authoritative there.
+
+    conversation_key is required -- this endpoint deliberately cannot
+    scan across conversations; use /query for that."""
+    try:
+        if not conversation_key:
+            return {"count": 0, "messages": [], "error": "conversation_key is required", "ts": time.time()}
+        limit = min(max(int(limit or 50), 1), 100)
+        conditions = ["conversation_key = $1"]
+        params: list = [conversation_key]
+
+        if start_time:
+            params.append(start_time)
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        if end_time:
+            params.append(end_time)
+            conditions.append(f"received_at <= ${len(params)}::timestamptz")
+        if cursor:
+            try:
+                cur_ts, cur_id = _decode_cursor(cursor)
+            except Exception:
+                return {"count": 0, "messages": [], "error": "invalid cursor", "ts": time.time()}
+            params.append(cur_ts)
+            params.append(cur_id)
+            conditions.append(f"(received_at, message_id) < (${len(params)-1}::timestamptz, ${len(params)})")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}"
+        columns = _METADATA_COLUMNS + _CONTENT_COLUMNS
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        rows = await fetch_all(
+            f"""
+            SELECT {", ".join(columns)}
+              FROM wbom_whatsapp_messages
+              {where_clause}
+             ORDER BY received_at DESC, message_id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        next_cursor = _encode_cursor(page[-1]["received_at"], page[-1]["message_id"]) if has_more and page else None
+        # Newest-first fetch (for stable cursor pagination), but a
+        # conversation's own history reads naturally oldest-first --
+        # reverse just this page before returning.
+        chronological = list(reversed(page))
+        return {
+            "conversation_key": conversation_key,
+            "count": len(chronological),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "messages": [dict(r) for r in chronological],
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/messages/conversation error: %s", exc)
+        return {"count": 0, "has_more": False, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
 @app.get("/api/outbound/status", dependencies=[Depends(require_api_key)])
 async def get_outbound_status(queue_id: int | None = None, recipient: str = "", limit: int = 10):
     """Real delivery-status lookup for one or more fazle_outbound_queue rows
