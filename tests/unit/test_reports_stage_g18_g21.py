@@ -59,12 +59,81 @@ class TestSystemObservationBuilder:
         from modules.reports import _b_system_observation
         fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}, "cpu": {"status": "critical", "load_pct": 90}}}
         with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
              patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
             payload = await _b_system_observation()
         assert payload["report"] == "system_observation"
         assert payload["summary"]["overall_status"] == "ok"
         assert payload["summary"]["degraded_probe_count"] == 1
         assert "cpu" in payload["summary"]["degraded_probes"]
+
+    async def test_cpu_only_degradation_is_transient_not_action_required(self):
+        """Stage G5.15: known ambient CPU spikes must not dominate/
+        escalate the report on their own."""
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "critical", "probes": {"db": {"status": "ok"}, "cpu": {"status": "critical", "load_pct": 150}}}
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
+            payload = await _b_system_observation()
+        assert payload["summary"]["priority"] == "TRANSIENT"
+        assert payload["summary"]["action_required_probes"] == []
+
+    async def test_db_or_bridge_degradation_is_action_required(self):
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "critical", "probes": {"db": {"status": "critical"}, "cpu": {"status": "ok"}}}
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
+            payload = await _b_system_observation()
+        assert payload["summary"]["priority"] == "ACTION_REQUIRED"
+        assert "db" in payload["summary"]["action_required_probes"]
+
+    async def test_healthy_system_reports_healthy_priority(self):
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}, "cpu": {"status": "ok"}}}
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], []])):
+            payload = await _b_system_observation()
+        assert payload["summary"]["priority"] == "HEALTHY"
+
+    async def test_critical_open_incident_forces_critical_priority(self):
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}, "cpu": {"status": "ok"}}}
+        incident_rows = [{"severity": "critical", "source": "guardian", "title": "fazle_core_unreachable", "n": 1}]
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], incident_rows])):
+            payload = await _b_system_observation()
+        assert payload["summary"]["priority"] == "CRITICAL"
+
+    async def test_job_not_in_current_registry_is_obsolete_not_stale(self):
+        """Stage G5.11/G5.15: a job whose code was removed (found this
+        stage: gap_scan_daily/hourly, dlq_divergence_guard,
+        escort_draft_cleanup, hermes_periodic_review) must not be
+        conflated with a currently-registered job that has simply gone
+        quiet."""
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}, "cpu": {"status": "ok"}}}
+        stale_row = {"job_name": "gap_scan_daily", "last_status": "ok", "last_run_at": None, "run_count": 9, "seconds_since_last_run": 999999}
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=["business_summary_report"]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[stale_row], []])):
+            payload = await _b_system_observation()
+        assert payload["summary"]["stale_job_count"] == 0
+        assert payload["summary"]["obsolete_job_count"] == 1
+
+    async def test_currently_registered_stale_job_is_stale_and_action_required(self):
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}, "cpu": {"status": "ok"}}}
+        stale_row = {"job_name": "business_summary_report", "last_status": "ok", "last_run_at": None, "run_count": 1, "seconds_since_last_run": 999999}
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=["business_summary_report"]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[stale_row], []])):
+            payload = await _b_system_observation()
+        assert payload["summary"]["stale_job_count"] == 1
+        assert payload["summary"]["priority"] == "ACTION_REQUIRED"
 
 
 class TestSchedulerRegistrationUsesOneJobId:

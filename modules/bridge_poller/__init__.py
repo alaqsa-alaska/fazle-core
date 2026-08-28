@@ -1791,6 +1791,7 @@ async def _save_draft(
     sender_name: str = "",
     sender_message: str = "",
     category: str = "",
+    auto_notify_admin: bool = False,
 ):
     """Store a suppressed reply as a draft (safe mode).
 
@@ -1802,6 +1803,19 @@ async def _save_draft(
     category (Stage G7, 2026-08-28): optional, passed straight through to
     _build_admin_review_draft()'s own optional category param -- every
     existing call site (none of which pass this) is unaffected.
+
+    auto_notify_admin (Stage G5.1, 2026-08-28): when True, actively pushes
+    the admin review card (modules.supervised_draft.notify_admin_of_pending_
+    draft) right after the draft transaction succeeds -- default False, so
+    every pre-existing call site (all 14+ of them) is completely unaffected;
+    only the DRAFT_ALWAYS_GATE call site below passes True, and only for
+    the Owner-supervised-draft lane (Client/Office-Internal). Never called
+    for a quality-rejected draft (those deliberately never reach the admin
+    pending list at all, per the B25 hotfix below). Wrapped in its own
+    try/except that can never make the draft itself disappear or raise --
+    matches the established Phase 5B trigger_admin_investigation()
+    discipline elsewhere in this codebase: a notification failure is
+    logged, never fatal to the underlying operation it's reporting on.
 
     B25 hotfix: passes through draft_quality gate first. Bad drafts are still
     persisted (for audit) but with status='rejected_quality'/'rejected_fallback'
@@ -1863,6 +1877,14 @@ async def _save_draft(
                     "rejected_fallback" if reason == "llm_fallback" else "rejected_quality",
                     draft_id,
                 )
+            elif auto_notify_admin:
+                try:
+                    from modules.supervised_draft import notify_admin_of_pending_draft
+                    notify_result = await notify_admin_of_pending_draft(draft_id, category)
+                    if not notify_result.get("ok"):
+                        log.warning("[G5.1] auto-notify failed draft_id=%s: %s", draft_id, notify_result.get("error"))
+                except Exception as _notify_err:
+                    log.warning("[G5.1] auto-notify raised draft_id=%s: %s", draft_id, _notify_err)
         return
 
     if not ok:
@@ -2700,8 +2722,29 @@ async def process_bridge_inbound(
 
                 if draft_gate:
                     log.info("[DRAFT-GATE] %s name=%r role=%s → draft", phone, id_name, id_role)
+                    # Stage G5.1 (2026-08-28): auto-notify admin only for the
+                    # Owner-supervised-draft lane (Client/Office-Internal) --
+                    # resolve_authority_lane() classifies purely from id_role
+                    # (never message text), matching every other lane
+                    # decision in this codebase. Every other reason a
+                    # message lands in DRAFT_ALWAYS (accountant, risk-level
+                    # gate, complaint phrase, loop detection) is left
+                    # exactly as before -- silent draft, no active push --
+                    # unless it also happens to be a Client/Office role.
+                    from modules.authority_lanes import resolve_authority_lane, LaneContext, OWNER_SUPERVISED_DRAFT
+                    _lane_decision = resolve_authority_lane(LaneContext(identity_role=id_role or "unknown"))
+                    _g51_category = ""
+                    if _lane_decision.lane == OWNER_SUPERVISED_DRAFT and id_role in (
+                        "vip_client", "security_service_client", "client_escort_buyer", "escort_client", "repeat_client",
+                    ):
+                        _g51_category = "Client"
+                    elif _lane_decision.lane == OWNER_SUPERVISED_DRAFT and id_role in (
+                        "internal_coordinator", "internal_operation", "employee_internal",
+                    ):
+                        _g51_category = "Office/Internal"
                     await _save_draft(bridge_name, phone, reply, msg_intent,
-                                      sender_name=id_name, sender_message=text)
+                                      sender_name=id_name, sender_message=text,
+                                      category=_g51_category, auto_notify_admin=bool(_g51_category))
                 else:
                     # STEP 7: loop detection
                     if _check_loop_detect(phone):

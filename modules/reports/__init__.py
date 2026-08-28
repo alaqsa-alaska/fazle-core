@@ -472,23 +472,36 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         "WHERE status='pending' ORDER BY created_at DESC LIMIT 15"
     )
 
+    # Stage G5.14 (2026-08-28): lead with WHAT NEEDS ACTION and its
+    # reference IDs, not merely category counts -- an Owner reading this
+    # should be able to act (APPROVE/EDIT/REJECT <id>, or look up a
+    # business proposal) directly from this report, not just see totals.
+    action_required_total = (
+        int(attendance_needs_action or 0) + int(cash_needs_action or 0)
+        + int(escort_needs_action or 0) + len(pending_business_actions)
+        + int(pending_drafts_total or 0)
+    )
     return {
         "report": "business_communication_summary",
         "args": {"hours": hours},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
-            "window_hours": hours,
-            "by_category": {r["category"]: r["contacts"] for r in domain_counts},
-            "complaints": int(complaints or 0),
-            "office_group_messages": int(office_group_msgs or 0),
-            "autonomous_replies_sent": int(replies_sent or 0),
+            "action_required_total": action_required_total,
+            "pending_business_proposals": len(pending_business_actions),
             "pending_drafts_total": int(pending_drafts_total or 0),
             "attendance_needs_action": int(attendance_needs_action or 0),
             "cash_needs_action": int(cash_needs_action or 0),
             "escort_needs_action": int(escort_needs_action or 0),
-            "pending_business_proposals": len(pending_business_actions),
+            "complaints": int(complaints or 0),
+            "window_hours": hours,
+            "by_category": {r["category"]: r["contacts"] for r in domain_counts},
+            "office_group_messages": int(office_group_msgs or 0),
+            "autonomous_replies_sent": int(replies_sent or 0),
         },
-        "rows": [dict(r) for r in pending_drafts] + [dict(r) for r in pending_business_actions],
+        # Priority items FIRST (structured business proposals -- precise
+        # domain + business_reference, the real "Owner must decide" list),
+        # then the broader pending-draft reference IDs for context.
+        "rows": [dict(r) for r in pending_business_actions] + [dict(r) for r in pending_drafts],
     }
 
 
@@ -498,42 +511,79 @@ async def _b_system_observation() -> dict:
     app.main._build_health() (the same probe set job_health_summary
     already alerts from) plus queue/DLQ/watchdog-adjacent signals already
     tracked in fazle_scheduled_jobs. READ-only: this builder queries
-    state, it never modifies anything -- Stage G19's explicit boundary."""
+    state, it never modifies anything -- Stage G19's explicit boundary.
+
+    Stage G5.15 improvements over the Stage G version:
+      - cpu-only degradation is classified TRANSIENT (this session's own
+        repeatedly-confirmed ambient host-load pattern), never
+        ACTION_REQUIRED/CRITICAL on its own -- any OTHER non-ok probe is
+        DEGRADED, and db/bridge/outbound failures are ACTION_REQUIRED.
+      - staleness is only reported for jobs still present in the
+        scheduler's own CURRENT _job_registry (modules.scheduler.
+        list_job_names()) -- a job whose code was removed (Stage G5.11's
+        RCA: gap_scan_daily/hourly, dlq_divergence_guard, escort_draft_
+        cleanup, hermes_periodic_review all found genuinely obsolete) is
+        reported separately as obsolete_job_names, not conflated with a
+        currently-registered job that has simply gone quiet."""
     from app.main import _build_health
+    from modules.scheduler import list_job_names
 
     health = await _build_health(deep=False)
     degraded = {k: v for k, v in health["probes"].items() if v.get("status") not in ("ok", "skipped")}
 
+    non_cpu_degraded = {k: v for k, v in degraded.items() if k != "cpu"}
+    if non_cpu_degraded:
+        priority = "ACTION_REQUIRED" if any(k in ("db",) or k.startswith("bridge") or k == "outbound" for k in non_cpu_degraded) else "DEGRADED"
+    elif degraded:
+        priority = "TRANSIENT"
+    else:
+        priority = "HEALTHY"
+
+    registered_now = set(list_job_names())
     job_rows = await fetch_all(
         "SELECT job_name, last_status, last_run_at, run_count, "
         "EXTRACT(EPOCH FROM (NOW() - last_run_at))::int AS seconds_since_last_run "
         "FROM fazle_scheduled_jobs ORDER BY job_name"
     )
-    stale_jobs = [
-        dict(r) for r in job_rows
-        if r["seconds_since_last_run"] is not None and r["seconds_since_last_run"] > 24 * 3600
-    ]
+    stale_jobs, obsolete_job_names = [], []
+    for r in job_rows:
+        if r["job_name"] not in registered_now:
+            obsolete_job_names.append(r["job_name"])
+            continue
+        if r["seconds_since_last_run"] is not None and r["seconds_since_last_run"] > 24 * 3600:
+            stale_jobs.append(dict(r))
     failed_jobs = [dict(r) for r in job_rows if r["last_status"] == "error"]
+    if stale_jobs or failed_jobs:
+        priority = "ACTION_REQUIRED" if priority in ("HEALTHY", "TRANSIENT") else priority
 
     incident_rows = await fetch_all(
         "SELECT severity, source, title, COUNT(*) AS n FROM agent.incidents "
         "WHERE resolved_at IS NULL GROUP BY severity, source, title "
         "ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, title LIMIT 20"
     )
+    if any(r["severity"] == "critical" for r in incident_rows):
+        priority = "CRITICAL"
 
     return {
         "report": "system_observation",
         "args": {},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
+            "priority": priority,
             "overall_status": health["status"],
             "degraded_probe_count": len(degraded),
             "degraded_probes": list(degraded.keys()),
+            "action_required_probes": list(non_cpu_degraded.keys()),
             "stale_job_count": len(stale_jobs),
+            "obsolete_job_count": len(obsolete_job_names),
             "failed_job_count": len(failed_jobs),
             "open_incident_count": len(incident_rows),
         },
-        "rows": [{"probe": k, **v} for k, v in degraded.items()] + stale_jobs + failed_jobs + [dict(r) for r in incident_rows],
+        "rows": (
+            [{"probe": k, **v} for k, v in degraded.items()] + stale_jobs + failed_jobs
+            + [dict(r) for r in incident_rows]
+            + [{"obsolete_job": n} for n in obsolete_job_names]
+        ),
     }
 
 

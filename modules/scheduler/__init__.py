@@ -809,12 +809,28 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     # genuinely scheduled to fire. One job, one id, matching every other
     # job in this file, fixes the status reporting without changing the
     # actual twice-daily firing behavior at all.
+    # Stage G5.13 (2026-08-28) real bug found and fixed: CronTrigger(...)
+    # constructed WITHOUT an explicit timezone= kwarg defaults to the
+    # SERVER's own local system timezone (confirmed live: Europe/Berlin/
+    # CEST, +02:00) at construction time -- it does NOT inherit
+    # AsyncIOScheduler(timezone=_tz())'s "Asia/Dhaka" setting just because
+    # the trigger is later passed to that scheduler's add_job(). This is a
+    # PRE-EXISTING pattern affecting every other CronTrigger(...) call in
+    # this file too (payroll_hour, digest_hour, memory_review_hour,
+    # rag_rebuild_hour, backup hours, stale_escort_reminder) -- daily_admin_
+    # digest's own docstring claims "runs at 08:00 Asia/Dhaka" but was
+    # actually firing at 08:00 server-local time, a 4-hour real-world
+    # discrepancy. Fixed HERE ONLY (the two Stage G jobs this stage is
+    # responsible for) -- deliberately not touched for every other
+    # pre-existing job, which is a separate, wider, disclosed-not-fixed
+    # finding (see the Stage G5 final report's G5.13 section) outside this
+    # stage's scope.
     if "business_summary_report" in _job_registry:
         bs_hour1 = int(os.getenv("BUSINESS_SUMMARY_HOUR_1", "9"))
         bs_hour2 = int(os.getenv("BUSINESS_SUMMARY_HOUR_2", "21"))
         _scheduler.add_job(
             _wrap("business_summary_report", _job_registry["business_summary_report"]),
-            CronTrigger(hour=f"{bs_hour1},{bs_hour2}", minute=0),
+            CronTrigger(hour=f"{bs_hour1},{bs_hour2}", minute=0, timezone=_tz()),
             id="business_summary_report", replace_existing=True,
         )
 
@@ -823,7 +839,7 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
         so_hour2 = int(os.getenv("SYSTEM_OBSERVATION_HOUR_2", "21"))
         _scheduler.add_job(
             _wrap("system_observation_report", _job_registry["system_observation_report"]),
-            CronTrigger(hour=f"{so_hour1},{so_hour2}", minute=15),
+            CronTrigger(hour=f"{so_hour1},{so_hour2}", minute=15, timezone=_tz()),
             id="system_observation_report", replace_existing=True,
         )
 

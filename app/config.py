@@ -402,7 +402,27 @@ class Settings(BaseSettings):
     # Contacts matching any of these criteria are ALWAYS drafted (never auto-sent)
     # even when AUTO_REPLY_ENABLED=true.
     # Roles: identity_role strings (e.g. accountant, vip_client)
-    draft_always_roles: str = "accountant,client_escort_buyer,vip_client,repeat_client"
+    #
+    # Stage G5.1 (2026-08-28) real gap found and fixed: internal_coordinator,
+    # internal_operation, employee_internal (Office/Internal, Stage G6's
+    # supervised-draft lane) and security_service_client (Client, Stage G5)
+    # were NOT in this list -- confirmed live in canonical history
+    # (wbom_whatsapp_messages) that internal_coordinator-classified senders
+    # had received 25 real autonomous AI-generated outbound replies
+    # (workflow_triggered values like 'greeting'/'office_location'/'join' --
+    # the exact vocabulary the automated pipeline stamps on its own
+    # AI-fallback replies), because these 4 roles fall through
+    # modules.message_router's employee/_ESCORT_ROLES/ROUTE_B_ROLES checks
+    # straight to the generic KB/AI-fallback branch, and were not in this
+    # gate either. escort_client/client_escort_buyer/vip_client/
+    # repeat_client are unaffected -- those are already routed away from
+    # autonomous reply entirely via the separate, dedicated
+    # handle_escort_client_message() (_ESCORT_ROLES in message_router)
+    # regardless of this setting.
+    draft_always_roles: str = (
+        "accountant,client_escort_buyer,vip_client,repeat_client,"
+        "internal_coordinator,internal_operation,employee_internal,security_service_client"
+    )
     # Phones: explicit E.164 phone numbers (without +)
     draft_always_phones: str = ""
     # Names: case-insensitive display name substrings

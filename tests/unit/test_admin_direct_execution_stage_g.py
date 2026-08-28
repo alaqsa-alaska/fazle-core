@@ -127,3 +127,47 @@ class TestExecuteFlow:
         assert result["ok"] is True
         assert result["stage"] == "executed"
         create_mock.assert_awaited_once()
+
+
+class TestReplayIdempotencyStageG57:
+    """Stage G5.7: the Owner sends the same employee-create instruction
+    twice (e.g. because the first response was delayed). First call
+    creates the employee; second call (now that the employee genuinely
+    exists) must recognize the duplicate and refuse -- never a second
+    create_employee() call, never a duplicate row."""
+
+    async def _settings(self, admin_number="880188X"):
+        from app.config import get_settings
+        s = get_settings()
+        return s.model_copy(update={"admin_bridge2_number": admin_number})
+
+    async def test_second_identical_instruction_is_refused_not_duplicated(self):
+        settings = await self._settings()
+        create_mock = AsyncMock(return_value={"employee": {"employee_id": 88}})
+        instruction = "Mohammad Karamat Ali, 01712345678, employee হিসাবে create করো"
+
+        with patch("app.config.get_settings", return_value=settings), \
+             patch("modules.fazle_payroll_engine.normalizer.normalize_bd_phone", return_value="8801712345678"), \
+             patch("app.database.fetch_one", new=AsyncMock(return_value=None)), \
+             patch("modules.admin_employees.create_employee", new=create_mock):
+            first = await execute_trusted_employee_creation(instruction, "880188X", "bridge2", dry_run=False)
+        assert first["ok"] is True
+        assert first["stage"] == "executed"
+        create_mock.assert_awaited_once()
+
+        # Now the duplicate-check pre-condition changes to reflect reality:
+        # the employee genuinely exists (this is what the live DB would
+        # actually show after the first call committed).
+        with patch("app.config.get_settings", return_value=settings), \
+             patch("modules.fazle_payroll_engine.normalizer.normalize_bd_phone", return_value="8801712345678"), \
+             patch("app.database.fetch_one", new=AsyncMock(return_value={
+                 "employee_id": 88, "employee_name": "Mohammad Karamat Ali", "status": "Active",
+             })), \
+             patch("modules.admin_employees.create_employee", new=create_mock):
+            second = await execute_trusted_employee_creation(instruction, "880188X", "bridge2", dry_run=False)
+
+        assert second["ok"] is False
+        assert second["stage"] == "duplicate_check"
+        assert second["existing_employee_id"] == 88
+        # create_employee was never called a second time.
+        create_mock.assert_awaited_once()
