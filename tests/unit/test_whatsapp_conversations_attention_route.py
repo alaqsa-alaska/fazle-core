@@ -90,6 +90,35 @@ class TestMetadataOnlyShape:
 
 
 class TestDomainAndStateResolution:
+    async def test_outbound_latest_message_falls_back_to_sender_number(self, auth_headers):
+        """Regression for a real live bug found during Stage D10:
+        canonical_phone is only ever populated by the inbound writer
+        (_save_raw_core_copy), never by the outbound writer
+        (_save_message) -- so a conversation whose LATEST message is
+        outbound (routine) must still resolve state via sender_number,
+        not silently fall back to 'unclear'."""
+        calls = {"n": 0}
+
+        async def _fake_fetch_all(sql, *args):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [_conv_row(
+                    canonical_phone=None, sender_number="8801784396009",
+                    direction="outbound", workflow_triggered="recruitment", intent_detected=None,
+                )]
+            if "wbom_candidates" in sql:
+                assert args[0] == ["8801784396009"]
+                return [{"phone": "8801784396009", "post_intake_status": "agreed"}]
+            return []
+
+        with patch("app.main.fetch_all", new=_fake_fetch_all):
+            async with await _client() as ac:
+                resp = await ac.get("/api/whatsapp/conversations/attention", headers=auth_headers)
+        conv = resp.json()["conversations"][0]
+        assert conv["canonical_phone"] == "8801784396009"
+        assert conv["current_state"] == "waiting_for_company"
+        assert conv["requires_action"] is True
+
     async def test_recruitment_conversation_resolves_state_from_candidate_row(self, auth_headers):
         calls = {"n": 0}
 

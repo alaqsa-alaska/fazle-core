@@ -1554,7 +1554,25 @@ async def whatsapp_conversations_attention(
         )
         from modules.number_identity import canonical_phone as _canon_phone
 
-        phones = sorted({r["canonical_phone"] for r in page if r["canonical_phone"]})
+        # Real bug found during Stage D10 live verification, fixed here:
+        # canonical_phone is only ever populated by the INBOUND writer
+        # (_save_raw_core_copy) -- the outbound writer (_save_message)
+        # never sets it (confirmed live: message_id 18851, an outbound
+        # recruitment reply, has canonical_phone=NULL even though
+        # sender_number='8801784396009' is present). Since this endpoint
+        # picks each conversation's LATEST message -- routinely an
+        # outbound reply -- relying on canonical_phone alone silently
+        # dropped real candidates (e.g. post_intake_status='agreed') to
+        # "unclear" purely because their most recent message happened to
+        # be outbound. sender_number is populated on every row
+        # regardless of direction; normalize it the same way the
+        # inbound writer already does (modules.number_identity.
+        # canonical_phone, the same function that populates the column
+        # in the first place) as a fallback.
+        def _resolved_phone(row: dict) -> Optional[str]:
+            return row["canonical_phone"] or (_canon_phone(row["sender_number"]) or None if row["sender_number"] else None)
+
+        phones = sorted({p for r in page if (p := _resolved_phone(r))})
         candidate_status: dict = {}
         escort_status: dict = {}
         if phones:
@@ -1583,7 +1601,7 @@ async def whatsapp_conversations_attention(
 
         results = []
         for r in page:
-            phone = r["canonical_phone"]
+            phone = _resolved_phone(r)
             row_domain = None
             if r["workflow_triggered"] == "recruitment" or r["intent_detected"] == "recruitment":
                 row_domain = "recruitment"
