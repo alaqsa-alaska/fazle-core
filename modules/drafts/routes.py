@@ -327,6 +327,25 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
     }
 
 
+# ── POST /api/drafts/{id}/notify-admin ─────────────────────────────────────
+@router.post("/api/drafts/{draft_id}/notify-admin")
+async def notify_admin_of_draft_route(
+    draft_id: int, category: str = "", _: None = Depends(_require_api_key),
+):
+    """Stage G5/G6/G7 (2026-08-28): actively push the (category-aware)
+    admin review card for an existing pending draft -- the missing piece
+    between draft creation (create_draft above / draft_whatsapp_reply)
+    and the existing APPROVE/EDIT/REJECT command path. Sends nothing to
+    the original sender; only notifies the admin. category: e.g.
+    'Client', 'Office/Internal' -- optional, rendered as an extra line on
+    the card when given."""
+    from modules.supervised_draft import notify_admin_of_pending_draft
+    result = await notify_admin_of_pending_draft(draft_id, category)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "notify failed")
+    return result
+
+
 # ── POST /api/drafts/{id}/delete ───────────────────────────────────────────
 @router.post("/api/drafts/{draft_id}/delete")
 async def delete_draft(draft_id: int, _: None = Depends(_require_api_key)):

@@ -1745,7 +1745,7 @@ async def start_pollers():
 
 def _build_admin_review_draft(
     *, sender_name: str, sender_mobile: str, sender_message: str,
-    ai_reply: str, draft_no: str = "(pending)",
+    ai_reply: str, draft_no: str = "(pending)", category: str = "",
 ) -> str:
     """Build the 5-part admin draft-review message.
 
@@ -1755,16 +1755,25 @@ def _build_admin_review_draft(
       3. Sender's Message
       4. AI Generated Reply
       5. Options: 1. Approved  2. Edit  3. Reject
-    """
+
+    category (Stage G7, 2026-08-28): optional sender category label
+    (Client/Office/Operations/Internal/...) -- an additive 6th line, only
+    rendered when a caller actually supplies one, so every existing
+    caller of this function (and _save_draft(), which never passes it)
+    produces byte-identical output to before this change. Derive the
+    value via modules.authority_lanes -- never invent a new taxonomy
+    here."""
     name_display = sender_name or "(unknown)"
     mobile_display = sender_mobile or "(unknown)"
     msg_display = (sender_message or "").strip() or "(empty)"
     reply_display = (ai_reply or "").strip() or "(no AI reply generated)"
+    category_line = f"Category: {category}\n" if category else ""
     return (
         f"📋 ADMIN REVIEW DRAFT\n"
         f"─────────────────\n"
         f"Sender: {name_display} | {mobile_display}\n"
         f"Draft No: {draft_no}\n"
+        f"{category_line}"
         f"─────────────────\n"
         f"Sender's Message:\n{msg_display}\n"
         f"─────────────────\n"
@@ -1781,6 +1790,7 @@ async def _save_draft(
     *,
     sender_name: str = "",
     sender_message: str = "",
+    category: str = "",
 ):
     """Store a suppressed reply as a draft (safe mode).
 
@@ -1788,6 +1798,10 @@ async def _save_draft(
     text is enriched to the 5-part admin review format (Sender Name+Mobile,
     Draft No, Sender's Message, AI Reply, Options). The raw AI reply is still
     stored separately in meta for the approve/edit flow to send.
+
+    category (Stage G7, 2026-08-28): optional, passed straight through to
+    _build_admin_review_draft()'s own optional category param -- every
+    existing call site (none of which pass this) is unaffected.
 
     B25 hotfix: passes through draft_quality gate first. Bad drafts are still
     persisted (for audit) but with status='rejected_quality'/'rejected_fallback'
@@ -1812,6 +1826,7 @@ async def _save_draft(
             sender_message=sender_message,
             ai_reply=reply_text if ok else "(AI generation failed/unavailable)",
             draft_no="__DRAFT_NO_PLACEHOLDER__",
+            category=category,
         )
         meta_ctx = json.dumps({
             "ai_reply_raw": reply_text or "",

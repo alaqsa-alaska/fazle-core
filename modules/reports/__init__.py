@@ -408,8 +408,139 @@ async def _b_unresolved_fpe_employees() -> dict:
     }
 
 
+# ── Stage G18: Business Communication Summary (twice-daily target) ──────────
+async def _b_business_communication_summary(hours: int = 12) -> dict:
+    """Bounded, metadata-first business communication summary -- Stage
+    G18. Reuses the exact domain-label convention Stage E's
+    /api/whatsapp/conversations/attention already established
+    (workflow_triggered/intent_detected = recruitment/escort_duty/
+    attendance/payment_due), identity_role for client/office-internal
+    (Stage G1's authority-lane role vocabulary), and the same "requires
+    action" state sources Stage E6/E7 proved deterministic (attendance
+    approved_at, cash transaction_status). Never dumps raw message
+    bodies -- counts + reference IDs only, so an admin can request
+    details separately (get_conversation_history)."""
+    since = f"NOW() - INTERVAL '{int(hours)} hours'"
+
+    domain_counts = await fetch_all(
+        f"""
+        SELECT
+          CASE
+            WHEN workflow_triggered='recruitment' OR intent_detected='recruitment' THEN 'recruitment'
+            WHEN workflow_triggered='escort_duty' OR intent_detected='escort_duty' THEN 'escort'
+            WHEN workflow_triggered='attendance' OR intent_detected='attendance' THEN 'attendance'
+            WHEN workflow_triggered='payment_due' OR intent_detected='payment_due' THEN 'cash'
+            WHEN identity_role IN ('vip_client','security_service_client','client_escort_buyer','escort_client','repeat_client') THEN 'client'
+            WHEN identity_role IN ('internal_coordinator','internal_operation','employee_internal') THEN 'office_internal'
+            WHEN identity_role IN ('employee','escort','security_guard','supervisor') THEN 'employee'
+            ELSE 'other'
+          END AS category,
+          COUNT(DISTINCT conversation_key) AS contacts
+        FROM wbom_whatsapp_messages
+        WHERE received_at >= {since}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        """
+    )
+    complaints = await fetch_val(
+        f"SELECT COUNT(DISTINCT conversation_key) FROM wbom_whatsapp_messages "
+        f"WHERE received_at >= {since} AND (workflow_triggered='complaint' OR intent_detected='complaint')"
+    )
+    office_group_msgs = await fetch_val(
+        f"SELECT COUNT(*) FROM wbom_whatsapp_messages WHERE received_at >= {since} AND conversation_key LIKE '%@g.us%'"
+    )
+    replies_sent = await fetch_val(
+        f"SELECT COUNT(*) FROM wbom_whatsapp_messages WHERE received_at >= {since} AND direction='outbound' AND actor_type IN ('automation','hermes')"
+    )
+    pending_drafts = await fetch_all(
+        "SELECT id, recipient, source, intent, created_at FROM fazle_draft_replies "
+        "WHERE status IN ('pending','pending_selfie','edited') ORDER BY created_at DESC LIMIT 15"
+    )
+    pending_drafts_total = await fetch_val("SELECT COUNT(*) FROM fazle_draft_replies WHERE status IN ('pending','pending_selfie','edited')")
+
+    attendance_needs_action = await fetch_val(
+        "SELECT COUNT(*) FROM wbom_attendance WHERE approved_at IS NULL"
+    )
+    cash_needs_action = await fetch_val(
+        "SELECT COUNT(*) FROM fpe_cash_transactions WHERE transaction_status='pending'"
+    )
+    escort_needs_action = await fetch_val(
+        "SELECT COUNT(*) FROM wbom_escort_programs WHERE status='draft'"
+    )
+    pending_business_actions = await fetch_all(
+        "SELECT id, domain, action_type, business_reference, created_at FROM hermes_action_approvals "
+        "WHERE status='pending' ORDER BY created_at DESC LIMIT 15"
+    )
+
+    return {
+        "report": "business_communication_summary",
+        "args": {"hours": hours},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "window_hours": hours,
+            "by_category": {r["category"]: r["contacts"] for r in domain_counts},
+            "complaints": int(complaints or 0),
+            "office_group_messages": int(office_group_msgs or 0),
+            "autonomous_replies_sent": int(replies_sent or 0),
+            "pending_drafts_total": int(pending_drafts_total or 0),
+            "attendance_needs_action": int(attendance_needs_action or 0),
+            "cash_needs_action": int(cash_needs_action or 0),
+            "escort_needs_action": int(escort_needs_action or 0),
+            "pending_business_proposals": len(pending_business_actions),
+        },
+        "rows": [dict(r) for r in pending_drafts] + [dict(r) for r in pending_business_actions],
+    }
+
+
+# ── Stage G21: System Observation Report (twice-daily target, READ-only) ────
+async def _b_system_observation() -> dict:
+    """Bounded system-health observation -- Stage G19/G21. Reuses
+    app.main._build_health() (the same probe set job_health_summary
+    already alerts from) plus queue/DLQ/watchdog-adjacent signals already
+    tracked in fazle_scheduled_jobs. READ-only: this builder queries
+    state, it never modifies anything -- Stage G19's explicit boundary."""
+    from app.main import _build_health
+
+    health = await _build_health(deep=False)
+    degraded = {k: v for k, v in health["probes"].items() if v.get("status") not in ("ok", "skipped")}
+
+    job_rows = await fetch_all(
+        "SELECT job_name, last_status, last_run_at, run_count, "
+        "EXTRACT(EPOCH FROM (NOW() - last_run_at))::int AS seconds_since_last_run "
+        "FROM fazle_scheduled_jobs ORDER BY job_name"
+    )
+    stale_jobs = [
+        dict(r) for r in job_rows
+        if r["seconds_since_last_run"] is not None and r["seconds_since_last_run"] > 24 * 3600
+    ]
+    failed_jobs = [dict(r) for r in job_rows if r["last_status"] == "error"]
+
+    incident_rows = await fetch_all(
+        "SELECT severity, source, title, COUNT(*) AS n FROM agent.incidents "
+        "WHERE resolved_at IS NULL GROUP BY severity, source, title "
+        "ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, title LIMIT 20"
+    )
+
+    return {
+        "report": "system_observation",
+        "args": {},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "overall_status": health["status"],
+            "degraded_probe_count": len(degraded),
+            "degraded_probes": list(degraded.keys()),
+            "stale_job_count": len(stale_jobs),
+            "failed_job_count": len(failed_jobs),
+            "open_incident_count": len(incident_rows),
+        },
+        "rows": [{"probe": k, **v} for k, v in degraded.items()] + stale_jobs + failed_jobs + [dict(r) for r in incident_rows],
+    }
+
+
 # ── registry + dispatch ─────────────────────────────────────────────────────
 _BUILDERS: dict[str, Callable[..., Awaitable[dict]]] = {
+    "business_communication_summary": _b_business_communication_summary,
+    "system_observation":             _b_system_observation,
     "daily_summary":          _b_daily_summary,
     "monthly_payroll":        _b_monthly_payroll,
     "escort_utilization":     _b_escort_utilization,
@@ -554,6 +685,73 @@ async def job_daily_admin_digest() -> dict:
             sent += 1
         except Exception as e:
             log.warning(f"[reports] digest enqueue failed for {adm}: {e}")
+    return {"status": "ok", "sent": sent, "admins": len(admins)}
+
+
+# ── Stage G18/G24 (2026-08-28): Business Communication Summary, twice daily ──
+async def job_business_summary_report() -> dict:
+    """Stage G18 -- routine, twice-daily (see modules.scheduler's own
+    CronTrigger registration for the exact times), reusing this file's
+    existing report-builder/cache/audit infrastructure (run_report/
+    render_text) and the existing outbound.enqueue delivery path every
+    other scheduled admin message already uses -- not a new
+    reporting/delivery mechanism. This is a ROUTINE report, deliberately
+    separate from the existing urgent-alert jobs (dlq_alert,
+    bridge_watchdog, health_summary) -- Stage G22's explicit
+    routine-vs-urgent separation; none of those jobs are touched here."""
+    import os
+    from modules import outbound
+    admins = [a.strip() for a in (os.getenv("ADMIN_NUMBERS", "") or "").split(",") if a.strip()]
+    if not admins:
+        return {"status": "ok", "skipped": "no admin"}
+    try:
+        payload = await run_report("business_communication_summary", {"hours": 12}, use_cache=False)
+    except Exception as e:
+        log.exception(f"[reports] business summary build failed: {e}")
+        return {"status": "error", "error": str(e)}
+    text = "📨 " + render_text(payload, max_rows=15)
+    slot_key = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    sent = 0
+    for adm in admins:
+        try:
+            await outbound.enqueue(
+                adm, text, source_bridge="bridge2", purpose="business-summary",
+                idempotency_key=f"business-summary-{slot_key}-{adm}",
+            )
+            sent += 1
+        except Exception as e:
+            log.warning(f"[reports] business summary enqueue failed for {adm}: {e}")
+    return {"status": "ok", "sent": sent, "admins": len(admins)}
+
+
+async def job_system_observation_report() -> dict:
+    """Stage G19/G21/G24 -- routine, twice-daily. READ-only by
+    construction: _b_system_observation() only queries state (Stage
+    G19's explicit "system monitoring must remain READ/REPORT" boundary,
+    Stage G21's "may recommend fixes but must NOT apply them") -- this
+    job has no code path that can mutate anything."""
+    import os
+    from modules import outbound
+    admins = [a.strip() for a in (os.getenv("ADMIN_NUMBERS", "") or "").split(",") if a.strip()]
+    if not admins:
+        return {"status": "ok", "skipped": "no admin"}
+    try:
+        payload = await run_report("system_observation", {}, use_cache=False)
+    except Exception as e:
+        log.exception(f"[reports] system observation build failed: {e}")
+        return {"status": "error", "error": str(e)}
+    text = "🩺 " + render_text(payload, max_rows=15)
+    slot_key = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    sent = 0
+    for adm in admins:
+        try:
+            await outbound.enqueue(
+                adm, text, source_bridge="bridge2", purpose="system-observation",
+                idempotency_key=f"system-observation-{slot_key}-{adm}",
+            )
+            sent += 1
+        except Exception as e:
+            log.warning(f"[reports] system observation enqueue failed for {adm}: {e}")
     return {"status": "ok", "sent": sent, "admins": len(admins)}
 
 

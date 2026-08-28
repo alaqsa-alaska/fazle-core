@@ -603,6 +603,20 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     except Exception as e:
         log.warning(f"[scheduler] reports module unavailable: {e}")
 
+    # Stage G18/G21/G24 (2026-08-28) — twice-daily Business Communication
+    # Summary + System Observation Report, both routine (see modules.reports'
+    # own docstrings for why these are separate from the existing urgent-alert
+    # jobs, none of which are touched here). Reuses the exact existing
+    # scheduler registration pattern above -- register_job() + add_job() --
+    # with two CronTrigger entries each for the twice-daily cadence, rather
+    # than a new scheduling mechanism.
+    try:
+        from modules.reports import job_business_summary_report, job_system_observation_report
+        register_job("business_summary_report", job_business_summary_report)
+        register_job("system_observation_report", job_system_observation_report)
+    except Exception as e:
+        log.warning(f"[scheduler] Stage G report jobs unavailable: {e}")
+
     # 2026-07-22 — daily phone-contact-book <-> wbom_contacts sync
     try:
         from modules.contact_sync import job_daily_contact_sync
@@ -777,6 +791,38 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
             _wrap("daily_admin_digest", _job_registry["daily_admin_digest"]),
             CronTrigger(hour=digest_hour, minute=0),
             id="daily_admin_digest", replace_existing=True,
+        )
+
+    # Stage G18/G24 — twice daily, default 08:00 and 20:00 Asia/Dhaka
+    # (same TZ as every other cron job in this function, see _tz() above),
+    # independently configurable via env so this doesn't collide with
+    # daily_admin_digest's own hour without an explicit change.
+    if "business_summary_report" in _job_registry:
+        bs_hour1 = int(os.getenv("BUSINESS_SUMMARY_HOUR_1", "9"))
+        bs_hour2 = int(os.getenv("BUSINESS_SUMMARY_HOUR_2", "21"))
+        _scheduler.add_job(
+            _wrap("business_summary_report", _job_registry["business_summary_report"]),
+            CronTrigger(hour=bs_hour1, minute=0),
+            id="business_summary_report_am", replace_existing=True,
+        )
+        _scheduler.add_job(
+            _wrap("business_summary_report", _job_registry["business_summary_report"]),
+            CronTrigger(hour=bs_hour2, minute=0),
+            id="business_summary_report_pm", replace_existing=True,
+        )
+
+    if "system_observation_report" in _job_registry:
+        so_hour1 = int(os.getenv("SYSTEM_OBSERVATION_HOUR_1", "9"))
+        so_hour2 = int(os.getenv("SYSTEM_OBSERVATION_HOUR_2", "21"))
+        _scheduler.add_job(
+            _wrap("system_observation_report", _job_registry["system_observation_report"]),
+            CronTrigger(hour=so_hour1, minute=15),
+            id="system_observation_report_am", replace_existing=True,
+        )
+        _scheduler.add_job(
+            _wrap("system_observation_report", _job_registry["system_observation_report"]),
+            CronTrigger(hour=so_hour2, minute=15),
+            id="system_observation_report_pm", replace_existing=True,
         )
 
     if "daily_db_backup" in _job_registry:
