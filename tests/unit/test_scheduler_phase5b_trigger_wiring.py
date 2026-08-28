@@ -361,16 +361,28 @@ class TestBuildHealthBridge3Coverage:
 
     async def test_bridge1_and_bridge2_probe_shape_unchanged(self, monkeypatch):
         """Regression guard: adding bridge3 must not alter bridge1/bridge2's
-        existing probe keys, labels, or paths."""
+        existing probe keys or labels.
+
+        2026-08-28 (health-probe path fix): the path assertions below used
+        to hardcode a literal expected path -- the exact same kind of
+        divergence-prone duplication that caused this probe to silently
+        keep reporting Bridge1's old, wrong store path after the P1
+        store-path config fix landed (the poller read the corrected
+        settings.bridge1_db_path; this probe still had its own hardcoded
+        string). Asserting against get_settings() directly here means this
+        test can never again drift out of sync with whatever the probe
+        (and the poller) actually read."""
         main_mod = self._patch_common_probes(monkeypatch)
+        from app.config import get_settings
+        live_settings = get_settings()
 
         result = await main_mod._build_health(deep=False)
 
         probes = result["probes"]
         assert probes["bridge1_db"]["label"] == "bridge1"
-        assert probes["bridge1_db"]["path"] == "/home/azim/whatsapp1/store/messages.db"
+        assert probes["bridge1_db"]["path"] == live_settings.bridge1_db_path
         assert probes["bridge2_db"]["label"] == "bridge2"
-        assert probes["bridge2_db"]["path"] == "/home/azim/whatsapp2/store/messages.db"
+        assert probes["bridge2_db"]["path"] == live_settings.bridge2_db_path
         assert probes["bridge_poller_b1"]["service"] == "bridge_poller:bridge1"
         assert probes["bridge_poller_b2"]["service"] == "bridge_poller:bridge2"
 
@@ -399,3 +411,22 @@ class TestBuildHealthBridge3Coverage:
         result = await main_mod._build_health(deep=False)
 
         assert result["status"] == "ok"
+
+    async def test_bridge1_db_probe_path_comes_from_settings_not_a_literal(self, monkeypatch):
+        """2026-08-28 (health-probe path fix): the actual regression this
+        guards is app/main.py's own source no longer containing a
+        hardcoded bridge1 store path -- if a future edit reintroduces one,
+        this test's monkeypatched settings override proves the probe would
+        silently ignore it, exactly the bug this fix closed."""
+        import app.config as config_mod
+        from app.config import Settings
+
+        overridden_path = "/tmp/__test_bridge1_probe_path_override__/messages.db"
+        real_settings = config_mod.get_settings()
+        patched_settings = real_settings.model_copy(update={"bridge1_db_path": overridden_path})
+        monkeypatch.setattr("app.main.settings", patched_settings)
+
+        main_mod = self._patch_common_probes(monkeypatch)
+        result = await main_mod._build_health(deep=False)
+
+        assert result["probes"]["bridge1_db"]["path"] == overridden_path

@@ -819,9 +819,18 @@ async def _build_health(deep: bool = False) -> dict:
         return_exceptions=False,
     )
     llm_p = await _safe_llm() if deep else {"status": "skipped", "reason": "deep health only"}
-    bridge1_db = _probe_file_age("/home/azim/whatsapp1/store/messages.db", "bridge1")
-    bridge2_db = _probe_file_age("/home/azim/whatsapp2/store/messages.db", "bridge2")
-    bridge3_db = _probe_file_age("/home/azim/whatsapp3/store/messages.db", "bridge3")
+    # 2026-08-28 (health-probe path fix): these three used to be hardcoded
+    # literal paths, independent of settings.bridge{1,2,3}_db_path -- the
+    # config Bridge1's own poller already reads (see modules.bridge_poller,
+    # which logs its real "SQLite path=..." on every start). That divergence
+    # meant a config-only path correction (P1, Bridge1 store-path mismatch)
+    # fixed the actual poller but left this dashboard probe silently still
+    # reporting the old, wrong file's staleness. Reading the same settings
+    # object as the poller closes that gap without a second, competing path
+    # literal to keep in sync by hand.
+    bridge1_db = _probe_file_age(settings.bridge1_db_path, "bridge1")
+    bridge2_db = _probe_file_age(settings.bridge2_db_path, "bridge2")
+    bridge3_db = _probe_file_age(settings.bridge3_db_path, "bridge3")
     # SQLite mtime is activity, not liveness. A fresh poller heartbeat proves
     # the quiet bridge is healthy while preserving the age as diagnostics.
     if hb1_p.get("status") == "ok" and bridge1_db.get("status") == "degraded":
