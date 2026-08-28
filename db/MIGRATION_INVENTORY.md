@@ -110,6 +110,7 @@
 070_hermes_action_approvals_dispatch_billing_types.sql
 071_hermes_action_approvals_escort_program_creation.sql
 072_wbom_candidates_post_intake_status.sql
+073_wbom_whatsapp_messages_actor_attribution.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -295,7 +296,22 @@ existing column represented what happens after a candidate reaches `funnel_stage
 Purely additive, no backfill (NULL treated as `awaiting_agreement` by the reading code). Same
 CHECK-constraint-on-column pattern as migration 059.
 
-**Next available number for new work: `073`.**
+**`073_wbom_whatsapp_messages_actor_attribution.sql` (2026-08-28, Stage B
+canonical-history baseline plan, APPLIED directly to production and
+tracked in `schema_migrations`; `072` above was found still pending at
+that time -- despite this doc's own note calling it applied -- and was
+deliberately left untouched as pre-existing, unrelated, out of this
+stage's scope):** adds nullable `wbom_whatsapp_messages.actor_type` /
+`actor_id` (who/what produced a row's content -- `external_user`,
+`human_device`, `human_operator`, `hermes`, `automation`, `system` --
+deliberately distinct from `identity_role`, which describes the
+counterparty's business identity, not the outbound generator). Purely
+additive, no CHECK constraint (new actor types must never require a
+migration to add), every existing writer updated in the same commit to
+pass an explicit value at its own call site -- see that commit's own
+message for the full per-writer inventory.
+
+**Next available number for new work: `074`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
