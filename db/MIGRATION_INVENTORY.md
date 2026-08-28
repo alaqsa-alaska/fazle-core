@@ -111,6 +111,7 @@
 071_hermes_action_approvals_escort_program_creation.sql
 072_wbom_candidates_post_intake_status.sql
 073_wbom_whatsapp_messages_actor_attribution.sql
+074_wbom_whatsapp_messages_stage_c_indexes.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -311,7 +312,16 @@ migration to add), every existing writer updated in the same commit to
 pass an explicit value at its own call site -- see that commit's own
 message for the full per-writer inventory.
 
-**Next available number for new work: `074`.**
+**`074_wbom_whatsapp_messages_stage_c_indexes.sql` (2026-08-28, Stage C
+filtered-retrieval baseline, APPLIED directly to production and tracked
+in `schema_migrations`):** two supporting partial indexes on
+`wbom_whatsapp_messages` (`actor_type`, `workflow_triggered`), same
+`WHERE ... IS NOT NULL` pattern the table's existing `idx_wbom_msg_intent`/
+`idx_wbom_messages_identity` already use. No new columns, no data change
+-- read-performance only, for the new `/api/whatsapp/messages/query` and
+`/api/whatsapp/messages/conversation` filtered-retrieval endpoints.
+
+**Next available number for new work: `075`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 
