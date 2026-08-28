@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -830,8 +831,24 @@ async def _poll_bridge(config: dict):
     cursor = await _get_cursor(bridge_name)
     log.info(f"[{bridge_name}] Starting from cursor: {cursor.isoformat()}")
 
-    _poll_iter = 0  # tracks iterations for periodic send-gate re-check
-    _gate_check_every = max(1, _SEND_GATE_CHECK_INTERVAL // POLL_INTERVAL)
+    # 2026-08-28 (send-gate timing fix): this used to be an iteration-count
+    # gate (_poll_iter % _gate_check_every == 0), which assumed a roughly
+    # fixed wall-clock time per iteration. That assumption breaks under
+    # this same loop's own adaptive backoff (BRIDGE_POLL_MIN_S=1.0 busy ->
+    # BRIDGE_POLL_MAX_S=30.0 idle): during a quiet stretch, reaching
+    # _gate_check_every (=60) iterations could take up to ~30 minutes of
+    # real time -- six times longer than the intended, commented "every
+    # 5 min" -- silently stretching the window a bridge's send gate could
+    # sit "off" (send_strict() turns it off after every real send; this
+    # periodic check is the only thing that turns it back on between
+    # sends). Root-caused live: Bridge2's /api/send-status sat
+    # allowed=false for 18+ minutes with no bridge/session issue at all.
+    # Fix: track elapsed wall-clock time via time.monotonic() instead of
+    # iteration count -- the 300s intended interval is now the actual
+    # interval, regardless of how the adaptive backoff has stretched this
+    # iteration's own sleep. Adaptive polling itself (_sleep_s below) is
+    # completely unchanged.
+    _last_gate_check = time.monotonic()
     _sleep_s = BRIDGE_POLL_MIN_S
 
     while True:
@@ -1573,8 +1590,11 @@ async def _poll_bridge(config: dict):
                 log.debug(f"[{bridge_name}] bridge_heartbeats write failed: {_hb2_err}")
 
             # Periodic send-gate re-enable (survives independent bridge restarts)
-            _poll_iter += 1
-            if _poll_iter % _gate_check_every == 0:
+            # -- elapsed wall-clock time, not iteration count; see the
+            # comment on _last_gate_check's initialization above.
+            _now_monotonic = time.monotonic()
+            if _now_monotonic - _last_gate_check >= _SEND_GATE_CHECK_INTERVAL:
+                _last_gate_check = _now_monotonic
                 try:
                     ok = await get_bridge().ensure_enabled()
                     if not ok:
