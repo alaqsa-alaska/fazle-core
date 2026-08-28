@@ -458,6 +458,29 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
     )
     pending_drafts_total = await fetch_val("SELECT COUNT(*) FROM fazle_draft_replies WHERE status IN ('pending','pending_selfie','edited')")
 
+    # Stage G6.14: explicit Client/Office pending-draft buckets with a
+    # ready-to-use next action -- reuses the "Category: ..." line Stage
+    # G5.1's auto-notify already bakes into a supervised draft's own
+    # reply_text (_build_admin_review_draft's optional category param),
+    # rather than a second lookup/join. A draft created before that field
+    # existed simply won't match either LIKE clause -- honest (not
+    # miscounted), not backfilled.
+    client_pending = await fetch_all(
+        "SELECT id, recipient, created_at FROM fazle_draft_replies "
+        "WHERE status IN ('pending','pending_selfie','edited') AND reply_text LIKE '%Category: Client%' "
+        "ORDER BY created_at DESC LIMIT 15"
+    )
+    office_pending = await fetch_all(
+        "SELECT id, recipient, created_at FROM fazle_draft_replies "
+        "WHERE status IN ('pending','pending_selfie','edited') AND reply_text LIKE '%Category: Office/Internal%' "
+        "ORDER BY created_at DESC LIMIT 15"
+    )
+    attendance_pending_drafts = await fetch_all(
+        "SELECT id, recipient, created_at FROM fazle_draft_replies "
+        "WHERE status IN ('pending','pending_selfie','edited') AND intent='attendance' "
+        "ORDER BY created_at DESC LIMIT 15"
+    )
+
     attendance_needs_action = await fetch_val(
         "SELECT COUNT(*) FROM wbom_attendance WHERE approved_at IS NULL"
     )
@@ -481,12 +504,29 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         + int(escort_needs_action or 0) + len(pending_business_actions)
         + int(pending_drafts_total or 0)
     )
+    # Stage G6.14: compact "Draft <id> — <Category> — APPROVE / EDIT /
+    # REJECT" approval-queue lines -- the exact Owner-example format --
+    # for the two supervised-draft buckets specifically, plus attendance
+    # reviews (their own existing APPROVE/REJECT command surface, Stage
+    # G12) and the structured business proposals (their own domain +
+    # reference, already precise). No message bodies anywhere here.
+    approval_queue = (
+        [f"Draft {r['id']} — Client — APPROVE / EDIT / REJECT" for r in client_pending]
+        + [f"Draft {r['id']} — Office/Internal — APPROVE / EDIT / REJECT" for r in office_pending]
+        + [f"Draft {r['id']} — Attendance — APPROVE / EDIT / REJECT" for r in attendance_pending_drafts]
+        + [f"Proposal {r['id']} — {r['domain']} — review via /api/actions/{r['id']}/approve" for r in pending_business_actions]
+    )
+
     return {
         "report": "business_communication_summary",
         "args": {"hours": hours},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "action_required_total": action_required_total,
+            "approval_queue_count": len(approval_queue),
+            "client_pending_drafts": len(client_pending),
+            "office_internal_pending_drafts": len(office_pending),
+            "attendance_pending_drafts": len(attendance_pending_drafts),
             "pending_business_proposals": len(pending_business_actions),
             "pending_drafts_total": int(pending_drafts_total or 0),
             "attendance_needs_action": int(attendance_needs_action or 0),
@@ -498,6 +538,7 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
             "office_group_messages": int(office_group_msgs or 0),
             "autonomous_replies_sent": int(replies_sent or 0),
         },
+        "approval_queue": approval_queue,
         # Priority items FIRST (structured business proposals -- precise
         # domain + business_reference, the real "Owner must decide" list),
         # then the broader pending-draft reference IDs for context.
@@ -676,6 +717,17 @@ def render_text(payload: dict, max_rows: int = 25) -> str:
                 lines.append(f"   - {sk}: {_fmt(sv)}")
         else:
             lines.append(f"• {k}: {_fmt(v)}")
+    # Stage G6.14: approval_queue (compact "Draft <id> — <Category> —
+    # APPROVE / EDIT / REJECT" lines) renders first, above the generic
+    # rows dump, when present -- this is the actionable part.
+    approval_queue = payload.get("approval_queue")
+    if approval_queue:
+        lines.append("")
+        lines.append("📋 Approval queue:")
+        for item in approval_queue[:max_rows]:
+            lines.append(f"  {item}")
+        if len(approval_queue) > max_rows:
+            lines.append(f"  … আরও {len(approval_queue) - max_rows}টি")
     if rows:
         lines.append("")
         lines.append(f"rows ({min(len(rows), max_rows)}/{len(rows)}):")

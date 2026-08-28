@@ -29,6 +29,23 @@ from app.config import get_settings
 
 log = logging.getLogger("fazle.admin_cmd")
 
+# ── Stage G6.15 (2026-08-28): read-only Admin command help surface ──────────
+# Single source of truth -- was previously only reachable as the
+# "command not understood" fallback (still is, unchanged); now ALSO
+# reachable explicitly via a bare "HELP" command. Only ever lists commands
+# genuinely implemented below in this same file -- never advertises
+# something unimplemented. Never exposes internal RBAC role names/config.
+_HELP_TEXT = (
+    "ব্যবহার:\n"
+    "  APPROVE <id>            — ড্রাফট পাঠান\n"
+    "  APPROVE <id> <id> ...   — একসাথে একাধিক\n"
+    "  REJECT <id>             — বাতিল\n"
+    "  EDIT <id> <নতুন বার্তা>\n"
+    "  PAID <id> <amount> <method>\n"
+    "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
+    "বাংলা সংখ্যাও কাজ করে: APPROVE ১৬৫"
+)
+
 # ── Bengali digit normalisation (Batch 25) ─────────────────────────────────────
 # Allow admins to type APPROVE ১৬৫. Map Bangla digits to ASCII before regex.
 _BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
@@ -287,6 +304,11 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
     """
     # B25: normalise Bengali digits + dedup duplicate sends within TTL window
     t = text.strip().translate(_BN_DIGITS)
+
+    # Stage G6.15: explicit, read-only HELP -- no RBAC command classification,
+    # no mutation, no dedup tracking (asking for help twice must always work).
+    if t.strip().upper() == "HELP":
+        return _HELP_TEXT
 
     if _dedup_seen(t, admin_phone):
         try:
@@ -550,17 +572,7 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
     if m:
         return await _cmd_user_apikey(m.group(1), admin_phone)
 
-    return (
-        "❌ কমান্ড বুঝিনি।\n\n"
-        "ব্যবহার:\n"
-        "  APPROVE <id>            — ড্রাফট পাঠান\n"
-        "  APPROVE <id> <id> ...   — একসাথে একাধিক\n"
-        "  REJECT <id>             — বাতিল\n"
-        "  EDIT <id> <নতুন বার্তা>\n"
-        "  PAID <id> <amount> <method>\n"
-        "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
-        "বাংলা সংখ্যাও কাজ করে: APPROVE ১৬৫"
-    )
+    return "❌ কমান্ড বুঝিনি।\n\n" + _HELP_TEXT
 
 
 # ── Multi-ID helpers (Batch 25, H5) ─────────────────────────────────────────────

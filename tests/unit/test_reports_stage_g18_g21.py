@@ -16,6 +16,9 @@ class TestBusinessSummaryBuilder:
         with patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[
             [{"category": "recruitment", "contacts": 5}],  # domain_counts
             [],  # pending_drafts
+            [],  # client_pending
+            [],  # office_pending
+            [],  # attendance_pending_drafts
             [],  # pending_business_actions
         ])), \
              patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[
@@ -40,6 +43,43 @@ class TestBusinessSummaryBuilder:
         from modules.reports import _BUILDERS
         assert "business_communication_summary" in _BUILDERS
         assert "system_observation" in _BUILDERS
+
+    async def test_approval_queue_format_stage_g6_14(self):
+        """Draft <id> — <Category> — APPROVE / EDIT / REJECT, the exact
+        Owner-example format."""
+        from modules.reports import _b_business_communication_summary
+
+        with patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[
+            [],  # domain_counts
+            [],  # pending_drafts
+            [{"id": 4099, "recipient": "x", "created_at": None}],  # client_pending
+            [{"id": 4100, "recipient": "y", "created_at": None}],  # office_pending
+            [{"id": 4101, "recipient": "z", "created_at": None}],  # attendance_pending_drafts
+            [{"id": 31, "domain": "cash", "action_type": "business_record_review", "business_reference": "cash_txn:4171", "created_at": None}],  # pending_business_actions
+        ])), \
+             patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[0, 0, 0, 0, 0, 0, 0])):
+            payload = await _b_business_communication_summary(hours=12)
+
+        queue = payload["approval_queue"]
+        assert "Draft 4099 — Client — APPROVE / EDIT / REJECT" in queue
+        assert "Draft 4100 — Office/Internal — APPROVE / EDIT / REJECT" in queue
+        assert "Draft 4101 — Attendance — APPROVE / EDIT / REJECT" in queue
+        assert any("Proposal 31" in item and "cash" in item for item in queue)
+        assert payload["summary"]["approval_queue_count"] == 4
+        assert payload["summary"]["client_pending_drafts"] == 1
+        assert payload["summary"]["office_internal_pending_drafts"] == 1
+
+    async def test_render_text_shows_approval_queue_section(self):
+        from modules.reports import render_text
+        payload = {
+            "report": "business_communication_summary", "args": {},
+            "summary": {"approval_queue_count": 1},
+            "approval_queue": ["Draft 4099 — Client — APPROVE / EDIT / REJECT"],
+            "rows": [],
+        }
+        text = render_text(payload)
+        assert "Draft 4099 — Client — APPROVE / EDIT / REJECT" in text
+        assert "message_body" not in text
 
 
 class TestSystemObservationBuilder:

@@ -321,7 +321,7 @@ class TestBuildHealthBridge3Coverage:
         async def _fake_probe_outbound():
             return {"status": "ok"}
 
-        async def _fake_probe_heartbeat(service):
+        async def _fake_probe_heartbeat(service, stale_after_s=120):
             return {"status": heartbeat_status, "service": service}
 
         def _fake_probe_file_age(path, label):

@@ -643,8 +643,15 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     payroll_hour = int(os.getenv("PAYROLL_AUTO_COMPUTE_HOUR", "2"))
     dlq_min = int(os.getenv("DLQ_ALERT_INTERVAL_MIN", "15"))
 
+    # Stage G6.10 (2026-08-28): timezone=_tz() added -- see the Stage G5.13
+    # comment below (business_summary_report) for the full root-cause
+    # explanation. This module's own header docstring explicitly documents
+    # "daily_payroll_compute (02:00 Asia/Dhaka)" -- confirmed live before
+    # this fix that it was actually firing at 02:00 server-local
+    # (Europe/Berlin/CEST) instead, a real 4-hour discrepancy from its own
+    # documented intent.
     _scheduler.add_job(_wrap("daily_payroll_compute", job_daily_payroll),
-                       CronTrigger(hour=payroll_hour, minute=0),
+                       CronTrigger(hour=payroll_hour, minute=0, timezone=_tz()),
                        id="daily_payroll_compute", replace_existing=True)
     _scheduler.add_job(_wrap("dlq_alert", job_dlq_alert),
                        IntervalTrigger(minutes=dlq_min),
@@ -655,14 +662,17 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     _scheduler.add_job(_wrap("agent_incident_summary", job_agent_incident_summary),
                        IntervalTrigger(hours=6),
                        id="agent_incident_summary", replace_existing=True)
+    # Stage G6.10: timezone=_tz() -- business-hours (9am) reminder, same
+    # Asia/Dhaka business-day intent as every other cron job in this file.
     _scheduler.add_job(_wrap("stale_escort_reminder", job_stale_escort_reminder),
-                       CronTrigger(hour=9, minute=0),
+                       CronTrigger(hour=9, minute=0, timezone=_tz()),
                        id="stale_escort_reminder", replace_existing=True)
     _scheduler.add_job(_wrap("payment_reconciliation", job_payment_reconciliation),
                        IntervalTrigger(hours=1),
                        id="payment_reconciliation", replace_existing=True)
+    # Stage G6.10: timezone=_tz() -- same scheduler-wide Asia/Dhaka default.
     _scheduler.add_job(_wrap("backup_staleness_alert", job_backup_staleness),
-                       CronTrigger(hour=3, minute=0),
+                       CronTrigger(hour=3, minute=0, timezone=_tz()),
                        id="backup_staleness_alert", replace_existing=True)
     _scheduler.add_job(_wrap("combined_draft_cleanup", job_combined_draft_cleanup),
                        IntervalTrigger(hours=1),
@@ -682,11 +692,14 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     # Phase 6 — Continuous Learning Loop
     memory_review_hour = int(os.getenv("MEMORY_REVIEW_HOUR", "9"))
     rag_rebuild_hour   = int(os.getenv("RAG_REBUILD_HOUR", "18"))
+    # Stage G6.10: timezone=_tz() -- this module's own header docstring
+    # explicitly documents "daily_memory_review (09:00 Asia/Dhaka)" and
+    # "rag_rebuild (18:00 Asia/Dhaka)".
     _scheduler.add_job(_wrap("daily_memory_review", job_daily_memory_review),
-                       CronTrigger(hour=memory_review_hour, minute=0),
+                       CronTrigger(hour=memory_review_hour, minute=0, timezone=_tz()),
                        id="daily_memory_review", replace_existing=True)
     _scheduler.add_job(_wrap("rag_rebuild", job_rag_rebuild),
-                       CronTrigger(hour=rag_rebuild_hour, minute=0),
+                       CronTrigger(hour=rag_rebuild_hour, minute=0, timezone=_tz()),
                        id="rag_rebuild", replace_existing=True)
 
     # DEPRECATED 2026-08-04 (Owner decision): the daily bridge-phone-book ->
@@ -787,9 +800,13 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
 
     if "daily_admin_digest" in _job_registry:
         digest_hour = int(os.getenv("DAILY_DIGEST_HOUR", "8"))
+        # Stage G6.10: timezone=_tz() -- job_daily_admin_digest's own
+        # docstring explicitly claims "runs at 08:00 Asia/Dhaka"; confirmed
+        # live before this fix it was actually firing at 08:00 server-local
+        # (Europe/Berlin/CEST) = 12:00 Dhaka, a real 4-hour discrepancy.
         _scheduler.add_job(
             _wrap("daily_admin_digest", _job_registry["daily_admin_digest"]),
-            CronTrigger(hour=digest_hour, minute=0),
+            CronTrigger(hour=digest_hour, minute=0, timezone=_tz()),
             id="daily_admin_digest", replace_existing=True,
         )
 
@@ -846,9 +863,12 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     if "daily_db_backup" in _job_registry:
         b_hour = int(os.getenv("DAILY_BACKUP_HOUR", "2"))
         b_min = int(os.getenv("DAILY_BACKUP_MIN", "30"))
+        # Stage G6.10: timezone=_tz() -- same scheduler-wide Asia/Dhaka
+        # default (AsyncIOScheduler(timezone=_tz()) above), consistent with
+        # every other daily job in this file.
         _scheduler.add_job(
             _wrap("daily_db_backup", _job_registry["daily_db_backup"]),
-            CronTrigger(hour=b_hour, minute=b_min),
+            CronTrigger(hour=b_hour, minute=b_min, timezone=_tz()),
             id="daily_db_backup", replace_existing=True,
         )
 

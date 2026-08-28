@@ -81,3 +81,40 @@ async def resolve_requester_employee_id(phone: str) -> Optional[int]:
     from modules.identity_brain import _lookup_employee
     emp = await _lookup_employee(phone)
     return emp.get("employee_id") if emp else None
+
+
+async def get_own_payroll_summary(requester_phone: str) -> dict:
+    """Stage G6.8 -- Payroll/Salary READ, promoted from PARTIAL to
+    SUPPORTED: the strongest possible privacy guarantee by construction --
+    there is no parameter through which a caller can ask for anyone
+    else's payroll data. requester_phone is resolved via the same
+    phone-anchored identity_brain._lookup_employee() this module already
+    uses for attendance/cash (Stage E6/E7's proven linkage); the returned
+    fields come from that SAME resolved row, never a second lookup keyed
+    on a name/id the requester supplied. Bounded, no raw dump, no write.
+
+    Deliberately separate from recruitment's own salary-policy text
+    (modules.recruitment_flow's templates, e.g. "বয়সসীমা ১৮-৫৫...
+    বেতন...") -- that answers "what does this JOB pay", a different
+    question from "what is MY payroll record", a structurally different
+    data source (wbom_employees.basic_salary vs a policy-text template),
+    so there is no comingling risk between the two."""
+    employee_id = await resolve_requester_employee_id(requester_phone)
+    if employee_id is None:
+        return {
+            "ok": False,
+            "error": "identity not resolved from this phone -- cannot disclose payroll data to an unverified sender",
+        }
+    from modules.identity_brain import _lookup_employee
+    emp = await _lookup_employee(requester_phone)
+    if not emp:
+        return {"ok": False, "error": "employee record not found"}
+    return {
+        "ok": True,
+        "employee_id": emp.get("employee_id"),
+        "employee_name": emp.get("employee_name"),
+        "designation": emp.get("designation"),
+        "basic_salary": float(emp["basic_salary"]) if emp.get("basic_salary") is not None else None,
+        "status": emp.get("status"),
+        "note": "own record only -- resolved from the requester's own WhatsApp-verified phone",
+    }

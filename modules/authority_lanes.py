@@ -52,6 +52,35 @@ _CLIENT_ROLES = frozenset({
 })
 _ADMIN_ROLES = frozenset({"admin"})
 
+# ── Stage G6.2: authority-drift prevention ───────────────────────────────
+# Stage G.5 found a real, live policy violation: internal_coordinator/
+# internal_operation/employee_internal/security_service_client were
+# classified OWNER_SUPERVISED_DRAFT by this module's own lane logic, but
+# the ACTUAL enforcement mechanism (modules.message_router's role-based
+# routing + settings.draft_always_role_set, an entirely separate list)
+# had never been told about them -- two independent lists that silently
+# diverged. Rather than a large, risky rewrite making
+# resolve_authority_lane() the router's own live decision source (out of
+# proportion for this stage, per its own "do not perform a large risky
+# router rewrite unless necessary"), this function is the explicit
+# consistency check: given the ACTUAL live enforcement sets (settings.
+# draft_always_role_set, and message_router's own _ESCORT_ROLES --
+# escort_client/client_escort_buyer/vip_client/repeat_client are
+# protected via a dedicated non-autonomous handler,
+# handle_escort_client_message, rather than via draft_always_roles, and
+# that is a legitimate, independently-safe alternative), it returns any
+# CLIENT/OFFICE-lane role this module knows about that neither mechanism
+# actually protects. A CI test calls this on every run so a future role
+# added to _CLIENT_ROLES/_OFFICE_INTERNAL_ROLES without also being added
+# to one of the two real enforcement sets fails immediately, instead of
+# silently reaching production the way the original 4-role gap did.
+def find_unprotected_supervised_draft_roles(
+    draft_always_role_set: frozenset, escort_roles: frozenset,
+) -> list[str]:
+    supervised_roles = _CLIENT_ROLES | _OFFICE_INTERNAL_ROLES
+    protected = frozenset(r.lower() for r in draft_always_role_set) | frozenset(r.lower() for r in escort_roles)
+    return sorted(r for r in supervised_roles if r not in protected)
+
 
 @dataclass(frozen=True)
 class LaneContext:

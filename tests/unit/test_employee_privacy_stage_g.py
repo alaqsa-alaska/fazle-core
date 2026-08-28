@@ -45,6 +45,41 @@ class TestCrossEmployeeDenied:
         assert is_authorized_for_employee_data(None, "unknown", None) is False
 
 
+class TestOwnPayrollSummary:
+    """Stage G6.8: Payroll/Salary READ. Own-data-only BY CONSTRUCTION --
+    there is no parameter through which a caller can request another
+    employee's data; the returned record is always the one resolved from
+    requester_phone itself."""
+
+    async def test_unresolved_identity_returns_error_not_data(self):
+        from modules.employee_privacy import get_own_payroll_summary
+        with patch("modules.identity_brain._lookup_employee", new=AsyncMock(return_value=None)):
+            result = await get_own_payroll_summary("8801799999999")
+        assert result["ok"] is False
+        assert "basic_salary" not in result
+
+    async def test_resolved_identity_returns_own_fields_only(self):
+        from modules.employee_privacy import get_own_payroll_summary
+        emp_row = {
+            "employee_id": 42, "employee_name": "Karim", "designation": "Guard",
+            "basic_salary": 15000, "status": "Active",
+        }
+        with patch("modules.identity_brain._lookup_employee", new=AsyncMock(return_value=emp_row)):
+            result = await get_own_payroll_summary("8801700000042")
+        assert result["ok"] is True
+        assert result["employee_id"] == 42
+        assert result["basic_salary"] == 15000.0
+
+    def test_function_signature_has_no_target_employee_parameter(self):
+        """Structural proof of the own-data-only guarantee: the function
+        cannot be asked for anyone else's record -- there is no id/name
+        parameter to redirect the lookup."""
+        import inspect
+        from modules.employee_privacy import get_own_payroll_summary
+        params = list(inspect.signature(get_own_payroll_summary).parameters)
+        assert params == ["requester_phone"]
+
+
 class TestResolveRequesterEmployeeId:
     async def test_uses_the_existing_phone_anchored_lookup(self):
         """Structural proof this delegates to the existing, already-proven

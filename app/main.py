@@ -808,7 +808,7 @@ async def _build_health(deep: bool = False) -> dict:
     # store -- it was simply never added to this aggregate view when it was
     # brought online. No new probe mechanism; this reuses the exact same
     # _probe_heartbeat/_probe_file_age helpers bridge1/bridge2 already use.
-    db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p, hb3_p = await asyncio.gather(
+    db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p, hb3_p, sched_p = await asyncio.gather(
         _probe_db(),
         _safe_ollama(),
         _probe_qdrant(),
@@ -816,6 +816,22 @@ async def _build_health(deep: bool = False) -> dict:
         _probe_heartbeat("bridge_poller:bridge1"),
         _probe_heartbeat("bridge_poller:bridge2"),
         _probe_heartbeat("bridge_poller:bridge3"),
+        # Stage G6.11/G6.12 (2026-08-28): the watchdog-of-watchdog signal --
+        # reuses the SAME _probe_heartbeat() helper and the scheduler's own
+        # PRE-EXISTING heartbeat write (modules.scheduler._heartbeat_scheduler(),
+        # called from _run_wrapped() after every single job run -- no new
+        # write path). 600s (10 min) threshold: the fastest-firing jobs
+        # (lock_cleanup, bridge_watchdog) already run every 5 min under
+        # normal operation, so a 10-min-stale heartbeat means the scheduler
+        # loop itself has genuinely stopped ticking, not just "waiting for
+        # its next slower job". This ALSO closes G6.12 "does an independent
+        # host-level mechanism already watch fazle-core" -- scripts/
+        # ai_console_monitor.sh (an independent host crontab job, every
+        # 5 min) already checks this exact /health endpoint; adding this
+        # probe here means that existing, separate, already-running check
+        # automatically starts covering scheduler liveness too, with zero
+        # changes to that script.
+        _probe_heartbeat("scheduler", stale_after_s=600),
         return_exceptions=False,
     )
     llm_p = await _safe_llm() if deep else {"status": "skipped", "reason": "deep health only"}
@@ -855,6 +871,7 @@ async def _build_health(deep: bool = False) -> dict:
         "bridge_poller_b2": hb2_p,
         "bridge_poller_b3": hb3_p,
         "outbound": ob_p,
+        "scheduler": sched_p,
         "disk": disk_p,
         "mem": mem_p,
         "cpu": cpu_p,
