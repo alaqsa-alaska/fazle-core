@@ -67,8 +67,11 @@ def parse_business_reference(business_reference: str) -> tuple[str, str]:
 # Reference kinds this bridge knows how to re-read CURRENT state for.
 # Deliberately conservative -- only kinds whose table/column were verified
 # against the live schema this stage. A kind not in this set raises
-# BusinessExecutionError rather than guessing at a table name.
-_KNOWN_REFERENCE_KINDS = frozenset({"cash_txn", "draft"})
+# BusinessExecutionError rather than guessing at a table name. "conversation"
+# added Stage H.5 (H5.13) after a real live proposal (#29) turned out to
+# reference a bare conversation_key, not a draft id -- see
+# audit_proposal_references() for the full live audit.
+_KNOWN_REFERENCE_KINDS = frozenset({"cash_txn", "draft", "conversation", "escort_program"})
 
 
 async def _current_state_for_reference(kind: str, ref_id: str) -> dict:
@@ -89,19 +92,45 @@ async def _current_state_for_reference(kind: str, ref_id: str) -> dict:
             int(ref_id),
         )
         return dict(row) if row else {}
+    if kind == "conversation":
+        row = await fetch_one(
+            "SELECT COUNT(*) AS message_count, MAX(received_at) AS last_received_at "
+            "FROM wbom_whatsapp_messages WHERE conversation_key = $1",
+            ref_id,
+        )
+        return dict(row) if row and row["message_count"] else {}
+    if kind == "escort_program":
+        row = await fetch_one(
+            "SELECT program_id AS id, status FROM wbom_escort_programs WHERE program_id = $1",
+            int(ref_id),
+        )
+        return dict(row) if row else {}
     raise BusinessExecutionError(f"no known state-lookup for business_reference kind {kind!r}")
 
 
-def _is_actionable(kind: str, state: dict) -> bool:
+def _is_actionable(kind: str, state: dict, proposed_at=None) -> bool:
     """Whether the CURRENT state is still in a condition this bridge is
     allowed to act on. Deliberately narrow per kind -- 'not actionable'
-    covers both 'already resolved by someone else' and 'never existed'."""
+    covers both 'already resolved by someone else' and 'never existed'.
+
+    conversation (H5.13): a conversation-referencing proposal (typically
+    business_reply_draft, proposed BEFORE any draft exists) is stale the
+    moment new conversation activity arrives after the proposal was
+    created -- the reply it would send was grounded in a snapshot of the
+    conversation that no longer reflects what the sender has since said."""
     if not state:
         return False
     if kind == "cash_txn":
         return state.get("transaction_status") == "pending"
     if kind == "draft":
         return state.get("status") == "pending"
+    if kind == "conversation":
+        last = state.get("last_received_at")
+        if proposed_at is None or last is None:
+            return True
+        return last <= proposed_at
+    if kind == "escort_program":
+        return state.get("status") in ("draft", "confirmed")
     return False
 
 
@@ -138,7 +167,7 @@ async def execute_approved_business_action(action_id: int, executor: str = "syst
         raise BusinessExecutionError(f"business_reference kind {kind!r} has no known re-validation path -- refusing to execute rather than skip the state check")
 
     current_state = await _current_state_for_reference(kind, ref_id)
-    if not _is_actionable(kind, current_state):
+    if not _is_actionable(kind, current_state, proposed_at=action.get("created_at")):
         raise StaleProposalError(
             f"action #{action_id} refers to {business_reference}, whose current state "
             f"({current_state or 'not found'}) is no longer actionable -- it was likely "
@@ -160,3 +189,66 @@ async def execute_approved_business_action(action_id: int, executor: str = "syst
     recorded = await record_execution_result(action_id, result)
     log.info("[business_action_execution] action #%d (%s, %s) executed by %s", action_id, action_type, business_reference, executor)
     return {"ok": True, "action_id": action_id, "action_type": action_type, "business_reference": business_reference, "result": result, "recorded": recorded}
+
+
+# ── H5.12/H5.14: proposal reference audit + legacy compatibility report ──
+async def audit_proposal_references() -> list[dict]:
+    """READ-only. One row per hermes_action_approvals business proposal
+    (every domain, every status -- not just pending), reporting exactly
+    what H5.12 asks for. Never mutates a proposal's own status; a proposal
+    found STALE/unexecutable here is reported, not rejected or rewritten
+    -- H5.14's explicit "do not destructively rewrite historical Stage F
+    proposals blindly"."""
+    from app.database import fetch_all
+
+    rows = await fetch_all(
+        "SELECT id, domain, status, action_type, business_reference, created_at "
+        "FROM hermes_action_approvals WHERE domain IS NOT NULL ORDER BY id"
+    )
+    out = []
+    for r in rows:
+        row = dict(r)
+        ref = row.get("business_reference") or ""
+        try:
+            kind, ref_id = parse_business_reference(ref)
+            reference_kind = kind
+        except BusinessExecutionError:
+            kind, ref_id, reference_kind = None, None, "UNTYPED"
+
+        executable = kind in _KNOWN_REFERENCE_KINDS if kind else False
+        # Migratable: a legacy reference this bridge doesn't recognize as
+        # typed, but whose raw string is EXACTLY a live conversation_key
+        # (verified against wbom_whatsapp_messages, never inferred from
+        # shape/regex -- H5.13's explicit "do not infer object type from
+        # numeric shape or domain text"). Covers both "no colon at all"
+        # (UNTYPED) and "colon present but the kind prefix is unrecognized"
+        # (e.g. proposal #29's bare "<phone>:<bridge>"). Reported only,
+        # never auto-rewritten -- H5.14.
+        migratable = False
+        if not executable and ref:
+            match = await fetch_one(
+                "SELECT 1 FROM wbom_whatsapp_messages WHERE conversation_key = $1 LIMIT 1", ref,
+            )
+            migratable = bool(match)
+
+        stale = None
+        if executable and row["status"] == "pending":
+            try:
+                current_state = await _current_state_for_reference(kind, ref_id)
+                stale = not _is_actionable(kind, current_state, proposed_at=row["created_at"])
+            except BusinessExecutionError:
+                stale = None
+
+        out.append({
+            "proposal_id": row["id"],
+            "domain": row["domain"],
+            "action_type": row["action_type"],
+            "current_reference": ref,
+            "reference_kind": reference_kind,
+            "executable": executable,
+            "migratable": migratable,
+            "stale": stale,
+            "status": row["status"],
+            "created_at": row["created_at"],
+        })
+    return out

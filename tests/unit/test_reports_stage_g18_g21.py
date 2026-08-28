@@ -20,7 +20,6 @@ class TestBusinessSummaryBuilder:
             [],  # office_pending
             [],  # attendance_pending_drafts
             [],  # pending_business_actions
-            [],  # pending_cash_txns (Stage H19)
         ])), \
              patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[
                  2,   # complaints
@@ -31,7 +30,11 @@ class TestBusinessSummaryBuilder:
                  4,   # cash_needs_action
                  1,   # escort_needs_action
                  0,   # financial_ops_failed_recent (Stage H19)
-             ])):
+             ])), \
+             patch(
+                 "modules.fazle_payroll_engine.review_linkage_repair.classify_all_pending_cash_transactions",
+                 new=AsyncMock(return_value=[]),
+             ):
             payload = await _b_business_communication_summary(hours=12)
 
         assert payload["report"] == "business_communication_summary"
@@ -58,9 +61,16 @@ class TestBusinessSummaryBuilder:
             [{"id": 4100, "recipient": "y", "created_at": None}],  # office_pending
             [{"id": 4101, "recipient": "z", "created_at": None}],  # attendance_pending_drafts
             [{"id": 31, "domain": "cash", "action_type": "business_record_review", "business_reference": "cash_txn:4171", "created_at": None}],  # pending_business_actions
-            [{"id": 4171, "txn_ref": "abc123def456", "employee_name_raw": "X", "amount": 500, "payout_method": "cash", "created_at": None}],  # pending_cash_txns
         ])), \
-             patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[0, 0, 0, 0, 0, 0, 0, 0])):
+             patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[0, 0, 0, 0, 0, 0, 0, 0])), \
+             patch(
+                 "modules.fazle_payroll_engine.review_linkage_repair.classify_all_pending_cash_transactions",
+                 new=AsyncMock(return_value=[{
+                     "txn_id": 4171, "txn_ref": "abc123def456", "employee_name_raw": "X",
+                     "amount": 500, "payout_method": "cash", "created_at": None,
+                     "classification": "VALID_PENDING_REVIEWABLE",
+                 }]),
+             ):
             payload = await _b_business_communication_summary(hours=12)
 
         queue = payload["approval_queue"]
@@ -72,6 +82,32 @@ class TestBusinessSummaryBuilder:
         assert payload["summary"]["approval_queue_count"] == 5
         assert payload["summary"]["client_pending_drafts"] == 1
         assert payload["summary"]["office_internal_pending_drafts"] == 1
+
+    async def test_legacy_unexecutable_proposal_flagged_stage_h5_14(self):
+        """A proposal whose business_reference isn't a recognized typed
+        kind (e.g. proposal #29's bare conversation_key with no prefix)
+        must be flagged [LEGACY] in the approval queue, not presented as
+        equally actionable as a typed one."""
+        from modules.reports import _b_business_communication_summary
+
+        with patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[
+            [],  # domain_counts
+            [],  # pending_drafts
+            [],  # client_pending
+            [],  # office_pending
+            [],  # attendance_pending_drafts
+            [{"id": 29, "domain": "recruitment", "action_type": "business_reply_draft", "business_reference": "8801617239992:bridge3", "created_at": None}],
+        ])), \
+             patch("modules.reports.fetch_val", new=AsyncMock(side_effect=[0, 0, 0, 0, 0, 0, 0, 0])), \
+             patch(
+                 "modules.fazle_payroll_engine.review_linkage_repair.classify_all_pending_cash_transactions",
+                 new=AsyncMock(return_value=[]),
+             ):
+            payload = await _b_business_communication_summary(hours=12)
+
+        queue = payload["approval_queue"]
+        assert any("Proposal 29" in item and "LEGACY" in item for item in queue)
+        assert payload["summary"]["pending_business_proposals_legacy_unexecutable"] == 1
 
     async def test_render_text_shows_financial_anomalies_section_stage_h20(self):
         from modules.reports import render_text
@@ -99,6 +135,19 @@ class TestBusinessSummaryBuilder:
 
 
 class TestSystemObservationBuilder:
+    @pytest.fixture(autouse=True)
+    def _no_pending_cash_by_default(self):
+        """Stage H.5: _b_system_observation now also calls
+        classify_all_pending_cash_transactions() for the
+        financial_provenance_health signal -- default it to "no pending
+        cash at all" for every test in this class unless a test overrides
+        it, so the pre-existing tests below don't need to know about it."""
+        with patch(
+            "modules.fazle_payroll_engine.review_linkage_repair.classify_all_pending_cash_transactions",
+            new=AsyncMock(return_value=[]),
+        ):
+            yield
+
     async def test_read_only_no_execute_calls(self):
         """Stage G19: system monitoring must remain READ/REPORT --
         structural proof the builder never calls execute()/writes
@@ -180,6 +229,41 @@ class TestSystemObservationBuilder:
         assert payload["summary"]["financial_anomaly_count"] == 2
         kinds = {a["kind"] for a in payload["financial_anomalies"]}
         assert kinds == {"old_pending_cash_txn", "duplicate_looking_pending_cash"}
+
+    async def test_financial_provenance_health_alert_on_all_orphaned_stage_h5_20(self):
+        """H5.20: pending cash > 0 AND reviewable/direct == 0 must alert
+        and escalate priority -- the exact 27/27 situation Stage H found
+        live."""
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}}}
+        orphans = [{"classification": "TEST_ARTIFACT_SUSPECT"} for _ in range(4)]
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], [], [], []])), \
+             patch(
+                 "modules.fazle_payroll_engine.review_linkage_repair.classify_all_pending_cash_transactions",
+                 new=AsyncMock(return_value=orphans),
+             ):
+            payload = await _b_system_observation()
+        health = payload["summary"]["financial_provenance_health"]
+        assert health["alert"] is True
+        assert health["reviewable_or_direct"] == 0
+        assert payload["summary"]["priority"] == "ACTION_REQUIRED"
+
+    async def test_financial_provenance_health_no_alert_when_reviewable(self):
+        from modules.reports import _b_system_observation
+        fake_health = {"status": "ok", "probes": {"db": {"status": "ok"}}}
+        rows = [{"classification": "VALID_PENDING_REVIEWABLE"} for _ in range(5)]
+        with patch("app.main._build_health", new=AsyncMock(return_value=fake_health)), \
+             patch("modules.scheduler.list_job_names", return_value=[]), \
+             patch("modules.reports.fetch_all", new=AsyncMock(side_effect=[[], [], [], []])), \
+             patch(
+                 "modules.fazle_payroll_engine.review_linkage_repair.classify_all_pending_cash_transactions",
+                 new=AsyncMock(return_value=rows),
+             ):
+            payload = await _b_system_observation()
+        assert payload["summary"]["financial_provenance_health"]["alert"] is False
+        assert payload["summary"]["priority"] == "HEALTHY"
 
     async def test_job_not_in_current_registry_is_obsolete_not_stale(self):
         """Stage G5.11/G5.15: a job whose code was removed (found this

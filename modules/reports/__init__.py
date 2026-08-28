@@ -494,15 +494,43 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         "SELECT id, domain, action_type, business_reference, created_at FROM hermes_action_approvals "
         "WHERE status='pending' ORDER BY created_at DESC LIMIT 15"
     )
+    # Stage H.5 (H5.14/H5.15): which pending proposals are actually
+    # executable under the typed reference contract right now -- a
+    # legacy/unmigratable reference (e.g. a bare conversation_key with no
+    # kind prefix) is flagged, never silently presented as equally ready
+    # as a typed, executable one. Cheap here (at most ~15 rows).
+    from modules.business_action_execution import parse_business_reference, _KNOWN_REFERENCE_KINDS, BusinessExecutionError
+    legacy_unexecutable_proposal_ids = []
+    for pba in pending_business_actions:
+        try:
+            kind, _ = parse_business_reference(pba["business_reference"] or "")
+            if kind not in _KNOWN_REFERENCE_KINDS:
+                legacy_unexecutable_proposal_ids.append(pba["id"])
+        except BusinessExecutionError:
+            legacy_unexecutable_proposal_ids.append(pba["id"])
     # Stage H19 (2026-08-28): individual pending CASH transactions, with
     # their own txn_ref as the Review ID -- previously only a count
     # (cash_needs_action) was surfaced; an Owner reading this report
     # could not act on cash without a separate lookup. No raw payroll
     # figures beyond amount (already shown elsewhere, e.g. report cash).
-    pending_cash_txns = await fetch_all(
-        "SELECT id, txn_ref, employee_name_raw, amount, payout_method, created_at "
-        "FROM fpe_cash_transactions WHERE transaction_status='pending' "
-        "ORDER BY created_at ASC LIMIT 15"
+    #
+    # Stage H.5 (H5.19): NOT all pending rows are equally actionable --
+    # reuses the same classify_all_pending_cash_transactions() the H.5
+    # RCA report uses (one definition of "actionable", not two). Only
+    # VALID_PENDING_REVIEWABLE/VALID_PENDING_DIRECT rows get an
+    # approval_queue line; TEST_ARTIFACT_SUSPECT/DUPLICATE_SUSPECT/
+    # ORPHANED/INSUFFICIENT_EVIDENCE are counted separately, never
+    # presented as a normal actionable item.
+    from modules.fazle_payroll_engine.review_linkage_repair import (
+        classify_all_pending_cash_transactions,
+        VALID_PENDING_REVIEWABLE, VALID_PENDING_DIRECT,
+    )
+    classified_cash = await classify_all_pending_cash_transactions()
+    pending_cash_txns = [
+        r for r in classified_cash if r["classification"] in (VALID_PENDING_REVIEWABLE, VALID_PENDING_DIRECT)
+    ][:15]
+    cash_needs_review_broken_provenance = sum(
+        1 for r in classified_cash if r["classification"] not in (VALID_PENDING_REVIEWABLE, VALID_PENDING_DIRECT)
     )
     # Stage H19: rejected/failed financial ops in the window -- sourced
     # from the existing fpe_accounting_audit_logs (no new audit table).
@@ -530,7 +558,11 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
         [f"Draft {r['id']} — Client — APPROVE / EDIT / REJECT" for r in client_pending]
         + [f"Draft {r['id']} — Office/Internal — APPROVE / EDIT / REJECT" for r in office_pending]
         + [f"Draft {r['id']} — Attendance — APPROVE / EDIT / REJECT" for r in attendance_pending_drafts]
-        + [f"Proposal {r['id']} — {r['domain']} — review via /api/actions/{r['id']}/approve" for r in pending_business_actions]
+        + [
+            f"Proposal {r['id']} — {r['domain']} — review via /api/actions/{r['id']}/approve"
+            + (" [LEGACY — reference not executable under the typed contract]" if r["id"] in legacy_unexecutable_proposal_ids else "")
+            for r in pending_business_actions
+        ]
         # Stage H19: cash — CASH APPROVE/REJECT <txn-ref>, the exact
         # Stage H6/H7 command syntax, so this line is directly actionable.
         + [f"Txn {r['txn_ref'][:16]} — Cash — CASH APPROVE {r['txn_ref']} / CASH REJECT {r['txn_ref']} <reason>" for r in pending_cash_txns]
@@ -547,9 +579,16 @@ async def _b_business_communication_summary(hours: int = 12) -> dict:
             "office_internal_pending_drafts": len(office_pending),
             "attendance_pending_drafts": len(attendance_pending_drafts),
             "pending_business_proposals": len(pending_business_actions),
+            "pending_business_proposals_legacy_unexecutable": len(legacy_unexecutable_proposal_ids),
             "pending_drafts_total": int(pending_drafts_total or 0),
             "attendance_needs_action": int(attendance_needs_action or 0),
             "cash_needs_action": int(cash_needs_action or 0),
+            "cash_actionable": len(pending_cash_txns),
+            # Stage H.5 (H5.19/H5.20): pending cash rows that are NOT a
+            # normal actionable review item (test-artifact/duplicate-
+            # suspect/orphaned/insufficient-evidence) -- counted, never
+            # silently folded into cash_needs_action as if equally ready.
+            "cash_needs_review_broken_provenance": cash_needs_review_broken_provenance,
             "escort_needs_action": int(escort_needs_action or 0),
             # Stage H19: financial ops that were rejected/reversed in this
             # window -- rejected/failed financial ops needing Admin
@@ -651,6 +690,35 @@ async def _b_system_observation() -> dict:
         + [{"kind": "duplicate_looking_pending_cash", **dict(r)} for r in duplicate_pending_cash]
     )
 
+    # Stage H.5 (H5.20): READ-only provenance-health signal -- the exact
+    # "27/27 missing review link" situation Stage H found is a system/
+    # data-lifecycle issue, not a per-transaction anomaly, so it gets its
+    # own signal distinct from financial_anomalies above. Reuses the same
+    # classification the H.5 RCA and the business summary use (one
+    # definition). Never auto-repairs -- see modules.fazle_payroll_engine.
+    # review_linkage_repair's own module docstring for the one-time,
+    # explicitly-invoked repair path this is separate from.
+    from modules.fazle_payroll_engine.review_linkage_repair import (
+        classify_all_pending_cash_transactions, VALID_PENDING_REVIEWABLE, VALID_PENDING_DIRECT,
+    )
+    classified_cash = await classify_all_pending_cash_transactions()
+    total_pending_cash = len(classified_cash)
+    reviewable_or_direct = sum(1 for r in classified_cash if r["classification"] in (VALID_PENDING_REVIEWABLE, VALID_PENDING_DIRECT))
+    orphan_like = total_pending_cash - reviewable_or_direct
+    orphan_ratio = (orphan_like / total_pending_cash) if total_pending_cash else 0.0
+    financial_provenance_health = {
+        "pending_cash_total": total_pending_cash,
+        "reviewable_or_direct": reviewable_or_direct,
+        "orphan_like_count": orphan_like,
+        "orphan_ratio": round(orphan_ratio, 3),
+        # Alert condition: pending cash exists but none of it is
+        # currently actionable, or over half is orphan-like -- the exact
+        # shape of the situation Stage H found live (27/27).
+        "alert": total_pending_cash > 0 and (reviewable_or_direct == 0 or orphan_ratio > 0.5),
+    }
+    if financial_provenance_health["alert"] and priority in ("HEALTHY", "TRANSIENT"):
+        priority = "ACTION_REQUIRED"
+
     return {
         "report": "system_observation",
         "args": {},
@@ -666,6 +734,7 @@ async def _b_system_observation() -> dict:
             "failed_job_count": len(failed_jobs),
             "open_incident_count": len(incident_rows),
             "financial_anomaly_count": len(financial_anomalies),
+            "financial_provenance_health": financial_provenance_health,
         },
         "financial_anomalies": financial_anomalies,
         "rows": (

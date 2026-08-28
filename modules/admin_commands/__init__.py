@@ -45,7 +45,8 @@ _HELP_TEXT = (
     "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
     "Cash transaction review (Stage H):\n"
     "  CASH APPROVE <txn-ref>\n"
-    "  CASH REJECT <txn-ref> <reason>\n"
+    "  CASH REJECT <txn-ref> <reason>   — rejects the REVIEW SUBMISSION only;\n"
+    "                                      the transaction itself stays pending\n"
     "  CASH REVERSE <txn-ref> <reason>   — final transactions only, always requires a reason\n\n"
     "বাংলা সংখ্যাও কাজ করে: APPROVE ১৬৫"
 )

@@ -44,8 +44,9 @@ log = logging.getLogger("fazle.financial_ops")
 
 _TXN_FIELDS = (
     "id, txn_ref, employee_id, employee_name_raw, employee_id_phone, "
-    "amount, payout_method, transaction_status, is_reversal, txn_category, "
-    "accounting_period, reversed_txn_id, txn_date"
+    "employee_phone, amount, payout_method, transaction_status, is_reversal, "
+    "txn_category, accounting_period, reversed_txn_id, txn_date, created_at, "
+    "source_message_id, source"
 )
 
 
@@ -260,26 +261,60 @@ async def cash_reverse(ref: str, reason: str, admin_phone: str) -> dict:
 
 # ── H9: card formatting ──────────────────────────────────────────────────
 
-def format_cash_review_card(txn: dict) -> str:
+def format_cash_review_card(txn: dict, provenance: Optional[dict] = None) -> str:
     """FINANCIAL REVIEW card for a pending cash transaction, matching the
-    Owner-specified example format. Presented for human review only --
-    never a one-tap auto-action; the recipient must type the exact
-    command line themselves."""
+    Owner-specified example format, extended per Stage H.5 (H5.16) with
+    Review ID / employee ID+mobile / txn type / date / provenance
+    evidence / explicit status. Presented for human review only -- never
+    a one-tap auto-action (in particular, never suggests CASH REVERSE as
+    a casual recommendation); the recipient must type the exact command
+    line themselves.
+
+    provenance (optional): the linked fpe_unmatched_messages row, if
+    resolved by the caller (see get_cash_review_card_for_transaction) --
+    when present, its raw_content is shown as the evidence this
+    transaction was actually submitted with."""
     ref = txn.get("txn_ref") or str(txn.get("id"))
     short_ref = ref[:16]
     employee = txn.get("employee_name_raw") or f"employee_id={txn.get('employee_id')}"
+    mobile = txn.get("employee_phone") or txn.get("employee_id_phone") or "—"
     amount = txn.get("amount")
     method = txn.get("payout_method") or "?"
-    return (
-        f"FINANCIAL REVIEW — {short_ref}\n"
-        f"Employee: {employee}\n"
-        f"Transaction: ৳{amount} ({method}) — status: {txn.get('transaction_status')}\n"
-        f"Reason for attention: pending cash transaction awaiting operator approval\n"
-        f"Recommended action: review, then approve or reject explicitly\n"
-        f"Commands:\n"
-        f"  CASH APPROVE {ref}\n"
-        f"  CASH REJECT {ref} <reason>"
+    txn_type = txn.get("txn_category") or "?"
+    txn_date = txn.get("txn_date") or "?"
+    evidence_line = "no linked review evidence found" if provenance is None else (
+        f'"{(provenance.get("raw_content") or "").strip()[:200]}"'
     )
+    lines = [
+        f"FINANCIAL REVIEW — Review ID {short_ref}",
+        f"Employee: {employee} (ID {txn.get('employee_id')}, {mobile})",
+        f"Transaction ref: {ref}",
+        f"Amount: ৳{amount} — Type: {txn_type} — Date: {txn_date}",
+        f"Current status: {txn.get('transaction_status')}",
+        f"Evidence: {evidence_line}",
+        f"Reason for attention: pending cash transaction awaiting operator approval",
+        f"Recommended action: review, then approve or reject explicitly",
+        f"Commands:",
+        f"  CASH APPROVE {ref}",
+        f"  CASH REJECT {ref} <reason>",
+    ]
+    return "\n".join(lines)
+
+
+async def get_cash_review_card_for_transaction(ref: str) -> dict:
+    """I/O wrapper: resolves the transaction AND its linked review-row
+    evidence (if any), then renders the enriched card. Kept separate from
+    the pure format_cash_review_card() above so the formatter itself
+    stays directly unit-testable with no DB access."""
+    resolved = await resolve_cash_transaction(ref)
+    if not resolved.get("ok"):
+        return resolved
+    txn = resolved["txn"]
+    provenance = await fetch_one(
+        "SELECT raw_content, review_note FROM fpe_unmatched_messages WHERE promoted_txn_id = $1",
+        txn["id"],
+    )
+    return {"ok": True, "txn": txn, "card": format_cash_review_card(txn, dict(provenance) if provenance else None)}
 
 
 def format_cash_result(op: str, r: dict) -> str:
