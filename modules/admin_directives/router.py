@@ -87,6 +87,13 @@ _AI_COOLDOWN_SECONDS = 5.0
 # one bridge2 Super Admin at a time.
 _hermes_cooldown: dict[str, float] = {}
 _HERMES_COOLDOWN_SECONDS = 15.0
+
+# Lifecycle-closure GAP 3 (2026-08-29): batch-invitation two-step confirm.
+# {admin_phone: ((count, office_date), monotonic_ts)} — a bare instruction
+# previews and stores the pending (count,date); the same instruction (or an
+# explicit "নিশ্চিত"/"confirm"/"পাঠাও") within the window actually sends.
+_invite_confirm_pending: dict[str, tuple] = {}
+_INVITE_CONFIRM_WINDOW_S = 300.0
 # Keeps a strong reference to in-flight background tasks so they aren't
 # garbage-collected mid-flight (a well-known asyncio footgun for
 # fire-and-forget create_task() calls) -- discarded via the done-callback.
@@ -1029,6 +1036,44 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
         except Exception:
             log.error("[admin_ai_router] record_audit failed for employee_create, phone=%s", sender_phone)
         return _fmt_emp_create(emp_result)
+
+    # Lifecycle-closure GAP 3 (2026-08-29): a deterministic batch-invitation
+    # instruction ("রেডি লোকদের প্রথম ৫ জনকে ৫ সেপ্টেম্বর অফিসে আসতে বলো") on
+    # this exact trusted channel is the authorization — one instruction,
+    # no per-message approval. Two-step: a bare instruction previews
+    # (dry_run) and asks for confirmation; the SAME instruction repeated
+    # within the confirm window (or one containing "নিশ্চিত"/"confirm"/
+    # "পাঠাও") actually sends. A non-match falls straight through to the
+    # Hermes relay — every other message is unaffected.
+    from modules.admin_direct_execution import (
+        parse_invite_batch_instruction as _parse_invite,
+        execute_trusted_invite_batch as _exec_invite,
+        format_invite_batch_card as _fmt_invite,
+    )
+    _invite_parsed = _parse_invite(request_text)
+    if _invite_parsed is not None:
+        _confirm = bool(re.search(r"নিশ্চিত|confirm|পাঠা(ও|ন)|হ্যাঁ পাঠাও", request_text, re.IGNORECASE))
+        _pending = _invite_confirm_pending.get(sender_phone)
+        _now_m = time.monotonic()
+        _do_send = False
+        if not _invite_parsed.get("needs_clarification"):
+            _key = (_invite_parsed["count"], _invite_parsed["office_date"])
+            if _confirm or (_pending and _pending[0] == _key and _now_m - _pending[1] < _INVITE_CONFIRM_WINDOW_S):
+                _do_send = True
+            else:
+                _invite_confirm_pending[sender_phone] = (_key, _now_m)
+        inv_result = await _exec_invite(request_text, sender_phone, source_bridge, dry_run=not _do_send)
+        if _do_send:
+            _invite_confirm_pending.pop(sender_phone, None)
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command="recruitment_invite_batch", actor_phone=sender_phone,
+                actor_admin=admin, allowed=inv_result.get("ok", False),
+                denied_reason=None if inv_result.get("ok") else inv_result.get("error"),
+            )
+        except Exception:
+            log.error("[admin_ai_router] record_audit failed for recruitment_invite_batch, phone=%s", sender_phone)
+        return _fmt_invite(inv_result)
 
     now = time.monotonic()
     last = _hermes_cooldown.get(sender_phone, 0.0)

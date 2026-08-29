@@ -175,3 +175,201 @@ def format_employee_create_card(result: dict) -> str:
         f"Name: {emp_name}\n"
         "Created exactly once via the same create_employee() the frontend uses."
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Recruitment batch invitation — trusted direct Admin action
+# (Owner directive 2026-08-29, "Final recruitment lifecycle closure" GAP 3)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# "রেডি লোকদের প্রথম ৫ জনকে ৫ সেপ্টেম্বর অফিসে আসতে বলো" — one authenticated
+# trusted-channel instruction authorizes that exact bounded outreach: no
+# second per-message approval. Reuses modules.recruitment_flow's
+# get_willing_candidates / resolve_invite_batch / send_invite_batch and the
+# existing outbound.enqueue idempotency. Never a broadcast platform, never
+# a group message.
+
+from datetime import datetime, timezone, timedelta  # noqa: E402
+
+_BD_TZ = timezone(timedelta(hours=6))
+
+_BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+_MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9, "october": 10,
+    "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+    "জানুয়ারি": 1, "ফেব্রুয়ারি": 2, "মার্চ": 3, "এপ্রিল": 4, "মে": 5, "জুন": 6,
+    "জুলাই": 7, "আগস্ট": 8, "সেপ্টেম্বর": 9, "অক্টোবর": 10, "নভেম্বর": 11, "ডিসেম্বর": 12,
+}
+
+_INVITE_READY_RE = re.compile(r"রাজি|রেডি|ready|willing|যারা.*চাকরি", re.IGNORECASE)
+_INVITE_ACTION_RE = re.compile(
+    r"ডাক|ডেকে|আসতে\s*বল|অফিসে\s*আস|invite|call\s+them|আসতে\s*বলো|আসতে\s*বলুন", re.IGNORECASE,
+)
+_INVITE_COUNT_RE = re.compile(r"(?:প্রথম|first|top)?\s*([০-৯]{1,3}|\d{1,3})\s*(?:জন|জনকে|জনকে|people|candidates?|person)", re.IGNORECASE)
+
+
+def _resolve_office_date(text: str, *, now: Optional[datetime] = None) -> Optional[str]:
+    """Resolve a relative/absolute office date to an absolute YYYY-MM-DD
+    (Owner directive 14 / N). Returns None if no future date can be
+    confidently resolved. Never guesses a year that makes the date past."""
+    now = now or datetime.now(_BD_TZ)
+    t = (text or "").translate(_BN_DIGITS).lower()
+
+    # 1) explicit ISO
+    m = re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", t)
+    if m:
+        try:
+            d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=_BD_TZ)
+            return d.strftime("%Y-%m-%d") if d.date() >= now.date() else None
+        except ValueError:
+            return None
+
+    # 2) month-name driven: for each month word present, take the 1-2 digit
+    #    number immediately before or after it as the day. Month-name-first
+    #    so "প্রথম ৫ জনকে ৫ সেপ্টেম্বর" binds the "৫" to সেপ্টেম্বর, not to "জনকে".
+    for name, mon_i in _MONTHS.items():
+        idx = t.find(name)
+        if idx < 0:
+            continue
+        before = t[max(0, idx - 12):idx]
+        after = t[idx + len(name): idx + len(name) + 12]
+        dm = re.search(r"(\d{1,2})\s*(?:তারিখ|th|st|nd|rd)?\s*$", before) or re.match(
+            r"\s*(?:তারিখ\s*)?(\d{1,2})", after)
+        if not dm:
+            continue
+        day_i = int(dm.group(1))
+        year = now.year
+        try:
+            d = datetime(year, mon_i, day_i, tzinfo=_BD_TZ)
+            if d.date() < now.date():
+                d = datetime(year + 1, mon_i, day_i, tzinfo=_BD_TZ)
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    # 3) "আগামী <day> তারিখ" / "<day> তারিখ" — the Nth of this month, or next month if past
+    m = re.search(r"(?:আগামী\s*)?(\d{1,2})\s*তারিখ", t)
+    if m:
+        day_i = int(m.group(1))
+        for base in (now, _add_month(now)):
+            try:
+                d = datetime(base.year, base.month, day_i, tzinfo=_BD_TZ)
+                if d.date() >= now.date():
+                    return d.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+    return None
+
+
+def _add_month(dt: datetime) -> datetime:
+    m = dt.month + 1
+    y = dt.year + (1 if m > 12 else 0)
+    m = 1 if m > 12 else m
+    return dt.replace(year=y, month=m, day=1)
+
+
+def parse_invite_batch_instruction(text: str) -> Optional[dict]:
+    """Deterministic (non-LLM) detection of a batch-invitation instruction.
+    Requires ALL of: a readiness reference, an invite/call action, a count,
+    and a resolvable future date. A partial match returns None (falls
+    through to the normal Hermes relay) or, when it clearly IS an invite
+    instruction but under-specified, a {'needs_clarification': ...} dict."""
+    if not text:
+        return None
+    has_ready = bool(_INVITE_READY_RE.search(text))
+    has_action = bool(_INVITE_ACTION_RE.search(text))
+    if not (has_ready and has_action):
+        return None
+    cm = _INVITE_COUNT_RE.search(text)
+    count = int(cm.group(1).translate(_BN_DIGITS)) if cm else None
+    office_date = _resolve_office_date(text)
+    if not count or count < 1 or count > 50:
+        return {"needs_clarification": True,
+                "error": "কতজনকে ডাকব স্পষ্ট করুন (যেমন \"প্রথম ৫ জন\")।"}
+    if not office_date:
+        return {"needs_clarification": True,
+                "error": "অফিসে আসার তারিখ স্পষ্ট করুন (যেমন \"৫ সেপ্টেম্বর\" বা \"2026-09-05\")।"}
+    return {"count": count, "office_date": office_date}
+
+
+async def execute_trusted_invite_batch(
+    text: str, sender_phone: str, source_bridge: str, *,
+    message_body: Optional[str] = None, dry_run: bool = True,
+) -> dict:
+    """Trusted-channel batch invitation. Channel check -> parse -> resolve
+    the willing shortlist -> freeze first-N -> send individually
+    (exact-once) -> report per-recipient result. dry_run=True is a genuine
+    preview (every step runs, no message is enqueued)."""
+    from app.config import get_settings
+    from modules.admin_directives.router import _HERMES_CONTROL_CHANNELS
+    from modules import recruitment_flow as rf
+
+    settings = get_settings()
+    if not is_trusted_direct_admin_channel(
+        sender_phone, source_bridge, settings.admin_bridge2_number or "", _HERMES_CONTROL_CHANNELS,
+    ):
+        return {"ok": False, "stage": "channel_check", "error": "not a trusted direct Admin channel"}
+
+    parsed = parse_invite_batch_instruction(text)
+    if not parsed:
+        return {"ok": False, "stage": "parse", "needs_clarification": True,
+                "error": "not a batch-invitation instruction"}
+    if parsed.get("needs_clarification"):
+        return {"ok": False, "stage": "parse", "needs_clarification": True, "error": parsed["error"]}
+
+    count = parsed["count"]
+    office_date = parsed["office_date"]
+
+    willing = await rf.get_willing_candidates(limit=None)
+    if not willing:
+        return {"ok": False, "stage": "shortlist", "error": "রাজি/রেডি অবস্থায় কোনো candidate নেই।"}
+    frozen = await rf.resolve_invite_batch([c["candidate_id"] for c in willing], limit=count)
+    if not frozen:
+        return {"ok": False, "stage": "resolve", "error": "invitation-এর জন্য যোগ্য recipient resolve করা যায়নি।"}
+
+    body = message_body or (
+        f"আসসালামু আলাইকুম। আল-মানারাতাইন স্কিল সলিউশন্স থেকে বলছি।\n"
+        f"আপনাকে {office_date} তারিখে আমাদের অফিসে আসার জন্য আমন্ত্রণ জানানো হচ্ছে।\n"
+        f"অফিস: ভিক্টোরিয়া গেইট, একে খান মোড়, পাহাড়তলী, চট্টগ্রাম। সময়: সকাল ৯টা – বিকাল ৫টা।\n"
+        f"সাথে আনুন: NID/জন্ম নিবন্ধন ফটোকপি ও পাসপোর্ট সাইজ ছবি ২ কপি।\n"
+        f"আসার আগে একটি মেসেজ বা কল দিয়ে জানাবেন। ধন্যবাদ।"
+    )
+
+    result = await rf.send_invite_batch(
+        frozen, office_date=office_date, message_body=body,
+        authorized_by=sender_phone, dry_run=dry_run,
+    )
+    result["ok"] = True
+    result["stage"] = "dry_run" if dry_run else "executed"
+    result["requested_count"] = count
+    result["recipients"] = [
+        {"candidate_id": r["candidate_id"], "name": r.get("name"),
+         "mobile": r.get("mobile"), "readiness": r.get("readiness")}
+        for r in frozen
+    ]
+    return result
+
+
+def format_invite_batch_card(result: dict) -> str:
+    stage = result.get("stage")
+    if not result.get("ok"):
+        if result.get("needs_clarification"):
+            return f"⚠️ INVITE BATCH — স্পষ্ট করুন\n{result.get('error')}"
+        return f"❌ INVITE BATCH — ত্রুটি ({stage})\n{result.get('error')}"
+    lines = []
+    if stage == "dry_run":
+        lines.append(f"INVITE BATCH — PREVIEW (dry_run) · তারিখ {result.get('office_date')}")
+    else:
+        lines.append(f"✅ INVITE BATCH — পাঠানো হয়েছে · তারিখ {result.get('office_date')}")
+    for r in result.get("recipients", []):
+        lines.append(f"  #{r['candidate_id']} {r.get('name') or '—'} ({r.get('mobile')}) [{r.get('readiness')}]")
+    lines.append(
+        f"চাওয়া: {result.get('requested_count')} · resolve: {len(result.get('recipients', []))} · "
+        f"sent: {len(result.get('sent', []))} · আগে-পাঠানো: {len(result.get('skipped_duplicate', []))} · "
+        f"ব্যর্থ: {len(result.get('failed', []))}"
+    )
+    if stage == "dry_run":
+        lines.append("কোনো মেসেজ যায়নি — নিশ্চিত করতে আবার বলুন (dry_run বাদ দিয়ে)।")
+    return "\n".join(lines)

@@ -230,11 +230,13 @@ Stored in `fazle_recruitment_sessions.score_bucket`.
 | `next_follow_up_at` | TIMESTAMPTZ | — | NULL | Indexed for scheduler follow-up sweep |
 | `source` | VARCHAR(30) | — | `'whatsapp'` | Channel where candidate first appeared |
 | `source_message` | TEXT | — | NULL | Original trigger message |
-| `notes` | TEXT | — | NULL | Admin notes |
+| `notes` | TEXT | — | NULL | Admin notes; also holds the marker-delimited `[EXPERIENCE_CLAIM]` block for responsible roles |
+| `post_intake_status` | TEXT | — | NULL | Migration 072, Owner-locked set: `awaiting_agreement / agreed / joining_ready / salary_objection / not_ready_now / declined / future_contact`. NULL = not yet reached. **Frozen vocabulary** — never extended. |
+| `linked_employee_id` | BIGINT | — | NULL | Migration 077 (2026-08-29). FK → `wbom_employees(employee_id)` ON DELETE SET NULL. Set exactly once by `link_candidate_to_employee()` when this person becomes an employee. Durable candidate→employee link that survives a later phone change. Partial UNIQUE index enforces 1:1. |
 | `created_at` | TIMESTAMPTZ | NOT NULL | NOW() | Immutable |
 | `updated_at` | TIMESTAMPTZ | NOT NULL | NOW() | Updated on each stage change |
 
-**Indexes:** UNIQUE on `phone`; btree on `score_bucket`, `next_follow_up_at` (partial WHERE NOT NULL), `funnel_stage`, `assigned_recruiter`.
+**Indexes:** UNIQUE on `phone`; btree on `score_bucket`, `next_follow_up_at` (partial WHERE NOT NULL), `funnel_stage`, `assigned_recruiter`, `post_intake_status` (partial WHERE NOT NULL); partial UNIQUE on `linked_employee_id` (WHERE NOT NULL).
 
 **Referenced by:** `fazle_recruitment_sessions` (FK, SET NULL on delete), `wbom_candidate_conversations` (FK, CASCADE), `wbom_recruitment_reminders` (FK, CASCADE).
 
@@ -245,6 +247,30 @@ Stored in `fazle_recruitment_sessions.score_bucket`.
 Every inbound recruitment trigger or step answer is appended before the session advances. The row stores the canonical `candidate_id`, the pre-transition `step`, direction `inbound`, exact message text, and collection timestamp. Migration 062 adds nullable `source_bridge` and `message_id` columns plus a partial unique index on `(source_bridge, message_id)` where `message_id IS NOT NULL`.
 
 When a bridge message ID is present, a conflict proves the message is a retry: the audit insert is suppressed and the intake state does not advance. Messages without an ID remain append-only and cannot be safely deduplicated. Audit persistence is fail-open, but session and permanent-candidate mutations share a transaction in both audited and audit-outage paths. A mutation failure rolls back the transition, retains the current-step reply, and leaves the message retryable.
+
+### Lifecycle events on this table (2026-08-29 closure)
+
+The same append-only table also carries **post-intake lifecycle events** — `_audit_candidate_conversation()` gained a `direction` parameter (`'inbound'` default, `'outbound'` for a message we sent, `'event'` for a fact with no WhatsApp message). `record_candidate_lifecycle_event(candidate_id, event, evidence, …)` writes them; `event` must be in `LIFECYCLE_EVENT_STEPS`:
+
+`invited · invitation_acknowledged · phone_confirmed · travelling · arrived_office · joined · deferred_after_invitation · did_not_arrive · phone_call_note · readiness_confirmed`
+
+These are **events, not states** — the frozen `post_intake_status` vocabulary is unchanged. Events are evidence-backed only (candidate message, authenticated Admin note, or authoritative employee creation); never inferred from silence. `did_not_arrive` is only written from an explicit record, never from absence of a reply.
+
+---
+
+## Recruitment lifecycle closure functions (2026-08-29, Owner directive)
+
+| Function | Purpose |
+|---|---|
+| `link_candidate_to_employee(employee_mobile, employee_id, …)` | GAP 1. Last-9-digit phone match (candidate `phone` and employee `employee_mobile` use inconsistent 01…/8801… forms). Links `WHERE linked_employee_id IS NULL` only; never repoints an already-linked candidate (→ `needs_admin_review`); ambiguous multi-match fails closed. Records a `joined` event. Called best-effort (non-fatal) from `admin_employees.create_employee()` and `create_and_link_wbom()`. |
+| `record_candidate_lifecycle_event(...)` | GAP 2. Append one `LIFECYCLE_EVENT_STEPS` row. |
+| `get_willing_candidates(include_interested=False, limit=None)` | Shortlist. Default: `post_intake_status IN ('joining_ready','agreed')` and not already an employee — never merely `scored`. `include_interested=True` adds the softer `_INTERESTED_STATUSES` with honest labels. Deterministic order: `joining_ready` before `agreed`, then earliest `readiness_confirmed` (else `updated_at`), then `candidate_id`. Score never used for ordering. |
+| `resolve_invite_batch(candidate_ids, limit=None)` | GAP 3. Deterministically orders + **freezes** a recipient set (same ordering as above). Drops candidates already linked to an employee / `declined` / no resolvable phone — never silently substitutes. `limit` = the N in "প্রথম ৫ জন". |
+| `send_invite_batch(recipients, office_date, message_body, authorized_by, …)` | Sends each recipient individually via `outbound.enqueue` with `idempotency_key=f"recruit_invite:{cid}:{office_date}"` (exact-once; replay never re-sends a success; a partial failure isolates). `office_date` must already be an absolute date. One trusted-Admin authorization covers the whole bounded batch — no per-message re-approval. Records an `invited` event per successful send. |
+| `record_admin_phone_call_note(candidate_ref, note, admin_phone, readiness=None)` | GAP 4. Records an authenticated Admin's offline/phone-call fact as a `phone_call_note` event, `source='admin:<phone>'` (never "Hermes heard the call"). Only updates `post_intake_status` if the Admin explicitly supplied `readiness` (must be in the frozen set). |
+| `classify_post_invitation_signal(text) → step\|None` | G. Returns `travelling` / `arrived_office` / `invitation_acknowledged` on explicit markers (e.g. "রওনা দিয়েছি", "অফিসের পথে", "আচ্ছা আসব"), else None. Used by `_route_post_intake_message` so an invited candidate's "I'm on the way" continues from invitation context and never restarts intake. Fail-closed on ambiguity. |
+
+**Personality layer** (`shared/reply_policy.py`, `POLICY_VERSION = "structured_v3"`): the recruitment reply prompt (`build_whatsapp_recruitment_policy`) now frames Fazle as a warm, competent human recruitment officer — natural conversational Bangla, light regional flavor, mild playfulness, humor within a hard safety boundary (`_HUMOR_SAFETY_NOTE` — never about hardship/poverty/illness/disability/age/religion/ethnicity/appearance/rejection). Anti-repetition rules: no per-turn greeting, no restating the question, no "আর কিছু জানতে চান?" loop, history-aware (don't re-ask known fields, don't re-send office contact unless needed), and a low-pressure acknowledgement for "চিন্তা করে দেখি". **Tone only** — business facts, salary figures, readiness classification, authority, privacy, and all DB/action decisions are unchanged and still governed by the Business Rules section + the code around the prompt.
 
 ---
 

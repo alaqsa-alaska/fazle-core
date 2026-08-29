@@ -161,6 +161,59 @@ def _setup_test_schema(override_env):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _BASE_SCHEMA_SQL = """
+-- Recruitment candidate tables — pre-date db/migrations/ (production tables
+-- since before the numbered migration era; no CREATE TABLE anywhere in the
+-- repo until this stub). Column set + CHECK constraints mirror the live
+-- `postgres` DB as captured 2026-08-29. `post_intake_status` (migration
+-- 072) and `linked_employee_id` (migration 077) are deliberately NOT here
+-- so those migrations actually apply against this schema in tests.
+CREATE TABLE IF NOT EXISTS wbom_candidates (
+    candidate_id        BIGSERIAL PRIMARY KEY,
+    phone               VARCHAR(20) NOT NULL,
+    full_name           VARCHAR(100),
+    age                 INTEGER,
+    area                VARCHAR(100),
+    job_preference      VARCHAR(50),
+    experience_years    INTEGER,
+    available_join_date DATE,
+    funnel_stage        VARCHAR(30) NOT NULL DEFAULT 'new'
+        CHECK (funnel_stage IN ('new','collecting','scored','assigned','contacted','interviewed','hired','rejected','dropped')),
+    collection_step     VARCHAR(30) DEFAULT 'name',
+    score               INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 100),
+    score_bucket        VARCHAR(10) NOT NULL DEFAULT 'cold' CHECK (score_bucket IN ('hot','warm','cold')),
+    assigned_recruiter  VARCHAR(80),
+    assigned_at         TIMESTAMPTZ,
+    last_contact_at     TIMESTAMPTZ,
+    next_follow_up_at   TIMESTAMPTZ,
+    source              VARCHAR(30) DEFAULT 'whatsapp',
+    source_message      TEXT,
+    notes               TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_phone ON wbom_candidates(phone);
+
+CREATE TABLE IF NOT EXISTS wbom_candidate_conversations (
+    conv_id       BIGSERIAL PRIMARY KEY,
+    candidate_id  BIGINT NOT NULL REFERENCES wbom_candidates(candidate_id) ON DELETE CASCADE,
+    step          VARCHAR(30) NOT NULL,
+    direction     VARCHAR(10) NOT NULL DEFAULT 'inbound',
+    message_text  TEXT NOT NULL,
+    collected_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    source_bridge TEXT,
+    message_id    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_conv_candidate ON wbom_candidate_conversations(candidate_id);
+
+CREATE TABLE IF NOT EXISTS wbom_recruitment_reminders (
+    reminder_id  BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT NOT NULL REFERENCES wbom_candidates(candidate_id) ON DELETE CASCADE,
+    due_at       TIMESTAMPTZ NOT NULL,
+    reason       VARCHAR(100) NOT NULL,
+    status       VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dismissed')),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- WBOM core tables (pre-date all migrations)
 CREATE TABLE IF NOT EXISTS wbom_employees (
     employee_id   SERIAL PRIMARY KEY,

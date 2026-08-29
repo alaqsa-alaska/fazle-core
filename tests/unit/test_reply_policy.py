@@ -238,4 +238,7 @@ def test_recruitment_policy_fallback_when_history_empty():
 # ── Policy version stability ───────────────────────────────────────────────────
 
 def test_policy_version_is_defined():
-    assert POLICY_VERSION == "structured_v2"
+    # structured_v3 (2026-08-29): recruitment personality layer — warm human
+    # recruitment-officer tone, history-aware anti-repetition rules, humor
+    # safety boundary. Business Rules / fact-grounding unchanged.
+    assert POLICY_VERSION == "structured_v3"

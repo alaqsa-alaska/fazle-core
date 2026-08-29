@@ -114,6 +114,7 @@
 074_wbom_whatsapp_messages_stage_c_indexes.sql
 075_wbom_group_identities.sql
 076_hermes_action_approvals_business_actions.sql
+077_wbom_candidates_linked_employee.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -357,7 +358,23 @@ initially not updated in the same change, causing every business-action
 proposal to fail validation before reaching the database -- fixed same
 session).
 
-**Next available number for new work: `077`.**
+**`077_wbom_candidates_linked_employee.sql` (2026-08-29, Owner directive
+"Final recruitment lifecycle closure" GAP 1):** adds one nullable
+`wbom_candidates.linked_employee_id` BIGINT FK to `wbom_employees`
+(`ON DELETE SET NULL`) plus a partial UNIQUE index enforcing 1:1
+(an employee is the conversion target of at most one candidate). Closes
+the "phone changes after joining -> candidate/employee thread breaks"
+gap; canonical phone remains the primary resolver, this is the durable
+backstop. Written only by `modules.recruitment_flow.
+link_candidate_to_employee()` and only `WHERE linked_employee_id IS NULL`
+(never silently repoints). Purely additive, no other table touched, no
+existing CHECK altered. The `joined` lifecycle fact is an event row in
+`wbom_candidate_conversations` (`step='joined'`), NOT a new
+`post_intake_status` value -- the migration-072 vocabulary stays frozen.
+Verified idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE ... IF NOT
+EXISTS`) on the disposable test DB before production application.
+
+**Next available number for new work: `078`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 

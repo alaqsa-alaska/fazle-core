@@ -863,17 +863,30 @@ async def _audit_candidate_conversation(
     source: str,
     message_id: Optional[str] = None,
     *,
+    direction: str = "inbound",
     conn: Any = None,
 ) -> Optional[bool]:
+    """Append one row to wbom_candidate_conversations (append-only audit).
+
+    direction (2026-08-29, lifecycle-closure GAP 2): 'inbound' (default,
+    every existing caller) for a candidate's own message; 'outbound' for a
+    message the system sent (e.g. a batch invitation); 'event' for a
+    lifecycle fact that did not come from a WhatsApp message at all
+    (employee conversion, an authenticated Admin phone-call note). The
+    (source_bridge, message_id) dedup index still applies -- 'event' rows
+    pass message_id=None so they are never deduped against each other.
+    """
     try:
         sql = """INSERT INTO wbom_candidate_conversations
                      (candidate_id, step, direction, message_text, source_bridge, message_id)
-                 VALUES ($1, $2, 'inbound', $3, $4, $5)
+                 VALUES ($1, $2, $5, $3, $4, $6)
                  ON CONFLICT (source_bridge, message_id)
                      WHERE message_id IS NOT NULL
                  DO NOTHING
                  RETURNING conv_id"""
-        args = (candidate_id, step, message, source, message_id or None)
+        # message_id stays the LAST positional arg (existing callers/tests
+        # rely on args[-1] being the message_id / None).
+        args = (candidate_id, step, message, source, direction, message_id or None)
         if conn is not None:
             conv_id = await conn.fetchval(sql, *args)
         else:
@@ -1808,8 +1821,33 @@ async def _route_post_intake_message(
             )
             active_session = dict(active_session)
             active_session["post_intake_status"] = new_status
+            # Lifecycle-closure GAP 3/E: stamp WHEN readiness was first
+            # confirmed so first-N invitation ordering has a real
+            # "oldest qualifying readiness timestamp" and not just
+            # updated_at. Evidence = the candidate's own message.
+            if new_status in _READY_RANK:
+                await record_candidate_lifecycle_event(
+                    candidate_id, "readiness_confirmed",
+                    f"{new_status}: {text[:300]}", source=source,
+                    message_id=message_id, direction="inbound",
+                )
         except Exception as exc:  # noqa: BLE001 -- reply generation still proceeds
             log.warning("[recruit] post_intake_status update failed candidate=%s: %s", candidate_id, exc)
+
+    # Lifecycle-closure G: an invited candidate saying "রওনা দিয়েছি" /
+    # "অফিসের পথে" / "আচ্ছা আসব" is post-invitation progression, not a new
+    # inquiry — record the event so history stays continuous. Never restarts
+    # intake (this is already the post-intake path).
+    if candidate_id is not None:
+        _post_invite = classify_post_invitation_signal(text)
+        if _post_invite:
+            try:
+                await record_candidate_lifecycle_event(
+                    candidate_id, _post_invite, text[:500], source=source,
+                    message_id=message_id, direction="inbound",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.debug("[recruit] post-invitation event record failed candidate=%s: %s", candidate_id, exc)
 
     if candidate_id is not None:
         await _audit_candidate_conversation(candidate_id, "post_intake", text, source, message_id)
@@ -2430,3 +2468,555 @@ def is_already_answered(
             return False
     # String fields: normalized comparison.
     return _normalize_for_compare(str(stored)) == _normalize_for_compare(str(candidate_value))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Recruitment lifecycle closure (Owner directive, 2026-08-29)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# GAP 1  candidate -> employee canonical link  (link_candidate_to_employee)
+# GAP 2  post-invitation lifecycle events      (record_candidate_lifecycle_event)
+# GAP 3  deterministic shortlist + invite batch(get_willing_candidates,
+#                                               resolve_invite_batch, send_invite_batch)
+# GAP 4  authenticated phone-call admin context(record_admin_phone_call_note)
+# G      post-invitation message understanding (classify_post_invitation_signal)
+#
+# Design rules honoured here:
+#   * NO change to the frozen wbom_candidates.post_intake_status vocabulary.
+#     Operational lifecycle facts are rows in wbom_candidate_conversations
+#     (existing append-only audit table, step column, no CHECK constraint).
+#   * Reuse: outbound.enqueue (idempotent), _audit_candidate_conversation,
+#     shared.phone. No new engine, table-family, memory system or broadcast
+#     platform.
+#   * Events are evidence-backed only: a candidate's own message, an
+#     authenticated Admin instruction, or an authoritative employee-creation
+#     action. Never inferred from silence.
+
+from shared.phone import phone_key9 as _phone_key9  # noqa: E402
+try:
+    from app.database import fetch_all as _fetch_all  # noqa: E402
+except Exception:  # pragma: no cover - defensive
+    _fetch_all = None  # type: ignore
+
+
+# Lifecycle event `step` values written to wbom_candidate_conversations with
+# direction='event' (system/admin origin) or 'inbound' (candidate evidence)
+# or 'outbound' (invitation we sent). Kept to exactly this set; anything
+# outside it is rejected by record_candidate_lifecycle_event().
+LIFECYCLE_EVENT_STEPS: frozenset[str] = frozenset({
+    "invited",
+    "invitation_acknowledged",
+    "phone_confirmed",
+    "travelling",
+    "arrived_office",
+    "joined",
+    "deferred_after_invitation",
+    "did_not_arrive",
+    "phone_call_note",          # authenticated Admin offline-context note
+    "readiness_confirmed",      # timestamp marker when status -> agreed/joining_ready
+})
+
+# Readiness states that qualify a candidate for the "ready to work" shortlist
+# and for batch invitation. joining_ready outranks agreed (Owner directive E).
+_READY_RANK: dict[str, int] = {"joining_ready": 0, "agreed": 1}
+# Softer interest — included only when the caller explicitly asks for
+# "interested but not yet agreed" (Owner directive, shortlist section).
+_INTERESTED_STATUSES: frozenset[str] = frozenset({
+    "awaiting_agreement", "salary_objection", "not_ready_now", "future_contact",
+})
+
+
+async def record_candidate_lifecycle_event(
+    candidate_id: int,
+    event: str,
+    evidence_text: str,
+    *,
+    source: str = "system",
+    message_id: Optional[str] = None,
+    direction: str = "event",
+    conn: Any = None,
+) -> Optional[bool]:
+    """Append one lifecycle event to wbom_candidate_conversations.
+
+    event must be in LIFECYCLE_EVENT_STEPS. evidence_text is stored verbatim
+    in message_text (the candidate's message, the Admin note, or a short
+    system description like 'employee #42 created'). Returns True if a row
+    was inserted, False if deduped, None on error (best-effort; never
+    raises unless conn is supplied and inside a caller transaction).
+    """
+    if event not in LIFECYCLE_EVENT_STEPS:
+        log.warning("[recruit] rejected lifecycle event=%r candidate=%s (not in LIFECYCLE_EVENT_STEPS)", event, candidate_id)
+        return None
+    return await _audit_candidate_conversation(
+        candidate_id, event, (evidence_text or "")[:2000], source,
+        message_id, direction=direction, conn=conn,
+    )
+
+
+async def link_candidate_to_employee(
+    employee_mobile: str,
+    employee_id: int,
+    *,
+    employee_name: Optional[str] = None,
+    conn: Any = None,
+) -> dict:
+    """GAP 1 — link the originating candidate record to a newly created
+    employee, exactly once, keyed by canonical phone (last-9 match, since
+    wbom_candidates.phone and wbom_employees.employee_mobile use
+    inconsistent 01.../8801... formats in production).
+
+    Best-effort and non-fatal: the caller (employee-creation path) must not
+    fail employee creation if this returns an error status.
+
+    Returns a dict:
+      {"linked": bool, "candidate_id": int|None, "reason": str,
+       "needs_admin_review": bool}
+
+    Fail-closed rules (Owner directive):
+      * only links a candidate whose linked_employee_id IS NULL
+      * never silently repoints a candidate already linked to a *different*
+        employee -> needs_admin_review=True, linked=False
+      * if the phone matches more than one candidate row -> ambiguous,
+        needs_admin_review=True, linked=False (should not happen: phone is
+        UNIQUE on wbom_candidates, but the last-9 match is not)
+      * records a 'joined' lifecycle event on success
+    """
+    key9 = _phone_key9(employee_mobile or "")
+    if not key9:
+        return {"linked": False, "candidate_id": None, "reason": "unresolvable_mobile", "needs_admin_review": False}
+
+    _q = conn.fetch if conn is not None else (_fetch_all if _fetch_all else None)
+    if _q is None:
+        return {"linked": False, "candidate_id": None, "reason": "fetch_all_unavailable", "needs_admin_review": False}
+
+    try:
+        rows = await _q(
+            """SELECT candidate_id, phone, linked_employee_id, full_name, post_intake_status
+                 FROM wbom_candidates
+                WHERE right(regexp_replace(phone, '\\D', '', 'g'), 9) = $1""",
+            key9,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("[recruit] link_candidate_to_employee lookup failed mobile=%s: %s", employee_mobile, e)
+        return {"linked": False, "candidate_id": None, "reason": f"lookup_error:{e}", "needs_admin_review": False}
+
+    rows = [dict(r) for r in rows]
+    if not rows:
+        return {"linked": False, "candidate_id": None, "reason": "no_matching_candidate", "needs_admin_review": False}
+    if len(rows) > 1:
+        # Already linked to THIS employee on one of them counts as done.
+        already = [r for r in rows if r["linked_employee_id"] == employee_id]
+        if already:
+            return {"linked": True, "candidate_id": int(already[0]["candidate_id"]),
+                    "reason": "already_linked_same_employee", "needs_admin_review": False}
+        log.warning("[recruit] link_candidate_to_employee AMBIGUOUS mobile=%s matched %d candidates -> admin review",
+                    employee_mobile, len(rows))
+        return {"linked": False, "candidate_id": None, "reason": "ambiguous_multiple_candidates", "needs_admin_review": True}
+
+    row = rows[0]
+    cid = int(row["candidate_id"])
+    existing = row["linked_employee_id"]
+    if existing is not None:
+        if existing == employee_id:
+            return {"linked": True, "candidate_id": cid, "reason": "already_linked", "needs_admin_review": False}
+        log.warning("[recruit] link_candidate_to_employee CONFLICT candidate=%s already linked to employee=%s, "
+                    "refusing to repoint to %s -> admin review", cid, existing, employee_id)
+        return {"linked": False, "candidate_id": cid, "reason": "already_linked_different_employee", "needs_admin_review": True}
+
+    _exec = conn.execute if conn is not None else execute
+    try:
+        await _exec(
+            """UPDATE wbom_candidates
+                  SET linked_employee_id = $1, updated_at = NOW()
+                WHERE candidate_id = $2 AND linked_employee_id IS NULL""",
+            employee_id, cid,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("[recruit] link_candidate_to_employee update failed candidate=%s employee=%s: %s", cid, employee_id, e)
+        return {"linked": False, "candidate_id": cid, "reason": f"update_error:{e}", "needs_admin_review": False}
+
+    evidence = f"employee #{employee_id} created" + (f" ({employee_name})" if employee_name else "")
+    await record_candidate_lifecycle_event(cid, "joined", evidence, source="employee_creation", conn=conn)
+    log.info("[recruit] linked candidate=%s -> employee=%s (mobile=%s)", cid, employee_id, employee_mobile)
+    return {"linked": True, "candidate_id": cid, "reason": "linked", "needs_admin_review": False}
+
+
+async def get_willing_candidates(
+    *,
+    include_interested: bool = False,
+    limit: Optional[int] = None,
+) -> list[dict]:
+    """Read-only shortlist for "যারা চাকরি করতে রাজি তাদের দেখাও".
+
+    Default: only candidates whose canonical evidence supports readiness —
+    post_intake_status IN ('joining_ready','agreed'), never merely 'scored'.
+    include_interested=True additionally returns the softer
+    _INTERESTED_STATUSES with honest labels (Owner directive: Admin may ask
+    "যারা আগ্রহী কিন্তু এখনো রাজি হয়নি").
+
+    Ordering is deterministic (Owner directive E):
+      1. joining_ready before agreed  (then interested, if included)
+      2. earliest readiness_confirmed event, else updated_at (oldest first)
+      3. candidate_id ASC
+    Never uses recruitment score for ordering.
+
+    Returns bounded fields only (no NID, no private payroll data).
+    """
+    if _fetch_all is None:
+        return []
+    statuses = ["joining_ready", "agreed"]
+    if include_interested:
+        statuses += sorted(_INTERESTED_STATUSES)
+    try:
+        rows = await _fetch_all(
+            """
+            SELECT c.candidate_id, c.phone, c.full_name, c.job_preference,
+                   c.post_intake_status, c.area, c.linked_employee_id,
+                   c.updated_at, c.notes,
+                   (SELECT min(cc.collected_at)
+                      FROM wbom_candidate_conversations cc
+                     WHERE cc.candidate_id = c.candidate_id
+                       AND cc.step = 'readiness_confirmed') AS ready_since,
+                   (SELECT max(cc.collected_at)
+                      FROM wbom_candidate_conversations cc
+                     WHERE cc.candidate_id = c.candidate_id) AS last_interaction
+              FROM wbom_candidates c
+             WHERE c.post_intake_status = ANY($1::text[])
+               AND c.linked_employee_id IS NULL
+            """,
+            statuses,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("[recruit] get_willing_candidates query failed: %s", e)
+        return []
+
+    def _rank(r: dict) -> tuple:
+        st = r.get("post_intake_status") or ""
+        rank = _READY_RANK.get(st, 2 + sorted(_INTERESTED_STATUSES).index(st) if st in _INTERESTED_STATUSES else 99)
+        ts = r.get("ready_since") or r.get("updated_at")
+        # normalise to a sortable value
+        ts_key = ts.isoformat() if hasattr(ts, "isoformat") else str(ts or "")
+        return (rank, ts_key, int(r["candidate_id"]))
+
+    out = sorted((dict(r) for r in rows), key=_rank)
+    if limit is not None:
+        out = out[: max(0, int(limit))]
+    result: list[dict] = []
+    for r in out:
+        result.append({
+            "candidate_id": int(r["candidate_id"]),
+            "name": r.get("full_name"),
+            "mobile": r.get("phone"),
+            "interested_role": r.get("job_preference"),
+            "readiness": r.get("post_intake_status"),
+            "area": r.get("area"),
+            "ready_since": (r.get("ready_since") or r.get("updated_at")),
+            "last_interaction": r.get("last_interaction"),
+            "unresolved_requirement": _unresolved_requirement(r),
+        })
+    return result
+
+
+def _unresolved_requirement(row: dict) -> Optional[str]:
+    """Small helper: the single most relevant missing thing for a shortlist
+    row, derived from already-collected fields. Not a new schema."""
+    if not row.get("full_name"):
+        return "name_missing"
+    if not row.get("job_preference"):
+        return "role_missing"
+    if row.get("post_intake_status") == "salary_objection":
+        return "salary_objection_open"
+    if row.get("post_intake_status") in ("not_ready_now", "future_contact"):
+        return "not_ready_yet"
+    return None
+
+
+async def resolve_invite_batch(
+    candidate_ids: list[int],
+    *,
+    limit: Optional[int] = None,
+) -> list[dict]:
+    """Deterministically resolve + freeze a batch-invitation recipient set.
+
+    Given an explicit list of candidate_ids (from a shortlist the Admin is
+    acting on), return an ordered, immutable list of
+    {candidate_id, mobile, name, role, readiness, source_bridge}.
+
+    Ordering (Owner directive E / F):
+      1. joining_ready before agreed
+      2. earliest readiness_confirmed (else updated_at)
+      3. candidate_id ASC
+    limit (the N in "প্রথম ৫ জন") is applied AFTER ordering. The returned
+    list IS the frozen recipient set — callers must not re-resolve or
+    expand it. Candidates already linked to an employee, already
+    'declined', or with no resolvable phone are dropped (and logged), never
+    silently swapped for someone else.
+    """
+    if not candidate_ids or _fetch_all is None:
+        return []
+    uniq = sorted({int(c) for c in candidate_ids})
+    try:
+        rows = await _fetch_all(
+            """
+            SELECT c.candidate_id, c.phone, c.full_name, c.job_preference,
+                   c.post_intake_status, c.linked_employee_id, c.updated_at,
+                   (SELECT min(cc.collected_at) FROM wbom_candidate_conversations cc
+                     WHERE cc.candidate_id = c.candidate_id AND cc.step = 'readiness_confirmed') AS ready_since,
+                   (SELECT cc.source_bridge FROM wbom_candidate_conversations cc
+                     WHERE cc.candidate_id = c.candidate_id AND cc.source_bridge IS NOT NULL
+                     ORDER BY cc.collected_at DESC LIMIT 1) AS last_bridge,
+                   (SELECT s.source_bridge FROM fazle_recruitment_sessions s
+                     WHERE s.candidate_id = c.candidate_id ORDER BY s.updated_at DESC LIMIT 1) AS session_bridge
+              FROM wbom_candidates c
+             WHERE c.candidate_id = ANY($1::bigint[])
+            """,
+            uniq,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("[recruit] resolve_invite_batch query failed: %s", e)
+        return []
+
+    resolved: list[dict] = []
+    for r in (dict(x) for x in rows):
+        cid = int(r["candidate_id"])
+        if r.get("linked_employee_id") is not None:
+            log.info("[recruit] resolve_invite_batch drop candidate=%s (already an employee)", cid)
+            continue
+        if r.get("post_intake_status") == "declined":
+            log.info("[recruit] resolve_invite_batch drop candidate=%s (declined)", cid)
+            continue
+        if not _phone_key9(r.get("phone") or ""):
+            log.info("[recruit] resolve_invite_batch drop candidate=%s (no resolvable phone)", cid)
+            continue
+        st = r.get("post_intake_status") or ""
+        rank = _READY_RANK.get(st, 5)
+        ts = r.get("ready_since") or r.get("updated_at")
+        ts_key = ts.isoformat() if hasattr(ts, "isoformat") else str(ts or "")
+        resolved.append({
+            "_sort": (rank, ts_key, cid),
+            "candidate_id": cid,
+            "mobile": r.get("phone"),
+            "name": r.get("full_name"),
+            "role": r.get("job_preference"),
+            "readiness": st or None,
+            "source_bridge": r.get("last_bridge") or r.get("session_bridge"),
+        })
+    resolved.sort(key=lambda d: d["_sort"])
+    if limit is not None:
+        resolved = resolved[: max(0, int(limit))]
+    for d in resolved:
+        d.pop("_sort", None)
+    return resolved
+
+
+async def send_invite_batch(
+    recipients: list[dict],
+    *,
+    office_date: str,
+    message_body: str,
+    authorized_by: str,
+    default_source_bridge: str = "bridge3",
+    dry_run: bool = False,
+    _enqueue: Any = None,
+) -> dict:
+    """GAP 3 — send a frozen batch of office invitations, individually.
+
+    recipients: the EXACT frozen list from resolve_invite_batch(). This
+    function never re-queries or expands it.
+    office_date: an already-resolved ABSOLUTE date string (caller resolves
+    "আগামী ৫ তারিখ" -> "2026-09-05" before calling). Included verbatim in
+    the log and event evidence so the resolved date is visible.
+    message_body: the full invitation text (Admin's instructions +
+    approved office details). Sent as-is to every recipient — {date} is
+    substituted with office_date if present.
+    authorized_by: the trusted Admin phone that issued the one
+    authorization for this bounded action (Owner directive M — no second
+    per-message approval).
+
+    Per-recipient idempotency: idempotency_key =
+    f"recruit_invite:{candidate_id}:{office_date}" so a replay of the whole
+    batch never re-sends an already-sent recipient, and a partial failure
+    retry only sends the ones that failed.
+
+    Returns {"office_date", "authorized_by", "total", "sent":[...],
+    "skipped_duplicate":[...], "failed":[...], "dry_run"}.
+    """
+    if _enqueue is None:
+        from modules import outbound as _outbound
+        _enqueue = _outbound.enqueue
+
+    body_tmpl = message_body or ""
+    office_date = (office_date or "").strip()
+    result: dict = {
+        "office_date": office_date, "authorized_by": authorized_by,
+        "total": len(recipients), "sent": [], "skipped_duplicate": [],
+        "failed": [], "dry_run": dry_run,
+    }
+    for r in recipients:
+        cid = r.get("candidate_id")
+        mobile = r.get("mobile")
+        if not cid or not mobile:
+            result["failed"].append({"candidate_id": cid, "reason": "missing_id_or_mobile"})
+            continue
+        body = body_tmpl.replace("{date}", office_date) if "{date}" in body_tmpl else body_tmpl
+        key = f"recruit_invite:{cid}:{office_date}"
+        bridge = r.get("source_bridge") or default_source_bridge
+        if dry_run:
+            result["sent"].append({"candidate_id": cid, "mobile": mobile, "bridge": bridge, "idempotency_key": key, "dry_run": True})
+            continue
+        try:
+            qid = await _enqueue(
+                mobile, body, source_bridge=bridge,
+                purpose="recruitment_invitation", idempotency_key=key,
+                meta={"candidate_id": cid, "office_date": office_date, "authorized_by": authorized_by},
+            )
+        except Exception as e:  # noqa: BLE001 — isolate per-recipient failure
+            log.warning("[recruit] send_invite_batch failed candidate=%s: %s", cid, e)
+            result["failed"].append({"candidate_id": cid, "mobile": mobile, "reason": str(e)[:200]})
+            continue
+        if qid is None:
+            result["skipped_duplicate"].append({"candidate_id": cid, "mobile": mobile, "idempotency_key": key})
+            continue
+        result["sent"].append({"candidate_id": cid, "mobile": mobile, "queue_id": qid, "bridge": bridge})
+        try:
+            await record_candidate_lifecycle_event(
+                int(cid), "invited",
+                f"office invitation for {office_date} (authorized_by {authorized_by})",
+                source=f"admin:{authorized_by}", direction="outbound",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("[recruit] send_invite_batch event-record failed candidate=%s: %s", cid, e)
+    log.info("[recruit] send_invite_batch date=%s auth=%s total=%d sent=%d dup=%d failed=%d dry_run=%s",
+             office_date, authorized_by, result["total"], len(result["sent"]),
+             len(result["skipped_duplicate"]), len(result["failed"]), dry_run)
+    return result
+
+
+# ── GAP 4: authenticated Admin phone-call / offline context ────────────────
+
+_ADMIN_NOTE_READINESS_MAP: dict[str, str] = {
+    # explicit Admin-stated readiness phrase -> post_intake_status
+    "join_ready": "joining_ready", "joining_ready": "joining_ready",
+    "will come": "joining_ready", "আসবে": "joining_ready",
+    "agreed": "agreed", "রাজি": "agreed",
+    "declined": "declined", "করবে না": "declined", "না করবে": "declined",
+    "later": "future_contact", "পরে": "future_contact",
+    "not now": "not_ready_now",
+}
+
+
+async def record_admin_phone_call_note(
+    candidate_ref: str,
+    note_text: str,
+    *,
+    admin_phone: str,
+    readiness: Optional[str] = None,
+) -> dict:
+    """GAP 4 — record an authenticated Admin's offline/phone-call fact as
+    candidate business context. Hermes never claims it heard a call.
+
+    candidate_ref: a phone (any format) or a bare candidate_id string.
+    note_text: the Admin's verbatim note.
+    admin_phone: the authenticated trusted-Admin sender (attribution).
+    readiness: optional explicit post_intake_status the Admin stated. If
+    None, the note is recorded as context only and status is NOT changed.
+    If given it MUST be one of POST_INTAKE_STATUSES.
+
+    Returns {"recorded": bool, "candidate_id": int|None,
+             "status_updated": str|None, "reason": str}.
+    """
+    if _fetch_all is None:
+        return {"recorded": False, "candidate_id": None, "status_updated": None, "reason": "db_unavailable"}
+    cid: Optional[int] = None
+    ref = (candidate_ref or "").strip()
+    if ref.isdigit() and len(ref) <= 9:
+        try:
+            row = await fetch_one("SELECT candidate_id FROM wbom_candidates WHERE candidate_id=$1", int(ref))
+            if row:
+                cid = int(row["candidate_id"])
+        except Exception:  # noqa: BLE001
+            cid = None
+    if cid is None:
+        key9 = _phone_key9(ref)
+        if key9:
+            try:
+                rows = await _fetch_all(
+                    "SELECT candidate_id FROM wbom_candidates "
+                    "WHERE right(regexp_replace(phone, '\\D', '', 'g'), 9) = $1",
+                    key9,
+                )
+                if len(rows) == 1:
+                    cid = int(rows[0]["candidate_id"])
+                elif len(rows) > 1:
+                    return {"recorded": False, "candidate_id": None, "status_updated": None,
+                            "reason": "ambiguous_candidate_phone"}
+            except Exception as e:  # noqa: BLE001
+                return {"recorded": False, "candidate_id": None, "status_updated": None, "reason": f"lookup_error:{e}"}
+    if cid is None:
+        return {"recorded": False, "candidate_id": None, "status_updated": None, "reason": "candidate_not_found"}
+
+    await record_candidate_lifecycle_event(
+        cid, "phone_call_note", note_text or "(no text)",
+        source=f"admin:{admin_phone}", direction="event",
+    )
+
+    status_updated: Optional[str] = None
+    if readiness:
+        norm = readiness.strip()
+        if norm not in POST_INTAKE_STATUSES:
+            # try to map a free phrase
+            norm = _ADMIN_NOTE_READINESS_MAP.get(norm.lower(), "")
+        if norm in POST_INTAKE_STATUSES:
+            try:
+                await execute(
+                    "UPDATE wbom_candidates SET post_intake_status=$1, updated_at=NOW() WHERE candidate_id=$2",
+                    norm, cid,
+                )
+                status_updated = norm
+                if norm in _READY_RANK:
+                    await record_candidate_lifecycle_event(
+                        cid, "readiness_confirmed", f"{norm} (via admin phone-call note by {admin_phone})",
+                        source=f"admin:{admin_phone}", direction="event",
+                    )
+                log.info("[recruit] admin phone-call note candidate=%s status->%s by=%s", cid, norm, admin_phone)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[recruit] admin phone-call note status update failed candidate=%s: %s", cid, e)
+    return {"recorded": True, "candidate_id": cid, "status_updated": status_updated, "reason": "ok"}
+
+
+# ── G: post-invitation message understanding ──────────────────────────────
+
+_TRAVELLING_MARKERS: tuple[str, ...] = (
+    "রওনা দি", "রওনা হ", "রওনা করে", "গাড়িতে", "বাসে আছি", "পথে আছি",
+    "অফিসের পথে", "আসতেছি", "আসছি এখন", "আসতেছি এখন", "চলে আসছি",
+    "on the way", "coming now", "on my way", "started for",
+)
+_ARRIVED_MARKERS: tuple[str, ...] = (
+    "অফিসে এসেছি", "অফিসে আসছি এখন", "পৌঁছে গেছি", "পৌঁছেছি", "চলে এসেছি অফিসে",
+    "গেটে আছি", "reached office", "at the office", "at your office", "i have arrived",
+)
+_ACK_MARKERS: tuple[str, ...] = (
+    "আচ্ছা আসব", "ঠিক আছে আসব", "ঠিক আছে ৫ তারিখ", "ওকে আসব", "আসব ইনশাআল্লাহ",
+    "okay i will come", "ok will come", "i will be there",
+)
+
+
+def classify_post_invitation_signal(text: str) -> Optional[str]:
+    """Return a LIFECYCLE_EVENT_STEPS value when an invited candidate's
+    message is clearly a post-invitation progression signal, else None.
+
+    Used by the post-intake router: a match means "continue from invitation
+    context, do NOT restart intake". Conservative — only fires on explicit
+    markers, never on ambiguous text (matches this codebase's
+    fail-closed-on-ambiguity posture).
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if any(m in t for m in _ARRIVED_MARKERS):
+        return "arrived_office"
+    if any(m in t for m in _TRAVELLING_MARKERS):
+        return "travelling"
+    if any(m in t for m in _ACK_MARKERS):
+        return "invitation_acknowledged"
+    return None

@@ -16,6 +16,23 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _pin_live_db_pool(test_db_pool):
+    """Test-order-pollution fix (Owner directive 2026-08-29, section Q):
+    these tests drive the real ASGI app but never set app.database._pool,
+    so if an earlier DB test in the session closed the shared pool and
+    cleared the global (see conftest.test_db_pool teardown), the RBAC auth
+    lookup here fails with 'password authentication failed'/'pool is
+    closed' and the 4 authenticated cases fail — only in full-suite runs,
+    never in isolation. Pinning the global to a live pool for the duration
+    of each test makes them order-independent."""
+    import app.database as db_module
+    prev = db_module._pool
+    db_module._pool = test_db_pool
+    yield
+    db_module._pool = prev
+
+
 @pytest.fixture
 def auth_headers():
     from app.config import get_settings
