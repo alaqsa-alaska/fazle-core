@@ -29,7 +29,7 @@ from modules import observability as obs
 from shared.sqlite_compat import processed_text_column
 
 from .historical_sync import (
-    _BRIDGE_CONFIGS,
+    _bridge_configs,
     _get_target_jids,
     _load_lid_map_sync,
     _parse_sqlite_ts,
@@ -53,7 +53,7 @@ async def run_gap_scan_once(chat_jids: Optional[list[str]] = None) -> list[dict]
         return []
 
     runs: list[dict] = []
-    for bridge in _BRIDGE_CONFIGS:
+    for bridge in _bridge_configs():
         for jid in target_jids:
             run = await _scan_bridge_chat(bridge, jid)
             runs.append(run)
