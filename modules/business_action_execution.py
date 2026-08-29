@@ -40,6 +40,40 @@ log = logging.getLogger("fazle.business_action_execution")
 
 EXECUTABLE_ACTION_TYPES = frozenset({"business_reply_draft", "business_record_review"})
 
+# Stage J4/J5/J21 (2026-08-29): the smallest safe representation fix for
+# "review vs mutation" ambiguity, with NO schema migration -- reuses
+# evidence_refs (jsonb, already following propose_business_action()'s own
+# {"type": ..., "value": ...} convention). A business_record_review
+# proposal is treated as an ACTION proposal (one Owner APPROVAL = one
+# execution, J2) ONLY when its evidence_refs contains an explicit
+# {"type": "proposed_operation", "value": <op>} entry naming one of these
+# operations -- otherwise it is (and remains) review-only, recorded as an
+# acknowledgement, per J20's critical invariant: a generic historical
+# review proposal (e.g. #31, which has no such entry -- confirmed live)
+# is NEVER silently reinterpreted as financial authorization after the
+# fact. Only cash_approve is wired this stage (the one concrete example
+# in the directive); anything else is refused, not guessed.
+SUPPORTED_PROPOSED_OPERATIONS = frozenset({"cash_approve"})
+
+
+def get_proposed_operation(evidence_refs) -> Optional[str]:
+    """Pure, directly testable. Returns the proposed_operation value if
+    evidence_refs (a list of {"type", "value"} dicts -- or the raw jsonb
+    string asyncpg returns it as, with no codec registered in
+    app.database, confirmed live) contains one, else None."""
+    if not evidence_refs:
+        return None
+    if isinstance(evidence_refs, str):
+        import json
+        try:
+            evidence_refs = json.loads(evidence_refs)
+        except (ValueError, TypeError):
+            return None
+    for ref in evidence_refs:
+        if isinstance(ref, dict) and ref.get("type") == "proposed_operation":
+            return ref.get("value")
+    return None
+
 
 class StaleProposalError(Exception):
     """The business state a proposal referenced has changed since it was
@@ -176,7 +210,36 @@ async def execute_approved_business_action(action_id: int, executor: str = "syst
         )
 
     if action_type == "business_record_review":
-        result = {"executed": False, "no_op": True, "note": "business_record_review has no mutation -- recorded as acknowledged"}
+        proposed_op = get_proposed_operation(action.get("evidence_refs"))
+        if proposed_op is None:
+            # J20: no proposed_operation was ever presented to the Owner
+            # for this proposal -- it is review-only. This is #31's exact
+            # case, confirmed live: never reinterpreted as cash_approve.
+            result = {"executed": False, "no_op": True, "note": "business_record_review has no mutation -- recorded as acknowledged"}
+        elif proposed_op not in SUPPORTED_PROPOSED_OPERATIONS:
+            raise BusinessExecutionError(
+                f"action #{action_id} declares proposed_operation={proposed_op!r}, which this bridge "
+                f"does not support executing (supported: {sorted(SUPPORTED_PROPOSED_OPERATIONS)})"
+            )
+        elif proposed_op == "cash_approve":
+            # J15/J16: converge on the EXACT SAME authoritative function
+            # CASH APPROVE <ref> uses -- no duplicated financial-mutation
+            # logic. kind/domain were already validated as cash_txn above
+            # (_KNOWN_REFERENCE_KINDS + the actionability re-read).
+            if kind != "cash_txn" or action.get("domain") != "cash":
+                raise BusinessExecutionError(
+                    f"action #{action_id} declares proposed_operation='cash_approve' but its "
+                    f"business_reference/domain is not a cash transaction ({business_reference!r}, domain={action.get('domain')!r})"
+                )
+            from modules.financial_operations import cash_approve
+            approve_result = await cash_approve(ref_id, executor)
+            if not approve_result.get("ok"):
+                raise StaleProposalError(
+                    f"action #{action_id}'s proposed cash_approve was refused at execution time: "
+                    f"{approve_result.get('error')} -- current state changed since proposal/approval; "
+                    "execution refused, proposal's own approved status left unchanged"
+                )
+            result = {"executed": True, "operation": "cash_approve", "txn_id": approve_result.get("txn_id"), "txn_ref": approve_result.get("txn_ref")}
     elif action_type == "business_reply_draft":
         if kind != "draft":
             raise BusinessExecutionError(f"business_reply_draft action #{action_id} has a non-draft business_reference ({business_reference!r})")

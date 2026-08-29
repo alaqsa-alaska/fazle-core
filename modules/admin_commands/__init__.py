@@ -44,6 +44,9 @@ _HELP_TEXT = (
     "  PAID <id> <amount> <method>\n"
     "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
     "Cash transaction review (Stage H):\n"
+    "  PROPOSAL DETAILS <id>           — inspect only, no mutation\n"
+    "  PROPOSAL APPROVE <id>           — one approval = one execution, no second APPROVE needed\n"
+    "  PROPOSAL REJECT <id> [reason]   — rejects the proposal only, business record untouched\n"
     "  CASH DETAILS <txn-ref>          — inspect only, no mutation\n"
     "  CASH APPROVE <txn-ref>\n"
     "  CASH REJECT <txn-ref> <reason>   — rejects the REVIEW SUBMISSION only;\n"
@@ -221,6 +224,18 @@ _CASH_REVERSE_RE = re.compile(r"^cash\s+reverse\s+(\S+)\s+(.+)$", re.IGNORECASE 
 # pattern (not folded into _CASH_APPROVE_RE) so "CASH DETAILS ..." never
 # accidentally matches a mutating command.
 _CASH_DETAILS_RE = re.compile(r"^cash\s+details\s+(\S+)\s*$", re.IGNORECASE)
+# Stage J7 (2026-08-29): business-proposal commands are deliberately
+# namespaced under "PROPOSAL ..." rather than overloading bare APPROVE/
+# REJECT -- APPROVE <id> already targets fazle_draft_replies exclusively
+# (see the dispatch chain below); a draft and a proposal can share the
+# same numeric id (both do right now: draft ids and proposal ids 29/30/
+# 31 are independent sequences), so a single shared "APPROVE <id>"
+# surface would need collision detection this stage did not judge safe
+# to build blind. This prefix makes resolution deterministic by
+# construction -- no guessing which table an id belongs to.
+_PROPOSAL_APPROVE_RE = re.compile(r"^proposal\s+approve\s+(\d+)\s*$", re.IGNORECASE)
+_PROPOSAL_REJECT_RE  = re.compile(r"^proposal\s+reject\s+(\d+)(?:\s+(.+))?\s*$", re.IGNORECASE | re.DOTALL)
+_PROPOSAL_DETAILS_RE = re.compile(r"^proposal\s+details\s+(\d+)\s*$", re.IGNORECASE)
 
 
 def is_report_command(text: str) -> bool:
@@ -273,7 +288,9 @@ def is_admin_command(text: str) -> bool:
         # Stage H6/H7/H8 (2026-08-28)
         _CASH_APPROVE_RE.match(t) or _CASH_REJECT_RE.match(t) or _CASH_REVERSE_RE.match(t) or
         # Stage I5 (2026-08-29)
-        _CASH_DETAILS_RE.match(t)
+        _CASH_DETAILS_RE.match(t) or
+        # Stage J7 (2026-08-29)
+        _PROPOSAL_APPROVE_RE.match(t) or _PROPOSAL_REJECT_RE.match(t) or _PROPOSAL_DETAILS_RE.match(t)
     )
 
 
@@ -320,6 +337,10 @@ def _classify_command(t: str) -> Optional[str]:
         (_CASH_REVERSE_RE, "cash_reverse"),
         # Stage I5 (2026-08-29) — CASH DETAILS (read-only)
         (_CASH_DETAILS_RE, "cash_details"),
+        # Stage J7 (2026-08-29) — PROPOSAL APPROVE/REJECT/DETAILS
+        (_PROPOSAL_APPROVE_RE, "proposal_approve"),
+        (_PROPOSAL_REJECT_RE, "proposal_reject"),
+        (_PROPOSAL_DETAILS_RE, "proposal_details"),
     )
     for rx, name in pairs:
         if rx.match(t):
@@ -469,6 +490,19 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
     m = _CASH_DETAILS_RE.match(t)
     if m:
         return await _cmd_cash_details(m.group(1))
+
+    # ── Stage J7 (2026-08-29): PROPOSAL APPROVE/REJECT/DETAILS ──────────────
+    m = _PROPOSAL_DETAILS_RE.match(t)
+    if m:
+        return await _cmd_proposal_details(int(m.group(1)))
+
+    m = _PROPOSAL_APPROVE_RE.match(t)
+    if m:
+        return await _cmd_proposal_approve(int(m.group(1)), admin_phone)
+
+    m = _PROPOSAL_REJECT_RE.match(t)
+    if m:
+        return await _cmd_proposal_reject(int(m.group(1)), (m.group(2) or "").strip() or None, admin_phone)
 
     # ── Stage H6/H7/H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE ────────────
     m = _CASH_APPROVE_RE.match(t)
@@ -1068,6 +1102,78 @@ async def _cmd_cash_details(ref: str) -> str:
     if not result.get("ok"):
         return format_cash_result("details", result)
     return result["card"]
+
+
+async def _cmd_proposal_details(proposal_id: int) -> str:
+    """Stage J7 -- PROPOSAL DETAILS <id>. Read-only."""
+    try:
+        from modules.hermes_tasks import get_action
+        action = await get_action(proposal_id)
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL DETAILS error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    if not action:
+        return f"❌ Proposal #{proposal_id} not found"
+    return (
+        f"PROPOSAL {proposal_id} — {action.get('domain')}\n"
+        f"Reference: {action.get('business_reference')}\n"
+        f"Status: {action.get('status')}\n"
+        f"Summary: {action.get('summary')}\n"
+        f"Expected effect: {action.get('expected_effect')}"
+    )
+
+
+async def _cmd_proposal_approve(proposal_id: int, admin_phone: str) -> str:
+    """Stage J2/J7 -- PROPOSAL APPROVE <id>. One Owner approval = one
+    execution: this single command both authorizes (approve_action(),
+    the existing hermes_tasks gate) AND immediately triggers revalidated
+    execution (execute_approved_business_action(), Stage H15/H16 +
+    Stage J's proposed_operation contract) -- never a second APPROVE/
+    CASH APPROVE required for the same declared operation. If execution
+    is refused (stale state, unsupported operation, or the proposal is
+    genuinely review-only with no proposed_operation), that is reported
+    plainly -- the approval itself still stands (recorded), only the
+    subsequent execution attempt failed."""
+    from modules.hermes_tasks import approve_action, TaskError
+    from modules.business_action_execution import execute_approved_business_action, StaleProposalError, BusinessExecutionError
+
+    try:
+        await approve_action(proposal_id, admin_phone)
+    except TaskError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL APPROVE error: {e}")
+        return f"❌ ত্রুটি: {e}"
+
+    try:
+        result = await execute_approved_business_action(proposal_id, executor=admin_phone)
+    except StaleProposalError as e:
+        return f"✅ Proposal {proposal_id} approved, but execution was refused: {e}"
+    except BusinessExecutionError as e:
+        return f"✅ Proposal {proposal_id} approved (review-only or not execution-enabled): {e}"
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL APPROVE execution error: {e}")
+        return f"✅ Proposal {proposal_id} approved, but execution raised an error: {e}"
+
+    if result["result"].get("no_op"):
+        return f"✅ Proposal {proposal_id} approved and acknowledged (review-only, no business mutation)."
+    return f"✅ Proposal {proposal_id} approved and executed — {result['result']}"
+
+
+async def _cmd_proposal_reject(proposal_id: int, reason: str, admin_phone: str) -> str:
+    """Stage J7/J26 -- PROPOSAL REJECT <id> [reason]. Rejects the
+    Hermes proposal only -- never touches the underlying business
+    object (structurally proven: reject_action() never references any
+    business domain table)."""
+    from modules.hermes_tasks import reject_action, TaskError
+    try:
+        await reject_action(proposal_id, admin_phone, reason)
+    except TaskError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL REJECT error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return f"🚫 Proposal {proposal_id} rejected. The underlying business record is untouched."
 
 
 async def _cmd_cash_approve(ref: str, admin_phone: str) -> str:
