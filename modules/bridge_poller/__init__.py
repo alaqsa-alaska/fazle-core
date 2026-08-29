@@ -37,6 +37,7 @@ from typing import Optional
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_all, fetch_val
 from shared.draft_reply import create_draft_reply
+from shared.sqlite_compat import has_column
 from app.bridge import get_bridge1, get_bridge2, get_bridge3
 from modules.message_router import (
     process_message,
@@ -321,6 +322,15 @@ def _fetch_new_messages(
         con = sqlite3.connect(f"file:{messages_db}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
         con.row_factory = sqlite3.Row
 
+        # `processed_text` is a legacy in-house OCR/STT column that is NOT part
+        # of the stock bridge schema. A store created by the current bridge
+        # binary (e.g. bridge1 after a re-pair) lacks it, while older
+        # bridge2/bridge3 stores still have it. Detect it per-DB and degrade to
+        # NULL rather than throwing `no such column` on every poll. Read-only.
+        _has_processed_text = has_column(con, "messages", "processed_text")
+        _pt_select = "processed_text" if _has_processed_text else "NULL AS processed_text"
+        _pt_where = "OR processed_text IS NOT NULL" if _has_processed_text else ""
+
         # Normalize cursor boundary to UTC so bridge-local timezone offsets
         # cannot cause false "older/newer" comparisons in SQLite filtering.
         ts_utc = since_ts.astimezone(timezone.utc).replace(microsecond=0)
@@ -338,7 +348,7 @@ def _fetch_new_messages(
 
         rows = con.execute(
             f"""
-            SELECT id, chat_jid, sender, content, timestamp, media_type, processed_text,
+            SELECT id, chat_jid, sender, content, timestamp, media_type, {_pt_select},
                    filename, url
             FROM messages
             WHERE is_from_me = 0
@@ -350,7 +360,7 @@ def _fetch_new_messages(
                    OR media_type NOT IN ('reaction', 'receipt', 'revoke', 'deleted', 'protocol'))
               AND (
                 content IS NOT NULL
-                OR processed_text IS NOT NULL
+                {_pt_where}
                 OR ((media_type IS NOT NULL) AND (filename IS NOT NULL OR url IS NOT NULL))
               )
             ORDER BY datetime(timestamp) ASC

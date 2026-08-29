@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import get_settings
+from shared.sqlite_compat import processed_text_column
 from .checkpoint import get_checkpoint, update_checkpoint, touch_checkpoint
 from .ingestion import ingest_message
 from .models import IngestionRequest
@@ -264,12 +265,17 @@ def _fetch_messages_sync(
         )
         con.row_factory = sqlite3.Row
 
+        # `processed_text` is a legacy in-house column absent from the stock
+        # bridge schema — degrade to NULL for stores that lack it (see
+        # shared.sqlite_compat). Read-only.
+        _pt = processed_text_column(con)
+
         if since_ts:
             ts_str = since_ts.isoformat()
             raw_rows = con.execute(
-                """
+                f"""
                 SELECT id, chat_jid, sender, content, timestamp,
-                       is_from_me, media_type, processed_text
+                       is_from_me, media_type, {_pt}
                 FROM messages
                 WHERE chat_jid = ?
                   AND datetime(timestamp) > datetime(?)
@@ -281,9 +287,9 @@ def _fetch_messages_sync(
         else:
             # Full backfill from beginning
             raw_rows = con.execute(
-                """
+                f"""
                 SELECT id, chat_jid, sender, content, timestamp,
-                       is_from_me, media_type, processed_text
+                       is_from_me, media_type, {_pt}
                 FROM messages
                 WHERE chat_jid = ?
                 ORDER BY datetime(timestamp) ASC
