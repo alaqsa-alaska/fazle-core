@@ -38,6 +38,7 @@ from app.config import get_settings
 from app.database import execute, fetch_one, fetch_all, fetch_val
 from shared.draft_reply import create_draft_reply
 from shared.sqlite_compat import has_column
+from shared.media_text import has_meaningful_text, is_media_placeholder
 from app.bridge import get_bridge1, get_bridge2, get_bridge3
 from modules.message_router import (
     process_message,
@@ -907,6 +908,7 @@ async def _poll_bridge(config: dict):
             inbound_saved = 0
             unresolved_router_skipped = 0
             group_read_index_saved = 0  # Stage E3: approved-group messages, persisted, never routed
+            media_unprocessed_skipped = 0  # bare [media:*] placeholder, no caption/OCR/STT — never routed
 
             for msg in messages:
                 msg_id: str = msg["id"]
@@ -963,10 +965,37 @@ async def _poll_bridge(config: dict):
                     await _mark_core_queue_status(bridge_name, msg, "skipped", "group_read_index_only")
                     continue
 
+                # Unreadable media: a bare "[media:<type>]" transport placeholder
+                # (no caption/content, no bridge-side OCR/STT `processed_text`).
+                # The current bridge binary does not deliver media bytes, so
+                # core-side extraction cannot run either. The placeholder is NOT
+                # sender text — never let it reach OCR/STT eligibility, the
+                # intent classifier, RAG, the semantic gate, Hermes or reply
+                # generation, and never fabricate a transcript. Preserve the
+                # canonical record + media metadata, mark the queue row
+                # terminal, and continue. (A real caption or a populated
+                # legacy `processed_text` makes has_meaningful_text() True and
+                # this branch is skipped — those route normally.) Group media
+                # never reaches here — the @g.us guard above already handled it.
+                if is_media_placeholder(text) and not has_meaningful_text(msg.get("processed_text")):
+                    media_unprocessed_skipped += 1
+                    await _mark_processed(msg_id, bridge_name, phone)
+                    await _finalize_core_copy(
+                        core_message_id, bridge_name, msg, phone, text,
+                        msg_type=msg.get("media_type") or "media",
+                        status="skipped", error="media_unprocessed",
+                    )
+                    await _mark_core_queue_status(bridge_name, msg, "skipped", "media_unprocessed")
+                    log.info(
+                        "[%s] MEDIA_UNPROCESSED msg_id=%s type=%s phone=%s — placeholder only, not routed",
+                        bridge_name, msg_id, msg.get("media_type"), phone,
+                    )
+                    continue
+
                 # Bridge-side OCR may already populate processed_text. Previously
                 # release images with processed_text skipped the release workflow
                 # because the full OCR block only ran when text was empty.
-                if msg.get("media_type") == "image" and text:
+                if msg.get("media_type") == "image" and has_meaningful_text(text):
                     try:
                         _processed_ocr_text = text
                         from modules.ocr_processor import (
@@ -1011,7 +1040,7 @@ async def _poll_bridge(config: dict):
                         )
 
                 # ── Phase 22: 2-step OCR for images without pre-processed text ─
-                if msg.get("media_type") == "image" and not text and msg.get("filename"):
+                if msg.get("media_type") == "image" and not has_meaningful_text(text) and msg.get("filename"):
                     from modules.ocr_processor import classify_from_context
                     store_dir = os.path.dirname(messages_db)
                     file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
@@ -1155,7 +1184,7 @@ async def _poll_bridge(config: dict):
                         log.info("[IMG_MARK_PROCESSED_FINAL] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
                 else:
                     # Audio transcription for voice messages
-                    if msg.get("media_type") in ("audio", "ptt") and not text and msg.get("filename"):
+                    if msg.get("media_type") in ("audio", "ptt") and not has_meaningful_text(text) and msg.get("filename"):
                         from modules.voice_processor import process_voice as _proc_voice
                         store_dir = os.path.dirname(messages_db)
                         file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
@@ -1193,7 +1222,7 @@ async def _poll_bridge(config: dict):
                     elif (
                         msg.get("media_type") in ("document", "application")
                         or (msg.get("filename") or "").lower().endswith(".pdf")
-                    ) and not text and msg.get("filename"):
+                    ) and not has_meaningful_text(text) and msg.get("filename"):
                         from modules.ocr_processor import process_document as _proc_doc
                         store_dir = os.path.dirname(messages_db)
                         file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
@@ -1391,13 +1420,14 @@ async def _poll_bridge(config: dict):
 
             if bridge_name == "bridge1":
                 log.info(
-                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d cursor_from=%s cursor_to=%s",
+                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d media_unprocessed_skipped=%d cursor_from=%s cursor_to=%s",
                     bridge_name,
                     len(messages),
                     dedup_skipped,
                     inbound_saved,
                     unresolved_router_skipped,
                     group_read_index_saved,
+                    media_unprocessed_skipped,
                     cursor.isoformat(),
                     new_cursor.isoformat(),
                 )
@@ -2396,6 +2426,19 @@ async def process_bridge_inbound(
     rationale. True only when `text` is raw OCR/STT output that could not
     be classified as a known slip/document type.
     """
+    # Defense in depth: a bare "[media:<type>]" transport placeholder is NOT
+    # sender text. _poll_bridge already intercepts these before routing;
+    # guard the webhook entry path (and any future caller) identically so the
+    # intent classifier / RAG / semantic gate / Hermes / reply generation
+    # never run on a placeholder and no transcript is ever fabricated.
+    # is_extracted_media=True means `text` is genuine OCR/STT output — route it.
+    if is_media_placeholder(text) and not is_extracted_media:
+        log.info(
+            "[%s] process_bridge_inbound: media placeholder from %s (%s) — not routed",
+            bridge_name, phone, text,
+        )
+        return
+
     # 0. Recruitment eligibility + best-effort funnel entry (2026-08-21,
     # Owner Correction 1 / regression case ...1609): this used to be step 3,
     # AFTER the cooldown early-return below. A candidate's SECOND message

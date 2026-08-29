@@ -104,7 +104,7 @@ class TestGroupShortCircuitOrdering:
         src = inspect.getsource(bp)
         persist_idx = src.index("core_message_id = await _save_raw_core_copy(bridge_name, msg, phone, text)")
         shortcircuit_idx = src.index('_group_chat_jid.endswith("@g.us")')
-        ocr_idx = src.index('if msg.get("media_type") == "image" and text:')
+        ocr_idx = src.index('if msg.get("media_type") == "image" and has_meaningful_text(text):')
         identity_idx = src.index("from modules.identity_brain import detect_identity")
         routing_idx = src.index("await process_bridge_inbound(")
 
