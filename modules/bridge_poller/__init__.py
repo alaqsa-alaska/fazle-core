@@ -2515,6 +2515,38 @@ async def process_bridge_inbound(
         )
         return
 
+    # ── Deterministic owner→accountant payment-message relay ──────────────────
+    # NARROW, deterministic, LLM-free (modules.payment_relay). If — and only
+    # if — the ACTUAL transport sender (`phone`, the canonical inbound sender,
+    # never a phone number inside the body) is the Owner's payment number AND
+    # the body has the Owner's established cash-payment shape, forward the
+    # ORIGINAL body verbatim to the accountant via bridge2, then STOP: no
+    # intent classification, no recruitment funnel, no Hermes, no reply, and
+    # no direct fpe_cash_transactions / employee-ledger write here. The
+    # existing Fazle Payroll Engine workers pick the relayed accountant-side
+    # (is_from_me=1) message up independently and unchanged. Gated by
+    # PAYMENT_RELAY_ENABLED (default off) — returns None (this block is a
+    # no-op) until the flag is set.
+    try:
+        from modules.payment_relay import maybe_relay_owner_payment
+        _relay_result = await maybe_relay_owner_payment(
+            bridge_name=bridge_name, sender=phone, body=text, message_id=message_id,
+        )
+    except Exception as _relay_exc:  # noqa: BLE001 — the relay gate must never break normal routing
+        log.error(
+            "[%s] payment_relay gate errored (continuing normal routing): %s",
+            bridge_name, _relay_exc,
+        )
+        _relay_result = None
+    if _relay_result is not None:
+        log.info(
+            "[%s] payment_relay claimed inbound msg_id=%s status=%s dest=%s "
+            "outbound_bridge=%s — routing stopped here",
+            bridge_name, message_id or "(none)", _relay_result.get("status"),
+            _relay_result.get("dest_number"), _relay_result.get("outbound_bridge"),
+        )
+        return
+
     # 0. Recruitment eligibility + best-effort funnel entry (2026-08-21,
     # Owner Correction 1 / regression case ...1609): this used to be step 3,
     # AFTER the cooldown early-return below. A candidate's SECOND message
