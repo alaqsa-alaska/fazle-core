@@ -4,8 +4,9 @@ Fazle Core — Owner → Accountant payment-message relay (deterministic, LLM-fr
 ONE narrow rule. This is NOT a general automation and must not grow into one.
 
   inbound WhatsApp message (existing bridge/inbound pipeline)
-    → arrived on RELAY_INBOUND_BRIDGE  (bridge1) — the SAME sender + body
-      arriving on bridge2 or bridge3 must NOT activate this relay
+    → arrived on RELAY_INBOUND_BRIDGE  (bridge2 = 8801880446111, the Owner /
+      Super Admin account) — the SAME sender + body arriving on bridge1 or
+      bridge3 must NOT activate this relay
     → ACTUAL transport sender (normalize_phone of the canonical inbound
       sender — remoteJid / sender JID / normalized sender phone), NOT any
       phone number that appears inside the message body,
@@ -54,10 +55,22 @@ log = logging.getLogger("fazle.payment_relay")
 
 # Hard-coded per the Owner's exact rule; env vars below allow an override
 # without a code change but default to exactly these values.
-RELAY_INBOUND_BRIDGE = "bridge1"                # rule fires ONLY for messages that
-                                               # arrived on bridge1 — the same
-                                               # sender+shape on bridge2/bridge3
+#
+# Bridge topology (Owner-authoritative, verified against the running process
+# environment 2026-08-30 — do NOT infer from labels/docs/memory):
+#   bridge1 = 8801958122300  (HR)
+#   bridge2 = 8801880446111  (OPS / Super Admin / Owner)   ← this rule's inbound
+#   bridge3 = 8801805529211  (REC2)
+# The real live message on 2026-08-30 (sender 8801817201596 → 8801880446111,
+# "ID: 01813225542 Anowar SG 01813225542(N) 200/-") arrived on bridge2.
+RELAY_INBOUND_BRIDGE = "bridge2"                # rule fires ONLY for messages that
+                                               # arrived on bridge2 (the Owner /
+                                               # Super Admin account) — the same
+                                               # sender+shape on bridge1/bridge3
                                                # must NOT activate this relay.
+RELAY_RECEIVING_NUMBER = "8801880446111"        # the number the inbound bridge MUST
+                                               # be paired to (defensive: guards a
+                                               # bridge-label / number swap in config)
 RELAY_SOURCE_NUMBER = "8801817201596"          # canonical 8801XXXXXXXXX
 RELAY_DEST_NUMBER = "8801844836824"            # "Mamun Vai Bkash Nagod"
 RELAY_DEST_REFERENCE = "Mamun Vai Bkash Nagod"
@@ -100,16 +113,51 @@ def is_payment_shape(body: str) -> bool:
         return False
 
 
+def _configured_bridge_number(bridge_name: Optional[str]) -> Optional[str]:
+    """The WhatsApp number the given bridge is configured/paired to, read from
+    live settings (app.config). Used only for the defensive label→number
+    cross-check below — never a routing input on its own."""
+    try:
+        from app.config import get_settings
+        s = get_settings()
+        return {
+            "bridge1": getattr(s, "bridge1_number", "") or "",
+            "bridge2": getattr(s, "bridge2_number", "") or "",
+            "bridge3": getattr(s, "bridge3_number", "") or "",
+        }.get(str(bridge_name or "").strip().lower())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[payment_relay] could not resolve bridge number for %s: %s", bridge_name, exc)
+        return None
+
+
 def is_relay_inbound_bridge(bridge_name: Optional[str]) -> bool:
     """True iff the message arrived on the one inbound bridge this rule is
-    scoped to (RELAY_INBOUND_BRIDGE, default ``bridge1``).
+    scoped to — ``bridge2`` (RELAY_INBOUND_BRIDGE), the Owner / Super Admin
+    account 8801880446111.
 
-    A qualifying sender + payment shape arriving on bridge2 or bridge3 must
+    A qualifying sender + payment shape arriving on bridge1 or bridge3 must
     NOT activate the relay — this is a hard part of the rule, not an
     optimisation.
+
+    Defensive second check: the bridge that carries the "bridge2" label must
+    actually be paired to RELAY_RECEIVING_NUMBER. If config ever swaps the
+    label↔number mapping, the relay fails closed rather than forwarding from
+    the wrong account (Owner directive 2026-08-30 — verify runtime, never
+    trust labels).
     """
     want = _cfg("PAYMENT_RELAY_INBOUND_BRIDGE", RELAY_INBOUND_BRIDGE)
-    return bool(bridge_name) and str(bridge_name).strip().lower() == want.strip().lower()
+    if not bridge_name or str(bridge_name).strip().lower() != want.strip().lower():
+        return False
+    want_num = normalize_phone(_cfg("PAYMENT_RELAY_RECEIVING_NUMBER", RELAY_RECEIVING_NUMBER))
+    got_num = normalize_phone(_configured_bridge_number(bridge_name) or "")
+    if want_num and got_num and got_num != want_num:
+        log.error(
+            "[payment_relay] inbound bridge %r is paired to %s but the rule expects "
+            "the receiving account to be %s — REFUSING relay (label/number mismatch)",
+            bridge_name, got_num, want_num,
+        )
+        return False
+    return True
 
 
 def is_relay_sender(raw_sender: Optional[str]) -> bool:
@@ -149,8 +197,9 @@ async def maybe_relay_owner_payment(
     """
     if not _enabled():
         return None
-    # Hard rule: inbound bridge must be bridge1. bridge2/bridge3 never activate
-    # this relay, even for the exact same sender + body.
+    # Hard rule: inbound bridge must be bridge2 (the Owner / Super Admin
+    # account 8801880446111). bridge1/bridge3 never activate this relay, even
+    # for the exact same sender + body.
     if not is_relay_inbound_bridge(bridge_name):
         return None
     if not is_relay_sender(sender):
