@@ -111,11 +111,20 @@ async def match_or_create_employee(
     #    employee identity per business rule; it must win over payout_phone,
     #    which is merely where the money is transferred and may legitimately
     #    coincide with a completely different employee's registered phone.
+    #
+    #    2026-08-30 (Owner business rule): a phone that belongs to an EXISTING
+    #    employee row matches that employee regardless of active/inactive
+    #    status — a duplicate employee row must NEVER be created just because
+    #    the existing one is inactive (that was the idx_fpe_emp_phone_unique
+    #    crash). An active row still wins over an inactive one when both exist.
+    #    Activation of a matched inactive employee on a successful payment is
+    #    handled downstream in accounting.create_transaction(), not here.
     if employee_id_phone:
         row = await fetch_one(
             "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
             "FROM fpe_employees "
-            "WHERE employee_id_phone = $1 AND status = 'active'",
+            "WHERE employee_id_phone = $1 "
+            "ORDER BY (status = 'active') DESC, id ASC LIMIT 1",
             employee_id_phone,
         )
         if row:
@@ -129,7 +138,8 @@ async def match_or_create_employee(
         row = await fetch_one(
             "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
             "FROM fpe_employees "
-            "WHERE primary_phone = $1 AND status = 'active'",
+            "WHERE primary_phone = $1 "
+            "ORDER BY (status = 'active') DESC, id ASC LIMIT 1",
             payout_phone,
         )
         if row:
@@ -146,7 +156,7 @@ async def match_or_create_employee(
             FROM fpe_employee_aliases a
             JOIN fpe_employees e ON e.id = a.employee_id
             WHERE a.alias_type = 'phone' AND a.alias_value = $1
-              AND e.status = 'active'
+            ORDER BY (e.status = 'active') DESC, e.id ASC LIMIT 1
             """,
             phone,
         )
@@ -482,12 +492,15 @@ async def _auto_create_employee(
             # inserted the same employee.
             existing = None
             if eid_phone:
+                # 2026-08-30 (Owner rule): match an existing employee row for
+                # this phone regardless of active/inactive status so we never
+                # collide with idx_fpe_emp_phone_unique on an inactive row.
                 existing = await con.fetchrow(
                     "SELECT id, employee_code, full_name, primary_phone, "
                     "canonical_employee_id "
                     "FROM fpe_employees "
                     "WHERE (employee_id_phone = $1 OR primary_phone = $1) "
-                    "  AND status = 'active' LIMIT 1",
+                    "ORDER BY (status = 'active') DESC, id ASC LIMIT 1",
                     eid_phone,
                 )
             if not existing and name_norm:
