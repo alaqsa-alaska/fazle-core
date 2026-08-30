@@ -392,3 +392,14 @@ scripts/phase7_check_sessions.py
 scripts/phase7_live_test.py
 scripts/phase7_second_webhook.py
 scripts/restart_fazle7.sh
+
+# 2026-08-30: docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md --
+# a modified planning doc belonging to the separate Bridge Media Acquisition
+# task (last touched 2026-08-29, unrelated to the owner->accountant payment
+# relay + cross-bridge system-echo guard this restart deploys). The Owner has
+# explicitly and repeatedly acknowledged this file as known and unrelated and
+# directed that it remain untouched (not reset, stashed, discarded, or
+# committed) while using the established restart-gate cleanliness-exception
+# procedure -- this entry. Remove once the Bridge Media Acquisition task
+# commits or reverts it.
+docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md
