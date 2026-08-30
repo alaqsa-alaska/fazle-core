@@ -183,25 +183,15 @@ async def test_bridge_echo_is_not_double_accounted(test_db_pool):
     now = datetime.now(timezone.utc)
     async with test_db_pool.acquire() as conn:
         await _seed_employee(conn, phone="01711000006", name="Echo Worker", status="active")
-        # a real 'sent' relay queue row, exactly as production would have one
-        await conn.execute(
-            """INSERT INTO fazle_outbound_queue
-                   (id, recipient, body, source_bridge, purpose, status, sent_at,
-                    meta_json, external_id, idempotency_key)
-               VALUES (90006,'8801844836824',$1,'bridge2',$2,'sent',$3,'{}'::jsonb,
-                       'bridge2:8801844836824','payment-relay:bridge2:WAMID90006')""",
-            body, RELAY_PURPOSE, now,
-        )
-    await on_relay_send_success(_queue_row(90006, body))
+    await on_relay_send_success(_queue_row(90006, body))   # meta.inbound_message_id = "WAMID90006"
 
-    # The bridge self-echo of that same send (WA timestamp seconds later) is
-    # recognised as already accounted — correlated to the booked relay send.
+    # The FPE worker later re-processes the owner's original message from the
+    # bridge store; its exact stanza id == the booked txn's inbound ref.
     assert await is_relay_payment_already_accounted(
-        body, message_ts=now + timedelta(seconds=6)) is True
-    # A different amount is a different message — not suppressed.
+        body, stanza_id="WAMID90006", message_ts=now + timedelta(seconds=6)) is True
+    # A different message (different stanza id) is booked, even with same body.
     assert await is_relay_payment_already_accounted(
-        "ID: 01711000006 Echo Worker 01711000006(B) 999/-",
-        message_ts=now + timedelta(seconds=6)) is False
+        body, stanza_id="WAMID_OTHER", message_ts=now + timedelta(seconds=6)) is False
 
 
 # ── 7 / 8 / 9. 3-month inactivity sweep + reactivation ─────────────────────

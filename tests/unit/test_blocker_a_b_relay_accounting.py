@@ -1,10 +1,12 @@
 """
 Owner Accounting Blocker A + B (2026-08-30) — payment-relay accounting.
 
-A — transport identity: body sha256 is NOT financial identity. Direct
-    idempotency stays payment-relay-send:<queue_id>:<line_idx>. The FPE-worker
-    echo suppression correlates to a real relay SEND EVENT (queue row + time +
-    booked txns), not a bare body hash.
+A — transport identity (Python exact-ID fix): the SOLE suppression authority is
+    exact WhatsApp stanza-ID equality — the FPE-worker message's
+    fpe_wa_messages.wa_message_id must equal a BOOKED relay transaction's
+    metadata->>'relay_inbound_message_ref' (or relay_send_stanza_id). NO
+    body / timestamp / queue-row heuristic can suppress a financial event.
+    Direct idempotency stays payment-relay-send:<queue_id>:<line_idx>.
 
 B — atomicity: employee resolve/create + cash txn + audit + ledger + activation
     for one payment line commit together or not at all. A rollback removes a
@@ -102,26 +104,34 @@ async def test_A_new_relay_event_identical_body_two_txns(test_db_pool):
         assert total == 2                                       # two genuine payments
 
 
-async def test_A_echo_selfecho_correlated_is_suppressed(test_db_pool):
+async def test_A_proof1_same_original_stanza_id_is_suppressed(test_db_pool):
+    """1. the exact stanza id of the booked relay's original message → suppressed."""
     import app.database as db_module
     db_module._pool = test_db_pool
     from modules.payment_relay_accounting import (
         on_relay_send_success, is_relay_payment_already_accounted,
     )
     body = "ID: 01710000203 Jsim 01710000203(B) 450/-"
-    now = datetime.now(timezone.utc)
+    r = await on_relay_send_success(_queue_row(93301, body))     # inbound_message_id = "WAMID93301"
+    assert r["booked"] == 1
 
     async with test_db_pool.acquire() as conn:
-        await _insert_sent_queue_row(conn, 93301, body, now)
-    await on_relay_send_success(_queue_row(93301, body))        # books the relay send
-
-    async with test_db_pool.acquire() as conn:
-        # self-echo of that same send, WA timestamp seconds later
+        ref = await conn.fetchval(
+            "SELECT metadata->>'relay_inbound_message_ref' FROM fpe_cash_transactions "
+            "WHERE source_message_id='payment-relay-send:93301:0'")
+        assert ref == "WAMID93301"
+        # the FPE worker later re-sees the owner's original message: same stanza id
         assert await is_relay_payment_already_accounted(
-            body, conn=conn, message_ts=now + timedelta(seconds=8)) is True
+            body, conn=conn, stanza_id="WAMID93301") is True
+        # and the WA timestamp is irrelevant to the decision
+        assert await is_relay_payment_already_accounted(
+            body, conn=conn, stanza_id="WAMID93301",
+            message_ts=datetime.now(timezone.utc) + timedelta(days=99)) is True
 
 
-async def test_A_manual_identical_body_not_suppressed(test_db_pool):
+async def test_A_proof4_manual_identical_payment_10min_different_stanza_not_suppressed(test_db_pool):
+    """4. a genuine manual payment, identical body, +10 min, DIFFERENT stanza id
+    → NOT suppressed (the exact case the owner flagged)."""
     import app.database as db_module
     db_module._pool = test_db_pool
     from modules.payment_relay_accounting import (
@@ -129,33 +139,80 @@ async def test_A_manual_identical_body_not_suppressed(test_db_pool):
     )
     body = "ID: 01710000204 Sohel 01710000204(N) 500/-"
     now = datetime.now(timezone.utc)
-
     async with test_db_pool.acquire() as conn:
         await _insert_sent_queue_row(conn, 93401, body, now)
-    await on_relay_send_success(_queue_row(93401, body))
+    await on_relay_send_success(_queue_row(93401, body))         # booked; ref = "WAMID93401"
 
     async with test_db_pool.acquire() as conn:
-        # (a) identical text, but 2 hours later — a genuine separate payment
         assert await is_relay_payment_already_accounted(
-            body, conn=conn, message_ts=now + timedelta(hours=2)) is False
-        # (b) identical text that never went through the relay queue at all
-        never_queued = "ID: 01710000299 Someone Else 01710000299(N) 500/-"
-        assert await is_relay_payment_already_accounted(
-            never_queued, conn=conn, message_ts=now) is False
+            body, conn=conn, stanza_id="3EB0MANUAL_DIFFERENT",
+            message_ts=now + timedelta(minutes=10)) is False
 
 
-async def test_A_echo_requires_a_booked_queue_row(test_db_pool):
+async def test_A_proof5_identical_body_no_stanza_match_not_suppressed(test_db_pool):
+    """5. identical body, a stanza id that matches nothing → NOT suppressed.
+    Also: no stanza id at all → NOT suppressed (heuristic cannot stand in)."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import (
+        on_relay_send_success, is_relay_payment_already_accounted,
+    )
+    body = "ID: 01710000205 Nur 01710000205(N) 100/-"
+    now = datetime.now(timezone.utc)
+    async with test_db_pool.acquire() as conn:
+        await _insert_sent_queue_row(conn, 93501, body, now)
+    await on_relay_send_success(_queue_row(93501, body))
+
+    async with test_db_pool.acquire() as conn:
+        assert await is_relay_payment_already_accounted(
+            body, conn=conn, stanza_id="NOPE", message_ts=now + timedelta(seconds=5)) is False
+        assert await is_relay_payment_already_accounted(
+            body, conn=conn, stanza_id=None, message_ts=now + timedelta(seconds=5)) is False
+
+
+async def test_A_proof6_sent_queue_row_but_not_booked_not_suppressed(test_db_pool):
+    """6. a 'sent' relay queue row exists but accounting never booked it →
+    NOT suppressed even with the exact inbound stanza id."""
     import app.database as db_module
     db_module._pool = test_db_pool
     from modules.payment_relay_accounting import is_relay_payment_already_accounted
-    body = "ID: 01710000205 Nur 01710000205(N) 100/-"
+    body = "ID: 01710000206 Amin 01710000206(N) 250/-"
     now = datetime.now(timezone.utc)
+    async with test_db_pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO fazle_outbound_queue
+                   (id, recipient, body, source_bridge, purpose, status, sent_at,
+                    meta_json, external_id, idempotency_key)
+               VALUES (93601,'8801844836824',$1,'bridge2',$2,'sent',$3,
+                       '{"inbound_message_id":"WAMID93601"}'::jsonb,
+                       'bridge2:8801844836824','payment-relay:bridge2:WAMID93601')""",
+            body, RELAY_PURPOSE, now,
+        )
+        # no fpe_cash_transactions row for 93601
+        assert await is_relay_payment_already_accounted(
+            body, conn=conn, stanza_id="WAMID93601", message_ts=now + timedelta(seconds=3)) is False
+
+
+async def test_A_proof7_unrelated_message_same_body_not_suppressed(test_db_pool):
+    """7. an unrelated WhatsApp message that happens to share the body →
+    NOT suppressed. Proves the body/time correlation cannot suppress even
+    inside its own window."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import (
+        on_relay_send_success, is_relay_payment_already_accounted,
+    )
+    body = "ID: 01710000207 Bilal 01710000207(N) 900/-"
+    now = datetime.now(timezone.utc)
+    async with test_db_pool.acquire() as conn:
+        await _insert_sent_queue_row(conn, 93701, body, now)
+    await on_relay_send_success(_queue_row(93701, body))         # booked; ref = "WAMID93701"
 
     async with test_db_pool.acquire() as conn:
-        await _insert_sent_queue_row(conn, 93501, body, now)     # sent, but NEVER booked
-        # no fpe_cash_transactions row exists for queue 93501
+        # unrelated inbound: identical body, WA timestamp INSIDE the ±30 min
+        # window, but its own distinct stanza id → still booked
         assert await is_relay_payment_already_accounted(
-            body, conn=conn, message_ts=now + timedelta(seconds=5)) is False
+            body, conn=conn, stanza_id="3EB0UNRELATED", message_ts=now + timedelta(minutes=1)) is False
 
 
 # ══ BLOCKER B ═══════════════════════════════════════════════════════════════

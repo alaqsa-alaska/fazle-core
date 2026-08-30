@@ -392,7 +392,7 @@ async def _process_parsed_batch() -> None:
         SELECT mps.fpe_wa_message_id,
                pr.message_type, pr.parsed_data, pr.confidence,
                m.raw_content, m.is_from_me, m.source, m.chat_jid, m.sender_phone,
-               m.timestamp_wa
+               m.timestamp_wa, m.wa_message_id
         FROM fpe_message_processing_state mps
         JOIN fpe_parser_results pr ON pr.fpe_wa_message_id = mps.fpe_wa_message_id
         JOIN fpe_wa_messages m ON m.id = mps.fpe_wa_message_id
@@ -548,17 +548,19 @@ async def _process_parsed_batch() -> None:
                 _diag_status, _diag_reason = "skipped", "not_from_owner"
                 continue
 
-            # Owner→accountant payment-relay echo dedup (2026-08-30, Blocker A):
-            # suppress this message ONLY if it is the self-echo / history-sync
-            # copy of a relay SEND EVENT that was already booked — correlated by
-            # (verbatim body == queue body) + (WA timestamp within ±30 min of
-            # q.sent_at) + (that queue row actually produced FPE txns). NOT a
-            # bare body-hash match, so a genuine identical-text payment that
-            # never went through the relay queue is still booked.
+            # Owner→accountant payment-relay echo dedup (2026-08-30, Blocker A —
+            # Python exact-ID fix): suppress this message ONLY when its exact
+            # WhatsApp stanza id (fpe_wa_messages.wa_message_id) equals a BOOKED
+            # relay transaction's relay_inbound_message_ref (or, once the bridge
+            # is upgraded, relay_send_stanza_id). Body/timestamp/queue-row
+            # correlation is a diagnostic only and can NEVER suppress — a genuine
+            # identical-text payment with a different stanza id is always booked.
             try:
                 from modules.payment_relay_accounting import is_relay_payment_already_accounted
                 if await is_relay_payment_already_accounted(
-                    row["raw_content"], message_ts=row.get("timestamp_wa"),
+                    row["raw_content"],
+                    message_ts=row.get("timestamp_wa"),
+                    stanza_id=row.get("wa_message_id"),
                 ):
                     await mark_processing_status(msg_id, "done")
                     log.info(

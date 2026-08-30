@@ -39,14 +39,16 @@ and enforced by create_transaction()'s own txn_ref idempotency plus an
 explicit pre-check here. Never dedupes by employee+amount+date alone.
 
 Later bridge self-echo / history-sync of the same successfully-relayed message
-is recognised as already-accounted by is_relay_payment_already_accounted() —
-which correlates the FPE-worker message to a real relay SEND EVENT: a
-fazle_outbound_queue row (purpose = owner-accountant-payment-relay, status =
-'sent') whose body is byte-identical, whose sent_at is within ±30 min of the
-message's WhatsApp timestamp, and which actually produced FPE transactions.
-Body sha256 is NOT used as financial identity — two genuine payments may carry
-identical text; a manual/unrelated identical-body message that never went
-through the relay queue is booked normally.
+is recognised as already-accounted by is_relay_payment_already_accounted().
+Blocker A — Python exact-ID fix (2026-08-30): the SOLE suppression authority is
+EXACT WhatsApp stanza-ID equality — the FPE-worker message's
+fpe_wa_messages.wa_message_id must equal a BOOKED relay transaction's
+metadata->>'relay_inbound_message_ref' (the owner's original relay-triggering
+message id, captured today) or metadata->>'relay_send_stanza_id' (the relayed
+copy's id, present only once the bridge is upgraded — not required now). No
+body / timestamp / queue-row correlation can suppress a financial event; that
+correlation survives only as a logged diagnostic for reconciliation review.
+relay_message_sha256 is audit/forensics only, never identity.
 
 Blocker B (2026-08-30): employee resolve/create + cash transaction + audit +
 ledger + activation for each payment line run in ONE atomic asyncpg
@@ -95,6 +97,23 @@ def _enabled() -> bool:
 
 def _sha256(s: str) -> str:
     return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
+
+def _stanza_id_or_none(external_id: Any) -> Optional[str]:
+    """The outbound external_id is a real WhatsApp stanza id ONLY once the
+    bridge returns one. Until then modules.outbound._send_with_channel returns
+    the synthetic '<bridge>:<recipient>' fallback — recognise and reject that
+    shape so relay_send_stanza_id is never a false transport identity."""
+    if not external_id:
+        return None
+    s = str(external_id).strip()
+    if not s:
+        return None
+    # synthetic fallback: "bridge1:8801..." / "bridge2:88018..." etc.
+    if s.startswith(("bridge1:", "bridge2:", "bridge3:", "meta:", "messenger:",
+                     "instagram:", "facebook_comment:")):
+        return None
+    return s
 
 
 def _payment_lines(body: str) -> list[str]:
@@ -260,6 +279,11 @@ async def _account_relay_send(
                             "relay_source_number": meta.get("source_number"),
                             "relay_dest": recipient,
                             "relay_external_id": external_id,
+                            # The relayed copy's own WhatsApp stanza id — only
+                            # available once the bridge returns it (deferred Go
+                            # change). Until then external_id is the synthetic
+                            # "<bridge>:<recipient>" string, so this stays null.
+                            "relay_send_stanza_id": _stanza_id_or_none(external_id),
                             "accounting_trigger": "outbound_send_success",
                         },
                     )
@@ -340,52 +364,85 @@ async def is_relay_payment_already_accounted(
     conn: Any = None,
     *,
     message_ts: Any = None,
+    stanza_id: Any = None,
 ) -> bool:
-    """True iff this FPE-worker bridge-store message is the self-echo /
-    history-sync copy of an owner→accountant relay SEND EVENT that was already
-    booked by the direct accounting path — so re-booking it would double-count.
+    """True iff this FPE-worker bridge-store message is the SAME TRANSPORT EVENT
+    as an owner→accountant relay payment that was already booked by the direct
+    accounting path — so re-booking it would double-count.
 
-    Owner Blocker A (2026-08-30): body sha256 is NOT financial identity (two
-    genuine payments can carry identical text). Suppression requires a real
-    correlated transport event:
+    Owner Blocker A — Python exact-ID fix (2026-08-30). The suppression
+    authority is EXACT WhatsApp stanza-ID equality, nothing else:
 
-      * a fazle_outbound_queue row q with purpose = owner-accountant-payment-relay
-        AND status = 'sent'
-      * q.body byte-identical to this message body (the relay forwards verbatim)
-      * q.sent_at within ±_ECHO_CORRELATION_MINUTES of this message's WA
-        timestamp (a self-echo lands within seconds); when no timestamp is
-        available, fall back to q.sent_at within the last 3 days
-      * q was actually booked — an fpe_cash_transactions row exists with
-        source_channel = SOURCE_CHANNEL and
-        source_message_id LIKE 'payment-relay-send:<q.id>:%'
+        this message's fpe_wa_messages.wa_message_id  (passed as stanza_id=)
+              ==
+        a BOOKED relay transaction's
+            metadata->>'relay_inbound_message_ref'   (the owner's original
+                                                      relay-triggering message —
+                                                      already captured today)
+          OR metadata->>'relay_send_stanza_id'       (the relayed copy's id —
+                                                      only present once the
+                                                      bridge is upgraded; NOT
+                                                      required now)
 
-    A manual / unrelated message with identical text that never went through
-    the relay queue, or is outside the time window, matches nothing → NOT
-    suppressed → the FPE worker books it normally.
+    "booked" = an fpe_cash_transactions row with source_channel = SOURCE_CHANNEL
+    AND NOT is_reversal carrying that metadata value.
 
-    Fail-open (returns False) on error so a real payment is never silently
-    dropped. The relay_message_sha256 stored in txn metadata is kept for
-    audit/forensics only and is no longer consulted as identity.
+    NO body/time/queue heuristic can suppress a financial event. The former
+    (identical body + 'sent' relay queue row + ±30 min) correlation is kept
+    ONLY as a diagnostic: if it *would* have matched but the stanza id did not,
+    a WARN is logged for reconciliation review — this function still returns
+    False and the payment is booked. relay_message_sha256 in txn metadata is
+    audit/forensics only, never identity.
+
+    Fail-open (returns False) on error so a real payment is never dropped.
     """
     if not raw_content or not raw_content.strip():
         return False
-    body = raw_content  # exact — the relay forwards the verbatim inbound body
+
+    sid = str(stanza_id).strip() if stanza_id not in (None, "") else None
     try:
-        if message_ts is not None:
+        # ── Authoritative check: exact transport-event identity ──────────────
+        if sid:
             row = await fetch_one(
+                """
+                SELECT id, txn_ref
+                FROM fpe_cash_transactions
+                WHERE source_channel = $1
+                  AND NOT is_reversal
+                  AND (
+                        metadata->>'relay_inbound_message_ref' = $2
+                     OR metadata->>'relay_send_stanza_id'      = $2
+                  )
+                LIMIT 1
+                """,
+                SOURCE_CHANNEL, sid,
+                conn=conn,
+            )
+            if row is not None:
+                log.info(
+                    "[relay_acct] echo suppressed by EXACT stanza id %s "
+                    "(booked txn id=%s ref=%s)",
+                    sid, row["id"], (row["txn_ref"] or "")[:12],
+                )
+                return True
+
+        # ── Diagnostic only — never suppresses ──────────────────────────────
+        # If body+queue+time would have matched, note it so reconciliation can
+        # be inspected; but a financial event is NEVER dropped on this basis.
+        body = raw_content  # exact — the relay forwards the verbatim inbound body
+        diag = None
+        if message_ts is not None:
+            diag = await fetch_one(
                 """
                 SELECT q.id
                 FROM fazle_outbound_queue q
-                WHERE q.purpose = $1
-                  AND q.status = 'sent'
-                  AND q.body = $2
-                  AND q.sent_at >  ($3::timestamptz - make_interval(mins => $4))
-                  AND q.sent_at <  ($3::timestamptz + make_interval(mins => $4))
-                  AND q.sent_at >  NOW() - make_interval(days => $5)
+                WHERE q.purpose = $1 AND q.status = 'sent' AND q.body = $2
+                  AND q.sent_at > ($3::timestamptz - make_interval(mins => $4))
+                  AND q.sent_at < ($3::timestamptz + make_interval(mins => $4))
+                  AND q.sent_at > NOW() - make_interval(days => $5)
                   AND EXISTS (
                       SELECT 1 FROM fpe_cash_transactions t
-                      WHERE t.source_channel = $6
-                        AND NOT t.is_reversal
+                      WHERE t.source_channel = $6 AND NOT t.is_reversal
                         AND t.source_message_id LIKE ('payment-relay-send:' || q.id::text || ':%')
                   )
                 LIMIT 1
@@ -394,27 +451,14 @@ async def is_relay_payment_already_accounted(
                 _ECHO_QUEUE_MAX_AGE_DAYS, SOURCE_CHANNEL,
                 conn=conn,
             )
-        else:
-            row = await fetch_one(
-                """
-                SELECT q.id
-                FROM fazle_outbound_queue q
-                WHERE q.purpose = $1
-                  AND q.status = 'sent'
-                  AND q.body = $2
-                  AND q.sent_at > NOW() - INTERVAL '3 days'
-                  AND EXISTS (
-                      SELECT 1 FROM fpe_cash_transactions t
-                      WHERE t.source_channel = $3
-                        AND NOT t.is_reversal
-                        AND t.source_message_id LIKE ('payment-relay-send:' || q.id::text || ':%')
-                  )
-                LIMIT 1
-                """,
-                RELAY_PURPOSE, body, SOURCE_CHANNEL,
-                conn=conn,
+        if diag is not None:
+            log.warning(
+                "[relay_acct] body+time correlates to booked relay queue id=%s but "
+                "stanza id %r did NOT match — NOT suppressing (booking); reconcile "
+                "review recommended",
+                diag["id"], sid,
             )
-        return row is not None
+        return False
     except Exception as exc:  # noqa: BLE001
         log.warning("[relay_acct] echo-dedup check errored (treating as not-accounted): %s", exc)
         return False
