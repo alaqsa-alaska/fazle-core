@@ -928,6 +928,12 @@ async def _poll_bridge(config: dict):
                 # instead of being handled by its own dedicated, already-
                 # safe branch). See process_message()'s docstring.
                 _is_extracted_media = False
+                # True only when a bare "[media:*]" placeholder message had its
+                # file successfully fetched from the bridge via /api/download
+                # (BRIDGE_MEDIA_ACQUISITION_ENABLED). The extraction blocks
+                # below then run against the now-present file exactly as they
+                # would for a store that already had the media on disk.
+                _acquired = False
                 core_message_id = await _save_raw_core_copy(bridge_name, msg, phone, text)
 
                 # Stage E3 (2026-08-28, controlled Office-group ingestion):
@@ -978,19 +984,62 @@ async def _poll_bridge(config: dict):
                 # this branch is skipped — those route normally.) Group media
                 # never reaches here — the @g.us guard above already handled it.
                 if is_media_placeholder(text) and not has_meaningful_text(msg.get("processed_text")):
-                    media_unprocessed_skipped += 1
-                    await _mark_processed(msg_id, bridge_name, phone)
-                    await _finalize_core_copy(
-                        core_message_id, bridge_name, msg, phone, text,
-                        msg_type=msg.get("media_type") or "media",
-                        status="skipped", error="media_unprocessed",
-                    )
-                    await _mark_core_queue_status(bridge_name, msg, "skipped", "media_unprocessed")
-                    log.info(
-                        "[%s] MEDIA_UNPROCESSED msg_id=%s type=%s phone=%s — placeholder only, not routed",
-                        bridge_name, msg_id, msg.get("media_type"), phone,
-                    )
-                    continue
+                    # 2026-08-30 (BRIDGE_MEDIA_ACQUISITION_ENABLED, default OFF):
+                    # try to fetch the media file from THIS bridge's own
+                    # /api/download so the image / audio / document blocks below
+                    # can OCR/STT it. Any failure — flag off, unsupported type,
+                    # download error, circuit open, own-bridge / unresolved
+                    # sender — falls through to the unchanged media_unprocessed
+                    # skip (fail-closed: no routing, no reply, byte-identical to
+                    # the pre-acquisition behaviour). Group media never reaches
+                    # here — the @g.us guard above already handled it.
+                    _mtype = (msg.get("media_type") or "").lower()
+                    if (
+                        os.getenv("BRIDGE_MEDIA_ACQUISITION_ENABLED", "false").strip().lower()
+                        in ("true", "1", "yes")
+                        and msg.get("filename")
+                        and _mtype in ("audio", "ptt", "image", "document", "application")
+                        and not phone.startswith("unresolved:")
+                        and phone not in _own_bridge_numbers()
+                    ):
+                        try:
+                            _dl_budget = float(os.getenv("BRIDGE_MEDIA_DOWNLOAD_TIMEOUT_S", "45")) + 5
+                            _path = await asyncio.wait_for(
+                                config["get_bridge"]().download_media(
+                                    str(msg["id"]), msg.get("chat_jid", "")
+                                ),
+                                timeout=_dl_budget,
+                            )
+                        except Exception as _dl_err:
+                            _path = None
+                            log.warning(
+                                "[%s] media acquire error msg_id=%s: %s",
+                                bridge_name, msg_id, _dl_err,
+                            )
+                        if _path and os.path.isfile(_path):
+                            _acquired = True
+                            log.info(
+                                "[%s] MEDIA_ACQUIRED msg_id=%s type=%s path=%s",
+                                bridge_name, msg_id, _mtype, _path,
+                            )
+
+                    if not _acquired:
+                        media_unprocessed_skipped += 1
+                        await _mark_processed(msg_id, bridge_name, phone)
+                        await _finalize_core_copy(
+                            core_message_id, bridge_name, msg, phone, text,
+                            msg_type=msg.get("media_type") or "media",
+                            status="skipped", error="media_unprocessed",
+                        )
+                        await _mark_core_queue_status(bridge_name, msg, "skipped", "media_unprocessed")
+                        log.info(
+                            "[%s] MEDIA_UNPROCESSED msg_id=%s type=%s phone=%s — placeholder only, not routed",
+                            bridge_name, msg_id, msg.get("media_type"), phone,
+                        )
+                        continue
+                    # else: file is now staged at <store_dir>/<chat_jid>/<filename>;
+                    # fall through so the existing image / audio / document
+                    # blocks below pick it up (each recomputes that same path).
 
                 # Bridge-side OCR may already populate processed_text. Previously
                 # release images with processed_text skipped the release workflow
@@ -1291,6 +1340,33 @@ async def _poll_bridge(config: dict):
                             continue
                     # Mark non-image and already-normalized messages immediately as before.
                     await _mark_processed(msg_id, bridge_name, phone)
+
+                # Acquired-media guard (2026-08-30): the file was fetched via
+                # /api/download but no extractor produced usable text (STT not
+                # confident, OCR / document extraction empty). The residual
+                # `text` is a non-routable marker such as "[audio: unclear]" or
+                # "[document:unknown:file.pdf]" — has_meaningful_text() is True
+                # for those (they are not "[media:*]"), so without this they
+                # would reach the intent classifier / RAG / Hermes. Fail-closed:
+                # terminal skip, no reply. Only ever fires for a just-acquired
+                # message; every pre-existing path has _acquired = False.
+                if _acquired and not has_meaningful_text(_extracted_text) and (
+                    is_media_placeholder(text)
+                    or text.lstrip().startswith(("[audio:", "[document:", "[image:"))
+                ):
+                    media_unprocessed_skipped += 1
+                    await _mark_processed(msg_id, bridge_name, phone)
+                    await _finalize_core_copy(
+                        core_message_id, bridge_name, msg, phone, text,
+                        msg_type=msg.get("media_type") or "media",
+                        status="skipped", error="media_extraction_empty",
+                    )
+                    await _mark_core_queue_status(bridge_name, msg, "skipped", "media_extraction_empty")
+                    log.info(
+                        "[%s] MEDIA_EXTRACTION_EMPTY msg_id=%s type=%s — acquired but no usable text, not routed",
+                        bridge_name, msg_id, (msg.get("media_type") or "").lower(),
+                    )
+                    continue
 
                 log.info(f"[{bridge_name}] from={phone} text={text[:80]!r}")
 

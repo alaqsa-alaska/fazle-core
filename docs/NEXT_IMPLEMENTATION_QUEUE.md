@@ -54,6 +54,13 @@ trusting this file's older sections for anything routing/identity-related.
   already-documented `OPERATIONAL_INTENTS`/`salary_query` recruitment
   misroute gap below (out of scope for this pass) — see
   `knowledge_base/04_business_rules/recruitment_business_rules.md`.
+- **2026-08-30 — Bridge media acquisition → fazle-core OCR/STT integration.**
+  IMPLEMENTED, flag-gated OFF (`BRIDGE_MEDIA_ACQUISITION_ENABLED=false`),
+  dark-deployed, awaiting Owner approval to enable. `BridgeClient.download_media`
+  + `_poll_bridge` acquire-then-fall-through so inbound bridge media reaches
+  the existing image/audio/document extraction; forward-only, no schema
+  change, Meta path untouched. See
+  `docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md`.
 
 ---
 

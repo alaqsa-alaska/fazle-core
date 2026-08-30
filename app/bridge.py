@@ -87,6 +87,10 @@ class BridgeClient:
         timeout = float(os.getenv("OUTBOUND_BRIDGE_TIMEOUT_S", "10"))
         self._client = httpx.AsyncClient(timeout=timeout)
         self.breaker = CircuitBreaker(label)
+        # Separate breaker for /api/download: an expired-CDN media fetch
+        # failing is common and benign — it must never trip `self.breaker`,
+        # which gates (and alerts on) all outbound sends via modules.outbound.
+        self.media_breaker = CircuitBreaker(f"{label}:media")
 
     async def _set_send(self, allow: bool):
         try:
@@ -167,6 +171,48 @@ class BridgeClient:
             return r.json()
         except Exception:
             return {"allowed": False, "error": "unreachable"}
+
+    async def download_media(self, message_id: str, chat_jid: str) -> str | None:
+        """POST /api/download on THIS bridge to fetch + decrypt an inbound
+        media file. Returns the local file path the bridge wrote, or None.
+
+        Never raises. The bridge endpoint is idempotent (an `os.Stat`
+        short-circuit returns the already-downloaded file on a repeat call).
+        Uses `self.media_breaker`, never the outbound-send breaker.
+        """
+        if not message_id or not chat_jid:
+            return None
+        if not self.media_breaker.allow():
+            log.info(f"[{self.label}] download_media skip msg={message_id}: media breaker open")
+            return None
+        timeout = float(os.getenv("BRIDGE_MEDIA_DOWNLOAD_TIMEOUT_S", "45"))
+        try:
+            r = await self._client.post(
+                f"{self.base_url}/api/download",
+                json={"message_id": message_id, "chat_jid": chat_jid},
+                timeout=timeout,
+            )
+            body: dict = {}
+            if r.headers.get("content-type", "").startswith("application/json"):
+                try:
+                    body = r.json()
+                except Exception:
+                    body = {}
+            if r.status_code == 200 and body.get("success"):
+                self.media_breaker.record_success()
+                path = body.get("path") or None
+                log.info(f"[{self.label}] download_media ok msg={message_id} path={path}")
+                return path
+            self.media_breaker.record_failure()
+            log.info(
+                f"[{self.label}] download_media no-file msg={message_id} "
+                f"http={r.status_code} detail={str(body.get('message'))[:120]!r}"
+            )
+            return None
+        except Exception as e:
+            self.media_breaker.record_failure()
+            log.warning(f"[{self.label}] download_media error msg={message_id}: {e}")
+            return None
 
     async def close(self):
         await self._client.aclose()
