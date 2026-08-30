@@ -2761,6 +2761,46 @@ async def process_bridge_inbound(
         is_extracted_media=is_extracted_media,
     )
 
+    # 5b. Conversation-policy SHADOW (Owner Phase 3, 2026-08-30) — compute what
+    # the topic-managed policy WOULD do this turn and LOG it beside the actual
+    # live outcome. Never changes the live reply. Flag-gated OFF by default
+    # (CONVERSATION_POLICY_SHADOW_ENABLED); fully swallowed on any error.
+    if os.getenv("CONVERSATION_POLICY_SHADOW_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            from modules.conversation_policy import (
+                compute_shadow_topic_decision, log_shadow_decision,
+            )
+            _active_topic = _active_status = None
+            _info_given: dict = {}
+            try:
+                from modules.conversation_memory import get_open_thread
+                for _dom in ("recruitment", "escort", "general"):
+                    _th = await get_open_thread(
+                        bridge_id=bridge_name, counterparty_phone=phone, business_domain=_dom,
+                    )
+                    if _th:
+                        _active_topic = _th.get("business_intent") or _th.get("business_domain")
+                        _active_status = _th.get("state")
+                        _info_given = _th.get("fields") or {}
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+            _decision = compute_shadow_topic_decision(
+                text=text, role=id_role,
+                active_topic=_active_topic, topic_status=_active_status,
+                information_given=_info_given,
+            )
+            _live_summary = (
+                "admin_note" if admin_note else
+                ("reply:" + (reply[:60] if reply else "none")) if reply is not None else "none"
+            )
+            log_shadow_decision(
+                bridge=bridge_name, sender=phone, message_id=message_id or None,
+                decision=_decision, live_action_summary=_live_summary,
+            )
+        except Exception as _cp_exc:  # noqa: BLE001
+            log.debug("[CONV_POLICY_SHADOW] skipped: %s", _cp_exc)
+
     # Write intent back to the most recent inbound row for this sender+source
     if msg_intent:
         try:
