@@ -2534,18 +2534,38 @@ async def process_bridge_inbound(
         _relay_result = await maybe_relay_owner_payment(
             bridge_name=bridge_name, sender=phone, body=text, message_id=message_id,
         )
-    except Exception as _relay_exc:  # noqa: BLE001 — the relay gate must never break normal routing
+    except Exception as _relay_exc:  # noqa: BLE001
+        # maybe_relay_owner_payment() is written never to raise, but if it
+        # somehow does, a message inside the PROTECTED financial-relay scope
+        # must still be HELD and STOPped — never silently handed to generic
+        # routing / Office-Internal / recruitment / admin-review / Hermes /
+        # LLM (Owner directive 2026-08-30 part A).
+        _protected = False
+        try:
+            from modules.payment_relay import is_protected_payment_candidate
+            _protected = is_protected_payment_candidate(bridge_name, phone, text)
+        except Exception:  # noqa: BLE001
+            _protected = False
+        if _protected:
+            log.error(
+                "[%s] payment_relay gate errored on a PROTECTED payment message "
+                "msg_id=%s — HELD and STOPPED (not routed): %s",
+                bridge_name, message_id or "(none)", _relay_exc,
+            )
+            return
         log.error(
-            "[%s] payment_relay gate errored (continuing normal routing): %s",
+            "[%s] payment_relay gate errored (message outside protected scope — "
+            "continuing normal routing): %s",
             bridge_name, _relay_exc,
         )
         _relay_result = None
     if _relay_result is not None:
         log.info(
-            "[%s] payment_relay claimed inbound msg_id=%s status=%s dest=%s "
+            "[%s] payment_relay claimed inbound msg_id=%s status=%s relayed=%s dest=%s "
             "outbound_bridge=%s — routing stopped here",
             bridge_name, message_id or "(none)", _relay_result.get("status"),
-            _relay_result.get("dest_number"), _relay_result.get("outbound_bridge"),
+            _relay_result.get("relayed"), _relay_result.get("dest_number"),
+            _relay_result.get("outbound_bridge"),
         )
         return
 

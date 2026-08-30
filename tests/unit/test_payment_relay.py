@@ -153,16 +153,20 @@ async def test_bridge2_wrong_sender_same_body_no_relay(fake_enqueue):
     assert fake_enqueue.calls == []
 
 
-async def test_inbound_bridge_paired_to_wrong_number_fails_closed(monkeypatch, fake_enqueue):
-    """Defensive: if the bridge labeled 'bridge2' is paired to something other
-    than 8801880446111 (config label↔number swap), the relay must NOT fire."""
+async def test_inbound_bridge_paired_to_wrong_number_is_held_not_routed(monkeypatch, fake_enqueue):
+    """Part A: a config label<->number swap on the inbound bridge is a HELD
+    failure inside the protected scope (sender + shape already matched) — it
+    must NOT enqueue and must NOT fall through to generic routing."""
     monkeypatch.setattr(pr, "_configured_bridge_number",
                         lambda name: "8801999999999" if name == "bridge2" else None)
     res = await pr.maybe_relay_owner_payment(
         bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.SWAP",
     )
-    assert res is None
-    assert fake_enqueue.calls == []
+    assert res is not None                       # CLAIMED — caller must STOP
+    assert res["claimed"] is True
+    assert res["relayed"] is False
+    assert res["status"] == "config_mismatch"
+    assert fake_enqueue.calls == []              # nothing sent
 
 
 def test_is_relay_inbound_bridge():
@@ -375,7 +379,7 @@ async def test_disabled_flag_is_noop(monkeypatch, fake_enqueue):
 
 # ── Fail-closed on enqueue error (never silently hand to LLM path) ──────────
 
-async def test_enqueue_error_returns_failed_claim(monkeypatch):
+async def test_enqueue_error_returns_held_claim(monkeypatch):
     async def _raise(*a, **k):
         raise RuntimeError("bridge2 unavailable")
 
@@ -384,6 +388,35 @@ async def test_enqueue_error_returns_failed_claim(monkeypatch):
         bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.ERR",
     )
     assert res is not None
+    assert res["claimed"] is True
     assert res["relayed"] is False
-    assert res["status"] == "enqueue_error"
+    assert res["status"] == "relay_error"
     assert res["outbound_bridge"] == "bridge2"
+
+
+async def test_internal_exception_after_protected_scope_is_held(monkeypatch, fake_enqueue):
+    """Any unexpected internal error AFTER protected scope is established must
+    be HELD + STOP, never a fall-through to generic routing."""
+    def _boom(_name):
+        raise RuntimeError("settings blew up")
+    monkeypatch.setattr(pr, "_inbound_bridge_number_matches", _boom)
+    res = await pr.maybe_relay_owner_payment(
+        bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.INTERR",
+    )
+    assert res is not None and res["claimed"] is True and res["relayed"] is False
+    assert res["status"] == "relay_error"
+    assert fake_enqueue.calls == []
+
+
+def test_is_protected_payment_candidate():
+    assert pr.is_protected_payment_candidate("bridge2", OWNER, SINGLE) is True
+    assert pr.is_protected_payment_candidate("bridge1", OWNER, SINGLE) is False
+    assert pr.is_protected_payment_candidate("bridge3", OWNER, SINGLE) is False
+    assert pr.is_protected_payment_candidate("bridge2", "8801700000000", SINGLE) is False
+    assert pr.is_protected_payment_candidate("bridge2", OWNER, "just a normal message") is False
+    assert pr.is_protected_payment_candidate("bridge2", OWNER, "") is False
+
+
+async def test_disabled_relay_leaves_protected_scope_empty(monkeypatch):
+    monkeypatch.setenv("PAYMENT_RELAY_ENABLED", "false")
+    assert pr.is_protected_payment_candidate("bridge2", OWNER, SINGLE) is False
