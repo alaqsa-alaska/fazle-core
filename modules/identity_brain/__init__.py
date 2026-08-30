@@ -410,15 +410,46 @@ async def detect_identity(phone: str, text: str = "") -> dict:
                 from modules.contact_sync import get_display_name
                 csv_name = await get_display_name(norm)
                 csv_role = _categorize_csv_contact(csv_name)
-                csv_pri = _ROLE_PRIORITY.get(csv_role, 70)
-                log.info(
-                    "[identity] %s → %s (csv_pattern, name=%r)",
-                    norm, csv_role, csv_name,
-                )
-                return _build(
-                    _phone=norm, role=csv_role, confidence=95,
-                    source="csv_pattern", priority=csv_pri,
-                )
+
+                # Owner Phase 2 (2026-08-30) — escort-name disambiguation.
+                # A contact name starting with "Escort" must NOT by itself
+                # imply escort_client. If there is real employee evidence for
+                # this name (a wbom_employees / fpe_employees row, active or
+                # inactive), this is our escort WORKER, not a client.
+                if csv_role == "escort_client":
+                    _emp_evidence = await _lookup_employee_by_name(csv_name)
+                    if _emp_evidence:
+                        _wrole = _designation_to_role(_emp_evidence.get("designation"))
+                        log.info(
+                            "[identity] %s → %s (csv_pattern+employee_evidence, name=%r, "
+                            "emp_id=%s) — escort-name resolved to WORKER not client",
+                            norm, _wrole, csv_name, _emp_evidence.get("employee_id"),
+                        )
+                        return _build(
+                            _phone=norm, role=_wrole, confidence=88,
+                            source="csv_pattern_employee_evidence",
+                            priority=_ROLE_PRIORITY.get(_wrole, _ROLE_PRIORITY["employee"]),
+                        )
+                    # No employee evidence AND no client/order record matched
+                    # in Steps 3.5–3.7 above → do not guess escort_client from
+                    # the name prefix alone. Fall through to text-hint / the
+                    # bottom 'unknown' return.
+                    log.info(
+                        "[identity] %s csv_name=%r starts with 'escort' but has no "
+                        "employee or client-record evidence — NOT classifying from "
+                        "prefix alone",
+                        norm, csv_name,
+                    )
+                else:
+                    csv_pri = _ROLE_PRIORITY.get(csv_role, 70)
+                    log.info(
+                        "[identity] %s → %s (csv_pattern, name=%r)",
+                        norm, csv_role, csv_name,
+                    )
+                    return _build(
+                        _phone=norm, role=csv_role, confidence=95,
+                        source="csv_pattern", priority=csv_pri,
+                    )
         except Exception as _csv_exc:  # noqa: BLE001
             log.warning("[identity] Step 4.5 CSV check failed for %s: %s", norm, _csv_exc)
 
@@ -529,6 +560,47 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
         variants,
     )
     return dict(row) if row and row.get("employee_id") else None
+
+
+async def _lookup_employee_by_name(name: str) -> Optional[dict]:
+    """Employee-evidence lookup by NAME (active OR inactive) — used only to
+    disambiguate a contact-name "Escort X" that could be either our escort
+    worker or an escort-service client (Owner Phase 2, 2026-08-30). A real
+    wbom_employees / fpe_employees row for this name is decisive worker
+    evidence; a contact-name prefix on its own is not.
+
+    Strips a leading "escort"/"guard" token before matching so "Escort
+    Saimun" matches the employee "Saimun". Case-insensitive, trimmed."""
+    raw = (name or "").strip()
+    if len(raw) < 3:
+        return None
+    core = re.sub(r"^(escort|guard|security)\s+", "", raw, flags=re.IGNORECASE).strip()
+    core = re.sub(r"\s+(wa|w/a|whatsapp)$", "", core, flags=re.IGNORECASE).strip()
+    if len(core) < 3:
+        return None
+    row = await fetch_one(
+        """SELECT employee_id, employee_name, designation, status
+           FROM wbom_employees
+           WHERE LOWER(TRIM(employee_name)) = LOWER($1)
+           ORDER BY (LOWER(COALESCE(status,'')) = 'active') DESC, employee_id DESC
+           LIMIT 1""",
+        core,
+    )
+    if row:
+        return dict(row)
+    row = await fetch_one(
+        """SELECT w.employee_id,
+                  COALESCE(NULLIF(e.full_name,''), NULLIF(w.employee_name,'')) AS employee_name,
+                  COALESCE(NULLIF(w.designation,''), 'Staff') AS designation,
+                  COALESCE(w.status, CASE WHEN e.status='active' THEN 'Active' ELSE 'Inactive' END) AS status
+           FROM fpe_employees e
+           LEFT JOIN wbom_employees w ON w.employee_id = e.wbom_employee_id
+           WHERE LOWER(TRIM(e.full_name)) = LOWER($1)
+           ORDER BY (e.status='active') DESC, e.id DESC
+           LIMIT 1""",
+        core,
+    )
+    return dict(row) if row else None
 
 
 async def is_registered_employee_phone(phone: str) -> bool:
