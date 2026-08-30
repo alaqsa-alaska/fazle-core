@@ -260,7 +260,8 @@ async def sweep_once(limit: int = 20) -> dict:
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
-                """SELECT id, recipient, body, source_bridge, fallback_channel, attempts, max_attempts
+                """SELECT id, recipient, body, source_bridge, fallback_channel, attempts, max_attempts,
+                          purpose, meta_json, idempotency_key
                      FROM fazle_outbound_queue
                     WHERE status IN ('pending','failed')
                       AND next_retry_at <= NOW()
@@ -306,6 +307,24 @@ async def sweep_once(limit: int = 20) -> dict:
                 )
                 sent += 1
                 _meta_outbound_log("meta_outbound_sent", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts)
+
+                # Owner-authoritative accounting boundary (2026-08-30): a
+                # successful WhatsApp delivery of an authorized owner→accountant
+                # payment-relay message IS the completed payment event. Book it
+                # to FPE here, at the send-success boundary — do NOT wait for an
+                # eventual bridge SQLite self-echo. Never lets an accounting
+                # error undo/retry the (already successful) send; the reconcile
+                # pass in the FPE accounting worker retries any that slip
+                # through. Only fires for purpose == "owner-accountant-payment-relay".
+                if (r.get("purpose") or "") == "owner-accountant-payment-relay":
+                    try:
+                        from modules.payment_relay_accounting import on_relay_send_success
+                        await on_relay_send_success(dict(r), external_id)
+                    except Exception as _acct_exc:  # noqa: BLE001
+                        log.error(
+                            "[OUTBOUND_RELAY_ACCT] queue id=%s send OK but accounting hook "
+                            "raised (reconcile will retry): %s", rid, _acct_exc,
+                        )
             except Exception as e:
                 err = str(e)[:500]
                 if attempts >= r["max_attempts"]:

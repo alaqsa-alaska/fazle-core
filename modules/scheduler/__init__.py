@@ -631,6 +631,21 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     except Exception as e:
         log.warning(f"[scheduler] backup module unavailable: {e}")
 
+    # 2026-08-30 — payment-driven employee inactivity sweep (Owner rule): an
+    # employee whose LATEST successful qualifying FPE cash transaction is older
+    # than 3 months becomes inactive; a later successful payment reactivates
+    # immediately (handled in accounting.create_transaction). The job body is
+    # itself flag-gated by FPE_PAYMENT_INACTIVITY_SWEEP_ENABLED (default off),
+    # so registering it here is inert until the Owner enables the flag. Not a
+    # competing scheduler — the repo has no other employee-inactivity sweep.
+    try:
+        from modules.payment_relay_accounting import run_payment_inactivity_sweep
+        async def job_payment_inactivity_sweep() -> dict:
+            return await run_payment_inactivity_sweep()
+        register_job("payment_inactivity_sweep", job_payment_inactivity_sweep)
+    except Exception as e:
+        log.warning(f"[scheduler] payment_relay_accounting sweep unavailable: {e}")
+
     _scheduler = AsyncIOScheduler(timezone=_tz())
 
     def _wrap(name: str, fn: Callable[[], Awaitable[dict]]):
@@ -701,6 +716,14 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     _scheduler.add_job(_wrap("rag_rebuild", job_rag_rebuild),
                        CronTrigger(hour=rag_rebuild_hour, minute=0, timezone=_tz()),
                        id="rag_rebuild", replace_existing=True)
+
+    # 2026-08-30 — payment-inactivity sweep, once daily at 04:00 Asia/Dhaka
+    # (after payroll compute at 02:00, before the 09:00 business-hours jobs).
+    # Inert until FPE_PAYMENT_INACTIVITY_SWEEP_ENABLED is set.
+    if "payment_inactivity_sweep" in _job_registry:
+        _scheduler.add_job(_wrap("payment_inactivity_sweep", _job_registry["payment_inactivity_sweep"]),
+                           CronTrigger(hour=4, minute=0, timezone=_tz()),
+                           id="payment_inactivity_sweep", replace_existing=True)
 
     # DEPRECATED 2026-08-04 (Owner decision): the daily bridge-phone-book ->
     # wbom_contacts sync is disabled. The uploaded CSV is now the authoritative
