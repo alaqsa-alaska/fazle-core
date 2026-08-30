@@ -77,7 +77,7 @@ def _enable_relay(monkeypatch):
 
 async def test_positive_single_line(fake_enqueue):
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.AAA",
+        bridge_name="bridge1", sender=OWNER, body=SINGLE, message_id="wamid.AAA",
     )
     assert res is not None and res["relayed"] is True and res["status"] == "enqueued"
     assert len(fake_enqueue.calls) == 1
@@ -90,7 +90,7 @@ async def test_positive_single_line(fake_enqueue):
 
 async def test_positive_multiline(fake_enqueue):
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=MULTI, message_id="wamid.MULTI",
+        bridge_name="bridge1", sender=OWNER, body=MULTI, message_id="wamid.MULTI",
     )
     assert res["relayed"] is True
     assert len(fake_enqueue.calls) == 1
@@ -108,11 +108,57 @@ async def test_positive_sender_as_jid(fake_enqueue):
     assert fake_enqueue.calls[0]["recipient"] == DEST
 
 
+# ── Inbound-bridge restriction (rule fires ONLY on bridge1) ─────────────────
+
+async def test_bridge1_correct_sender_correct_shape_relays(fake_enqueue):
+    res = await pr.maybe_relay_owner_payment(
+        bridge_name="bridge1", sender=OWNER, body=SINGLE, message_id="wamid.B1",
+    )
+    assert res is not None and res["relayed"] is True
+    assert len(fake_enqueue.calls) == 1
+    assert fake_enqueue.calls[0]["recipient"] == DEST
+    assert fake_enqueue.calls[0]["source_bridge"] == "bridge2"
+
+
+async def test_bridge2_correct_sender_correct_shape_no_relay(fake_enqueue):
+    res = await pr.maybe_relay_owner_payment(
+        bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.B2",
+    )
+    assert res is None
+    assert fake_enqueue.calls == []
+
+
+async def test_bridge3_correct_sender_correct_shape_no_relay(fake_enqueue):
+    res = await pr.maybe_relay_owner_payment(
+        bridge_name="bridge3", sender=OWNER, body=SINGLE, message_id="wamid.B3",
+    )
+    assert res is None
+    assert fake_enqueue.calls == []
+
+
+async def test_bridge1_wrong_sender_same_body_no_relay(fake_enqueue):
+    res = await pr.maybe_relay_owner_payment(
+        bridge_name="bridge1", sender="8801700000000", body=SINGLE,
+        message_id="wamid.B1WRONG",
+    )
+    assert res is None
+    assert fake_enqueue.calls == []
+
+
+def test_is_relay_inbound_bridge():
+    assert pr.is_relay_inbound_bridge("bridge1") is True
+    assert pr.is_relay_inbound_bridge("BRIDGE1") is True
+    assert pr.is_relay_inbound_bridge("bridge2") is False
+    assert pr.is_relay_inbound_bridge("bridge3") is False
+    assert pr.is_relay_inbound_bridge("") is False
+    assert pr.is_relay_inbound_bridge(None) is False
+
+
 # ── Negative — wrong sender ──────────────────────────────────────────────────
 
 async def test_negative_wrong_sender(fake_enqueue):
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender="8801700000000", body=SINGLE,
+        bridge_name="bridge1", sender="8801700000000", body=SINGLE,
         message_id="wamid.X",
     )
     assert res is None
@@ -121,7 +167,7 @@ async def test_negative_wrong_sender(fake_enqueue):
 
 async def test_negative_unresolved_sender(fake_enqueue):
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender="unresolved:12345", body=SINGLE,
+        bridge_name="bridge1", sender="unresolved:12345", body=SINGLE,
         message_id="wamid.X",
     )
     assert res is None
@@ -132,7 +178,7 @@ async def test_negative_unresolved_sender(fake_enqueue):
 
 async def test_negative_wrong_format_ordinary_text(fake_enqueue):
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER,
+        bridge_name="bridge1", sender=OWNER,
         body="ভাই কালকে অফিসে আসবেন? একটু কথা ছিল।", message_id="wamid.T",
     )
     assert res is None
@@ -146,7 +192,7 @@ async def test_number_confusion_body_contains_owner_number(fake_enqueue):
     The relay must key off transport metadata, not body text → no relay."""
     body = f"ID: {OWNER} Some Name {OWNER}(B) 200/-"
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender="8801555555555", body=body,
+        bridge_name="bridge1", sender="8801555555555", body=body,
         message_id="wamid.CONF",
     )
     assert res is None
@@ -165,7 +211,7 @@ async def test_is_relay_sender_ignores_body_numbers():
 
 async def test_verbatim_passthrough(fake_enqueue):
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=VERBATIM, message_id="wamid.V",
+        bridge_name="bridge1", sender=OWNER, body=VERBATIM, message_id="wamid.V",
     )
     inbound_body = VERBATIM
     outbound_body = fake_enqueue.calls[0]["body"]
@@ -201,7 +247,7 @@ async def test_no_direct_fpe_or_ledger_mutation(monkeypatch, fake_enqueue):
     monkeypatch.setattr(fb, "create_fpe_transaction_from_ingest", _boom_fpe)
 
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=MULTI, message_id="wamid.NOFPE",
+        bridge_name="bridge1", sender=OWNER, body=MULTI, message_id="wamid.NOFPE",
     )
     assert res["relayed"] is True
     assert len(fake_enqueue.calls) == 1
@@ -263,7 +309,7 @@ async def test_no_hermes_or_llm_invocation(monkeypatch, fake_enqueue):
                 pass
 
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.NOLLM",
+        bridge_name="bridge1", sender=OWNER, body=SINGLE, message_id="wamid.NOLLM",
     )
     assert res["relayed"] is True
     assert called["hit"] is False
@@ -272,7 +318,7 @@ async def test_no_hermes_or_llm_invocation(monkeypatch, fake_enqueue):
 # ── Transport duplicate delivery ───────────────────────────────────────────
 
 async def test_transport_duplicate_same_message_id_relays_once(fake_enqueue):
-    kw = dict(bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.DUP")
+    kw = dict(bridge_name="bridge1", sender=OWNER, body=SINGLE, message_id="wamid.DUP")
     first = await pr.maybe_relay_owner_payment(**kw)
     second = await pr.maybe_relay_owner_payment(**kw)
 
@@ -288,10 +334,10 @@ async def test_transport_duplicate_same_message_id_relays_once(fake_enqueue):
 
 async def test_idempotency_key_is_transport_identity_not_business_fields(fake_enqueue):
     await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.KEY",
+        bridge_name="bridge1", sender=OWNER, body=SINGLE, message_id="wamid.KEY",
     )
     key = fake_enqueue.calls[0]["idempotency_key"]
-    assert key == "payment-relay:bridge2:wamid.KEY"
+    assert key == "payment-relay:bridge1:wamid.KEY"
     # no amount / employee / date in the key
     assert "200" not in key and "01998846707" not in key
 
@@ -301,7 +347,7 @@ async def test_idempotency_key_is_transport_identity_not_business_fields(fake_en
 async def test_disabled_flag_is_noop(monkeypatch, fake_enqueue):
     monkeypatch.setenv("PAYMENT_RELAY_ENABLED", "false")
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.OFF",
+        bridge_name="bridge1", sender=OWNER, body=SINGLE, message_id="wamid.OFF",
     )
     assert res is None
     assert fake_enqueue.calls == []
@@ -315,7 +361,7 @@ async def test_enqueue_error_returns_failed_claim(monkeypatch):
 
     monkeypatch.setattr("modules.outbound.enqueue", _raise)
     res = await pr.maybe_relay_owner_payment(
-        bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.ERR",
+        bridge_name="bridge1", sender=OWNER, body=SINGLE, message_id="wamid.ERR",
     )
     assert res is not None
     assert res["relayed"] is False

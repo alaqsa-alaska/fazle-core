@@ -2517,10 +2517,11 @@ async def process_bridge_inbound(
 
     # ── Deterministic owner→accountant payment-message relay ──────────────────
     # NARROW, deterministic, LLM-free (modules.payment_relay). If — and only
-    # if — the ACTUAL transport sender (`phone`, the canonical inbound sender,
-    # never a phone number inside the body) is the Owner's payment number AND
-    # the body has the Owner's established cash-payment shape, forward the
-    # ORIGINAL body verbatim to the accountant via bridge2, then STOP: no
+    # if — this message arrived on bridge1 (not bridge2/bridge3) AND the
+    # ACTUAL transport sender (`phone`, the canonical inbound sender, never a
+    # phone number inside the body) is the Owner's payment number AND the body
+    # has the Owner's established cash-payment shape, forward the ORIGINAL
+    # body verbatim to the accountant via bridge2, then STOP: no
     # intent classification, no recruitment funnel, no Hermes, no reply, and
     # no direct fpe_cash_transactions / employee-ledger write here. The
     # existing Fazle Payroll Engine workers pick the relayed accountant-side

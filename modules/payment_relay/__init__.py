@@ -4,6 +4,8 @@ Fazle Core — Owner → Accountant payment-message relay (deterministic, LLM-fr
 ONE narrow rule. This is NOT a general automation and must not grow into one.
 
   inbound WhatsApp message (existing bridge/inbound pipeline)
+    → arrived on RELAY_INBOUND_BRIDGE  (bridge1) — the SAME sender + body
+      arriving on bridge2 or bridge3 must NOT activate this relay
     → ACTUAL transport sender (normalize_phone of the canonical inbound
       sender — remoteJid / sender JID / normalized sender phone), NOT any
       phone number that appears inside the message body,
@@ -52,10 +54,14 @@ log = logging.getLogger("fazle.payment_relay")
 
 # Hard-coded per the Owner's exact rule; env vars below allow an override
 # without a code change but default to exactly these values.
+RELAY_INBOUND_BRIDGE = "bridge1"                # rule fires ONLY for messages that
+                                               # arrived on bridge1 — the same
+                                               # sender+shape on bridge2/bridge3
+                                               # must NOT activate this relay.
 RELAY_SOURCE_NUMBER = "8801817201596"          # canonical 8801XXXXXXXXX
 RELAY_DEST_NUMBER = "8801844836824"            # "Mamun Vai Bkash Nagod"
 RELAY_DEST_REFERENCE = "Mamun Vai Bkash Nagod"
-RELAY_BRIDGE = "bridge2"                        # hard requirement — never bridge1/bridge3
+RELAY_BRIDGE = "bridge2"                        # OUTBOUND — hard requirement, never bridge1/bridge3
 RELAY_PURPOSE = "owner-accountant-payment-relay"
 
 
@@ -94,6 +100,18 @@ def is_payment_shape(body: str) -> bool:
         return False
 
 
+def is_relay_inbound_bridge(bridge_name: Optional[str]) -> bool:
+    """True iff the message arrived on the one inbound bridge this rule is
+    scoped to (RELAY_INBOUND_BRIDGE, default ``bridge1``).
+
+    A qualifying sender + payment shape arriving on bridge2 or bridge3 must
+    NOT activate the relay — this is a hard part of the rule, not an
+    optimisation.
+    """
+    want = _cfg("PAYMENT_RELAY_INBOUND_BRIDGE", RELAY_INBOUND_BRIDGE)
+    return bool(bridge_name) and str(bridge_name).strip().lower() == want.strip().lower()
+
+
 def is_relay_sender(raw_sender: Optional[str]) -> bool:
     """True iff the ACTUAL transport sender normalizes to RELAY_SOURCE_NUMBER.
 
@@ -130,6 +148,10 @@ async def maybe_relay_owner_payment(
     the LLM path).
     """
     if not _enabled():
+        return None
+    # Hard rule: inbound bridge must be bridge1. bridge2/bridge3 never activate
+    # this relay, even for the exact same sender + body.
+    if not is_relay_inbound_bridge(bridge_name):
         return None
     if not is_relay_sender(sender):
         return None

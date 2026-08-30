@@ -23,6 +23,7 @@ async def test_relay_claim_stops_all_further_processing(monkeypatch):
     seen = {"classify": False, "recruit": False}
 
     async def _fake_relay(*, bridge_name, sender, body, message_id=""):
+        assert bridge_name == "bridge1"
         assert sender == "8801817201596"
         assert body == SINGLE
         return {"relayed": True, "status": "enqueued", "dest_number": "8801844836824",
@@ -41,7 +42,7 @@ async def test_relay_claim_stops_all_further_processing(monkeypatch):
     monkeypatch.setattr(bp, "recruitment_eligibility", _boom_recruit)
 
     out = await bp.process_bridge_inbound(
-        "bridge2", "8801817201596", SINGLE, message_id="wamid.RELAY",
+        "bridge1", "8801817201596", SINGLE, message_id="wamid.RELAY",
     )
     assert out is None
     assert seen == {"classify": False, "recruit": False}
