@@ -2094,6 +2094,35 @@ def _classify_internal_echo(source: str, sender: str, text: str) -> tuple[Option
     return "system", origin_bridge
 
 
+def _is_cross_bridge_system_echo(source: str, sender: str, text: str) -> bool:
+    """True iff BOTH:
+      (1) `sender` is one of THIS installation's own configured bridge
+          numbers AND the message arrived on a DIFFERENT bridge's inbound
+          (_classify_internal_echo's pure-provenance signal — sender
+          identity only, never message text), AND
+      (2) the body is one of our own maintained system-notification
+          templates (_is_system_generated_notification /
+          SYSTEM_NOTIFICATION_TITLE_PREFIXES).
+
+    Requiring BOTH means a real external user is NEVER suppressed merely for
+    pasting text that begins "📋 ADMIN REVIEW DRAFT", and an own bridge
+    number is NEVER suppressed for ordinary human text.
+
+    Live motivation (2026-08-30): modules.supervised_draft enqueues the
+    "📋 ADMIN REVIEW DRAFT" review card to the primary admin number, which is
+    bridge2's own paired number, via bridge1. It bounced back onto bridge2 as
+    a genuine is_from_me=0 inbound from bridge1's number, was re-classified as
+    a brand-new admin message, and a SECOND, nested review card was rendered
+    (drafts #4514 -> #4515). LOOP_GUARD stopped it going further but only
+    after the nested draft existed. This guard consumes that echo before any
+    routing/draft.
+    """
+    echo_actor, _ = _classify_internal_echo(source, sender, text or "")
+    if not echo_actor:
+        return False
+    return _is_system_generated_notification(text or "")
+
+
 def _parse_source_timestamp(value) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -2512,6 +2541,29 @@ async def process_bridge_inbound(
         log.info(
             "[%s] process_bridge_inbound: media placeholder from %s (%s) — not routed",
             bridge_name, phone, text,
+        )
+        return
+
+    # ── Cross-bridge system-notification echo guard ──────────────────────────
+    # A notification THIS system generated (e.g. "📋 ADMIN REVIEW DRAFT",
+    # "⚠️ RELEASE REVIEW REQUIRED", a "⚠️ ALERT:" circuit-open message) and
+    # sent to an admin number that is another bridge's own paired number
+    # bounces back here as a genuine is_from_me=0 inbound from that other
+    # bridge's number. Without this guard it is re-classified as a brand-new
+    # admin message and a SECOND, nested review card is rendered (observed
+    # live 2026-08-30: drafts #4514 → #4515). Requires BOTH pure provenance
+    # (sender is one of our own bridge numbers, arriving on a different
+    # bridge) AND a recognized own system-notification prefix — so a real
+    # external user is never suppressed for merely pasting such text, and an
+    # own-bridge number is never suppressed for ordinary human text. The
+    # existing "🤖 Hermes:" cross-bridge guard in modules.message_router is
+    # unaffected ("🤖 Hermes:" is not a SYSTEM_NOTIFICATION_TITLE_PREFIXES
+    # entry, so this guard leaves those echoes to it).
+    if _is_cross_bridge_system_echo(bridge_name, phone, text):
+        log.info(
+            "[%s] CROSS_BRIDGE_SYSTEM_ECHO: own system notification re-ingested "
+            "from %s (msg_id=%s) — consumed, not routed, no draft",
+            bridge_name, phone, message_id or "(none)",
         )
         return
 
