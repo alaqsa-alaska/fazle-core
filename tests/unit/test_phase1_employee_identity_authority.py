@@ -25,6 +25,15 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 
+def _arg_has(args, phone):
+    """The resolver looks up phones by a list of format variants
+    (01…/880…/+880…). Accept either a bare string or that list."""
+    if not args:
+        return False
+    a = args[0]
+    return phone in a if isinstance(a, (list, tuple)) else a == phone
+
+
 class _FakeConn:
     def __init__(self, new_id: int = 500):
         self._new_id = new_id
@@ -85,7 +94,7 @@ async def test_explicit_id_phone_unmatched_does_not_fall_through_to_payout_phone
     async def fetch_one_side_effect(query, *args, **kwargs):
         queried.append((query, args))
         # payout phone would match "Someone Else" IF it were ever queried
-        if args and args[0] == "01700000000":
+        if _arg_has(args, "01700000000"):
             return other_person_by_payout
         return None
 
@@ -101,9 +110,16 @@ async def test_explicit_id_phone_unmatched_does_not_fall_through_to_payout_phone
     assert result is not None
     assert result.employee_id != 99, "payout phone must not resolve identity"
     assert result.match_type == "auto_created"
-    # the payout phone must never have been used as a lookup key
-    assert all(a != ("01700000000",) for _, a in queried), \
-        f"payout phone leaked into an identity lookup: {queried}"
+    # the payout phone must never have been used as a lookup key, in any form
+    def _flat(x):
+        if isinstance(x, (list, tuple)):
+            for i in x:
+                yield from _flat(i)
+        else:
+            yield x
+    for _q, a in queried:
+        assert "01700000000" not in set(_flat(a)), \
+            f"payout phone leaked into an identity lookup: {a}"
     # the new row is keyed on the ID phone (INSERT args: name, name_norm, primary, eid)
     ins = _LAST_CONN["c"].inserted_args
     assert ins[2] == "01811111111" and ins[3] == "01811111111"
@@ -122,7 +138,7 @@ async def test_single_phone_is_the_identity():
     }
 
     async def fetch_one_side_effect(query, *args, **kwargs):
-        if "employee_id_phone = $1 OR primary_phone = $1" in query and args and args[0] == "01849258074":
+        if "employee_id_phone = ANY" in query and _arg_has(args, "01849258074"):
             return existing_inactive
         return None
 
@@ -150,7 +166,7 @@ async def test_name_spelling_difference_does_not_create_second_employee():
     }
 
     async def fetch_one_side_effect(query, *args, **kwargs):
-        if args and args[0] == "01900000000" and "employee_id_phone = $1 OR primary_phone = $1" in query:
+        if _arg_has(args, "01900000000") and "employee_id_phone = ANY" in query:
             return existing
         return None
 

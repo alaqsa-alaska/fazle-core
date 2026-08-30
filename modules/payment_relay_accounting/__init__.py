@@ -39,11 +39,20 @@ and enforced by create_transaction()'s own txn_ref idempotency plus an
 explicit pre-check here. Never dedupes by employee+amount+date alone.
 
 Later bridge self-echo / history-sync of the same successfully-relayed message
-is recognised as already-accounted by
-is_relay_payment_already_accounted(raw_content) — an exact whole-message
-sha256 match against fpe_cash_transactions.metadata->>'relay_message_sha256'
-within a 45-day window — wired into the FPE accounting worker so it does not
-create a duplicate.
+is recognised as already-accounted by is_relay_payment_already_accounted() —
+which correlates the FPE-worker message to a real relay SEND EVENT: a
+fazle_outbound_queue row (purpose = owner-accountant-payment-relay, status =
+'sent') whose body is byte-identical, whose sent_at is within ±30 min of the
+message's WhatsApp timestamp, and which actually produced FPE transactions.
+Body sha256 is NOT used as financial identity — two genuine payments may carry
+identical text; a manual/unrelated identical-body message that never went
+through the relay queue is booked normally.
+
+Blocker B (2026-08-30): employee resolve/create + cash transaction + audit +
+ledger + activation for each payment line run in ONE atomic asyncpg
+transaction (match_or_create_employee now takes conn=). A failure before
+commit rolls back a just-created employee row too; a sibling line that already
+committed is untouched; the reconcile pass retries the unbooked ones.
 
 Gated by env flag PAYMENT_RELAY_ACCOUNTING_ENABLED (default: false).
 """
@@ -63,7 +72,19 @@ log = logging.getLogger("fazle.payment_relay_accounting")
 
 RELAY_PURPOSE = "owner-accountant-payment-relay"
 SOURCE_CHANNEL = "owner-accountant-payment-relay"
-_ECHO_DEDUP_WINDOW_DAYS = 45
+
+# Echo/self-echo correlation window (Owner Blocker A, 2026-08-30): a bridge
+# self-echo / history-sync copy of a relayed payment message lands within
+# seconds of the send; ±30 min is generous slack for clock skew and
+# history-sync backfill lag while staying far away from "a genuine identical
+# payment days later". A hard 14-day outer bound on the queue row caps it.
+_ECHO_CORRELATION_MINUTES = 30
+_ECHO_QUEUE_MAX_AGE_DAYS = 14
+
+
+class _LineRollback(Exception):
+    """Internal: abort one payment line's transaction without persisting
+    anything, while leaving already-committed sibling lines intact."""
 
 
 def _enabled() -> bool:
@@ -174,78 +195,100 @@ async def _account_relay_send(
 
     results: list[dict] = []
     async with db_conn() as conn:
-        async with conn.transaction():
-            for item in parsed:
-                idx, line, p = item["idx"], item["line"], item["p"]
-                src_msg_id = f"payment-relay-send:{queue_id}:{idx}"
+        for item in parsed:
+            idx, line, p = item["idx"], item["line"], item["p"]
+            src_msg_id = f"payment-relay-send:{queue_id}:{idx}"
 
-                # Exactly-once — this exact (queue send, line) already booked?
-                existing = await fetch_one(
-                    "SELECT id, txn_ref, employee_id, amount FROM fpe_cash_transactions "
-                    "WHERE source_message_id = $1 AND source_channel = $2",
-                    src_msg_id, SOURCE_CHANNEL, conn=conn,
-                )
-                if existing:
-                    results.append({"line": idx, "status": "already_accounted",
-                                    "txn_id": existing["id"], "txn_ref": existing["txn_ref"]})
-                    continue
+            # Exactly-once — this exact (queue send, line) already booked?
+            existing = await fetch_one(
+                "SELECT id, txn_ref, employee_id, amount FROM fpe_cash_transactions "
+                "WHERE source_message_id = $1 AND source_channel = $2",
+                src_msg_id, SOURCE_CHANNEL, conn=conn,
+            )
+            if existing:
+                results.append({"line": idx, "status": "already_accounted",
+                                "txn_id": existing["id"], "txn_ref": existing["txn_ref"]})
+                continue
 
-                emp = await match_or_create_employee(
-                    p.employee_name_raw, p.payout_phone, p.employee_id_phone,
-                )
-                if emp is None:
-                    log.error(
-                        "[relay_acct] queue id=%s line %d: employee unresolved "
-                        "(name=%r payout=%s id=%s) — line NOT booked, needs manual review",
-                        queue_id, idx, p.employee_name_raw, p.payout_phone, p.employee_id_phone,
+            # ── ONE atomic transaction PER payment line (Owner Blocker B) ──
+            # employee resolve/create + cash txn + audit + ledger + activation
+            # all commit together or not at all. A failure here rolls back the
+            # just-created employee row too (conn= threaded into
+            # match_or_create_employee). A sibling line that already committed
+            # is untouched; the reconcile pass retries only the unbooked ones.
+            try:
+                async with conn.transaction():
+                    emp = await match_or_create_employee(
+                        p.employee_name_raw, p.payout_phone, p.employee_id_phone,
+                        conn=conn,
                     )
-                    results.append({"line": idx, "status": "employee_unresolved"})
-                    continue
+                    if emp is None:
+                        log.error(
+                            "[relay_acct] queue id=%s line %d: employee unresolved "
+                            "(name=%r payout=%s id=%s) — line NOT booked, needs manual review",
+                            queue_id, idx, p.employee_name_raw, p.payout_phone, p.employee_id_phone,
+                        )
+                        results.append({"line": idx, "status": "employee_unresolved"})
+                        raise _LineRollback()  # abort this line's txn, keep siblings
 
-                req = TransactionCreateRequest(
-                    fpe_wa_message_id=None,
-                    employee_id=emp.employee_id,
-                    employee_name_raw=p.employee_name_raw,
-                    amount=Decimal(str(p.amount)),
-                    payout_phone=p.payout_phone,
-                    payout_method=p.payout_method or PayoutMethod.unknown,
-                    txn_date=p.txn_date or today,
-                    txn_category=TxnCategory.salary,
-                    source_message_text=line[:500],
-                    source=PaymentSource.whatsapp,
-                    source_channel=SOURCE_CHANNEL,
-                    source_message_id=src_msg_id,
-                    employee_id_phone=p.employee_id_phone,
-                    employee_phone=p.payout_phone,
-                    transaction_status=TransactionStatus.final,
-                    created_by="payment_relay_accounting",
-                    metadata={
-                        "relay_outbound_queue_id": queue_id,
-                        "relay_line_index": idx,
-                        "relay_line_count": len(lines),
-                        "relay_message_sha256": msg_sha,
-                        "relay_line_sha256": _sha256(line),
-                        "relay_idempotency_key": idempotency_key,
-                        "relay_inbound_message_ref": meta.get("inbound_message_id"),
-                        "relay_inbound_bridge": meta.get("inbound_bridge"),
-                        "relay_source_number": meta.get("source_number"),
-                        "relay_dest": recipient,
-                        "relay_external_id": external_id,
-                        "accounting_trigger": "outbound_send_success",
-                    },
-                )
-                txn = await create_transaction(req, conn=conn)
-                results.append({
-                    "line": idx, "status": "booked", "txn_id": txn.id, "txn_ref": txn.txn_ref,
-                    "employee_id": emp.employee_id, "amount": str(txn.amount),
-                    "match_type": emp.match_type,
-                })
+                    req = TransactionCreateRequest(
+                        fpe_wa_message_id=None,
+                        employee_id=emp.employee_id,
+                        employee_name_raw=p.employee_name_raw,
+                        amount=Decimal(str(p.amount)),
+                        payout_phone=p.payout_phone,
+                        payout_method=p.payout_method or PayoutMethod.unknown,
+                        txn_date=p.txn_date or today,
+                        txn_category=TxnCategory.salary,
+                        source_message_text=line[:500],
+                        source=PaymentSource.whatsapp,
+                        source_channel=SOURCE_CHANNEL,
+                        source_message_id=src_msg_id,
+                        employee_id_phone=p.employee_id_phone,
+                        employee_phone=p.payout_phone,
+                        transaction_status=TransactionStatus.final,
+                        created_by="payment_relay_accounting",
+                        metadata={
+                            "relay_outbound_queue_id": queue_id,
+                            "relay_line_index": idx,
+                            "relay_line_count": len(lines),
+                            "relay_message_sha256": msg_sha,
+                            "relay_line_sha256": _sha256(line),
+                            "relay_idempotency_key": idempotency_key,
+                            "relay_inbound_message_ref": meta.get("inbound_message_id"),
+                            "relay_inbound_bridge": meta.get("inbound_bridge"),
+                            "relay_source_number": meta.get("source_number"),
+                            "relay_dest": recipient,
+                            "relay_external_id": external_id,
+                            "accounting_trigger": "outbound_send_success",
+                        },
+                    )
+                    txn = await create_transaction(req, conn=conn)
+                    _line_result = {
+                        "line": idx, "status": "booked", "txn_id": txn.id, "txn_ref": txn.txn_ref,
+                        "employee_id": emp.employee_id, "amount": str(txn.amount),
+                        "match_type": emp.match_type,
+                    }
+                # transaction committed here (context manager exit)
+                results.append(_line_result)
                 log.info(
                     "[relay_acct] BOOKED queue id=%s line %d txn_id=%s ref=%s emp=%s amount=%s "
                     "match=%s",
                     queue_id, idx, txn.id, txn.txn_ref[:12], emp.employee_id, txn.amount,
                     emp.match_type,
                 )
+            except _LineRollback:
+                # deliberate abort (employee unresolved) — already recorded;
+                # nothing from this line's transaction persists.
+                continue
+            except Exception as _line_exc:  # noqa: BLE001
+                log.error(
+                    "[relay_acct] queue id=%s line %d accounting FAILED and rolled back "
+                    "(no partial rows); reconcile pass will retry: %s",
+                    queue_id, idx, _line_exc, exc_info=True,
+                )
+                results.append({"line": idx, "status": "error", "detail": str(_line_exc)[:200]})
+                continue
 
     booked = [r for r in results if r["status"] == "booked"]
     return {
@@ -292,26 +335,85 @@ async def reconcile_pending_relay_accounting(limit: int = 25) -> dict:
 
 # ── Echo dedup — used by the FPE accounting worker (historical_sync / gap_scan) ──
 
-async def is_relay_payment_already_accounted(raw_content: str, conn: Any = None) -> bool:
-    """True iff this exact message body was already booked via the payment-relay
-    direct accounting path within the dedup window. Whole-message sha256 match
-    (exact byte content), NOT employee+amount+date. Fail-open (returns False)
-    on error so a real payment is never silently dropped."""
+async def is_relay_payment_already_accounted(
+    raw_content: str,
+    conn: Any = None,
+    *,
+    message_ts: Any = None,
+) -> bool:
+    """True iff this FPE-worker bridge-store message is the self-echo /
+    history-sync copy of an owner→accountant relay SEND EVENT that was already
+    booked by the direct accounting path — so re-booking it would double-count.
+
+    Owner Blocker A (2026-08-30): body sha256 is NOT financial identity (two
+    genuine payments can carry identical text). Suppression requires a real
+    correlated transport event:
+
+      * a fazle_outbound_queue row q with purpose = owner-accountant-payment-relay
+        AND status = 'sent'
+      * q.body byte-identical to this message body (the relay forwards verbatim)
+      * q.sent_at within ±_ECHO_CORRELATION_MINUTES of this message's WA
+        timestamp (a self-echo lands within seconds); when no timestamp is
+        available, fall back to q.sent_at within the last 3 days
+      * q was actually booked — an fpe_cash_transactions row exists with
+        source_channel = SOURCE_CHANNEL and
+        source_message_id LIKE 'payment-relay-send:<q.id>:%'
+
+    A manual / unrelated message with identical text that never went through
+    the relay queue, or is outside the time window, matches nothing → NOT
+    suppressed → the FPE worker books it normally.
+
+    Fail-open (returns False) on error so a real payment is never silently
+    dropped. The relay_message_sha256 stored in txn metadata is kept for
+    audit/forensics only and is no longer consulted as identity.
+    """
     if not raw_content or not raw_content.strip():
         return False
+    body = raw_content  # exact — the relay forwards the verbatim inbound body
     try:
-        row = await fetch_one(
-            """
-            SELECT id FROM fpe_cash_transactions
-            WHERE source_channel = $1
-              AND NOT is_reversal
-              AND metadata->>'relay_message_sha256' = $2
-              AND created_at > NOW() - make_interval(days => $3)
-            LIMIT 1
-            """,
-            SOURCE_CHANNEL, _sha256(raw_content), _ECHO_DEDUP_WINDOW_DAYS,
-            conn=conn,
-        )
+        if message_ts is not None:
+            row = await fetch_one(
+                """
+                SELECT q.id
+                FROM fazle_outbound_queue q
+                WHERE q.purpose = $1
+                  AND q.status = 'sent'
+                  AND q.body = $2
+                  AND q.sent_at >  ($3::timestamptz - make_interval(mins => $4))
+                  AND q.sent_at <  ($3::timestamptz + make_interval(mins => $4))
+                  AND q.sent_at >  NOW() - make_interval(days => $5)
+                  AND EXISTS (
+                      SELECT 1 FROM fpe_cash_transactions t
+                      WHERE t.source_channel = $6
+                        AND NOT t.is_reversal
+                        AND t.source_message_id LIKE ('payment-relay-send:' || q.id::text || ':%')
+                  )
+                LIMIT 1
+                """,
+                RELAY_PURPOSE, body, message_ts, _ECHO_CORRELATION_MINUTES,
+                _ECHO_QUEUE_MAX_AGE_DAYS, SOURCE_CHANNEL,
+                conn=conn,
+            )
+        else:
+            row = await fetch_one(
+                """
+                SELECT q.id
+                FROM fazle_outbound_queue q
+                WHERE q.purpose = $1
+                  AND q.status = 'sent'
+                  AND q.body = $2
+                  AND q.sent_at > NOW() - INTERVAL '3 days'
+                  AND EXISTS (
+                      SELECT 1 FROM fpe_cash_transactions t
+                      WHERE t.source_channel = $3
+                        AND NOT t.is_reversal
+                        AND t.source_message_id LIKE ('payment-relay-send:' || q.id::text || ':%')
+                  )
+                LIMIT 1
+                """,
+                RELAY_PURPOSE, body, SOURCE_CHANNEL,
+                conn=conn,
+            )
         return row is not None
     except Exception as exc:  # noqa: BLE001
         log.warning("[relay_acct] echo-dedup check errored (treating as not-accounted): %s", exc)

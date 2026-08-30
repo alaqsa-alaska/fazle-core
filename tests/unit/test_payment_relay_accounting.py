@@ -178,15 +178,30 @@ async def test_bridge_echo_is_not_double_accounted(test_db_pool):
     db_module._pool = test_db_pool
     from modules.payment_relay_accounting import on_relay_send_success, is_relay_payment_already_accounted
 
+    from datetime import datetime, timedelta, timezone
     body = "ID: 01711000006 Echo Worker 01711000006(B) 700/-"
+    now = datetime.now(timezone.utc)
     async with test_db_pool.acquire() as conn:
         await _seed_employee(conn, phone="01711000006", name="Echo Worker", status="active")
+        # a real 'sent' relay queue row, exactly as production would have one
+        await conn.execute(
+            """INSERT INTO fazle_outbound_queue
+                   (id, recipient, body, source_bridge, purpose, status, sent_at,
+                    meta_json, external_id, idempotency_key)
+               VALUES (90006,'8801844836824',$1,'bridge2',$2,'sent',$3,'{}'::jsonb,
+                       'bridge2:8801844836824','payment-relay:bridge2:WAMID90006')""",
+            body, RELAY_PURPOSE, now,
+        )
     await on_relay_send_success(_queue_row(90006, body))
 
-    # The exact same body, as it would arrive from a bridge self-echo, is
-    # recognised as already accounted.
-    assert await is_relay_payment_already_accounted(body) is True
-    assert await is_relay_payment_already_accounted("ID: 01711000006 Echo Worker 01711000006(B) 999/-") is False
+    # The bridge self-echo of that same send (WA timestamp seconds later) is
+    # recognised as already accounted — correlated to the booked relay send.
+    assert await is_relay_payment_already_accounted(
+        body, message_ts=now + timedelta(seconds=6)) is True
+    # A different amount is a different message — not suppressed.
+    assert await is_relay_payment_already_accounted(
+        "ID: 01711000006 Echo Worker 01711000006(B) 999/-",
+        message_ts=now + timedelta(seconds=6)) is False
 
 
 # ── 7 / 8 / 9. 3-month inactivity sweep + reactivation ─────────────────────

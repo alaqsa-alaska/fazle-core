@@ -391,7 +391,8 @@ async def _process_parsed_batch() -> None:
         """
         SELECT mps.fpe_wa_message_id,
                pr.message_type, pr.parsed_data, pr.confidence,
-               m.raw_content, m.is_from_me, m.source, m.chat_jid, m.sender_phone
+               m.raw_content, m.is_from_me, m.source, m.chat_jid, m.sender_phone,
+               m.timestamp_wa
         FROM fpe_message_processing_state mps
         JOIN fpe_parser_results pr ON pr.fpe_wa_message_id = mps.fpe_wa_message_id
         JOIN fpe_wa_messages m ON m.id = mps.fpe_wa_message_id
@@ -547,15 +548,18 @@ async def _process_parsed_batch() -> None:
                 _diag_status, _diag_reason = "skipped", "not_from_owner"
                 continue
 
-            # Owner→accountant payment-relay echo dedup (2026-08-30): if this
-            # exact message body was already booked to FPE by the direct
-            # post-send accounting path (modules.payment_relay_accounting),
-            # then a later whatsmeow self-echo / history-sync of the same
-            # successfully-relayed message must NOT create a duplicate
-            # transaction. Whole-message sha256 match, not employee+amount+date.
+            # Owner→accountant payment-relay echo dedup (2026-08-30, Blocker A):
+            # suppress this message ONLY if it is the self-echo / history-sync
+            # copy of a relay SEND EVENT that was already booked — correlated by
+            # (verbatim body == queue body) + (WA timestamp within ±30 min of
+            # q.sent_at) + (that queue row actually produced FPE txns). NOT a
+            # bare body-hash match, so a genuine identical-text payment that
+            # never went through the relay queue is still booked.
             try:
                 from modules.payment_relay_accounting import is_relay_payment_already_accounted
-                if await is_relay_payment_already_accounted(row["raw_content"]):
+                if await is_relay_payment_already_accounted(
+                    row["raw_content"], message_ts=row.get("timestamp_wa"),
+                ):
                     await mark_processing_status(msg_id, "done")
                     log.info(
                         "[fpe.worker.acct] msg=%d already accounted via payment-relay "
