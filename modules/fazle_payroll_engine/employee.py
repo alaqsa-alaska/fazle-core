@@ -107,48 +107,51 @@ async def match_or_create_employee(
     (canonical_employee_id IS NOT NULL), we transparently resolve to the
     canonical employee. The duplicate row itself is never deleted or mutated.
     """
-    # 1. Exact employee_id_phone match — the "ID:" mobile is the authoritative
-    #    employee identity per business rule; it must win over payout_phone,
-    #    which is merely where the money is transferred and may legitimately
-    #    coincide with a completely different employee's registered phone.
+    # ── Identity phone (Owner business rule, 2026-08-30 — Phase 1) ────────────
+    # The employee identity is a PHONE, never a name.
     #
-    #    2026-08-30 (Owner business rule): a phone that belongs to an EXISTING
-    #    employee row matches that employee regardless of active/inactive
-    #    status — a duplicate employee row must NEVER be created just because
-    #    the existing one is inactive (that was the idx_fpe_emp_phone_unique
-    #    crash). An active row still wins over an inactive one when both exist.
-    #    Activation of a matched inactive employee on a successful payment is
-    #    handled downstream in accounting.create_transaction(), not here.
-    if employee_id_phone:
+    #   * If an explicit employee-ID phone is present it is the SOLE identity
+    #     key. The payout phone is only where the money is sent — it must
+    #     NEVER resolve to, or create, a different employee.
+    #   * If only one phone is present (no "ID:" prefix), the parser has
+    #     already promoted it to employee_id_phone upstream, so that phone is
+    #     the identity.
+    #   * A phone that belongs to an existing row matches it regardless of
+    #     active / inactive status (an active row wins when both exist). This
+    #     removes the idx_fpe_emp_phone_unique duplicate-key crash.
+    #   * A previously unseen identity phone is a NEW person even if the name
+    #     matches an existing employee — different canonical phones mean
+    #     different people; name spelling never creates or merges a second
+    #     employee once the phone is known. We therefore do NOT fall through
+    #     to payout-phone or name matching when the identity phone is set but
+    #     unmatched — we create keyed on the identity phone.
+    #
+    # Activation of a matched inactive employee on a successful payment is
+    # handled downstream in accounting.create_transaction(), not here.
+    #
+    # Normalise BOTH phones to the canonical 01XXXXXXXXX form first — a phone
+    # is the identity key, so "8801811111111", "+8801811111111" and
+    # "01811111111" must all resolve to the same employee row. (Direct callers
+    # like draft_approval pass raw phones; the FPE parser already normalises.)
+    payout_phone = normalize_bd_phone(payout_phone) if payout_phone else None
+    employee_id_phone = normalize_bd_phone(employee_id_phone) if employee_id_phone else None
+    identity_phone = employee_id_phone or payout_phone
+
+    if identity_phone:
+        # 1. Direct column match on the identity phone (id-phone or primary).
         row = await fetch_one(
             "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
             "FROM fpe_employees "
-            "WHERE employee_id_phone = $1 "
+            "WHERE employee_id_phone = $1 OR primary_phone = $1 "
             "ORDER BY (status = 'active') DESC, id ASC LIMIT 1",
-            employee_id_phone,
+            identity_phone,
         )
         if row:
             row = await _resolve_canonical(row)
             await _maybe_enrich_full_name(row["id"], row.get("full_name"), name_raw)
-            return _make_result(row, "exact_id_phone")
+            return _make_result(row, "exact_id_phone" if employee_id_phone else "exact_phone")
 
-    # 2. Exact primary_phone match — used when there is no ID: prefix, so the
-    #    payout phone doubles as the employee lookup key (business rule 7.3).
-    if payout_phone:
-        row = await fetch_one(
-            "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
-            "FROM fpe_employees "
-            "WHERE primary_phone = $1 "
-            "ORDER BY (status = 'active') DESC, id ASC LIMIT 1",
-            payout_phone,
-        )
-        if row:
-            row = await _resolve_canonical(row)
-            await _maybe_enrich_full_name(row["id"], row.get("full_name"), name_raw)
-            return _make_result(row, "exact_phone")
-
-    # 3. Alias phone lookup
-    for phone in filter(None, [employee_id_phone, payout_phone]):
+        # 2. Phone-alias lookup on the identity phone.
         alias_row = await fetch_one(
             """
             SELECT e.id, e.employee_code, e.full_name, e.primary_phone,
@@ -158,36 +161,35 @@ async def match_or_create_employee(
             WHERE a.alias_type = 'phone' AND a.alias_value = $1
             ORDER BY (e.status = 'active') DESC, e.id ASC LIMIT 1
             """,
-            phone,
+            identity_phone,
         )
         if alias_row:
             alias_row = await _resolve_canonical(alias_row)
             await _maybe_enrich_full_name(alias_row["id"], alias_row.get("full_name"), name_raw)
             return _make_result(alias_row, "alias_phone")
 
-    # 3b. WBOM cross-lookup: check bkash_number / nagad_number / employee_mobile
-    # This bridges WBOM employee records into FPE when a number is known in
-    # one system but not the other.
-    for phone in filter(None, [employee_id_phone, payout_phone]):
+        # 3. WBOM cross-system lookup on the identity phone — bridges a number
+        #    known in wbom_employees but not yet linked into FPE.
         wbom_row = await fetch_one(
             "SELECT employee_id, employee_name, employee_mobile "
             "FROM wbom_employees "
             "WHERE (employee_mobile = $1 OR bkash_number = $1 OR nagad_number = $1) "
             "  AND LOWER(status) != 'inactive' "
             "LIMIT 1",
-            phone,
+            identity_phone,
         )
         if wbom_row:
-            # Look for a matching FPE record — use payout_phone as the anchor
             fpe_row = await fetch_one(
-                "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id, wbom_employee_id "
-                "FROM fpe_employees WHERE primary_phone = $1 AND status = 'active'",
-                phone,
+                "SELECT id, employee_code, full_name, primary_phone, "
+                "canonical_employee_id, wbom_employee_id "
+                "FROM fpe_employees "
+                "WHERE employee_id_phone = $1 OR primary_phone = $1 "
+                "ORDER BY (status = 'active') DESC, id ASC LIMIT 1",
+                identity_phone,
             )
             if fpe_row:
                 fpe_row = await _resolve_canonical(fpe_row)
                 await _maybe_enrich_full_name(fpe_row["id"], fpe_row.get("full_name"), name_raw)
-                # Ensure wbom_employee_id link is set (runtime repair — idempotent)
                 if not fpe_row.get("wbom_employee_id"):
                     try:
                         await execute(
@@ -201,13 +203,50 @@ async def match_or_create_employee(
                     except Exception as _link_err:
                         log.debug("[fpe.emp] wbom_employee_id link failed: %s", _link_err)
                 return _make_result(fpe_row, "wbom_phone_match")
-            # FPE record absent — fall through to auto-create below (with phone evidence)
 
-    # 4 & 5. Name matching (only when no phone evidence was decisive)
+        # 4. Identity phone is KNOWN but nothing matched → a new person.
+        #    Create keyed on the identity phone. NO payout-phone or name
+        #    fallthrough (Owner rule).
+        new_result = await _auto_create_employee(name_raw, identity_phone, identity_phone)
+        # Best-effort: if an existing active employee has a closely similar
+        # name, queue a human de-dup review. This never blocks or merges —
+        # the identity phone remains authoritative.
+        if name_raw and new_result and new_result.match_type == "auto_created":
+            try:
+                name_norm = normalize_name(name_raw)
+                if name_norm:
+                    cand = await fetch_one(
+                        """
+                        SELECT id, similarity(name_normalized, $1) AS sim
+                        FROM fpe_employees
+                        WHERE name_normalized IS NOT NULL AND status = 'active'
+                          AND id <> $2
+                          AND similarity(name_normalized, $1) >= 0.80
+                        ORDER BY similarity(name_normalized, $1) DESC
+                        LIMIT 1
+                        """,
+                        name_norm, new_result.employee_id,
+                    )
+                    if cand:
+                        from .normalization import enqueue_review
+                        await enqueue_review(
+                            candidate_employee_id=new_result.employee_id,
+                            suspected_match_id=cand["id"],
+                            match_reason="name_similar_new_identity_phone",
+                            confidence_score=float(cand["sim"]),
+                            raw_name=name_raw,
+                            raw_phone=identity_phone,
+                        )
+            except Exception as exc:
+                log.debug("[fpe.emp] post-create dedup review enqueue skipped: %s", exc)
+        return new_result
+
+    # ── No phone evidence at all — name-only path ─────────────────────────────
+    # Never auto-creates (no phone to anchor identity). A confident exact or
+    # fuzzy name match resolves; anything less goes to manual review (None).
     if name_raw:
         name_norm = normalize_name(name_raw)
         if name_norm:
-            # Exact normalized-name
             row = await fetch_one(
                 "SELECT id, employee_code, full_name, primary_phone, canonical_employee_id "
                 "FROM fpe_employees "
@@ -218,7 +257,6 @@ async def match_or_create_employee(
                 row = await _resolve_canonical(row)
                 return _make_result(row, "exact_name")
 
-            # Fuzzy name — load all active employees, do in-Python scoring
             all_emps = await fetch_all(
                 "SELECT id, employee_code, full_name, name_normalized, "
                 "primary_phone, canonical_employee_id "
@@ -236,18 +274,12 @@ async def match_or_create_employee(
             second_score = scored[1][0] if len(scored) > 1 else 0
             best_row = scored[0][1] if scored else None
 
-            # Auto-link only when above safe threshold AND clearly the best
             ambiguous = (
                 best_row is not None
                 and best_score >= FUZZY_THRESHOLD
                 and (best_score - second_score) < FUZZY_AMBIGUITY_MARGIN
             )
-
-            if (
-                best_row
-                and best_score >= FUZZY_THRESHOLD
-                and not ambiguous
-            ):
+            if best_row and best_score >= FUZZY_THRESHOLD and not ambiguous:
                 best_row = await _resolve_canonical(best_row)
                 log.info(
                     "[fpe.emp] fuzzy match name=%r → %s score=%.1f",
@@ -262,50 +294,17 @@ async def match_or_create_employee(
                     match_score=best_score / 100.0,
                 )
 
-            # Phase 4 — SAFETY: when we have no phone evidence at all and name
-            # match is ambiguous / below threshold, return None so the accounting
-            # worker routes the message to the manual review queue.
-            # DO NOT auto-create phantom employees from name-only guesses.
-            if not payout_phone and not employee_id_phone:
-                log.warning(
-                    "[fpe.emp] REVIEW REQUIRED — name_only=%r, no phone evidence, "
-                    "best_fuzzy=%.1f — skipping auto-create to prevent phantom record",
-                    name_raw, best_score,
-                )
-                return None  # type: ignore[return-value]
-
-            # Phone evidence present → auto-create is safe; also enqueue review
-            # if a close-but-unconfident fuzzy match exists.
-            new_result = await _auto_create_employee(
-                name_raw, payout_phone, employee_id_phone
-            )
-            if best_row and best_score >= 70:
-                try:
-                    from .normalization import enqueue_review
-                    await enqueue_review(
-                        candidate_employee_id=new_result.employee_id,
-                        suspected_match_id=best_row["id"],
-                        match_reason=(
-                            "fuzzy_name_below_threshold"
-                            if best_score < FUZZY_THRESHOLD
-                            else "name_collision"
-                        ),
-                        confidence_score=best_score / 100.0,
-                        raw_name=name_raw,
-                        raw_phone=payout_phone or employee_id_phone,
-                    )
-                except Exception as exc:
-                    log.warning("[fpe.emp] enqueue_review failed: %s", exc)
-            return new_result
-
-    # 6. Auto-create — only safe when we have at least one phone to anchor identity.
-    # A phone-less, name-less call can never produce a useful employee record.
-    if not payout_phone and not employee_id_phone:
         log.warning(
-            "[fpe.emp] REVIEW REQUIRED — no phone and no name — cannot create phantom employee",
+            "[fpe.emp] REVIEW REQUIRED — name_only=%r, no phone evidence — "
+            "not auto-creating a phantom employee",
+            name_raw,
         )
         return None  # type: ignore[return-value]
-    return await _auto_create_employee(name_raw, payout_phone, employee_id_phone)
+
+    log.warning(
+        "[fpe.emp] REVIEW REQUIRED — no phone and no name — cannot create phantom employee",
+    )
+    return None  # type: ignore[return-value]
 
 
 async def _resolve_canonical(row: dict) -> dict:
@@ -503,7 +502,12 @@ async def _auto_create_employee(
                     "ORDER BY (status = 'active') DESC, id ASC LIMIT 1",
                     eid_phone,
                 )
-            if not existing and name_norm:
+            # NOTE (Owner rule, Phase 1): no name-based re-check here. A caller
+            # only reaches _auto_create_employee with an identity phone that
+            # matched nothing — a name collision with a *different* phone is a
+            # different person and must NOT short-circuit creation. The
+            # name-only resolution path never calls this function.
+            if not eid_phone and name_norm:
                 existing = await con.fetchrow(
                     "SELECT id, employee_code, full_name, primary_phone, "
                     "canonical_employee_id "
