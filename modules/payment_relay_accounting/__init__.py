@@ -56,10 +56,20 @@ transaction (match_or_create_employee now takes conn=). A failure before
 commit rolls back a just-created employee row too; a sibling line that already
 committed is untouched; the reconcile pass retries the unbooked ones.
 
+Reconciliation rules (Owner decision 2026-08-30): before _account_relay_send()
+books a queue, it is considered already reconciled if EITHER
+  A. a canonical row exists: source_message_id = payment-relay-send:<qid>:<idx>
+  B. an EXISTING transaction carries an explicit provenance link:
+     metadata->>'relay_reconciled_queue_id' == <qid>  (set by
+     link_existing_transaction_to_relay_queue() — human-established,
+     owner-approved; NEVER inferred from employee/amount/date/method/body/time).
+If B, nothing is booked and RECONCILED_EXISTING_TRANSACTION is logged.
+
 Gated by env flag PAYMENT_RELAY_ACCOUNTING_ENABLED (default: false).
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -97,6 +107,146 @@ def _enabled() -> bool:
 
 def _sha256(s: str) -> str:
     return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
+
+# ── Explicit queue → existing-transaction reconciliation link ────────────────
+# Owner decision 2026-08-30: when a relay queue was already booked to FPE by
+# ANOTHER legitimate mechanism (e.g. a manual admin entry), we record an
+# explicit provenance link on that existing transaction rather than reversing
+# it, creating a sentinel, or heuristically matching. The reconciler then
+# treats the queue as done. NO financial row, NO schema change.
+RECONCILE_LINK_META_KEY = "relay_reconciled_queue_id"
+RECONCILE_LINK_TYPE_EXISTING_MANUAL = "existing_manual_booking"
+
+
+async def _queue_reconciled_by_existing_link(queue_id: int, conn: Any = None) -> Optional[int]:
+    """Return the id of a non-reversal fpe_cash_transactions row that carries an
+    EXPLICIT reconciliation link to this exact relay queue id, or None. This is
+    the only 'already reconciled by an existing transaction' signal — it is
+    never inferred from employee/amount/date/method/body/time."""
+    row = await fetch_one(
+        f"""
+        SELECT id FROM fpe_cash_transactions
+        WHERE NOT is_reversal
+          AND deleted_at IS NULL
+          AND metadata->>'{RECONCILE_LINK_META_KEY}' = $1
+        LIMIT 1
+        """,
+        str(queue_id),
+        conn=conn,
+    )
+    return row["id"] if row else None
+
+
+async def link_existing_transaction_to_relay_queue(
+    *,
+    txn_id: int,
+    queue_id: int,
+    inbound_message_ref: Optional[str],
+    reason: str,
+    approved_by: str,
+    conn: Any = None,
+) -> dict:
+    """Attach an explicit 'this relay queue is already financially booked by
+    this existing transaction' provenance link to fpe_cash_transactions.<txn_id>,
+    plus one accounting audit row. Owner-approved, human-established — NEVER a
+    heuristic.
+
+    Atomic: the metadata merge and the audit INSERT run in ONE
+    db_conn()+conn.transaction() (or on the caller's conn). Idempotent: a
+    second call for the same (txn_id, queue_id) is a no-op with no extra audit
+    row. Refuses if the transaction is already linked to a DIFFERENT queue, is
+    a reversal, or is soft-deleted.
+
+    Does NOT touch amount / txn_category / employee_id / source / source_channel
+    / source_message_id / created_by / the ledger — provenance only.
+    """
+    from datetime import datetime, timezone
+
+    _own = conn is None
+    _cm = db_conn() if _own else contextlib.nullcontext(conn)
+    async with _cm as c:
+        _tx = c.transaction() if _own else contextlib.nullcontext(None)
+        async with _tx:
+            row = await fetch_one(
+                "SELECT id, amount, txn_category, employee_id, source, source_channel, "
+                "source_message_id, created_by, is_reversal, deleted_at, metadata "
+                "FROM fpe_cash_transactions WHERE id = $1",
+                txn_id, conn=c,
+            )
+            if row is None:
+                raise ValueError(f"transaction {txn_id} not found")
+            if row["is_reversal"]:
+                raise ValueError(f"transaction {txn_id} is a reversal — cannot link")
+            if row["deleted_at"] is not None:
+                raise ValueError(f"transaction {txn_id} is soft-deleted — cannot link")
+
+            md = row["metadata"]
+            if isinstance(md, str):
+                md = json.loads(md) if md.strip() else {}
+            md = dict(md or {})
+
+            prior = md.get(RECONCILE_LINK_META_KEY)
+            if prior is not None and str(prior) == str(queue_id):
+                return {
+                    "ok": True, "already_linked": True, "txn_id": txn_id,
+                    "queue_id": queue_id,
+                }
+            if prior is not None and str(prior) != str(queue_id):
+                raise ValueError(
+                    f"transaction {txn_id} is already linked to relay queue {prior} "
+                    f"— refusing to relink to {queue_id}"
+                )
+
+            linked_at = datetime.now(timezone.utc).isoformat()
+            add = {
+                RECONCILE_LINK_META_KEY: int(queue_id),
+                "relay_inbound_message_ref": inbound_message_ref,
+                "relay_reconciliation_type": RECONCILE_LINK_TYPE_EXISTING_MANUAL,
+                "relay_reconciled_at": linked_at,
+                "relay_reconciled_by": approved_by,
+                "relay_reconciliation_reason": reason,
+            }
+            await c.execute(
+                "UPDATE fpe_cash_transactions "
+                "SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb "
+                "WHERE id = $1",
+                txn_id, json.dumps(add),
+            )
+            await c.execute(
+                """
+                INSERT INTO fpe_accounting_audit_logs
+                    (entity_type, entity_id, action, before_state, after_state,
+                     performed_by, reason)
+                VALUES ('transaction', $1, 'relay_reconciliation_link', $2, $3, $4, $5)
+                """,
+                txn_id,
+                json.dumps({"metadata_keys_before": sorted(md.keys())}),
+                json.dumps({
+                    "relay_reconciled_queue_id": int(queue_id),
+                    "relay_inbound_message_ref": inbound_message_ref,
+                    "relay_reconciliation_type": RECONCILE_LINK_TYPE_EXISTING_MANUAL,
+                    "preserved_provenance": {
+                        "amount": str(row["amount"]),
+                        "txn_category": row["txn_category"],
+                        "employee_id": row["employee_id"],
+                        "source": row["source"],
+                        "source_channel": row["source_channel"],
+                        "source_message_id": row["source_message_id"],
+                        "created_by": row["created_by"],
+                    },
+                }),
+                approved_by,
+                f"existing legitimate manual booking; owner-approved reconciliation "
+                f"of relay queue {queue_id}: {reason}",
+            )
+    log.info(
+        "[relay_acct] LINKED relay queue id=%s -> existing txn id=%s "
+        "(type=%s, by=%s) — no new financial row",
+        queue_id, txn_id, RECONCILE_LINK_TYPE_EXISTING_MANUAL, approved_by,
+    )
+    return {"ok": True, "linked": True, "txn_id": txn_id, "queue_id": queue_id,
+            "reconciliation_type": RECONCILE_LINK_TYPE_EXISTING_MANUAL}
 
 
 def _stanza_id_or_none(external_id: Any) -> Optional[str]:
@@ -214,6 +364,28 @@ async def _account_relay_send(
 
     results: list[dict] = []
     async with db_conn() as conn:
+        # ── Rule B (Owner decision 2026-08-30): this exact relay queue may
+        #    already be financially reconciled by an EXISTING transaction that
+        #    carries an explicit provenance link (metadata.relay_reconciled_queue_id
+        #    == this queue id). If so, book NOTHING. This is never inferred from
+        #    employee / amount / date / method / body / time — only the explicit
+        #    link counts. (Rule A — a canonical payment-relay-send:<qid>:<idx>
+        #    row — is checked per line below.)
+        _linked_txn = await _queue_reconciled_by_existing_link(queue_id, conn=conn)
+        if _linked_txn is not None:
+            log.info(
+                "[relay_acct] queue id=%s RECONCILED_EXISTING_TRANSACTION "
+                "(existing txn id=%s) — skipping financial booking",
+                queue_id, _linked_txn,
+            )
+            return {
+                "ok": True, "queue_id": queue_id, "lines": len(lines), "booked": 0,
+                "reconciled_existing_txn_id": _linked_txn,
+                "results": [{"status": "reconciled_existing_transaction",
+                             "txn_id": _linked_txn}],
+                "body_sha256": msg_sha,
+            }
+
         for item in parsed:
             idx, line, p = item["idx"], item["line"], item["p"]
             src_msg_id = f"payment-relay-send:{queue_id}:{idx}"
@@ -337,10 +509,16 @@ async def reconcile_pending_relay_accounting(limit: int = 25) -> dict:
         WHERE q.purpose = $1
           AND q.status = 'sent'
           AND q.sent_at > NOW() - INTERVAL '7 days'
-          AND NOT EXISTS (
+          AND NOT EXISTS (                                  -- Rule A: canonical relay txn
               SELECT 1 FROM fpe_cash_transactions t
               WHERE t.source_channel = $2
                 AND t.source_message_id LIKE ('payment-relay-send:' || q.id::text || ':%')
+          )
+          AND NOT EXISTS (                                  -- Rule B: explicit link to an existing txn
+              SELECT 1 FROM fpe_cash_transactions t2
+              WHERE NOT t2.is_reversal
+                AND t2.deleted_at IS NULL
+                AND t2.metadata->>'relay_reconciled_queue_id' = q.id::text
           )
         ORDER BY q.sent_at ASC
         LIMIT $3

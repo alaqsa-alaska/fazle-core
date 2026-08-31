@@ -50,15 +50,302 @@ async def _count_txns(conn, prefix):
     )
 
 
-async def _insert_sent_queue_row(conn, qid, body, sent_at):
+async def _insert_sent_queue_row(conn, qid, body, sent_at, inbound_message_id=None):
+    import json as _j
+    meta = _j.dumps({"inbound_message_id": inbound_message_id or f"WAMID{qid}"})
     await conn.execute(
         """INSERT INTO fazle_outbound_queue
                (id, recipient, body, source_bridge, purpose, status, sent_at,
                 meta_json, external_id, idempotency_key)
-           VALUES ($1,'8801844836824',$2,'bridge2',$3,'sent',$4,'{}'::jsonb,
-                   'bridge2:8801844836824',$5)""",
-        qid, body, RELAY_PURPOSE, sent_at, f"payment-relay:bridge2:WAMID{qid}",
+           VALUES ($1,'8801844836824',$2,'bridge2',$3,'sent',$4,$5::jsonb,
+                   'bridge2:8801844836824',$6)""",
+        qid, body, RELAY_PURPOSE, sent_at, meta,
+        f"payment-relay:bridge2:{inbound_message_id or ('WAMID'+str(qid))}",
     )
+
+
+async def _insert_manual_txn(conn, *, emp_id, amount, method="bkash", category="advance",
+                             created_by="Shah Azim", txn_date=None):
+    """Mirror the shape of the real production manual txn 4476 (source='manual',
+    source_channel NULL, source_message_id NULL, txn_category='advance')."""
+    import json as _j
+    from datetime import date as _d
+    tid = await conn.fetchval(
+        """INSERT INTO fpe_cash_transactions
+               (txn_ref, employee_id, employee_name_raw, amount, payout_phone,
+                payout_method, txn_date, txn_category, accounting_period, created_by,
+                source, source_channel, source_message_id, transaction_status,
+                metadata, is_reversal)
+           VALUES ($1,$2,'MD: Billal Mia',$3,'01881894579',$4,$5,$6,$7,$8,
+                   'manual', NULL, NULL, 'final', $9::jsonb, FALSE)
+           RETURNING id""",
+        f"fpe-manual-{emp_id}-{amount}", emp_id, amount, method,
+        txn_date or _d(2026, 8, 30), category, "2026-08", created_by,
+        _j.dumps({"admin_api": True, "employee_id_phone": "01881894579"}),
+    )
+    await conn.execute(
+        """INSERT INTO fpe_employee_ledger (employee_id, accounting_period, total_paid, txn_count)
+           VALUES ($1,'2026-08',$2,1)
+           ON CONFLICT (employee_id, accounting_period)
+           DO UPDATE SET total_paid = fpe_employee_ledger.total_paid + $2,
+                         txn_count = fpe_employee_ledger.txn_count + 1""",
+        emp_id, amount,
+    )
+    return tid
+
+
+async def _seed_active_emp(conn, *, phone, name):
+    return await conn.fetchval(
+        """INSERT INTO fpe_employees
+               (full_name, name_normalized, primary_phone, employee_id_phone,
+                status, created_source, resolution_status, basic_salary)
+           VALUES ($1,$2,$3,$3,'active','whatsapp_auto_create','resolved',10000)
+           RETURNING id""",
+        name, name.lower(), phone,
+    )
+
+
+# ══ RULE B — explicit queue → existing-transaction reconciliation link ══════
+
+async def test_link_zero_new_txns_and_reconciler_skips(test_db_pool):
+    """1. queue explicitly linked to an existing manual txn → reconciler /
+    on_relay_send_success create ZERO new financial transactions."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import (
+        link_existing_transaction_to_relay_queue, on_relay_send_success,
+        reconcile_pending_relay_accounting,
+    )
+    from datetime import datetime, timezone
+    body = "ID: 01881894579 MD: Billal Mia 01881894579(B) 400/-"
+    async with test_db_pool.acquire() as conn:
+        emp = await _seed_active_emp(conn, phone="01881894579", name="Billal Mia")
+        txn = await _insert_manual_txn(conn, emp_id=emp, amount=400)
+        await _insert_sent_queue_row(conn, 96738, body, datetime.now(timezone.utc),
+                                     inbound_message_id="3EB0A967FF6CED3A904318")
+        total_before = await conn.fetchval("SELECT count(*) FROM fpe_cash_transactions")
+
+    res = await link_existing_transaction_to_relay_queue(
+        txn_id=txn, queue_id=96738, inbound_message_ref="3EB0A967FF6CED3A904318",
+        reason="test: existing manual booking", approved_by="Shah Azim",
+    )
+    assert res["ok"] and res["linked"] and res["reconciliation_type"] == "existing_manual_booking"
+
+    r1 = await on_relay_send_success(_queue_row(96738, body))
+    r2 = await reconcile_pending_relay_accounting()
+
+    assert r1["booked"] == 0
+    assert r1["results"][0]["status"] == "reconciled_existing_transaction"
+    assert r1["reconciled_existing_txn_id"] == txn
+    async with test_db_pool.acquire() as conn:
+        total_after = await conn.fetchval("SELECT count(*) FROM fpe_cash_transactions")
+        assert total_after == total_before, "no new financial row may be created"
+        assert await _count_txns(conn, "payment-relay-send:96738:") == 0
+
+
+async def test_link_repeated_reconciler_passes_still_zero(test_db_pool):
+    """2. repeated reconciler passes for a linked queue → still ZERO new txns."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import (
+        link_existing_transaction_to_relay_queue, on_relay_send_success,
+        reconcile_pending_relay_accounting,
+    )
+    from datetime import datetime, timezone
+    body = "ID: 01881894579 MD: Billal Mia 01881894579(B) 400/-"
+    async with test_db_pool.acquire() as conn:
+        emp = await _seed_active_emp(conn, phone="01881894579", name="Billal Mia")
+        txn = await _insert_manual_txn(conn, emp_id=emp, amount=400)
+        await _insert_sent_queue_row(conn, 96739, body, datetime.now(timezone.utc))
+    await link_existing_transaction_to_relay_queue(
+        txn_id=txn, queue_id=96739, inbound_message_ref="WAMID96739",
+        reason="test", approved_by="Shah Azim")
+
+    async with test_db_pool.acquire() as conn:
+        before = await conn.fetchval("SELECT count(*) FROM fpe_cash_transactions")
+    for _ in range(4):
+        await on_relay_send_success(_queue_row(96739, body))
+        await reconcile_pending_relay_accounting()
+    async with test_db_pool.acquire() as conn:
+        after = await conn.fetchval("SELECT count(*) FROM fpe_cash_transactions")
+        assert after == before
+
+
+async def test_link_does_not_suppress_a_different_unlinked_queue(test_db_pool):
+    """3. a NEW queue with an identical body but NO explicit link → booked."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import (
+        link_existing_transaction_to_relay_queue, on_relay_send_success,
+    )
+    from datetime import datetime, timezone
+    body = "ID: 01881894579 MD: Billal Mia 01881894579(B) 400/-"
+    async with test_db_pool.acquire() as conn:
+        emp = await _seed_active_emp(conn, phone="01881894579", name="Billal Mia")
+        txn = await _insert_manual_txn(conn, emp_id=emp, amount=400)
+    await link_existing_transaction_to_relay_queue(
+        txn_id=txn, queue_id=96740, inbound_message_ref="WAMID96740",
+        reason="test", approved_by="Shah Azim")
+
+    # a genuinely new relay event, identical body, DIFFERENT queue id, no link
+    res = await on_relay_send_success(_queue_row(96741, body))
+    assert res["booked"] == 1
+    async with test_db_pool.acquire() as conn:
+        assert await _count_txns(conn, "payment-relay-send:96741:") == 1
+        assert await _count_txns(conn, "payment-relay-send:96740:") == 0
+
+
+async def test_link_is_never_inferred_from_employee_amount_date_method(test_db_pool):
+    """4. same employee / amount / date / method but a DIFFERENT queue with no
+    explicit link → NOT treated as reconciled (books normally)."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import (
+        link_existing_transaction_to_relay_queue, on_relay_send_success,
+    )
+    from datetime import datetime, timezone
+    body = "ID: 01881894579 MD: Billal Mia 01881894579(B) 400/-"
+    async with test_db_pool.acquire() as conn:
+        emp = await _seed_active_emp(conn, phone="01881894579", name="Billal Mia")
+        # a manual txn: emp/amount/date/method all match the relay body
+        txn = await _insert_manual_txn(conn, emp_id=emp, amount=400, method="bkash")
+        await _insert_sent_queue_row(conn, 96742, body, datetime.now(timezone.utc))
+    # link it to a DIFFERENT queue id
+    await link_existing_transaction_to_relay_queue(
+        txn_id=txn, queue_id=99999, inbound_message_ref="WAMIDX",
+        reason="test", approved_by="Shah Azim")
+
+    res = await on_relay_send_success(_queue_row(96742, body))
+    assert res["booked"] == 1, "matching facts must NOT auto-reconcile without an explicit link for THIS queue"
+    async with test_db_pool.acquire() as conn:
+        assert await _count_txns(conn, "payment-relay-send:96742:") == 1
+
+
+async def test_unlinked_queue_6725_style_books_normally(test_db_pool):
+    """5. a queue with no link and no relay txn → normal canonical booking,
+    existing inactive employee reused + activated."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import on_relay_send_success
+    from decimal import Decimal
+    body = "ID: 01849258074 Saiful Operation 01849258074(N) 300/-"
+    async with test_db_pool.acquire() as conn:
+        emp = await conn.fetchval(
+            """INSERT INTO fpe_employees
+                   (full_name, name_normalized, primary_phone, employee_id_phone,
+                    status, created_source, resolution_status, basic_salary)
+               VALUES ('Saiful Islam','saiful islam','01849258074','01849258074',
+                       'inactive','whatsapp_auto_create','resolved',10000) RETURNING id""")
+    res = await on_relay_send_success(_queue_row(96725, body))
+    assert res["booked"] == 1
+    async with test_db_pool.acquire() as conn:
+        t = await conn.fetchrow(
+            "SELECT employee_id, amount, transaction_status FROM fpe_cash_transactions "
+            "WHERE source_message_id='payment-relay-send:96725:0'")
+        assert t["employee_id"] == emp and t["amount"] == Decimal("300.00")
+        assert t["transaction_status"] == "final"
+        assert await conn.fetchval("SELECT status FROM fpe_employees WHERE id=$1", emp) == "active"
+        assert await conn.fetchval(
+            "SELECT count(*) FROM fpe_employees WHERE primary_phone='01849258074'") == 1
+
+
+async def test_link_preserves_all_original_provenance_and_ledger(test_db_pool):
+    """6. linking does not change amount / category / employee_id / ledger /
+    manual provenance."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import link_existing_transaction_to_relay_queue
+    from decimal import Decimal
+    async with test_db_pool.acquire() as conn:
+        emp = await _seed_active_emp(conn, phone="01881894579", name="Billal Mia")
+        txn = await _insert_manual_txn(conn, emp_id=emp, amount=400, method="bkash", category="advance")
+        before = dict(await conn.fetchrow(
+            "SELECT amount, txn_category, employee_id, source, source_channel, "
+            "source_message_id, created_by, is_reversal FROM fpe_cash_transactions WHERE id=$1", txn))
+        led_before = await conn.fetchval(
+            "SELECT total_paid FROM fpe_employee_ledger WHERE employee_id=$1", emp)
+
+    await link_existing_transaction_to_relay_queue(
+        txn_id=txn, queue_id=96743, inbound_message_ref="3EB0A967FF6CED3A904318",
+        reason="test", approved_by="Shah Azim")
+
+    async with test_db_pool.acquire() as conn:
+        after = dict(await conn.fetchrow(
+            "SELECT amount, txn_category, employee_id, source, source_channel, "
+            "source_message_id, created_by, is_reversal, metadata FROM fpe_cash_transactions WHERE id=$1", txn))
+        led_after = await conn.fetchval(
+            "SELECT total_paid FROM fpe_employee_ledger WHERE employee_id=$1", emp)
+        for k in ("amount", "txn_category", "employee_id", "source", "source_channel",
+                  "source_message_id", "created_by", "is_reversal"):
+            assert before[k] == after[k], f"{k} changed: {before[k]!r} -> {after[k]!r}"
+        assert led_before == led_after == Decimal("400.00")
+        import json as _j
+        md = after["metadata"]
+        md = _j.loads(md) if isinstance(md, str) else md
+        assert md["admin_api"] is True                     # original key preserved
+        assert md["relay_reconciled_queue_id"] == 96743
+        assert md["relay_reconciliation_type"] == "existing_manual_booking"
+        assert md["relay_inbound_message_ref"] == "3EB0A967FF6CED3A904318"
+
+
+async def test_link_audit_row_is_exactly_once_idempotent(test_db_pool):
+    """7. the reconciliation-link audit row is written exactly once; re-linking
+    the same (txn, queue) is a no-op with no extra audit row; relinking to a
+    different queue is refused."""
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import link_existing_transaction_to_relay_queue
+    async with test_db_pool.acquire() as conn:
+        emp = await _seed_active_emp(conn, phone="01881894579", name="Billal Mia")
+        txn = await _insert_manual_txn(conn, emp_id=emp, amount=400)
+
+    r1 = await link_existing_transaction_to_relay_queue(
+        txn_id=txn, queue_id=96744, inbound_message_ref="WAMID96744",
+        reason="test", approved_by="Shah Azim")
+    r2 = await link_existing_transaction_to_relay_queue(
+        txn_id=txn, queue_id=96744, inbound_message_ref="WAMID96744",
+        reason="test again", approved_by="Shah Azim")
+    assert r1.get("linked") is True
+    assert r2.get("already_linked") is True and "linked" not in r2
+
+    async with test_db_pool.acquire() as conn:
+        n = await conn.fetchval(
+            "SELECT count(*) FROM fpe_accounting_audit_logs "
+            "WHERE entity_type='transaction' AND entity_id=$1 AND action='relay_reconciliation_link'", txn)
+        assert n == 1, f"expected exactly one link-audit row, got {n}"
+
+    # relinking to a DIFFERENT queue is refused
+    with pytest.raises(ValueError):
+        await link_existing_transaction_to_relay_queue(
+            txn_id=txn, queue_id=90000, inbound_message_ref="X",
+            reason="x", approved_by="Shah Azim")
+
+
+async def test_link_refuses_reversal_and_deleted(test_db_pool):
+    import app.database as db_module
+    db_module._pool = test_db_pool
+    from modules.payment_relay_accounting import link_existing_transaction_to_relay_queue
+    async with test_db_pool.acquire() as conn:
+        emp = await _seed_active_emp(conn, phone="01881894579", name="Billal Mia")
+        rev = await conn.fetchval(
+            """INSERT INTO fpe_cash_transactions
+                   (txn_ref, employee_id, amount, txn_date, txn_category,
+                    accounting_period, created_by, source, transaction_status, is_reversal)
+               VALUES ('fpe-rev-x',$1,-400,'2026-08-30','advance','2026-08','sys',
+                       'manual','final',TRUE) RETURNING id""", emp)
+        deleted = await conn.fetchval(
+            """INSERT INTO fpe_cash_transactions
+                   (txn_ref, employee_id, amount, txn_date, txn_category,
+                    accounting_period, created_by, source, transaction_status,
+                    is_reversal, deleted_at, deleted_by)
+               VALUES ('fpe-del-x',$1,400,'2026-08-30','advance','2026-08','sys',
+                       'manual','final',FALSE, NOW(), 'sys') RETURNING id""", emp)
+    with pytest.raises(ValueError):
+        await link_existing_transaction_to_relay_queue(
+            txn_id=rev, queue_id=1, inbound_message_ref="x", reason="x", approved_by="x")
+    with pytest.raises(ValueError):
+        await link_existing_transaction_to_relay_queue(
+            txn_id=deleted, queue_id=2, inbound_message_ref="x", reason="x", approved_by="x")
 
 
 # ══ BLOCKER A ═══════════════════════════════════════════════════════════════
