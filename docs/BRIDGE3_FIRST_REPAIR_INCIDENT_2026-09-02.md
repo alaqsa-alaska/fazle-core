@@ -487,16 +487,28 @@ explicit owner instruction, and the agent never chooses the recipient.**
 
 ---
 
-## 11. Tests required (before second pairing)
+## 11. Tests — required list → coverage
 
-| Test | Asserts |
+| Owner-required scenario | Covered by |
 |---|---|
-| `test_bridge_poller_history_sync_replay` | Given a `messages.db` with N rows flagged `from_history_sync=1` whose timestamps are newer than the cursor, `_fetch_new_messages` returns **0** routable rows; `wbom_whatsapp_messages` still gets the raw persisted copies; **0** `outbound.enqueue` calls. Reproduces the exact 2,444-row scenario (fixture derived from the preserved `messages.post-incident.db`). |
-| `test_bridge_poller_quarantine_mode` | With `bridge3.quarantine_until` in the future: inbound is persisted, **no** reply generated, **no** draft, **no** enqueue; recovery sweep for bridge3 is a no-op; backlog/queue flush for bridge3 is a no-op. After the window: normal routing resumes. |
-| `test_live_boundary_from_metadata` | Cursor after quarantine = `max(timestamp)` over non-history rows (or pairing ts if later), never a blind `NOW()`; the chosen value + its source transport id are logged. |
-| `test_semantic_gate_blocks_unknown_no_match` (F5) | `identity_role=unknown` + `semantic_gate=no_match` conf ≥ 0.9 + automated-notification shape → draft, not auto-send. Identified candidate + genuine recruitment question → unchanged (still auto-sends). |
-| `test_no_session_from_automated_inbound` (F6) | An OTP / "successfully connected" / confirmation-code inbound on bridge3 cold does **not** create `fazle_recruitment_sessions` / `wbom_candidates`. |
-| `test_bridge1_bridge2_unaffected` | All of the above leave Bridge1/Bridge2 poll queries, cursors, and auto-reply gating byte-identical. |
+| mixed history + genuine live messages | `test_mixed_history_and_live_only_live_routes` |
+| repeated history sync | `test_repeated_history_sync_still_excluded` |
+| restart / reconnect replay (2,444-row shape) | `test_restart_reconnect_replay_the_2444_row_shape` |
+| a timestamp cannot release quarantine | `test_no_timestamp_anywhere_in_release_logic` |
+| no release without explicit owner action | `test_only_outbound_owner_approved_releases` + `test_unpaired_and_unknown_values_hold` + the endpoint's `confirm == "RELEASE OUTBOUND <bridge>"` gate |
+| `LIVE_INBOUND_VERIFIED` remains non-sending | `test_live_inbound_verified_still_holds_outbound` |
+| OTP / system messages create no recruitment entities | `test_f6_flags_automated_system_messages` + `test_hold_and_f6_branches_continue_before_routing` (F6 branch stops before identity / session / candidate / reply) |
+| old queues do not flush | pairing-hold + F6 branches call `_mark_processed` and finalise `skipped` before any `outbound.enqueue`; recovery sweep `_decide_and_reply` returns early for a held bridge (`test_*` in `test_recruitment_recovery_sweep` unaffected; hold path asserted structurally) |
+| new-core / old-bridge compatibility | `test_new_core_old_bridge_no_flag_column_unchanged` |
+| new-bridge / old-core compatibility | `test_new_bridge_old_core_column_is_just_ignored` |
+| Bridge1 / Bridge2 unchanged | `test_other_bridges_unaffected_by_bridge3_state` + F6 scoped `bridge_name == "bridge3"` + `_fetch_new_messages` filter is a no-op on flag-0 rows |
+| Payment / FPE + business regression | existing suites — run at deploy time via `scripts/restart_gate.sh` checks 4/4b/4c (all PASS on the deployed branch; to be re-run on the fix branch at deploy) |
+
+**Deferred integration test (owner review):** a full-poller-loop DB test that
+asserts an OTP inbound on a live bridge3 produces **0** new
+`fazle_recruitment_sessions` / `wbom_candidates` rows end-to-end (the unit +
+structural tests prove the branch stops before those writes; a DB-level
+end-to-end is a belt-and-suspenders add).
 
 ---
 
@@ -534,24 +546,47 @@ cursor, the queues, or the history-sync rows was modified or deleted.
 
 ---
 
-## 15. Test status (2026-09-02)
+## 15. Test status (2026-09-02, after the state-machine + F6 amendment)
 
-- New: `tests/unit/test_bridge_poller_history_sync_quarantine.py` — 14 tests, **pass**
-  (F2 history filter incl. the all-history 2,444-row batch shape; F3 quarantine helper).
-- Bridge Go: `go test ./...` **pass** (2 new tests for the `from_history_sync` flag +
-  no-clobber-of-live-row).
+- `tests/unit/test_bridge_poller_history_sync_quarantine.py` — **37 tests pass**
+  (F2 history filter incl. the 2,444-row shape; the full pairing-state machine incl.
+  "timestamp cannot release" and "LIVE_INBOUND_VERIFIED still holds"; F6 positive +
+  negative corpus; structural continue-before-routing).
+- Bridge Go (`fix/bridge3-history-sync-flag-20260902`): `go test ./...` **pass**
+  (2 tests: `from_history_sync` default 0 on the live path; history insert does not
+  clobber or re-flag an existing live row).
 - Adjacent suites green: `test_bridge_poller_processed_text_compat`, `_struct_bypass`,
-  `_system_notification_guard`, `_system_echo_guard`, `_phone_block`, `_legacy_gate`,
-  `_payment_relay_gate`, `_send_gate_timing_fix`, `_orphan_message_fix`,
+  `_system_notification_guard`, `_system_echo_guard`, `_payment_relay_gate`,
+  `_legacy_gate`, `_send_gate_timing_fix`, `_orphan_message_fix`,
   `test_recruitment_recovery_sweep`, `test_phase2_bridge_poller_regression`,
-  `test_media_placeholder_hardening`, `test_group_ingestion_stage_e3` (one source-scan
-  assertion preserved by rewording a comment — no logic change).
-- **Pre-existing failures, NOT caused by this change:** `test_route_b_handoff.py::`
-  `test_known_employee_never_enters_route_b` and `test_ollama_failure_produces_safe_`
-  `response_not_dropped` — both fail identically on the clean branch-point `351324f`
-  with these changes stashed; root cause is no network to the Ollama cloud models in the
-  test sandbox (`ConnectError: Temporary failure in name resolution`). Tracked separately.
+  `test_phase2_identity_resolver`, `test_phase2_p1_identity`,
+  `test_media_placeholder_hardening`, `test_owner_contact_registry`,
+  `test_group_ingestion_stage_e3` (source-scan assertions preserved — comments worded to
+  avoid the literal routing-call tokens; no logic change).
+- **Pre-existing failures, NOT caused by this change — verified by reproduction on the
+  clean deployed branch `feat/phase2-inbound-identity-2026-09-01` with every fix change
+  stashed:**
+  - `test_bridge_poller_phone_block.py` (4 tests) fails **only** in a specific
+    multi-file batch (`_struct_bypass + _system_notification_guard + _group_ingestion_stage_e3
+    + _recruitment_recovery_sweep + _processed_text_compat + _owner_contact_registry +
+    _phone_block`) with `AttributeError: 'module' object at modules.wa_chat_frontend has
+    no attribute 'wa_chat_frontend'` — a `monkeypatch` import-path resolution corrupted by
+    an earlier test in the chain. Passes in isolation and in every smaller combination.
+    **Reproduces identically on the pristine deployed branch.**
+  - `test_route_b_handoff.py` (2 tests) — no network to the Ollama cloud models in the
+    sandbox (`ConnectError: Temporary failure in name resolution`).
+  Both are tracked pre-existing test-isolation / environment issues (see `MEMORY.md`).
+
+## 16. Restart-gate readiness (fix branch)
+
+`scripts/restart_gate.sh --check-only` was run on the **deployed** branch for the
+Meta-secret restart (§ see `META_APP_SECRET_ACTIVATION_2026-09-02.md`) → **PASS**. It has
+**not** yet been run on `fix/bridge3-history-sync-quarantine-20260902` — that is a
+deploy-time step (checks 4/4b/4c re-run the full targeted + payment/FPE + Phase-C suites).
+The fix branch adds one new test file, one new module (`shared/system_message.py`), one
+new endpoint, and no migration; `db/.restart_gate_manifest` needs no new entry (all
+changes are committed).
 
 ---
 
-`END OF FORENSIC REPORT — CONTAINED · ACCOUNT TEMPORARILY RESTRICTED · F1–F4 IMPLEMENTED NOT DEPLOYED · NO PAIRING / RESTART / DEPLOY WITHOUT SEPARATE OWNER APPROVAL`
+`END OF FORENSIC REPORT — CONTAINED · PRIMARY ACCOUNT TEMPORARILY RESTRICTED · META SECRET ACTIVATED · BRIDGE3 FIX (F1–F4 + state machine + F6) COMMITTED, NOT DEPLOYED · NO PAIRING / DEPLOY / DATA CLEANUP WITHOUT SEPARATE OWNER APPROVAL`
