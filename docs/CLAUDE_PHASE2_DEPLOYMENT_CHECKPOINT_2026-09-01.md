@@ -139,4 +139,108 @@ Core branch `feat/phase2-inbound-identity-2026-09-01` is now at **`2035641`** (8
 - `origin/feat/owner-accountant-payment-relay-20260830` still `5e62ed5` — untouched.
 - `966e1c9` contained only in this branch — NOT merged into `main` (still `0f5ef31`) or any other.
 
-### Stage 7 — deploy core (Phase-2 OFF) — IN PROGRESS 2026-09-01T19:10Z
+### Stage 7 — deploy core (Phase-2 OFF)
+
+**Attempt 1 (2026-09-01T19:10Z) — gate BLOCKED, restart ABORTED, production UNTOUCHED.**
+
+`scripts/restart_gate.sh --restart`: checks 1, 2, 3, 4, 4c, 5, 5b, 6, 7 → PASS.
+**Check 4b → BLOCK**: `test_recruitment_salary_context_routing_fix.py::
+test_recruitment_eligible_empty_reply_never_falls_to_employee_verification`
+→ **`Failed: Timeout >30.0s`** (pytest-timeout wall clock, `pytest.ini: timeout=30`).
+Gate correctly aborted before touching the service — **`fazle-core` PID 3115745,
+NRestarts=0, unchanged.** Rollback point intact.
+
+**Root-caused as an ENVIRONMENTAL (CPU-contention) artifact, NOT a code defect:**
+| Evidence | Result |
+|---|---|
+| Failing test in isolation (my branch) | **PASS**, 3.5s CPU |
+| Exact check-4b 6-suite recruitment batch at **baseline `5e62ed5`** (git worktree) | **PASS** (92 tests, 20s wall, 7.6s CPU) |
+| Same batch on my branch `8070bfb` (isolated) | **PASS** (92 tests, 63s **wall** but **8.9s CPU** — identical CPU work to baseline; the 43s gap is pure scheduler wait) |
+| Box state during Attempt 1 | `load1` ~8/8 cores (100%) — my acceptance-gate test runs + gate's own check-4 + a live `hermes-agent` LLM call (75% spike, real inbound recruitment candidate) + persistent IDE tooling (VSCode-server 25% / copilot 12% / kilo 9% / claude-code 9%) |
+| My `identity_brain` / `message_router` changes | add **no** `await`, no hot-path DB round-trip, no lock — a code hang would show as an assertion failure (mis-route), not a 30s wall timeout |
+| conftest.py:1093 | already documents this exact fragility: "task's turn can be delayed past pytest's fixed 30s test timeout" |
+
+The gate's 30s per-test timeout was **not weakened or bypassed** (§7). Retrying the
+gate when the box is not CPU-saturated. If it blocks again on the same wall-timeout,
+this is recorded as an OWNER action (re-run the gate in a quiet window) — the
+restart is NOT forced.
+
+**Attempt 2 — 2026-09-01T19:18:34Z — RESTART: SUCCESS.**
+
+Box at `load1 4.51` (a lower moment). `scripts/restart_gate.sh --restart`:
+**all 10 checks PASS** (1, 2, 3, 4, **4b** ✓ this time, 4c 14/14, 5, 5b, 6, 7).
+Check 8 pre-restart health `ok`. Restarted. Check 9: startup-complete 8s,
+first healthy `/health` 8s (overall `ok`). **RESTART: SUCCESS.**
+
+| Post-restart evidence (19:20:57Z) | Value |
+|---|---|
+| Old PID → New PID | **3115745 → 2981971** |
+| `NRestarts` | **0** (clean `systemctl restart`, not a crash-loop) |
+| `ActiveEnterTimestamp` | 2026-09-01 21:20:33 CEST |
+| Loaded revision | **NEW code** — `/api/identity/search-by-name` + `/api/whatsapp/contact/summary` now **HTTP 200** (were 404 pre-restart) |
+| git HEAD (unchanged by restart) | `8070bfb` on `feat/phase2-inbound-identity-2026-09-01` |
+| **`PHASE2_IDENTITY_RESOLVER_ENABLED`** | **NOT in `/proc/2981971/environ`** → default **OFF** — enrichment is DARK ✓ |
+| `/health` | `degraded` — **only** the `cpu` probe (`load1` 6.99/8, ambient IDE load); every other probe `ok`. Check-9 saw `ok` at the 8s mark. Not a service failure — no rollback (§10). |
+| Error log post-restart window | **0** Traceback / CRITICAL |
+| Startup log | `Finished server process [3115745]` (clean exit) → `Started server process [2981971]` → `Application startup complete.` → `Uvicorn running` |
+| Bridges | **UNTOUCHED** — PIDs 3640163 / 3688844 / 2589884, `NRestarts=0`, started 2026-08-29 |
+| `.env` | not modified. `schema_migrations` still 84 (no migration applied). |
+
+**Rollback point (unchanged):** `feat/owner-accountant-payment-relay-20260830 @ 5e62ed5` — `git checkout` it + `restart_gate.sh --restart`.
+
+### Stage 8 — post-deploy smoke verification — DONE 2026-09-01T19:24Z — **ALL PASS**
+
+| Layer | Check | Result |
+|---|---|---|
+| **Transport** | 3 bridge pollers | `ok`, age ~22s, `queue_depth 0` |
+| | bridge DBs | b1/b2 current, b3 `quiet_but_poller_healthy` (logged out — expected) |
+| | outbound queue | `pending 0`, `dlq 102`, `actionable_dlq 6` — **identical to pre-deploy** (102/6), no spike, no duplication |
+| | error rate | **0** ERROR/CRITICAL/Traceback in the post-restart window; 0 in the comparable 20-min pre-restart window |
+| **Routing** | `/api/identity/resolve` accountant | `role=accountant, source=settings, confidence=100` — **new Step 1b LIVE** (was `source=seed_rule`) |
+| | `/api/identity/resolve` known employee | `role=escort, source=db_employee` — **NOT clobbered** |
+| | `/api/identity/resolve` inactive/former number | resolves (not `unknown`) |
+| **Persistence** | `sender_name_snapshot` / `canonical_message_key` / `resolved_phone` populated rows | **0 / 0 / 0** — flag OFF, enrichment DARK ✓ |
+| | `unresolved:` rows with `canonical_phone` | **0** of 298 — LID sentinel never a phone |
+| | new `01…`-local `canonical_phone` since restart | **0** — always-on normalizer converts `01`→`8801` |
+| **Accounting** | latest payment-relay txn | `id 4510` (17:03, ~2h pre-restart) — key `payment-relay-send:7747:0`, `created_by=payment_relay_accounting` — **frozen path booking normally** |
+| | frozen-path files in deployed diff | **0** (`payment_relay*` / `fazle_payroll_engine` / `modules/outbound` / `payment_workflow` / `payment_ingest`) |
+| | new relay txns since restart | 0 (expected — no owner→accountant payment in the window) |
+| **Platform** | `/health` | overall **`ok`** — db / bridge1-3_db / poller_b1-3 / outbound / scheduler / ollama (9 models) / qdrant all `ok`. The earlier `degraded` was ambient `cpu` only, now recovered. |
+| | `NRestarts` | **0** — no crash-loop |
+| | bridges | **untouched** — PIDs / `ActiveEnterTimestamp` unchanged (2026-08-29) |
+
+**No smoke check failed. Deploy is healthy. No rollback.**
+
+### Stage 9 — MCP review / push / deploy — DONE (deploy deferred to owner) 2026-09-01T19:26Z
+
+| Step | Result |
+|---|---|
+| Review | DONE (Stage 3) — my 2 tools additive, read-only, PII-masked, bounded |
+| Commit | `8a3f7f0` on `recovery-2026-08-25` — **my Phase-2 tools ONLY** |
+| Stage D8/E9 | `git stash` in `fazle-mcp` → `stash@{0}` "Stage-D8E9-prior-session-work-PRESERVED-for-owner-review". Working tree now clean == `8a3f7f0`. |
+| Push | `git push origin recovery-2026-08-25` (no force, `852043f..8a3f7f0`) — remote == local, verified |
+| `server.py` on disk | imports clean, 129 tools, my 2 register, Stage D8/E9 absent |
+| Endpoint targets (live, deployed in core) | **all verified** — exact-phone query (provenance preserved), cursor pagination (page2 distinct), `message_body_contains` ILIKE, `search-by-name` ambiguous → `resolved:null/ambiguous:true`, no-match → `count 0` (never guesses), `contact/summary` bounded + provenance on every row |
+| **MCP server RELOAD** | **OWNER_ACTION** — the MCP stdio server (PID 64399, up since Aug 21) has **no systemd unit**; it is spawned by a manually-run `hermes` agent (PID 64377) that serves live admin/customer traffic, and its watchdog (`mcp_stdio_watchdog.py`) is parent-death-only (does NOT respawn on child kill). `kill 64399` risks dropping an in-flight Hermes conversation with no guaranteed respawn. Zero urgency (additive read-only tools). `server.py` on disk is already the reviewed `8a3f7f0`, so whenever the agent next cycles the MCP server it loads exactly that. |
+
+### Stage 10 — observation window — STARTED 2026-09-01T19:26Z
+
+`OBSERVATION WINDOW STARTED`
+- start: 2026-09-01T19:26Z (deploy 19:20:33Z)
+- earliest review: **+24h → 2026-09-02T19:26Z**
+- preferred final review: **+48h → 2026-09-03T19:26Z**
+- checklist: `docs/CLAUDE_PHASE2_OBSERVATION_2026-09-01.md`
+- resume: **`RESUME CLAUDE PHASE2 OBSERVATION REVIEW`**
+
+`PHASE2_IDENTITY_RESOLVER_ENABLED` remains **absent from `.env`** — Phase-2 enrichment stays DARK through the window. Enabling it requires a **separate explicit owner instruction** after the observation review (§14).
+
+No durable scheduled monitor was created (avoids duplicating the owner's own monitoring / restart gate / `/health`, per §13's "no notification spam"). The owner may add a read-only daily snapshot cron if desired.
+
+---
+
+## Session end state (2026-09-01T19:26Z)
+
+- **core**: `feat/phase2-inbound-identity-2026-09-01 @ 8070bfb` — **pushed**, **DEPLOYED** (PID 2981971, `NRestarts=0`, health `ok`), Phase-2 flag **OFF**.
+- **rollback**: `feat/owner-accountant-payment-relay-20260830 @ 5e62ed5` (== origin) — `git checkout` + `restart_gate.sh --restart`.
+- **fazle-mcp**: `recovery-2026-08-25 @ 8a3f7f0` — **pushed**; MCP server **not yet reloaded** (owner action); Stage D8/E9 in `stash@{0}`.
+- production mutations this session: `git push` (core + mcp) · `fazle-core.service` restart (through the gate) · nothing else. `.env` untouched. No migration applied. No message sent. Bridges untouched.
