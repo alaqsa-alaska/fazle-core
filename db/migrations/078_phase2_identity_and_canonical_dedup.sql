@@ -14,7 +14,11 @@
 --
 -- Does NOT change semantics of any existing column, FK, trigger, UNIQUE, or
 -- default. Live traffic continues unaffected because every new column is NULL
--- until the new persist_inbound_central() helper writes to it.
+-- until a Phase-2 write path populates it (bridge_poller._phase2_enrich_raw_copy
+-- and app.main._save_message), and those only run when the env flag
+-- PHASE2_IDENTITY_RESOLVER_ENABLED is set (default OFF).
+-- [2026-09-01: comment corrected — the originally-referenced
+--  persist_inbound_central() helper was removed before deployment.]
 --
 -- Idempotent: every statement uses IF NOT EXISTS / DO blocks so a re-apply
 -- against an already-migrated DB is a no-op.
@@ -55,9 +59,14 @@ END $$;
 
 -- 3. Partial index: canonical_message_key (cross-bridge grouping) -----------------
 -- Only bridge-platform rows have a canonical_message_key; partial keeps the
--- index small. Used by:
---   (a) action-layer cross-bridge dedup (process_bridge_inbound pre-check)
---   (b) forensic "show all bridges that observed this physical message"
+-- index small. FORENSIC / OBSERVABILITY ONLY — supports "show every bridge
+-- that observed this physical message". canonical_message_key is NOT read by
+-- any code path to gate a business action, and must never be wired into
+-- process_bridge_inbound or any payment/admin/attendance/recruitment
+-- idempotency check. Transport-row dedup stays on UNIQUE(message_hash);
+-- business idempotency stays on the specific transaction/stanza key.
+-- [2026-09-01: comment corrected — the earlier "action-layer dedup pre-check"
+--  consumer was never built; the content+time heuristic was removed.]
 CREATE INDEX IF NOT EXISTS idx_wbom_msg_canonical_key
     ON wbom_whatsapp_messages (canonical_message_key, platform, received_at DESC)
     WHERE canonical_message_key IS NOT NULL
