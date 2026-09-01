@@ -438,6 +438,19 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
         decision["reason"] = "empty_phone_or_text"
         return decision
 
+    # Pairing quarantine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02): if the
+    # source bridge is inside its post-pairing settling window, this sweep must
+    # not message that population either — the live poller is already holding
+    # every inbound on that bridge as persist-only. Defense-in-depth: the sweep
+    # reads wbom_whatsapp_messages directly, not the poller.
+    try:
+        from modules.bridge_poller import _bridge_quarantine_until
+        if await _bridge_quarantine_until(source_bridge) is not None:
+            decision["reason"] = f"bridge_pairing_quarantine:{source_bridge}"
+            return decision
+    except Exception:
+        pass
+
     try:
         from modules.identity_brain import detect_identity
         identity = await detect_identity(phone, text)

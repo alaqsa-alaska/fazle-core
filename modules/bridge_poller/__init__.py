@@ -164,6 +164,35 @@ async def _set_cursor(bridge: str, ts: datetime):
     )
 
 
+async def _bridge_quarantine_until(bridge: str) -> Optional[datetime]:
+    """Pairing quarantine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02).
+
+    Returns the UTC datetime until which `bridge` is in receive/persist-only
+    mode, or None if not quarantined. Controlled by the sanctioned runtime
+    setting ``<bridge>.quarantine_until`` (ISO-8601) in fazle_runtime_settings.
+    While active, inbound is still persisted (raw copy + wbom_whatsapp_messages)
+    but NOT routed: no identity resolution, no reply/draft, no outbound enqueue,
+    no recovery-sweep pickup — nothing that can send. Set it just before a
+    fresh pairing; clear it (or let it expire) once the live-session boundary
+    is confirmed. Fail-open: any parse/lookup error → not quarantined (logged),
+    because a broken setting must never silently freeze a healthy bridge.
+    """
+    try:
+        from modules.wa_chat_frontend import get_runtime_setting
+        raw = (await get_runtime_setting(f"{bridge}.quarantine_until", "") or "").strip()
+        if not raw:
+            return None
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= ts:
+            return None
+        return ts
+    except Exception as exc:  # noqa: BLE001 — fail-open, never freeze a healthy bridge
+        log.warning("[quarantine] %s.quarantine_until unreadable (%s) — treating as NOT quarantined", bridge, exc)
+        return None
+
+
 async def _get_outgoing_cursor(bridge: str) -> datetime:
     """Return the last processed outgoing timestamp for this bridge.
     Defaults to NOW()-5min on first run to pick up recent admin completions."""
@@ -359,6 +388,17 @@ def _fetch_new_messages(
         _pt_select = "processed_text" if _has_processed_text else "NULL AS processed_text"
         _pt_where = "OR processed_text IS NOT NULL" if _has_processed_text else ""
 
+        # `from_history_sync` (bridge binary 2026-09-02+): 1 for rows written by
+        # whatsmeow's history-sync backfill on a fresh device link, 0 for live
+        # deliveries. Historical/imported messages are preserved in messages.db
+        # for search but MUST NOT enter live business routing — see
+        # docs/BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02.md (a re-pair replayed
+        # ~2,444 old messages and one was auto-answered). Schema-tolerant: a
+        # store from an older bridge binary lacks the column, in which case the
+        # filter is omitted (byte-identical to prior behaviour).
+        _has_hist_flag = has_column(con, "messages", "from_history_sync")
+        _hist_where = "AND COALESCE(from_history_sync, 0) = 0" if _has_hist_flag else ""
+
         # Normalize cursor boundary to UTC so bridge-local timezone offsets
         # cannot cause false "older/newer" comparisons in SQLite filtering.
         ts_utc = since_ts.astimezone(timezone.utc).replace(microsecond=0)
@@ -381,6 +421,7 @@ def _fetch_new_messages(
             FROM messages
             WHERE is_from_me = 0
               AND datetime(timestamp) > datetime(:since)
+              {_hist_where}
               AND chat_jid NOT LIKE '%@newsletter'
               AND chat_jid != 'status@broadcast'
               AND (chat_jid NOT LIKE '%@g.us' OR {_group_exception_sql})
@@ -403,12 +444,17 @@ def _fetch_new_messages(
         # accurate (same _group_exception_sql/_query_params as the main
         # query above).
         try:
+            _hist_count_sql = (
+                "SUM(CASE WHEN COALESCE(from_history_sync, 0) = 1 THEN 1 ELSE 0 END) AS history_sync"
+                if _has_hist_flag else "0 AS history_sync"
+            )
             skipped_row = con.execute(
                 f"""
                 SELECT
                   SUM(CASE WHEN chat_jid LIKE '%@g.us' AND NOT ({_group_exception_sql}) THEN 1 ELSE 0 END) AS groups,
                   SUM(CASE WHEN chat_jid LIKE '%@newsletter' THEN 1 ELSE 0 END) AS newsletters,
-                  SUM(CASE WHEN chat_jid = 'status@broadcast' THEN 1 ELSE 0 END) AS status
+                  SUM(CASE WHEN chat_jid = 'status@broadcast' THEN 1 ELSE 0 END) AS status,
+                  {_hist_count_sql}
                 FROM messages
                 WHERE is_from_me = 0
                   AND datetime(timestamp) > datetime(:since)
@@ -427,6 +473,14 @@ def _fetch_new_messages(
                 if skipped_row["status"]:
                     _obs.inc("messages_skipped_total", value=float(skipped_row["status"]),
                              labels={"reason": "status", "db": bn})
+                if skipped_row["history_sync"]:
+                    _obs.inc("messages_skipped_total", value=float(skipped_row["history_sync"]),
+                             labels={"reason": "history_sync", "db": bn})
+                    log.info(
+                        "[history_sync_guard] db=%s excluded %s history-sync row(s) from routing "
+                        "(preserved in messages.db, never routed)",
+                        messages_db, skipped_row["history_sync"],
+                    )
         except Exception as _sk_err:
             log.debug(f"skipped-count query failed: {_sk_err}")
         con.close()
@@ -948,6 +1002,12 @@ async def _poll_bridge(config: dict):
             unresolved_router_skipped = 0
             group_read_index_saved = 0  # Stage E3: approved-group messages, persisted, never routed
             media_unprocessed_skipped = 0  # bare [media:*] placeholder, no caption/OCR/STT — never routed
+            quarantine_persist_only = 0  # pairing quarantine: persisted, never routed
+
+            # Pairing quarantine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02):
+            # computed once per cycle. When set, every inbound this cycle is
+            # persisted but not routed — no reply, no draft, no enqueue.
+            _quar_until = await _bridge_quarantine_until(bridge_name)
 
             for msg in messages:
                 msg_id: str = msg["id"]
@@ -1008,6 +1068,38 @@ async def _poll_bridge(config: dict):
                 if _group_chat_jid.endswith("@g.us"):
                     group_read_index_saved += 1
                     await _mark_core_queue_status(bridge_name, msg, "skipped", "group_read_index_only")
+                    continue
+
+                # Pairing quarantine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02):
+                # while this bridge is inside its post-pairing settling window,
+                # PERSISTENCE != AUTOMATION. The raw copy is already written
+                # (_save_raw_core_copy above); we finalize the canonical row and
+                # the queue row to a terminal state and stop HERE — before any
+                # identity lookup, media extraction, downstream routing
+                # (recruitment / employee / customer auto-reply / admin-command
+                # / Hermes relay), draft creation or outbound enqueue. The
+                # _mark_processed() call dedups it so it is never re-handled
+                # once the quarantine lifts: the live-session boundary is
+                # "messages that arrive AFTER the window", established from real
+                # message timestamps + the history-sync flag, not a blind
+                # cursor jump. Mirrors the @g.us and media_unprocessed skip
+                # discipline directly above / below.
+                if _quar_until is not None:
+                    quarantine_persist_only += 1
+                    await _mark_processed(msg_id, bridge_name, phone)
+                    await _finalize_core_copy(
+                        core_message_id, bridge_name, msg, phone, text,
+                        msg_type=msg.get("media_type") or "text",
+                        status="skipped", error="bridge_pairing_quarantine",
+                    )
+                    await _mark_core_queue_status(
+                        bridge_name, msg, "skipped", "bridge_pairing_quarantine"
+                    )
+                    log.info(
+                        "[%s] PAIRING_QUARANTINE msg_id=%s phone=%s — persisted, not routed "
+                        "(quarantine until %s)",
+                        bridge_name, msg_id, phone, _quar_until.isoformat(),
+                    )
                     continue
 
                 # Unreadable media: a bare "[media:<type>]" transport placeholder
@@ -1533,9 +1625,9 @@ async def _poll_bridge(config: dict):
                     await _mark_core_queue_status(bridge_name, msg, "failed", f"routing_error:{route_err}")
                     raise
 
-            if bridge_name == "bridge1":
+            if bridge_name == "bridge1" or _quar_until is not None or quarantine_persist_only:
                 log.info(
-                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d media_unprocessed_skipped=%d cursor_from=%s cursor_to=%s",
+                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d media_unprocessed_skipped=%d quarantine_persist_only=%d cursor_from=%s cursor_to=%s",
                     bridge_name,
                     len(messages),
                     dedup_skipped,
@@ -1543,6 +1635,7 @@ async def _poll_bridge(config: dict):
                     unresolved_router_skipped,
                     group_read_index_saved,
                     media_unprocessed_skipped,
+                    quarantine_persist_only,
                     cursor.isoformat(),
                     new_cursor.isoformat(),
                 )
