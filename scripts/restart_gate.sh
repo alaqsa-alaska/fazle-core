@@ -194,6 +194,50 @@ check5() {
     fi
 }
 
+# ── Check 5b: migrations actually applied to the live DB (read-only) ────────
+# 2026-09-01: Check 5 only proves every migration FILE is documented — it
+# does NOT prove those migrations have run against the DB the service will
+# load. Deploying code that assumes a not-yet-applied column is a real
+# failure mode (Phase-2 identity work depends on migration 078). This check
+# is strictly read-only: one `SELECT name FROM schema_migrations`, no DDL,
+# no apply. It never applies anything — a BLOCK here means "run
+# `DATABASE_URL=... python db/migrate.py` first".
+check5b() {
+    local py="venv/bin/python"
+    [[ -x "$py" ]] || py="python3"
+    local dburl
+    dburl=$(grep -oP '(?<=^DATABASE_URL=).*' /home/azim/secure-env-backup/runtime-services.env 2>/dev/null || true)
+    [[ -z "${dburl:-}" ]] && dburl=$(grep -oP '(?<=^DATABASE_URL=).*' "$ENV_FILE" 2>/dev/null || true)
+    if [[ -z "${dburl:-}" ]]; then
+        warn "5b. Migrations applied ........ DATABASE_URL not found — verify schema_migrations manually"
+        return
+    fi
+    local pending rc
+    pending=$(DATABASE_URL="$dburl" "$py" - <<'PYEOF' 2>/dev/null
+import asyncio, os, glob, asyncpg
+async def main():
+    files = {os.path.basename(p) for p in glob.glob("db/migrations/*.sql")}
+    con = await asyncpg.connect(os.environ["DATABASE_URL"], timeout=10)
+    try:
+        applied = {r["name"] for r in await con.fetch("SELECT name FROM schema_migrations")}
+    finally:
+        await con.close()
+    print(" ".join(sorted(files - applied)))
+asyncio.run(main())
+PYEOF
+)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warn "5b. Migrations applied ........ could not query schema_migrations (read-only check skipped)"
+        return
+    fi
+    if [[ -z "$pending" ]]; then
+        pass "5b. Migrations applied ........ every db/migrations/*.sql is recorded in schema_migrations"
+    else
+        block "5b. Migrations applied ........ NOT applied to the live DB: ${pending}  (run: DATABASE_URL=... $py db/migrate.py)"
+    fi
+}
+
 # ── Check 6: .env critical flags acknowledged (warn, don't block) ──────────
 check6() {
     if [[ ! -f "$ENV_FLAGS_ACK" ]]; then
@@ -232,7 +276,7 @@ check7() {
 
 echo "Restart Gate — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "──────────────────────────────────────────────────────────"
-check1; check2; check3; check4; check4b; check5; check6; check7
+check1; check2; check3; check4; check4b; check5; check5b; check6; check7
 for r in "${RESULTS[@]}"; do echo "$r"; done
 echo "──────────────────────────────────────────────────────────"
 if [[ "$BLOCKED" -gt 0 ]]; then

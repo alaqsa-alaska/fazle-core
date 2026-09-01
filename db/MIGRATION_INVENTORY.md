@@ -115,6 +115,7 @@
 075_wbom_group_identities.sql
 076_hermes_action_approvals_business_actions.sql
 077_wbom_candidates_linked_employee.sql
+078_phase2_identity_and_canonical_dedup.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
@@ -374,7 +375,23 @@ existing CHECK altered. The `joined` lifecycle fact is an event row in
 Verified idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE ... IF NOT
 EXISTS`) on the disposable test DB before production application.
 
-**Next available number for new work: `078`.**
+**`078_phase2_identity_and_canonical_dedup.sql` (2026-08-31, Phase-2
+inbound WhatsApp identity):** purely additive on `wbom_whatsapp_messages`
+— 6 nullable columns (`sender_name_snapshot` / `_source` / `_confidence`,
+`canonical_message_key`, `resolved_phone`, `resolved_at`), 1 NULL-tolerant
+CHECK on `sender_name_source` (9-value provenance vocabulary), 2 partial
+indexes (canonical_message_key on bridge platforms; Meta
+`source_message_ref`). No existing column/FK/trigger/default changed. Every
+new column is NULL until the flag-gated Phase-2 writer populates it, so
+live traffic is unaffected whether or not `PHASE2_IDENTITY_RESOLVER_ENABLED`
+is set. Idempotent (`ADD COLUMN IF NOT EXISTS` / `DO` blocks). **Already
+applied to production 2026-08-31 20:52 UTC** (recorded in
+`schema_migrations`), ahead of the application code — safe precisely
+because it is additive-nullable. `canonical_message_key` is FORENSIC /
+OBSERVABILITY only: nothing reads it to gate a business action and it must
+never be wired into `process_bridge_inbound` or any idempotency check.
+
+**Next available number for new work: `079`.**
 
 **Known cross-directory `ALTER TABLE` touches into these tables from outside `db/migrations/`** (see Report 4 for full evidence): `fpe_cash_transactions`, `fpe_income_transactions`, `escort_roster_entries`, `wbom_escort_programs`, `fazle_payment_drafts` are each also touched by `fazle_payroll_engine/migrations/` and/or the legacy `migrations/` directory.
 

@@ -1,6 +1,6 @@
 # Deployment / Restart Gate — Design
 
-**Status:** IMPLEMENTED as a manual script — `scripts/restart_gate.sh` (all 9 checks below) — as of 2026-07-12. **Not** wired into `ExecStartPre=` (Owner decision 2026-07-12: manual-only for now, to avoid a script bug hard-blocking every future restart before it's proven itself over real use). Run it by hand, or by an AI agent under explicit instruction, before requesting a restart:
+**Status:** IMPLEMENTED as a manual script — `scripts/restart_gate.sh` (all checks below; 5b added 2026-09-01) — as of 2026-07-12. **Not** wired into `ExecStartPre=` (Owner decision 2026-07-12: manual-only for now, to avoid a script bug hard-blocking every future restart before it's proven itself over real use). Run it by hand, or by an AI agent under explicit instruction, before requesting a restart:
 ```
 scripts/restart_gate.sh --check-only   # checks 1-7 only
 scripts/restart_gate.sh --restart      # checks 1-7, then (if PASS) restarts fazle-core.service and runs checks 8-9
@@ -14,7 +14,7 @@ Supporting files created alongside it: `db/.restart_gate_manifest` (check 1), `d
 
 ---
 
-## The 9 checks
+## The 10 checks (5b added 2026-09-01)
 
 ### 1. Working-tree cleanliness or approved dirty-file manifest
 - Maintain a file, `db/.restart_gate_manifest` (plain text, one path per line, comment lines start with `#`), listing every path that is *currently* expected to be dirty (e.g. the REL-2026-07-W1 in-flight files).
@@ -38,6 +38,11 @@ Supporting files created alongside it: `db/.restart_gate_manifest` (check 1), `d
 - Every file under `db/migrations/*.sql` must have a corresponding line in `db/MIGRATION_INVENTORY.md`.
 - Gate logic: diff the `db/migrations/` directory listing against the inventory doc's file list; block on any `.sql` file not mentioned there.
 - This directly prevents a repeat of the 2026-07-08 finding (4 migration files sitting untracked and undocumented).
+
+### 5b. Migrations actually applied to the live DB (read-only)
+- **Added 2026-09-01.** Check 5 proves every migration *file* is documented; it does **not** prove those migrations have run against the database the service will load. Deploying code that assumes a not-yet-applied column/index is a real failure mode (the Phase-2 identity work depends on migration `078`).
+- Gate logic: one read-only `SELECT name FROM schema_migrations` against `DATABASE_URL` (resolved from `/home/azim/secure-env-backup/runtime-services.env`, falling back to `.env`); diff against `db/migrations/*.sql`. **Block** if any migration file is missing from `schema_migrations`. No DDL, no apply — a block means "run `DATABASE_URL=... python db/migrate.py` first".
+- If `DATABASE_URL` can't be resolved or the DB can't be reached, this **warns** (does not block) and asks for a manual check, so a credential/network hiccup never hard-blocks a restart.
 
 ### 6. Current `.env` critical flags acknowledged
 - Maintain a short list of safety-critical flags (`AUTO_REPLY_ENABLED`, `RECRUITMENT_AUTOREPLY_ENABLED`, `SOCIAL_AUTO_REPLY_SINGLE_ENGINE`, `AI_SAFE_MODE`, `INTERNAL_NOTIFICATIONS_ENABLED`) and their last-acknowledged values (`db/.env_flags_acknowledged`, key=value pairs).
