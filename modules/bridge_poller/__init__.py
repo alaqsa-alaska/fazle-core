@@ -39,6 +39,7 @@ from app.database import execute, fetch_one, fetch_all, fetch_val
 from shared.draft_reply import create_draft_reply
 from shared.sqlite_compat import has_column
 from shared.media_text import has_meaningful_text, is_media_placeholder
+from shared.system_message import is_automated_system_message
 from app.bridge import get_bridge1, get_bridge2, get_bridge3
 from modules.message_router import (
     process_message,
@@ -164,33 +165,57 @@ async def _set_cursor(bridge: str, ts: datetime):
     )
 
 
-async def _bridge_quarantine_until(bridge: str) -> Optional[datetime]:
-    """Pairing quarantine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02).
+# ── Explicit pairing state machine ───────────────────────────────────────────
+# BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02 + owner amendment 2026-09-02:
+# a TIMESTAMP MUST NEVER AUTOMATICALLY AUTHORISE OUTBOUND SENDING. A freshly
+# (re)paired bridge moves through explicit, owner-advanced states — there is no
+# auto-expiry. Stored as the sanctioned runtime setting `<bridge>.pairing_state`
+# in fazle_runtime_settings (set only via the api-key-gated
+# POST /api/wa/bridge/{bridge}/pairing-state endpoint).
+PAIRING_UNPAIRED = "UNPAIRED"
+PAIRING_HISTORY_SYNC_QUARANTINE = "HISTORY_SYNC_QUARANTINE"
+PAIRING_LIVE_INBOUND_VERIFIED = "LIVE_INBOUND_VERIFIED"
+PAIRING_OUTBOUND_OWNER_APPROVED = "OUTBOUND_OWNER_APPROVED"
+PAIRING_STATES = (
+    PAIRING_UNPAIRED,
+    PAIRING_HISTORY_SYNC_QUARANTINE,
+    PAIRING_LIVE_INBOUND_VERIFIED,
+    PAIRING_OUTBOUND_OWNER_APPROVED,
+)
+# The ONLY state in which the bridge may route inbound and send outbound.
+# Every other set state — and, conservatively, an unrecognised value — holds
+# the bridge in receive/persist-only mode. An UNSET setting = the bridge never
+# went through the guarded-pairing flow (bridge1/bridge2 today) = normal.
+_PAIRING_STATE_ALLOWS_SEND = frozenset({PAIRING_OUTBOUND_OWNER_APPROVED})
 
-    Returns the UTC datetime until which `bridge` is in receive/persist-only
-    mode, or None if not quarantined. Controlled by the sanctioned runtime
-    setting ``<bridge>.quarantine_until`` (ISO-8601) in fazle_runtime_settings.
-    While active, inbound is still persisted (raw copy + wbom_whatsapp_messages)
-    but NOT routed: no identity resolution, no reply/draft, no outbound enqueue,
-    no recovery-sweep pickup — nothing that can send. Set it just before a
-    fresh pairing; clear it (or let it expire) once the live-session boundary
-    is confirmed. Fail-open: any parse/lookup error → not quarantined (logged),
-    because a broken setting must never silently freeze a healthy bridge.
+
+async def _bridge_pairing_state(bridge: str) -> str:
+    """Return `<bridge>.pairing_state` (one of PAIRING_STATES) or "" if unset.
+
+    Fail-open on a read error → "" (normal), because a broken settings row must
+    never silently freeze a healthy bridge. An unrecognised stored value is
+    returned verbatim and treated by _bridge_outbound_held() as NON-sending
+    (fail-safe for the guarded bridge).
     """
     try:
         from modules.wa_chat_frontend import get_runtime_setting
-        raw = (await get_runtime_setting(f"{bridge}.quarantine_until", "") or "").strip()
-        if not raw:
-            return None
-        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) >= ts:
-            return None
-        return ts
+        return (await get_runtime_setting(f"{bridge}.pairing_state", "") or "").strip()
     except Exception as exc:  # noqa: BLE001 — fail-open, never freeze a healthy bridge
-        log.warning("[quarantine] %s.quarantine_until unreadable (%s) — treating as NOT quarantined", bridge, exc)
-        return None
+        log.warning("[pairing_state] %s.pairing_state unreadable (%s) — treating as unset/normal", bridge, exc)
+        return ""
+
+
+async def _bridge_outbound_held(bridge: str) -> tuple[bool, str]:
+    """(held, state). `held` is True when this bridge is in a NON-sending
+    pairing state — inbound is persisted but not routed and nothing may send.
+    Held for every set state except OUTBOUND_OWNER_APPROVED (incl. an
+    unrecognised value); NOT held when the setting is unset. No timestamp is
+    consulted anywhere — release is only ever an explicit owner action.
+    """
+    state = await _bridge_pairing_state(bridge)
+    if not state:
+        return (False, "")
+    return (state not in _PAIRING_STATE_ALLOWS_SEND, state)
 
 
 async def _get_outgoing_cursor(bridge: str) -> datetime:
@@ -1002,12 +1027,15 @@ async def _poll_bridge(config: dict):
             unresolved_router_skipped = 0
             group_read_index_saved = 0  # Stage E3: approved-group messages, persisted, never routed
             media_unprocessed_skipped = 0  # bare [media:*] placeholder, no caption/OCR/STT — never routed
-            quarantine_persist_only = 0  # pairing quarantine: persisted, never routed
+            quarantine_persist_only = 0  # pairing-state hold: persisted, never routed
+            f6_system_msg_persist_only = 0  # automated OTP/system msg: persisted, never routed
 
-            # Pairing quarantine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02):
-            # computed once per cycle. When set, every inbound this cycle is
-            # persisted but not routed — no reply, no draft, no enqueue.
-            _quar_until = await _bridge_quarantine_until(bridge_name)
+            # Pairing-state hold (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02, owner
+            # amendment): computed once per cycle. Held for every set
+            # `<bridge>.pairing_state` except OUTBOUND_OWNER_APPROVED — no
+            # timestamp, release is only ever an explicit owner action. While
+            # held, every inbound this cycle is persisted but not routed.
+            _held, _pair_state = await _bridge_outbound_held(bridge_name)
 
             for msg in messages:
                 msg_id: str = msg["id"]
@@ -1070,35 +1098,67 @@ async def _poll_bridge(config: dict):
                     await _mark_core_queue_status(bridge_name, msg, "skipped", "group_read_index_only")
                     continue
 
-                # Pairing quarantine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02):
-                # while this bridge is inside its post-pairing settling window,
-                # PERSISTENCE != AUTOMATION. The raw copy is already written
-                # (_save_raw_core_copy above); we finalize the canonical row and
-                # the queue row to a terminal state and stop HERE — before any
-                # identity lookup, media extraction, downstream routing
-                # (recruitment / employee / customer auto-reply / admin-command
-                # / Hermes relay), draft creation or outbound enqueue. The
-                # _mark_processed() call dedups it so it is never re-handled
-                # once the quarantine lifts: the live-session boundary is
-                # "messages that arrive AFTER the window", established from real
-                # message timestamps + the history-sync flag, not a blind
-                # cursor jump. Mirrors the @g.us and media_unprocessed skip
-                # discipline directly above / below.
-                if _quar_until is not None:
+                # Pairing-state hold (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02,
+                # owner amendment): while `<bridge>.pairing_state` is anything
+                # other than OUTBOUND_OWNER_APPROVED, PERSISTENCE != AUTOMATION.
+                # The raw copy is already written (_save_raw_core_copy above);
+                # we finalize the canonical row and the queue row to a terminal
+                # state and stop HERE — before any identity lookup, media
+                # extraction, downstream routing (recruitment / employee /
+                # customer auto-reply / admin-command / Hermes relay), draft
+                # creation or outbound enqueue. _mark_processed() dedups it so
+                # it is never re-handled after the owner advances the state:
+                # the live-session boundary is "messages that arrive AFTER the
+                # explicit release", from real timestamps + the history-sync
+                # flag — no timestamp ever auto-authorises sending. Mirrors the
+                # @g.us and media_unprocessed skip discipline above / below.
+                if _held:
                     quarantine_persist_only += 1
                     await _mark_processed(msg_id, bridge_name, phone)
                     await _finalize_core_copy(
                         core_message_id, bridge_name, msg, phone, text,
                         msg_type=msg.get("media_type") or "text",
-                        status="skipped", error="bridge_pairing_quarantine",
+                        status="skipped", error=f"bridge_pairing_hold:{_pair_state}",
                     )
                     await _mark_core_queue_status(
-                        bridge_name, msg, "skipped", "bridge_pairing_quarantine"
+                        bridge_name, msg, "skipped", f"bridge_pairing_hold:{_pair_state}"
                     )
                     log.info(
-                        "[%s] PAIRING_QUARANTINE msg_id=%s phone=%s — persisted, not routed "
-                        "(quarantine until %s)",
-                        bridge_name, msg_id, phone, _quar_until.isoformat(),
+                        "[%s] PAIRING_HOLD msg_id=%s phone=%s — persisted, not routed "
+                        "(pairing_state=%s)",
+                        bridge_name, msg_id, phone, _pair_state,
+                    )
+                    continue
+
+                # F6 (owner amendment 2026-09-02, Bridge3 ingestion scope): an
+                # automated OTP / login-code / platform system notification is
+                # NEVER a job applicant. On bridge3 an unknown sender defaults
+                # to the recruitment funnel, so these become a phantom
+                # candidate + session + auto-reply (the incident). Preserve the
+                # raw forensic row with full provenance (already done by
+                # _save_raw_core_copy) but do NOT let it reach identity
+                # resolution, recruitment routing, a recruitment session or
+                # wbom_candidates row, a workflow-state write, or any reply.
+                # Deterministic, tight allowlist (shared.system_message) — a
+                # miss falls through to normal routing, a hit only SUPPRESSES.
+                # Scoped to bridge3 (recruitment channel); bridge1/bridge2 do
+                # not funnel unknowns into recruitment so the failure mode does
+                # not exist there and the surface stays minimal.
+                if bridge_name == "bridge3" and is_automated_system_message(text):
+                    f6_system_msg_persist_only += 1
+                    await _mark_processed(msg_id, bridge_name, phone)
+                    await _finalize_core_copy(
+                        core_message_id, bridge_name, msg, phone, text,
+                        msg_type=msg.get("media_type") or "text",
+                        status="skipped", error="automated_system_message",
+                    )
+                    await _mark_core_queue_status(
+                        bridge_name, msg, "skipped", "automated_system_message"
+                    )
+                    log.info(
+                        "[%s] SYSTEM_MSG_SUPPRESSED msg_id=%s phone=%s — automated "
+                        "OTP/system notification, persisted for forensics, not routed",
+                        bridge_name, msg_id, phone,
                     )
                     continue
 
@@ -1625,9 +1685,9 @@ async def _poll_bridge(config: dict):
                     await _mark_core_queue_status(bridge_name, msg, "failed", f"routing_error:{route_err}")
                     raise
 
-            if bridge_name == "bridge1" or _quar_until is not None or quarantine_persist_only:
+            if bridge_name == "bridge1" or _held or quarantine_persist_only or f6_system_msg_persist_only:
                 log.info(
-                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d media_unprocessed_skipped=%d quarantine_persist_only=%d cursor_from=%s cursor_to=%s",
+                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d media_unprocessed_skipped=%d quarantine_persist_only=%d f6_system_msg_persist_only=%d pairing_state=%s cursor_from=%s cursor_to=%s",
                     bridge_name,
                     len(messages),
                     dedup_skipped,
@@ -1636,6 +1696,8 @@ async def _poll_bridge(config: dict):
                     group_read_index_saved,
                     media_unprocessed_skipped,
                     quarantine_persist_only,
+                    f6_system_msg_persist_only,
+                    _pair_state or "-",
                     cursor.isoformat(),
                     new_cursor.isoformat(),
                 )

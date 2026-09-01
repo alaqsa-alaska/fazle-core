@@ -263,13 +263,60 @@ services `active`; `bridge_poller_b1/b2` cursors current.
 
 ## 8. Minimal fix
 
-> **2026-09-02 status:** F1–F4 **IMPLEMENTED** on branch
-> `fix/bridge3-history-sync-quarantine-20260902` (off deployed `351324f`).
-> Unit tests green (see §11). **Not deployed** — awaiting owner review, then
-> `scripts/restart_gate.sh --restart` + a bridge-binary rebuild for F1.
-> F5–F6 are **deferred** (they change live routing for all bridges and want
-> their own review) — F3 quarantine alone prevents recurrence during pairing,
-> F1+F2 prevent history-sync replay in general.
+> **2026-09-02 status (amended per owner instruction):** F1, F2, **F3 as an
+> EXPLICIT STATE MACHINE (no timestamp auto-release)**, F4, and **F6 within the
+> bridge ingestion scope** are **IMPLEMENTED** on branch
+> `fix/bridge3-history-sync-quarantine-20260902` (core) +
+> `fix/bridge3-history-sync-flag-20260902` (whatsapp-mcp). Unit tests green
+> (§11/§15). **NOT deployed** — no push, no bridge-binary rebuild, no Bridge3
+> restart, no pairing, no incident-data cleanup, no Phase-2. Awaiting owner
+> review, then (separately) `scripts/restart_gate.sh --restart` + a reviewed
+> bridge-binary rebuild for F1.
+> **F5 (semantic-gate global block) is deliberately NOT implemented** — owner
+> instruction: do not enable F5 globally.
+
+### F3 — explicit pairing state machine (replaces the time-based quarantine)
+
+Owner requirement: *a timestamp must never automatically authorise outbound
+sending.* The `bridge3.quarantine_until` timestamp is **removed**. In its place,
+the sanctioned runtime setting `<bridge>.pairing_state` holds one of:
+
+| State | Bridge behaviour |
+|---|---|
+| _(unset)_ | normal — bridge never went through guarded pairing (Bridge1/Bridge2 today) |
+| `UNPAIRED` | held (persist-only) |
+| `HISTORY_SYNC_QUARANTINE` | held — **pairing always enters this state** |
+| `LIVE_INBOUND_VERIFIED` | **still held / non-sending** — an operator checkpoint, not a release |
+| `OUTBOUND_OWNER_APPROVED` | the **only** routing+sending state |
+| _(any unrecognised value, incl. an ISO timestamp)_ | held (fail-safe) |
+
+- `modules/bridge_poller/_bridge_pairing_state()` + `_bridge_outbound_held()` —
+  no timestamp is read anywhere; release is only ever an explicit state change.
+- Poller loop: while held, each inbound is `_save_raw_core_copy`-persisted then
+  finalised `skipped / bridge_pairing_hold:<state>` and `_mark_processed`-deduped
+  — **before** identity, media extraction, routing, drafts or any enqueue.
+- `recruitment_recovery_sweep._decide_and_reply` also checks
+  `_bridge_outbound_held(source_bridge)` and skips a held population.
+- Transitions go through the **api-key-gated** `POST /api/wa/bridge/{bridge}/pairing-state`;
+  reaching `OUTBOUND_OWNER_APPROVED` additionally requires
+  `confirm == "RELEASE OUTBOUND <bridge>"` (a second deliberate signal).
+  `GET` the same path to read current state + `outbound_allowed`.
+
+### F6 — automated OTP / system-message suppression (bridge ingestion scope)
+
+`shared/system_message.py::is_automated_system_message()` — a deterministic,
+tight allowlist (Facebook/Instagram/WhatsApp/Google/… "`<code>` is your … code",
+"your … verification code is …", one-time-password, "Your WhatsApp account is
+successfully connected", new-login notices; Bengali-digit tolerant). A bare
+numeric string is **not** flagged (could be a real answer). In the poller loop,
+right after the pairing-hold check: a hit → `_save_raw_core_copy` keeps the raw
+forensic row **with full provenance**, then finalise `skipped /
+automated_system_message`, `_mark_processed`, `continue` — **no identity, no
+`fazle_recruitment_sessions`, no `wbom_candidates`, no workflow-state write, no
+reply.** A miss just falls through to normal routing (prefer false-negative).
+Applies to every bridge's ingestion (an OTP is junk on any channel).
+
+### Original F1/F2/F4 (unchanged from the first implementation)
 
 ### Implemented (F1–F4)
 

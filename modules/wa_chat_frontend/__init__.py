@@ -394,6 +394,72 @@ async def unblock_contact_autoreply(phone: str, _: None = Depends(_require_api_k
     return {"unblocked": True, "phone": phone}
 
 
+# ── Bridge pairing state machine (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02) ────
+# Explicit, owner-advanced states for a freshly (re)paired bridge. NO timestamp
+# ever auto-authorises sending: the bridge routes inbound and may send outbound
+# ONLY in OUTBOUND_OWNER_APPROVED. Every transition here is an explicit
+# api-key-gated (owner/superadmin) action. Consumed by
+# modules.bridge_poller._bridge_outbound_held and the recruitment recovery sweep.
+
+_BRIDGE_PAIRING_STATES = (
+    "UNPAIRED",
+    "HISTORY_SYNC_QUARANTINE",
+    "LIVE_INBOUND_VERIFIED",
+    "OUTBOUND_OWNER_APPROVED",
+)
+_BRIDGE_PAIRING_BRIDGES = ("bridge1", "bridge2", "bridge3")
+
+
+@router.get("/api/wa/bridge/{bridge}/pairing-state")
+async def get_bridge_pairing_state(bridge: str, _: None = Depends(_require_api_key)):
+    if bridge not in _BRIDGE_PAIRING_BRIDGES:
+        raise HTTPException(status_code=400, detail=f"unknown bridge {bridge!r}")
+    val = (await get_runtime_setting(f"{bridge}.pairing_state", "") or "").strip()
+    return {
+        "bridge": bridge,
+        "pairing_state": val or None,
+        "outbound_allowed": val in ("", "OUTBOUND_OWNER_APPROVED"),
+        "valid_states": list(_BRIDGE_PAIRING_STATES),
+    }
+
+
+class BridgePairingStatePatch(BaseModel):
+    state: str
+    # Explicit confirmation phrase required to reach the sending state — a
+    # second, deliberate signal, not just the api key.
+    confirm: str | None = None
+
+
+@router.post("/api/wa/bridge/{bridge}/pairing-state")
+async def set_bridge_pairing_state(
+    bridge: str, body: BridgePairingStatePatch, _: None = Depends(_require_api_key)
+):
+    """Advance a bridge's pairing state. `OUTBOUND_OWNER_APPROVED` additionally
+    requires `confirm == "RELEASE OUTBOUND <bridge>"` so a release is never a
+    single accidental call. Clearing (empty string) removes the restriction."""
+    if bridge not in _BRIDGE_PAIRING_BRIDGES:
+        raise HTTPException(status_code=400, detail=f"unknown bridge {bridge!r}")
+    state = (body.state or "").strip()
+    if state and state not in _BRIDGE_PAIRING_STATES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid state {state!r}; valid: {list(_BRIDGE_PAIRING_STATES)} or '' to clear",
+        )
+    if state == "OUTBOUND_OWNER_APPROVED":
+        expected = f"RELEASE OUTBOUND {bridge}"
+        if (body.confirm or "").strip() != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"OUTBOUND_OWNER_APPROVED requires confirm == {expected!r}",
+            )
+    await set_runtime_setting(f"{bridge}.pairing_state", state)
+    return {
+        "bridge": bridge,
+        "pairing_state": state or None,
+        "outbound_allowed": state in ("", "OUTBOUND_OWNER_APPROVED"),
+    }
+
+
 # ── Messages endpoints ────────────────────────────────────────────────────────
 
 @router.get("/api/wa/messages/{phone}")
