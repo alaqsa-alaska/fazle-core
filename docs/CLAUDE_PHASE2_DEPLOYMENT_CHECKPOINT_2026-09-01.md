@@ -127,4 +127,16 @@ Core branch `feat/phase2-inbound-identity-2026-09-01` is now at **`2035641`** (8
 | Pre-existing failure #2 (`test_route_b_handoff.py`) | **REPRODUCED at clean `5e62ed5`** — confirmed pre-existing |
 | Default flag OFF | verified — `PHASE2_IDENTITY_RESOLVER_ENABLED` absent from `.env`, code default `false` |
 | Rollback point | `feat/owner-accountant-payment-relay-20260830 @ 5e62ed5` (== running code) |
-| secret scan / restart-gate check-only | ↓ next |
+| secret scan (tracked + diff files) | **PASS** (0 matches) |
+| restart-gate `--check-only` (on deploy branch) | **OVERALL PASS** — all 10 checks green (1 cleanliness, 2 secret, 3 xfail 8/13, 4 targeted, 4b bridge3-golden, 4c 14/14, 5 inventory, **5b migrations-applied**, 6 flags, 7 backup 22h) |
+
+**ACCEPTANCE GATE: PASS.**
+
+### Stage 6 — push core — DONE 2026-09-01T19:10Z
+
+`git push -u origin feat/phase2-inbound-identity-2026-09-01` (no force, new branch).
+- `origin/feat/phase2-inbound-identity-2026-09-01` = `966e1c9` = local HEAD (exact match, verified `git ls-remote`).
+- `origin/feat/owner-accountant-payment-relay-20260830` still `5e62ed5` — untouched.
+- `966e1c9` contained only in this branch — NOT merged into `main` (still `0f5ef31`) or any other.
+
+### Stage 7 — deploy core (Phase-2 OFF) — IN PROGRESS 2026-09-01T19:10Z

@@ -392,5 +392,13 @@ tests/unit/test_bridge_poller_struct_bypass.py
 # directed that it remain untouched (not reset, stashed, discarded, or
 # committed) while using the established restart-gate cleanliness-exception
 # procedure -- this entry. Remove once the Bridge Media Acquisition task
-# commits or reverts it.
+# commits or reverts it. (2026-09-01: the Phase-2 session masked 3 phone/LID
+# values in it -- still not committed, per the same Owner directive.)
 docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md
+
+# 2026-09-01: the Phase-2 deployment session's live evidence log. It is
+# committed to the branch but is edited continuously during the restart
+# itself (Stage-7/8 evidence lands after the gate's Check-1 snapshot), so it
+# is expected to be dirty across a `--restart` run. Remove this entry once the
+# Phase-2 observation window closes and the doc is final.
+docs/CLAUDE_PHASE2_DEPLOYMENT_CHECKPOINT_2026-09-01.md
