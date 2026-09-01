@@ -66,6 +66,53 @@ def normalize_phone(raw: str) -> Optional[str]:
     return canonical
 
 
+def storage_canonical_phone(raw: Optional[str]) -> Optional[str]:
+    """Best value for the ``wbom_whatsapp_messages.canonical_phone`` column.
+
+    Rules (2026-09-01 — was previously stored verbatim with no normalization):
+      * a Bangladeshi number in ANY accepted form (8801…, 01…, 1…, +880…,
+        hyphenated, Bengali-numeral)  ->  canonical ``8801XXXXXXXXX``
+      * a LID sentinel (``unresolved:<digits>`` / ``lid:<digits>``)  ->  ``None``
+        (a LID is never a phone number)
+      * a JID (``…@s.whatsapp.net`` / ``…@lid``) or a ``+``/space/hyphen
+        formatted number  ->  digits only, JID suffix stripped
+      * a plausible NON-BD international number (8–15 digits)  ->  digits only,
+        no ``+`` — this column already legitimately holds foreign numbers and
+        must not be nulled out for them
+      * anything shorter than 8 digits, longer than 15 (e.g. a Facebook PSID),
+        or otherwise unusable  ->  ``None``
+
+    Never returns ``+``, spaces, hyphens, a JID suffix, or a LID sentinel.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    low = s.lower()
+    if low.startswith("unresolved:") or low.startswith("lid:"):
+        return None
+    bd = normalize_phone(s)
+    if bd:
+        return bd
+    s = to_ascii_digits(s)
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    digits = re.sub(r"\D", "", s)
+    if 8 <= len(digits) <= 15:
+        return digits
+    return None
+
+
+def storage_phone_last10(canonical_or_raw: Optional[str]) -> Optional[str]:
+    """Last 10 digits of a canonicalized phone — a search aid only. Returns
+    ``None`` for a LID sentinel or an unusable value (never a 10-digit slice
+    of a LID). Feed it the output of :func:`storage_canonical_phone`."""
+    c = storage_canonical_phone(canonical_or_raw)
+    if not c:
+        return None
+    digits = re.sub(r"\D", "", c)
+    return digits[-10:] if len(digits) >= 10 else (digits or None)
+
+
 def format_for_display(canonical: str) -> str:
     """Return 01812-345678 display format."""
     if len(canonical) == 13 and canonical.startswith("880"):

@@ -313,14 +313,19 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
     """
     settings = get_settings()
     sender = normalize_phone(sender) or sender.strip()
-    if settings.accountant_phone and sender == settings.accountant_phone:
+    # 2026-09-01: normalize both sides — a settings value entered in
+    # 01XXXXXXXXX / +8801 form would otherwise silently fail to match the
+    # canonical `sender` and stop silencing the accountant.
+    _acct = normalize_phone(settings.accountant_phone) or (settings.accountant_phone or "").strip()
+    if _acct and sender == _acct:
         return True, f"accountant phone match ({sender})"
     try:
         contact = None
         for v in _phone_variants(sender):
             contact = await fetch_one(
                 "SELECT display_name FROM wbom_contacts"
-                " WHERE whatsapp_number = $1 AND is_active = true LIMIT 1",
+                " WHERE whatsapp_number = $1 AND is_active = true"
+                "   AND COALESCE(platform, 'whatsapp') = 'whatsapp' LIMIT 1",
                 v,
             )
             if contact:

@@ -283,6 +283,22 @@ async def detect_identity(phone: str, text: str = "") -> dict:
                 priority=200, emp=emp,
             )
 
+        # ── Step 1b: accountant check from settings ───────────────────────────
+        # 2026-09-01: the configured ACCOUNTANT_PHONE is a protected runtime
+        # identity and must resolve deterministically to role="accountant",
+        # not depend on a fazle_contact_roles seed row that could be
+        # deactivated (which would silently downgrade the accountant to
+        # role="employee" via Step 3, since the accountant is also an active
+        # employee). Same highest-authority "from settings" tier as admin,
+        # priority just below admin. Routing order in message_router is
+        # unchanged — this only fixes WHICH role the accountant is given.
+        if _check_accountant_settings(norm):
+            emp = await _lookup_employee(norm)
+            return _build(
+                _phone=norm, role="accountant", confidence=100, source="settings",
+                priority=190, emp=emp,
+            )
+
         # ── Step 2: seed rule lookup (fazle_contact_roles) ────────────────────
         seed = await _lookup_seed(norm)
         if seed:
@@ -504,6 +520,22 @@ def _check_admin_settings(phone: str) -> bool:
         return False
 
 
+def _check_accountant_settings(phone: str) -> bool:
+    """True when `phone` (already canonical 8801XXXXXXXXX) matches the
+    configured ACCOUNTANT_PHONE. Both sides are run through the canonical
+    normalizer so a settings value entered in 01XXXXXXXXX / +8801 form still
+    matches. Never returns or logs the configured number."""
+    try:
+        from app.config import get_settings
+        s = get_settings()
+        acct = getattr(s, "accountant_phone", "") or ""
+        if not acct:
+            return False
+        return bool(phone) and phone == (_normalize_phone(acct) or acct.strip())
+    except (AttributeError, LookupError, TypeError, ValueError):
+        return False
+
+
 async def _lookup_seed(phone: str) -> Optional[dict]:
     """Lookup highest-priority seed rule for this phone.
     Matches against all phone variants (01XXXXXXXXX, 8801XXXXXXXXX,
@@ -518,6 +550,7 @@ async def _lookup_seed(phone: str) -> Optional[dict]:
         """SELECT role, confidence, source, priority, notes
            FROM fazle_contact_roles
            WHERE phone = ANY($1)
+             AND COALESCE((to_jsonb(fazle_contact_roles)->>'platform'), 'whatsapp') = 'whatsapp'
              AND COALESCE((to_jsonb(fazle_contact_roles)->>'is_active')::boolean, true) = true
              AND LOWER(COALESCE(to_jsonb(fazle_contact_roles)->>'status', 'active')) = 'active'
            ORDER BY priority DESC
@@ -544,6 +577,12 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
         return dict(row)
 
     # Fallback to FPE-linked employees created through payroll/admin/escort flows.
+    # 2026-09-01: no longer filtered to e.status='active' — an INACTIVE employee
+    # must still be resolvable by phone for identity purposes (a unique existing
+    # employee must not disappear from identity resolution just because they were
+    # marked inactive; this is identity existence, not current-role authority).
+    # An active row still wins the tie-break. The result's `status` column
+    # continues to carry the real active/inactive lifecycle for downstream use.
     row = await fetch_one(
         """SELECT w.employee_id,
                   COALESCE(NULLIF(w.employee_name, ''), NULLIF(e.full_name, '')) AS employee_name,
@@ -553,9 +592,8 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
                   COALESCE(w.status, CASE WHEN e.status = 'active' THEN 'Active' ELSE 'Inactive' END) AS status
            FROM fpe_employees e
            LEFT JOIN wbom_employees w ON w.employee_id = e.wbom_employee_id
-           WHERE e.status = 'active'
-             AND (e.primary_phone = ANY($1) OR e.employee_id_phone = ANY($1))
-           ORDER BY e.id DESC
+           WHERE (e.primary_phone = ANY($1) OR e.employee_id_phone = ANY($1))
+           ORDER BY (e.status = 'active') DESC, e.id DESC
            LIMIT 1""",
         variants,
     )
@@ -733,6 +771,7 @@ async def _lookup_contact(phone: str) -> Optional[dict]:
                   COALESCE(c.relation, 'repeat_client') AS relation_name
               FROM wbom_contacts c
               WHERE c.whatsapp_number = ANY($1)
+                AND COALESCE(c.platform, 'whatsapp') = 'whatsapp'
            ORDER BY c.contact_id DESC
            LIMIT 1""",
         variants,
