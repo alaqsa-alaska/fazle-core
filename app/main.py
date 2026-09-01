@@ -1296,6 +1296,8 @@ async def whatsapp_messages_query(
     identity_role: str = "",
     intent_detected: str = "",
     workflow_triggered: str = "",
+    phone: str = "",
+    message_body_contains: str = "",
     include_body: bool = False,
     limit: int = 20,
     cursor: str = "",
@@ -1356,6 +1358,32 @@ async def whatsapp_messages_query(
         if workflow_triggered:
             params.append(workflow_triggered)
             conditions.append(f"workflow_triggered = ${len(params)}")
+        if phone:
+            # Exact-phone lookup — match the canonical/sender/resolved columns
+            # against every normalized variant, with a last-10-digit fallback
+            # for rows whose canonical_phone was never populated.
+            try:
+                from modules.number_identity import normalize_phone as _pv, phone_last10 as _p10
+                _variants = _pv(phone) or [phone.strip()]
+                _last10 = _p10(phone)
+            except Exception:
+                _variants, _last10 = [phone.strip()], "".join(ch for ch in phone if ch.isdigit())[-10:]
+            params.append(_variants)
+            _vp = len(params)
+            if _last10:
+                params.append(_last10)
+                conditions.append(
+                    f"(canonical_phone = ANY(${_vp}) OR resolved_phone = ANY(${_vp}) "
+                    f"OR sender_number = ANY(${_vp}) OR phone_last10 = ${len(params)})"
+                )
+            else:
+                conditions.append(
+                    f"(canonical_phone = ANY(${_vp}) OR resolved_phone = ANY(${_vp}) "
+                    f"OR sender_number = ANY(${_vp}))"
+                )
+        if message_body_contains:
+            params.append(f"%{message_body_contains}%")
+            conditions.append(f"message_body ILIKE ${len(params)}")
 
         if cursor:
             try:
@@ -1368,6 +1396,11 @@ async def whatsapp_messages_query(
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         columns = _METADATA_COLUMNS + (_CONTENT_COLUMNS if include_body else ())
+        # Schema-tolerance: an older DB (or the test schema) may lack an
+        # optional column such as `status` — select only what actually exists
+        # rather than 500 on `column "..." does not exist`.
+        _present = await _existing_columns("wbom_whatsapp_messages", columns)
+        columns = tuple(c for c in columns if c in _present) or ("message_id",)
         # Fetch one extra row to determine has_more without a second COUNT query.
         fetch_limit = limit + 1
         params.append(fetch_limit)
@@ -2022,6 +2055,102 @@ async def api_verify_employee_claim(
     )
 
 
+@app.get("/api/identity/search-by-name", dependencies=[Depends(require_api_key)])
+async def api_search_identity_by_name(name: str, limit: int = 10):
+    """Name -> candidate phone number(s). Searches the trusted identity
+    tables ONLY (wbom_employees / wbom_contacts[platform='whatsapp'] /
+    fazle_contact_roles / fpe_employees), dedup'd by phone.
+
+    Contract (never guesses on a name alone):
+      * 0 candidates -> {"resolved": null, "ambiguous": false, "candidates": []}
+      * exactly 1    -> {"resolved": "<8801…>", "ambiguous": false, ...}
+      * 2+           -> {"resolved": null, "ambiguous": true, "candidates": [...]}
+    The caller must disambiguate a `ambiguous: true` result (e.g. ask which
+    person) before acting — do not pick one arbitrarily."""
+    from modules.identity_resolver import search_identity_by_name
+    try:
+        limit = min(max(int(limit or 10), 1), 25)
+    except (TypeError, ValueError):
+        limit = 10
+    candidates = await search_identity_by_name(name, limit=limit)
+    distinct_phones = [c.get("phone") for c in candidates if c.get("phone")]
+    resolved = distinct_phones[0] if len(distinct_phones) == 1 else None
+    return {
+        "query": name,
+        "candidate_count": len(candidates),
+        "resolved": resolved,
+        "ambiguous": len(distinct_phones) > 1,
+        "candidates": candidates,
+        "ts": time.time(),
+    }
+
+
+@app.get("/api/whatsapp/contact/summary", dependencies=[Depends(require_api_key)])
+async def api_whatsapp_contact_summary(phone: str, recent_limit: int = 5):
+    """One bounded call: identity + role + platforms observed + first/last
+    seen + per-platform message counts + the last few messages (source and
+    direction preserved on every row). The 'give me everything about this
+    number' summary. Read-only."""
+    from modules.identity_brain import detect_identity
+    try:
+        recent_limit = min(max(int(recent_limit or 5), 1), 20)
+    except (TypeError, ValueError):
+        recent_limit = 5
+    try:
+        from modules.number_identity import normalize_phone as _pv, phone_last10 as _p10
+        variants = _pv(phone) or [phone.strip()]
+        last10 = _p10(phone)
+    except Exception:
+        variants, last10 = [phone.strip()], "".join(ch for ch in phone if ch.isdigit())[-10:]
+
+    _match = ("(canonical_phone = ANY($1) OR resolved_phone = ANY($1) "
+              "OR sender_number = ANY($1)" + (" OR phone_last10 = $2)" if last10 else ")"))
+    args: list = [variants] + ([last10] if last10 else [])
+
+    identity = await detect_identity(phone)
+    identity = {k: v for k, v in identity.items() if k not in ("bkash_number", "basic_salary")}
+
+    try:
+        by_platform = await fetch_all(
+            f"""SELECT platform, direction, count(*) AS n,
+                       min(received_at) AS first_seen, max(received_at) AS last_seen
+                  FROM wbom_whatsapp_messages
+                 WHERE {_match}
+                 GROUP BY platform, direction
+                 ORDER BY platform, direction""",
+            *args,
+        )
+        recent = await fetch_all(
+            f"""SELECT message_id, platform, direction, received_at, message_type,
+                       identity_role, intent_detected, workflow_triggered,
+                       LEFT(COALESCE(message_body, ''), 240) AS message_body
+                  FROM wbom_whatsapp_messages
+                 WHERE {_match}
+                 ORDER BY received_at DESC, message_id DESC
+                 LIMIT {recent_limit + 1}""",
+            *args,
+        )
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/contact/summary error: %s", exc)
+        return {"phone": phone, "identity": identity, "error": str(exc)[:200], "ts": time.time()}
+
+    platforms = sorted({r["platform"] for r in by_platform if r["platform"]})
+    first_seen = min((r["first_seen"] for r in by_platform if r["first_seen"]), default=None)
+    last_seen = max((r["last_seen"] for r in by_platform if r["last_seen"]), default=None)
+    return {
+        "phone": phone,
+        "phone_variants": variants,
+        "identity": identity,
+        "platforms": platforms,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "count_by_platform": [dict(r) for r in by_platform],
+        "recent_messages": [dict(r) for r in recent[:recent_limit]],
+        "more_messages_exist": len(recent) > recent_limit,
+        "ts": time.time(),
+    }
+
+
 @app.get("/api/intent/classify", dependencies=[Depends(require_api_key)])
 async def api_classify_intent(text: str):
     """Classify a message's intent via the deterministic keyword/regex/fuzzy
@@ -2449,6 +2578,20 @@ async def _handle_meta_message(msg: dict, value: dict):
             log.warning("[META] media normalization failed type=%s error=%s", msg_type, media_err)
             text = f"[{msg_type} message]"
 
+    # Meta delivers the sender's WhatsApp profile name in the SAME webhook,
+    # under value.contacts[].profile.name (wa_id matches msg.from). This is
+    # DISPLAY metadata only — never identity authority.
+    meta_profile_name = None
+    try:
+        for c in (value.get("contacts") or []):
+            if isinstance(c, dict):
+                pn = (c.get("profile") or {}).get("name")
+                if pn and isinstance(pn, str):
+                    meta_profile_name = pn.strip() or None
+                    break
+    except Exception:
+        meta_profile_name = None
+
     log.info(f"[META] from={sender} type={msg_type} text={text[:60]!r}")
 
     if not text:
@@ -2465,6 +2608,30 @@ async def _handle_meta_message(msg: dict, value: dict):
             log.info("[META] duplicate webhook safely acknowledged inbound_id=%s", message_id)
             return
 
+    # Phase-2 inbound identity enrichment — flag-gated (default OFF), Meta
+    # inbound only. When OFF, behaviour is exactly as before.
+    _p2 = {}
+    try:
+        from modules.identity_resolver import is_phase2_identity_enabled, resolve_inbound_identity, SOURCE_UNKNOWN
+        if is_phase2_identity_enabled():
+            _ident = await resolve_inbound_identity(
+                platform="meta",
+                sender_number=sender,
+                canonical_phone=sender,
+                source_message_ref=message_id or None,
+                message_type=msg_type or "text",
+                meta_profile_name=meta_profile_name,
+            )
+            _src = _ident.get("sender_name_source")
+            _p2 = {
+                "sender_name_snapshot": _ident.get("sender_name_snapshot"),
+                "sender_name_source": _src if _src not in (None, SOURCE_UNKNOWN) else None,
+                "sender_name_confidence": int(_ident.get("sender_name_confidence") or 0) or None,
+                "canonical_message_key": _ident.get("canonical_message_key"),
+            }
+    except Exception as _p2_exc:
+        log.debug("[META] Phase-2 identity enrichment skipped (non-fatal): %s", _p2_exc)
+
     await _save_message(
         "meta",
         sender,
@@ -2475,6 +2642,7 @@ async def _handle_meta_message(msg: dict, value: dict):
         actor_type="external_user",
         source_message_ref=message_id,
         metadata={"delivery_state": "received", "meta_message_id": message_id},
+        **_p2,
     )
 
     try:
@@ -2489,7 +2657,9 @@ async def _handle_meta_message(msg: dict, value: dict):
     # 2026-07-21: identity-first routing — social_auto_reply retired for
     # WhatsApp DM traffic (bridge1/bridge2/meta share one routing path now;
     # see modules.bridge_poller.process_bridge_inbound / modules.route_b).
-    # Sync-only: Meta is not in auto_reply_sources — save message, skip reply/draft.
+    # If 'meta' is absent from AUTO_REPLY_SOURCES the row is still persisted
+    # above; only reply/draft generation is skipped. (As of 2026-08 'meta'
+    # IS in the live list, so this guard normally passes through.)
     if "meta" not in settings.auto_reply_source_list:
         log.debug(f"[META] sync-only, skipping reply/draft for {sender}")
         return
@@ -2993,12 +3163,51 @@ async def _handle_bridge_event(payload: dict, source: str):
             log.debug(f"[{source.upper()}] identity detection failed: {_id_err}")
             _id_role, _id_conf, _id_name = "unknown", 0, ""
 
+        # Phase-2 inbound identity enrichment — flag-gated (default OFF).
+        # NO-CLOBBER: only fills identity_role when identity_brain returned
+        # "unknown"; a meaningful role (admin/accountant/employee/escort_*/
+        # candidate/…) from detect_identity is never overwritten.
+        _p2_kw: dict = {}
+        try:
+            from modules.identity_resolver import (
+                is_phase2_identity_enabled, resolve_inbound_identity, SOURCE_UNKNOWN,
+            )
+            if is_phase2_identity_enabled():
+                _is_lid = str(sender_clean).startswith("unresolved:")
+                _ri = await resolve_inbound_identity(
+                    platform=source,
+                    sender_number=sender_clean,
+                    canonical_phone=sender_clean if not _is_lid else None,
+                    sender_lid=sender_clean if _is_lid else None,
+                    chat_jid=event.get("chat_jid") or None,
+                    source_message_ref=(msg_id or None),
+                    message_type=media_type or "text",
+                    bridge_full_name=event.get("full_name"),
+                    bridge_push_name=event.get("push_name"),
+                    bridge_business_name=event.get("business_name"),
+                )
+                _src = _ri.get("sender_name_source")
+                _p2_kw = {
+                    "sender_name_snapshot": _ri.get("sender_name_snapshot"),
+                    "sender_name_source": _src if _src not in (None, SOURCE_UNKNOWN) else None,
+                    "sender_name_confidence": int(_ri.get("sender_name_confidence") or 0) or None,
+                    "canonical_message_key": _ri.get("canonical_message_key"),
+                }
+                if (not _id_role or _id_role == "unknown") and _ri.get("identity_role") not in (None, "unknown"):
+                    _rc = int(_ri.get("identity_confidence") or 0)
+                    if _rc >= 80:
+                        _id_role = _ri["identity_role"]
+                        _id_conf = _rc
+        except Exception as _p2_exc:
+            log.debug(f"[{source.upper()}] Phase-2 identity enrichment skipped (non-fatal): {_p2_exc}")
+
         try:
             await _save_message(
                 source, sender_clean, text, direction="inbound",
                 identity_role=_id_role, identity_confidence=_id_conf,
                 msg_type=media_type if media_type else "text",
                 actor_type="external_user",
+                **_p2_kw,
             )
         except Exception as _save_err:
             if dedup_id and pre_marked:
@@ -3027,6 +3236,13 @@ async def _handle_bridge_event(payload: dict, source: str):
         # Sync-only sources: message is saved, no reply, no draft, no admin notify.
         if source not in settings.auto_reply_source_list:
             log.debug(f"[{source.upper()}] sync-only, skipping reply/draft for {sender_clean}")
+            continue
+
+        # An unresolved LID is NOT a phone number and must never enter routing
+        # (mirrors the SQLite poller's own `unresolved:` skip). The row is
+        # already persisted above; we only skip reply/draft generation.
+        if str(sender_clean).startswith("unresolved:"):
+            log.info(f"[{source.upper()}] unresolved LID — row saved, routing skipped: {sender_clean}")
             continue
 
         # Full production pipeline — identical to bridge_poller path
@@ -3445,6 +3661,18 @@ async def _save_message(
     metadata: Optional[dict] = None,
     actor_type: str = "",
     actor_id: str = "",
+    # 2026-09-01: additive, all optional. `canonical_phone`/`phone_last10`
+    # default from `sender` for WhatsApp platforms (previously never written on
+    # this path — Meta rows had canonical_phone=NULL). The Phase-2 identity
+    # columns are only ever passed by a caller that has the flag enabled and
+    # has already run the resolver; they land only if migration 078 is applied.
+    canonical_phone: str = "",
+    phone_last10: str = "",
+    sender_name_snapshot: Optional[str] = None,
+    sender_name_source: Optional[str] = None,
+    sender_name_confidence: Optional[int] = None,
+    canonical_message_key: Optional[str] = None,
+    resolved_phone: Optional[str] = None,
 ):
     """actor_type/actor_id (2026-08-28, Stage B1/B4): same attribution
     concept as modules.bridge_poller._save_message's own actor_type/
@@ -3456,6 +3684,18 @@ async def _save_message(
     compatible with any caller that doesn't pass it."""
     _receiver = receiver_number or _source_to_receiver(source)
     _conv_key = f"{sender}:{source}" if sender else None
+    # canonical_phone / phone_last10 — normalize the counterparty number for
+    # any WhatsApp-family platform when the caller didn't supply them.
+    _WHATSAPP_PLATFORMS = {"bridge1", "bridge2", "bridge3", "meta", "whatsapp"}
+    _canon = canonical_phone or None
+    _last10 = phone_last10 or None
+    if _canon is None and source in _WHATSAPP_PLATFORMS:
+        try:
+            from modules.phone_normalizer import storage_canonical_phone, storage_phone_last10
+            _canon = storage_canonical_phone(sender)
+            _last10 = _last10 or storage_phone_last10(sender)
+        except Exception:
+            _canon = None
     try:
         table = "wbom_whatsapp_messages"
         candidate_columns = (
@@ -3476,6 +3716,13 @@ async def _save_message(
             "metadata_json",
             "actor_type",
             "actor_id",
+            "canonical_phone",
+            "phone_last10",
+            "sender_name_snapshot",
+            "sender_name_source",
+            "sender_name_confidence",
+            "canonical_message_key",
+            "resolved_phone",
         )
         present_columns = await _existing_columns(table, candidate_columns)
 
@@ -3498,6 +3745,13 @@ async def _save_message(
             "metadata_json": json.dumps(metadata or {}),
             "actor_type": actor_type or None,
             "actor_id": actor_id or None,
+            "canonical_phone": _canon,
+            "phone_last10": _last10,
+            "sender_name_snapshot": sender_name_snapshot,
+            "sender_name_source": sender_name_source,
+            "sender_name_confidence": sender_name_confidence,
+            "canonical_message_key": canonical_message_key,
+            "resolved_phone": resolved_phone,
         }
 
         core_columns = ["sender_number", "message_body", "direction", "platform"]
@@ -3516,6 +3770,13 @@ async def _save_message(
             "metadata_json",
             "actor_type",
             "actor_id",
+            "canonical_phone",
+            "phone_last10",
+            "sender_name_snapshot",
+            "sender_name_source",
+            "sender_name_confidence",
+            "canonical_message_key",
+            "resolved_phone",
         ]
         columns.extend(c for c in optional_columns if c in present_columns)
 

@@ -292,6 +292,33 @@ def _load_lid_map(whatsapp_db: str) -> dict[str, str]:
     return lid_map
 
 
+def _load_contact_names(whatsapp_db: str) -> dict[str, dict]:
+    """Load whatsmeow display-name hints (push/full/business) keyed by the
+    bare user-part of `their_jid`. Read-only, once per poll cycle — same
+    pattern as _load_lid_map. These are DISPLAY METADATA ONLY: a sender's
+    own chosen name, never identity authority. Missing table / logged-out
+    bridge → empty dict, and callers degrade gracefully."""
+    names: dict[str, dict] = {}
+    try:
+        con = sqlite3.connect(f"file:{whatsapp_db}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
+        rows = con.execute(
+            "SELECT their_jid, full_name, push_name, business_name FROM whatsmeow_contacts"
+        ).fetchall()
+        con.close()
+        for their_jid, full_name, push_name, business_name in rows:
+            key = str(their_jid or "").split(":")[0].split("@")[0]
+            if not key:
+                continue
+            names[key] = {
+                "full_name": (full_name or None),
+                "push_name": (push_name or None),
+                "business_name": (business_name or None),
+            }
+    except Exception as e:
+        log.debug(f"contact-name map load skipped ({whatsapp_db}): {e}")
+    return names
+
+
 def _fetch_new_messages(
     messages_db: str,
     whatsapp_db: str,
@@ -405,6 +432,12 @@ def _fetch_new_messages(
         con.close()
 
         lid_map = _load_lid_map(whatsapp_db)
+        # whatsmeow display-name hints — only loaded when Phase-2 enrichment
+        # is on, so a disabled flag adds zero per-cycle cost.
+        _p2_on = os.getenv("PHASE2_IDENTITY_RESOLVER_ENABLED", "false").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        contact_names = _load_contact_names(whatsapp_db) if _p2_on else {}
 
         for row in rows:
             msg = dict(row)
@@ -456,6 +489,12 @@ def _fetch_new_messages(
 
             msg["phone"] = phone
             msg["text"] = text
+            if contact_names:
+                _hint = contact_names.get(sender_lid) or {}
+                if _hint:
+                    msg["full_name"] = _hint.get("full_name")
+                    msg["push_name"] = _hint.get("push_name")
+                    msg["business_name"] = _hint.get("business_name")
             messages.append(msg)
 
         if bridge_tag == "bridge1" and (rows or unresolved_lid or skipped_no_text):
@@ -2135,8 +2174,124 @@ def _parse_source_timestamp(value) -> Optional[datetime]:
         return None
 
 
+def _storage_canonical_phone(phone: Optional[str]) -> Optional[str]:
+    try:
+        from modules.phone_normalizer import storage_canonical_phone
+        return storage_canonical_phone(phone)
+    except Exception:
+        # Never regress below the old behaviour on an unexpected import error.
+        return phone if phone and not str(phone).startswith(("unresolved:", "lid:")) else None
+
+
+def _storage_phone_last10(phone: Optional[str]) -> Optional[str]:
+    try:
+        from modules.phone_normalizer import storage_phone_last10
+        return storage_phone_last10(phone)
+    except Exception:
+        return None
+
+
+async def _phase2_enrich_raw_copy(
+    core_id: Optional[int],
+    source: str,
+    msg: dict,
+    phone: str,
+    raw_text: str,
+    chat_jid: str,
+    media_type: str,
+    source_ts,
+) -> None:
+    """Follow-up UPDATE that fills the migration-078 identity columns on a
+    raw core copy. Fully gated by PHASE2_IDENTITY_RESOLVER_ENABLED (default
+    OFF). Schema-tolerant (skips columns the DB lacks) and non-fatal — an
+    error here never affects the row that _save_raw_core_copy already wrote,
+    nor routing."""
+    if core_id is None:
+        return
+    try:
+        from modules.identity_resolver import (
+            is_phase2_identity_enabled,
+            resolve_inbound_identity,
+            available_columns,
+            SOURCE_UNKNOWN,
+        )
+        if not is_phase2_identity_enabled():
+            return
+
+        present = await available_columns("wbom_whatsapp_messages")
+        p2_cols = {
+            "sender_name_snapshot", "sender_name_source", "sender_name_confidence",
+            "canonical_message_key", "resolved_phone", "resolved_at",
+        }
+        if not (p2_cols & present):
+            return  # migration 078 not applied on this DB — nothing to do
+
+        sender_raw = str(msg.get("sender") or "")
+        is_lid_sender = str(phone or "").startswith("unresolved:") or sender_raw.endswith("@lid")
+        canonical = _storage_canonical_phone(phone)
+
+        ident = await resolve_inbound_identity(
+            platform=source,
+            sender_number=phone,
+            canonical_phone=canonical if not str(phone or "").startswith("unresolved:") else None,
+            sender_lid=phone if str(phone or "").startswith("unresolved:") else None,
+            chat_jid=chat_jid or None,
+            source_message_ref=str(msg.get("id") or msg.get("message_id") or "") or None,
+            source_timestamp=source_ts.isoformat() if source_ts else None,
+            message_type=media_type,
+            bridge_full_name=(msg.get("full_name") or msg.get("contact_full_name") or None),
+            bridge_push_name=(msg.get("push_name") or msg.get("contact_push_name") or None),
+            bridge_business_name=(msg.get("business_name") or msg.get("contact_business_name") or None),
+        )
+
+        # resolved_phone = the phone we resolved a LID *to* (only meaningful
+        # when the raw sender really was a LID and we got a usable number).
+        resolved_phone = canonical if (is_lid_sender and canonical) else None
+
+        updates: dict = {
+            "sender_name_snapshot": ident.get("sender_name_snapshot"),
+            "sender_name_source": (
+                ident.get("sender_name_source")
+                if ident.get("sender_name_source") not in (None, SOURCE_UNKNOWN) else None
+            ),
+            "sender_name_confidence": int(ident.get("sender_name_confidence") or 0) or None,
+            "canonical_message_key": ident.get("canonical_message_key"),
+            "resolved_phone": resolved_phone,
+            "resolved_at": "now()" if resolved_phone else None,
+        }
+        set_parts, args = [], []
+        i = 1
+        for col, val in updates.items():
+            if col not in present:
+                continue
+            if col == "resolved_at":
+                if val:
+                    set_parts.append(f"{col} = COALESCE({col}, NOW())")
+                continue
+            set_parts.append(f"{col} = COALESCE({col}, ${i + 1})")
+            args.append(val)
+            i += 1
+        if not set_parts:
+            return
+        await execute(
+            f"UPDATE wbom_whatsapp_messages SET {', '.join(set_parts)} WHERE message_id = $1",
+            core_id, *args,
+        )
+    except Exception as exc:
+        log.debug("[core_copy] Phase-2 enrich skipped (non-fatal) msg_id=%s: %s",
+                  msg.get("id"), exc)
+
+
 async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> Optional[int]:
-    """Persist a raw core-side copy before OCR/routing mutates the message."""
+    """Persist a raw core-side copy before OCR/routing mutates the message.
+
+    2026-09-01: `canonical_phone` / `phone_last10` are now run through
+    modules.phone_normalizer.storage_canonical_phone (BD -> 8801XXXXXXXXX,
+    foreign kept digits-only, LID sentinel -> NULL) instead of being stored
+    verbatim. When PHASE2_IDENTITY_RESOLVER_ENABLED is on, a best-effort
+    follow-up populates the migration-078 identity columns; that step can
+    never break or block the raw INSERT.
+    """
     msg_id = str(msg.get("id") or msg.get("message_id") or "")
     if not msg_id:
         return None
@@ -2204,12 +2359,15 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
             phone, phone, raw_text, media_type, source,
             receiver or None, conv_key, msg_id, source_ts,
             json.dumps(context, ensure_ascii=False), msg_hash,
-            phone if phone and not phone.startswith("unresolved:") else None,
-            re.sub(r"\D", "", phone or "")[-10:] if phone else None,
+            _storage_canonical_phone(phone),
+            _storage_phone_last10(phone),
             json.dumps(context, ensure_ascii=False),
             _actor_type, _actor_id,
         )
         core_id = int(row["message_id"]) if row and row.get("message_id") is not None else None
+        # Phase-2 identity enrichment — best-effort, flag-gated, additive.
+        # Runs as a follow-up UPDATE so it can never break the raw INSERT above.
+        await _phase2_enrich_raw_copy(core_id, source, msg, phone, raw_text, _chat_jid, media_type, source_ts)
         try:
             await execute(
                 """
