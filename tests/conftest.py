@@ -1119,6 +1119,38 @@ def _disable_shadow_logger_real_writes(request):
 
 
 @pytest.fixture(autouse=True)
+def _default_bridge3_pairing_state_released(request):
+    """BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02: modules.bridge_poller now
+    FAIL-CLOSES bridge3 whenever `bridge3.pairing_state` is not exactly
+    `OUTBOUND_OWNER_APPROVED` — an unset key holds all bridge3 routing and
+    refuses every bridge3 outbound enqueue/dispatch. The isolated test DB's
+    `fazle_runtime_settings` starts empty, so without this fixture every
+    pre-existing test that enqueues or routes via bridge3 (idempotency,
+    lifecycle, recruitment, admin-isolation ...) would suddenly see a held
+    bridge. Default the lookup to `OUTBOUND_OWNER_APPROVED` for
+    `*.pairing_state` keys so those tests keep exercising normal behaviour;
+    everything else passes through to the real get_runtime_setting.
+
+    Opt-out: the two suites that assert the real fail-closed / state-machine
+    logic patch get_runtime_setting themselves and must not be wrapped."""
+    mod = request.module.__name__
+    if mod.endswith(("test_bridge_poller_history_sync_quarantine",
+                     "test_outbound_pairing_hold")):
+        yield
+        return
+    import modules.wa_chat_frontend as _wf
+    _real = _wf.get_runtime_setting
+
+    async def _patched(key, default="false"):
+        if isinstance(key, str) and key.endswith(".pairing_state"):
+            return "OUTBOUND_OWNER_APPROVED"
+        return await _real(key, default)
+
+    with patch.object(_wf, "get_runtime_setting", new=_patched):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_admin_command_dedup_cache():
     """Clear modules.admin_commands' in-process dedup LRU before each test.
 

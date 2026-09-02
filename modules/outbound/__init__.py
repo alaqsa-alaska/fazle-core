@@ -62,8 +62,25 @@ async def enqueue(
     idempotency_key: Optional[str] = None,
     meta: Optional[dict[str, Any]] = None,
 ) -> Optional[int]:
-    """Insert into queue. Returns id, or None if dedup'd by idempotency_key."""
+    """Insert into queue. Returns id, or None if dedup'd by idempotency_key.
+
+    BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02: if `source_bridge` is in a
+    non-sending pairing state, the enqueue is REFUSED here (returns None,
+    logged) — the queue-dispatch hold in sweep_once() is the second net for
+    rows enqueued by any path that bypasses this check.
+    """
     import json
+
+    _hs_bridge = source_bridge or ""
+    if _hs_bridge:
+        _hheld, _hstate = await _pairing_held(_hs_bridge)
+        if _hheld:
+            log.warning(
+                "[OUTBOUND_ENQUEUE] REFUSED bridge=%s pairing_state=%s recipient=%s purpose=%s "
+                "key=%s — bridge is in a non-sending pairing state",
+                _hs_bridge, _hstate, recipient, purpose, idempotency_key,
+            )
+            return None
     # Phase 7 (2026-08-26): Generic no-duplicate-answer invariant.
     # Read-only check for a substantially similar recent reply to the same
     # recipient + same purpose within the dedup window. Emits a structured
@@ -251,12 +268,29 @@ async def _alert_circuit_open(source_bridge: str) -> None:
         log.warning(f"[outbound] failed to enqueue circuit alert: {e}")
 
 
+async def _pairing_held(bridge: str) -> tuple[bool, str]:
+    """Thin wrapper over modules.bridge_poller._bridge_outbound_held (lazy import
+    — bridge_poller imports this module, never the reverse). Fail-closed:
+    ANYTHING that goes wrong resolving the state holds a fail-closed bridge.
+    BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02: the queue dispatcher must block
+    ALREADY-queued Bridge3 rows while the bridge is in a non-sending pairing
+    state, not just prevent new enqueues."""
+    try:
+        from modules.bridge_poller import _bridge_outbound_held
+        return await _bridge_outbound_held(bridge)
+    except Exception as exc:  # noqa: BLE001
+        if bridge == "bridge3":
+            log.warning("[OUTBOUND_HOLD] bridge3 hold-check failed (%s) — holding fail-closed", exc)
+            return (True, "(hold-check-failed)")
+        return (False, "")
+
+
 async def sweep_once(limit: int = 20) -> dict:
     """Pick up to N due rows, send them, update status. Returns counts."""
     if not _outbound_enabled():
         return {"picked": 0, "sent": 0, "failed": 0, "dlq": 0, "paused": True}
     pool = get_pool()
-    sent = failed = dlq = 0
+    sent = failed = dlq = held = 0
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
@@ -282,6 +316,31 @@ async def sweep_once(limit: int = 20) -> dict:
         for r in rows:
             rid = r["id"]
             attempts = r["attempts"] + 1
+
+            # Pairing-state hold (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02):
+            # a bridge in a non-sending pairing state must not have its queued
+            # work dispatched. Leave the row PENDING (no attempt consumed, no
+            # DLQ) so it dispatches normally once the owner releases the bridge.
+            # The fallback route is guarded separately below.
+            _src = r["source_bridge"] or ""
+            _held_src, _hs = await _pairing_held(_src) if _src else (False, "")
+            if _held_src:
+                await pool.execute(
+                    """UPDATE fazle_outbound_queue
+                          SET status='pending', locked_at=NULL, updated_at=NOW(),
+                              next_retry_at = NOW() + INTERVAL '5 minutes',
+                              last_error=$2
+                        WHERE id=$1""",
+                    rid, f"bridge_pairing_hold:{_src}:{_hs}",
+                )
+                held += 1
+                log.info(
+                    "[OUTBOUND_HOLD] queue id=%s bridge=%s held (pairing_state=%s) — "
+                    "left pending, not dispatched",
+                    rid, _src, _hs,
+                )
+                continue
+
             try:
                 try:
                     external_id = await _send_with_channel(
@@ -290,6 +349,16 @@ async def sweep_once(limit: int = 20) -> dict:
                 except Exception:
                     fallback = r.get("fallback_channel")
                     if not fallback:
+                        raise
+                    _held_fb, _hf = await _pairing_held(fallback)
+                    if _held_fb:
+                        # never fail a message over to a bridge that is in a
+                        # non-sending pairing state — re-raise so the row goes
+                        # through normal failed/backoff handling instead.
+                        log.warning(
+                            "[OUTBOUND_HOLD] id=%s fallback=%s is pairing-held (%s) — "
+                            "not failing over", rid, fallback, _hf,
+                        )
                         raise
                     log.warning(
                         "[OUTBOUND_FAILOVER] id=%s from=%s to=%s",
@@ -352,7 +421,7 @@ async def sweep_once(limit: int = 20) -> dict:
                     )
                     failed += 1
                     _meta_outbound_log("meta_outbound_failed", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts, error_class=type(e).__name__)
-    return {"picked": len(rows), "sent": sent, "failed": failed, "dlq": dlq}
+    return {"picked": len(rows), "sent": sent, "failed": failed, "dlq": dlq, "held": held}
 
 
 async def _worker_loop(interval_seconds: int) -> None:

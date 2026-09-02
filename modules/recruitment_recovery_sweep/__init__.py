@@ -439,14 +439,16 @@ async def _decide_and_reply(row: dict, *, live_send: bool) -> dict:
         return decision
 
     # Pairing-state hold (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02): if the
-    # source bridge is not in OUTBOUND_OWNER_APPROVED, this sweep must not
-    # message that population either — the live poller is already holding every
-    # inbound on that bridge as persist-only. Defense-in-depth: the sweep reads
-    # wbom_whatsapp_messages directly, not the poller.
+    # source bridge is EXPLICITLY in a non-sending pairing state, skip this
+    # candidate early (cleaner log, no wasted LLM call). The unset / fail-closed
+    # case does not early-skip here — the poller has already prevented new
+    # stale conversations on a held bridge, and modules.outbound.enqueue()
+    # independently REFUSES a held-bridge enqueue, so this sweep can never
+    # actually deliver to a held bridge regardless. Defense-in-depth only.
     try:
-        from modules.bridge_poller import _bridge_outbound_held
-        _sweep_held, _sweep_state = await _bridge_outbound_held(source_bridge)
-        if _sweep_held:
+        from modules.bridge_poller import _bridge_pairing_state, PAIRING_OUTBOUND_OWNER_APPROVED
+        _sweep_state = await _bridge_pairing_state(source_bridge)
+        if _sweep_state and _sweep_state != PAIRING_OUTBOUND_OWNER_APPROVED:
             decision["reason"] = f"bridge_pairing_hold:{source_bridge}:{_sweep_state}"
             return decision
     except Exception:

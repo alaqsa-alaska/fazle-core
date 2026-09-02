@@ -182,38 +182,75 @@ PAIRING_STATES = (
     PAIRING_LIVE_INBOUND_VERIFIED,
     PAIRING_OUTBOUND_OWNER_APPROVED,
 )
-# The ONLY state in which the bridge may route inbound and send outbound.
-# Every other set state — and, conservatively, an unrecognised value — holds
-# the bridge in receive/persist-only mode. An UNSET setting = the bridge never
-# went through the guarded-pairing flow (bridge1/bridge2 today) = normal.
+# The ONLY state that authorises outbound.
 _PAIRING_STATE_ALLOWS_SEND = frozenset({PAIRING_OUTBOUND_OWNER_APPROVED})
+
+# FAIL-CLOSED bridges (owner directive 2026-09-02): for these, ANY ambiguity in
+# the pairing state — absent, empty, whitespace, malformed, unknown value, a
+# legacy ISO timestamp, settings storage unavailable, a read exception — MUST
+# hold outbound. Only the exact literal "OUTBOUND_OWNER_APPROVED" releases.
+# bridge1 / bridge2 are NOT in this set: they never entered the guarded-pairing
+# flow, so an unset state keeps their existing behaviour unchanged.
+_PAIRING_FAIL_CLOSED_BRIDGES = frozenset({"bridge3"})
+
+# Sentinel returned by _bridge_pairing_state() when the value could not be read
+# at all (storage down / exception). Distinct from "" (row simply absent) only
+# for logging; both hold a fail-closed bridge.
+_PAIRING_READ_FAILED = "\x00READ_FAILED"
 
 
 async def _bridge_pairing_state(bridge: str) -> str:
-    """Return `<bridge>.pairing_state` (one of PAIRING_STATES) or "" if unset.
+    """Return the raw `<bridge>.pairing_state` string, "" if the row is absent,
+    or _PAIRING_READ_FAILED if the settings store could not be read.
 
-    Fail-open on a read error → "" (normal), because a broken settings row must
-    never silently freeze a healthy bridge. An unrecognised stored value is
-    returned verbatim and treated by _bridge_outbound_held() as NON-sending
-    (fail-safe for the guarded bridge).
+    This function does NOT decide policy — _bridge_outbound_held() does. It only
+    reports what storage says (or that storage failed). For a fail-closed bridge
+    every one of {"", unknown, malformed, timestamp, _PAIRING_READ_FAILED} holds.
     """
     try:
         from modules.wa_chat_frontend import get_runtime_setting
-        return (await get_runtime_setting(f"{bridge}.pairing_state", "") or "").strip()
-    except Exception as exc:  # noqa: BLE001 — fail-open, never freeze a healthy bridge
-        log.warning("[pairing_state] %s.pairing_state unreadable (%s) — treating as unset/normal", bridge, exc)
-        return ""
+        # get_runtime_setting swallows its own errors and returns the default,
+        # so a returned default is indistinguishable from an absent row here —
+        # which is fine: a fail-closed bridge holds on either. We still guard
+        # this call for anything it might not catch (import error, etc.).
+        raw = await get_runtime_setting(f"{bridge}.pairing_state", "")
+        return (raw or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[pairing_state] %s.pairing_state unreadable (%s) — FAIL-CLOSED bridges hold",
+            bridge, exc,
+        )
+        return _PAIRING_READ_FAILED
 
 
 async def _bridge_outbound_held(bridge: str) -> tuple[bool, str]:
-    """(held, state). `held` is True when this bridge is in a NON-sending
-    pairing state — inbound is persisted but not routed and nothing may send.
-    Held for every set state except OUTBOUND_OWNER_APPROVED (incl. an
-    unrecognised value); NOT held when the setting is unset. No timestamp is
-    consulted anywhere — release is only ever an explicit owner action.
+    """(held, state_for_logging).
+
+    `held` True ⇒ this bridge is NON-sending: inbound is persisted but not
+    routed, no interactive auto-reply, no outbound enqueue, no queue dispatch,
+    no recovery-sweep live send. No timestamp is consulted anywhere — release
+    is only ever the explicit owner state change to OUTBOUND_OWNER_APPROVED.
+
+    * FAIL-CLOSED bridge (bridge3): held unless the stored value is EXACTLY
+      "OUTBOUND_OWNER_APPROVED". Absent / empty / malformed / unknown / legacy
+      timestamp / storage-unavailable / read-exception ⇒ held.
+    * Any other bridge (bridge1/bridge2): unset ⇒ NOT held (existing behaviour
+      preserved); a state that IS set holds unless it is OUTBOUND_OWNER_APPROVED.
     """
     state = await _bridge_pairing_state(bridge)
-    if not state:
+
+    if bridge in _PAIRING_FAIL_CLOSED_BRIDGES:
+        held = state != PAIRING_OUTBOUND_OWNER_APPROVED
+        if state == _PAIRING_READ_FAILED:
+            label = "(read-failed→HELD)"
+        elif not state:
+            label = "(unset→HELD)"
+        else:
+            label = state
+        return (held, label)
+
+    # non-fail-closed bridges
+    if not state or state == _PAIRING_READ_FAILED:
         return (False, "")
     return (state not in _PAIRING_STATE_ALLOWS_SEND, state)
 
