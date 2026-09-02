@@ -120,11 +120,45 @@ _(filled with results — attendance / escort / admin / RBAC / recruitment / Pay
 
 ## 11. Facebook ad — OWNER ACTION
 
-_(§ below)_
+The software side is ready: Bridge1 receives inbound, resolves identity, routes recruitment
+conversationally, replies through Bridge1, and suppresses OTP/system noise. No autonomous
+Meta/ad mutation was made (no authenticated Meta Marketing API capability in this
+environment, and it would need separate owner authorisation regardless).
 
-## 12. Manual live-test plan (owner-controlled phones — DO NOT auto-execute)
+**To point the Facebook Click-to-WhatsApp ad at Bridge1:**
+1. In **Meta Ads Manager / Business Suite**, open the ad set (or the WhatsApp
+   Click-to-Message ad) and change the **WhatsApp destination / connected WhatsApp number**
+   from the old (restricted) Bridge3 number to the **Bridge1 number** (`880195…`, the
+   account currently linked to `whatsapp-bridge.service`).
+2. If the ad was previously **rejected/restricted** because of the old destination, changing
+   the number may not auto-clear it — you may need to **duplicate the ad** with the new
+   destination or submit it for a fresh review. Do not assume the existing ad goes live.
+3. Before switching ad spend on, confirm with the agent (read-only): Bridge1 healthy;
+   Bridge1 can receive new unknown inbound; same-source reply routing correct;
+   `auto_reply.recruitment = true`; F6 active on Bridge1; no bulk/unsolicited messaging.
+4. **The agent will not claim the ad is live without direct evidence** — report the ad
+   status back after you change it.
 
-_(§ below)_
+No bulk messaging, no automatic outreach to old contacts, and no unsolicited first-contact
+message is introduced by this change — Bridge1 only ever *replies* to an inbound it
+received.
+
+## 12. Manual live-test plan (owner-controlled phones — PREPARED, NOT EXECUTED)
+
+Send from an owner-controlled phone that is **not** a known admin/employee/accountant
+number (so it resolves as unknown/candidate), unless the test says otherwise.
+
+| # | Sender type | Send to | Message | Expected routing | Expected outbound | Expected persistence | Must NOT happen |
+|---|---|---|---|---|---|---|---|
+| 1 | unknown human, genuine recruitment | **Bridge1** | e.g. "আমি Security Guard পদে চাকরি করতে চাই" | recruitment conversational | **exactly one reply via Bridge1** | inbound + outbound rows on `platform='bridge1'`; a `fazle_recruitment_sessions` row opens | no Bridge2/Bridge3 reply; no duplicate; no financial write |
+| 2 | known employee (use a real employee's phone) | **Bridge1** | e.g. "আমার এই মাসের বেতন কবে হবে?" | employee conversational | **one reply via Bridge1** (informational, or a `fazle_payment_drafts` row for admin review) | inbound + outbound on `platform='bridge1'` | employee NOT turned into a new candidate; no cash txn / ledger row; no Bridge2/3 reply |
+| 3 (optional) | unknown human, genuine recruitment | **Bridge2** | e.g. "চাকরির জন্য আবেদন করতে চাই" | recruitment conversational | **one reply via Bridge2** | rows on `platform='bridge2'` | not misrouted to admin; no Bridge1/3 reply |
+| 4 (only if separately authorised) | admin, structured format | **Bridge2** | one existing **approved** structured-parser command in its exact format | the established deterministic parser | whatever that parser already does | its existing row(s) | no change vs. before this session |
+
+**Do not** include a Payment/FPE relay as a live test just for verification. **Do not** send
+any Meta/Messenger/Instagram message. After each test, the agent verifies read-only (queue,
+`wbom_whatsapp_messages`, `fazle_recruitment_sessions`, `fazle_payment_drafts`, logs) that
+the "expected" happened and the "must not" did not.
 
 ## 13. Deployment / restart evidence
 
