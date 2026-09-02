@@ -577,15 +577,52 @@ cursor, the queues, or the history-sync rows was modified or deleted.
     sandbox (`ConnectError: Temporary failure in name resolution`).
   Both are tracked pre-existing test-isolation / environment issues (see `MEMORY.md`).
 
-## 16. Restart-gate readiness (fix branch)
+## 16. Fail-closed correction (owner pre-deployment review, 2026-09-02)
 
-`scripts/restart_gate.sh --check-only` was run on the **deployed** branch for the
-Meta-secret restart (§ see `META_APP_SECRET_ACTIVATION_2026-09-02.md`) → **PASS**. It has
-**not** yet been run on `fix/bridge3-history-sync-quarantine-20260902` — that is a
-deploy-time step (checks 4/4b/4c re-run the full targeted + payment/FPE + Phase-C suites).
-The fix branch adds one new test file, one new module (`shared/system_message.py`), one
-new endpoint, and no migration; `db/.restart_gate_manifest` needs no new entry (all
-changes are committed).
+**Owner authoritative safety question:** *what happens when `bridge3.pairing_state` is
+absent/unset?* — original answer: unset ⇒ normal (fail-OPEN, matching bridge1/bridge2).
+**Corrected: for bridge3, unset ⇒ HELD (fail-CLOSED).** Commit `c42c587`:
+
+| Condition on `bridge3.pairing_state` | Result |
+|---|---|
+| exactly `OUTBOUND_OWNER_APPROVED` | **released** — the only release |
+| absent / row missing | HELD |
+| empty / whitespace only | HELD |
+| unknown / malformed value | HELD |
+| a legacy ISO timestamp | HELD |
+| settings storage unavailable | HELD |
+| settings read raises an exception | HELD (`_PAIRING_READ_FAILED` sentinel) |
+| `modules.wa_chat_frontend` import fails | HELD (`_pairing_held` wrapper is itself fail-closed for bridge3) |
+| process restart while the key is still missing | HELD — `get_runtime_setting` does a live `fetch_one` every call; **no in-process cache** (asserted by `test_no_runtime_setting_cache_exists_for_pairing_state`) |
+| API cannot persist the state (write fails) | value unchanged; unset/quarantine ⇒ HELD |
+
+Held ⇒ **blocks** business routing · interactive auto-reply · outbound enqueue
+(`modules.outbound.enqueue` refuses) · queue dispatch (`sweep_once` leaves the row
+`pending`, no attempt consumed, no DLQ; failover to a held bridge re-raised) ·
+recovery-sweep live send. **Raw inbound persistence continues.** **bridge1 / bridge2
+byte-unchanged** — not in `_PAIRING_FAIL_CLOSED_BRIDGES`; unset ⇒ not held, read-error ⇒
+not held.
+
+## 17. Coordinated two-repo diff review (2026-09-02) — ALL PASS
+
+core `fix/bridge3-history-sync-quarantine-20260902` (`ca510a0`) + whatsapp-mcp
+`fix/bridge3-history-sync-flag-20260902` (`eb3a1ad`):
+
+| Check | Evidence |
+|---|---|
+| history-sync column migration additive + idempotent | `ADD COLUMN from_history_sync INTEGER NOT NULL DEFAULT 0` gated by a `pragma_table_info` count (same as `direct_path`); `go test` covers fresh + no-clobber |
+| old bridge / new core | `_fetch_new_messages` probes `has_column`; absent ⇒ filter omitted, byte-identical |
+| new bridge / old core | old core's SELECT lists explicit columns, never names the new one; inert |
+| no raw-message loss | F1 history insert is `INSERT … ON CONFLICT DO NOTHING`; F2 filters only the routing SELECT; `_save_raw_core_copy` persists before the hold/F6 branches |
+| imported history cannot reach routing | F2 `AND COALESCE(from_history_sync,0)=0` |
+| quarantine blocks newly-generated AND already-queued Bridge3 outbound | poller hold + `enqueue` refusal + `sweep_once` per-row hold |
+| F6 cannot suppress a recruitment message with a bare number | `is_automated_system_message` has no bare-number rule; test covers `"25"`, `"1998"` |
+| F6 applies to bridge3 only | `if bridge_name == "bridge3" and is_automated_system_message(text)` |
+| Payment/FPE + Bridge1/2 unchanged | no `payment_relay*` / `fpe_*` / `payroll` file in the diff; bridge2 payment-relay enqueue (unset) → not held |
+| no secret / session material committed | `scripts/secret_scan.sh` PASS on the full worktree; manual review clean |
+
+`scripts/restart_gate.sh --check-only` on the fix branch: run at deploy (checks 4/4b/4c
+independently green this session; `db/.restart_gate_manifest` needs no new entry).
 
 ---
 

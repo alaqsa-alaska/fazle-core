@@ -1,15 +1,34 @@
 # CLAUDE PHASE-2 — 24–48 h OBSERVATION WINDOW
 
-**`OBSERVATION WINDOW STARTED`**
+**`OBSERVATION BASELINE RESET 2026-09-02 — see below`**
+
+> ### Baseline reset (2026-09-02)
+>
+> Two operational restarts happened during the window; per owner instruction the
+> **observation baseline now begins from the successful Meta-secret core restart**:
+>
+> | # | Event | UTC | Core PID | Notes |
+> |---|---|---|---|---|
+> | 1 | Original Phase-2 deploy | 2026-09-01 19:20:33Z | 2981971 | Phase-2 P1 fixes live, flag OFF |
+> | — | Meta secret rotation (`.env` edited by owner) | ~2026-09-01 19:43Z | — | value only; not loaded yet |
+> | **2** | **Meta-secret activation restart** (`restart_gate --restart`, all 10 PASS) — **NEW BASELINE** | **2026-09-01 23:30:00Z** (01:30 CEST 09-02) | **3470442** | `feat/phase2-inbound-identity-2026-09-01 @ 351324f`; Phase-2 still OFF; Bridge1/2 PIDs untouched; Bridge3 stopped; `META_APP_SECRET` new value loaded + HMAC self-test PASS |
+> | 3 | Bridge3 fix deploy (`restart_gate --restart`) | _(recorded at deploy time)_ | _(recorded)_ | `fix/bridge3-history-sync-quarantine-20260902`; F1–F4 + pairing-state machine (bridge3 FAIL-CLOSED) + F6; Phase-2 still OFF; **Bridge3 stays stopped, `bridge3.pairing_state=HISTORY_SYNC_QUARANTINE`, no pairing** |
+>
+> `PHASE2_IDENTITY_RESOLVER_ENABLED` has been **absent / OFF through every one of
+> these restarts** and stays OFF. The Phase-2 enable decision (§14 of the
+> deployment checkpoint) is unchanged and still needs a separate explicit owner
+> instruction.
+>
+> **New earliest review: +24 h from event 2 → 2026-09-02T23:30Z.**
+> **Preferred final review: +48 h → 2026-09-03T23:30Z.**
+> If event 3 (the Bridge3 fix deploy) materially changes the picture, note it and
+> consider extending.
 
 | Field | Value |
 |---|---|
-| Deploy | 2026-09-01 21:20:33 CEST (19:20:33Z) — `fazle-core.service` PID **2981971** on `feat/phase2-inbound-identity-2026-09-01 @ 8070bfb` |
+| Original deploy | 2026-09-01 21:20:33 CEST (19:20:33Z) — `fazle-core.service` PID **2981971** on `feat/phase2-inbound-identity-2026-09-01 @ 8070bfb` |
 | Feature flag | `PHASE2_IDENTITY_RESOLVER_ENABLED` **absent from `.env` → OFF**. Phase-2 enrichment is DARK this whole window. |
 | What went live | P1 identity fixes (always-on): deterministic accountant tier · `platform='whatsapp'` scoping · inactive-employee resolution · `canonical_phone`/`phone_last10` write-time normalization · Meta `canonical_phone` populated · new read-only endpoints. |
-| Observation start | 2026-09-01T19:26Z |
-| Earliest review | **2026-09-02T19:26Z (+24 h)** |
-| Preferred final review | **2026-09-03T19:26Z (+48 h)** |
 | Resume command | **`RESUME CLAUDE PHASE2 OBSERVATION REVIEW`** |
 | Rollback | `git checkout feat/owner-accountant-payment-relay-20260830` (→ `5e62ed5`) then `scripts/restart_gate.sh --restart` |
 
