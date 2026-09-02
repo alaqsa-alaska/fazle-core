@@ -410,6 +410,20 @@ _BRIDGE_PAIRING_STATES = (
 _BRIDGE_PAIRING_BRIDGES = ("bridge1", "bridge2", "bridge3")
 
 
+async def _pairing_outbound_allowed(bridge: str) -> bool:
+    """Authoritative — asks modules.bridge_poller._bridge_outbound_held (the
+    SAME function the poller / outbound queue / recovery sweep consult), so the
+    API answer can never disagree with runtime behaviour. For a FAIL-CLOSED
+    bridge (bridge3) an unset / ambiguous state reports allowed=False."""
+    try:
+        from modules.bridge_poller import _bridge_outbound_held
+        held, _ = await _bridge_outbound_held(bridge)
+        return not held
+    except Exception:
+        # match _pairing_held's fail-closed stance for bridge3
+        return bridge != "bridge3"
+
+
 @router.get("/api/wa/bridge/{bridge}/pairing-state")
 async def get_bridge_pairing_state(bridge: str, _: None = Depends(_require_api_key)):
     if bridge not in _BRIDGE_PAIRING_BRIDGES:
@@ -418,7 +432,7 @@ async def get_bridge_pairing_state(bridge: str, _: None = Depends(_require_api_k
     return {
         "bridge": bridge,
         "pairing_state": val or None,
-        "outbound_allowed": val in ("", "OUTBOUND_OWNER_APPROVED"),
+        "outbound_allowed": await _pairing_outbound_allowed(bridge),
         "valid_states": list(_BRIDGE_PAIRING_STATES),
     }
 
@@ -456,7 +470,7 @@ async def set_bridge_pairing_state(
     return {
         "bridge": bridge,
         "pairing_state": state or None,
-        "outbound_allowed": state in ("", "OUTBOUND_OWNER_APPROVED"),
+        "outbound_allowed": await _pairing_outbound_allowed(bridge),
     }
 
 
