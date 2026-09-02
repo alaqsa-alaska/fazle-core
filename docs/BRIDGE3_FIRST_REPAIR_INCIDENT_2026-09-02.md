@@ -621,9 +621,91 @@ core `fix/bridge3-history-sync-quarantine-20260902` (`ca510a0`) + whatsapp-mcp
 | Payment/FPE + Bridge1/2 unchanged | no `payment_relay*` / `fpe_*` / `payroll` file in the diff; bridge2 payment-relay enqueue (unset) → not held |
 | no secret / session material committed | `scripts/secret_scan.sh` PASS on the full worktree; manual review clean |
 
-`scripts/restart_gate.sh --check-only` on the fix branch: run at deploy (checks 4/4b/4c
-independently green this session; `db/.restart_gate_manifest` needs no new entry).
+`scripts/restart_gate.sh --check-only` on the fix branch: **run — OVERALL PASS (0 warnings)**,
+all 10 checks; `db/.restart_gate_manifest` needed no new entry.
 
 ---
 
-`END OF FORENSIC REPORT — CONTAINED · PRIMARY ACCOUNT TEMPORARILY RESTRICTED · META SECRET ACTIVATED · BRIDGE3 FIX (F1–F4 + state machine + F6) COMMITTED, NOT DEPLOYED · NO PAIRING / DEPLOY / DATA CLEANUP WITHOUT SEPARATE OWNER APPROVAL`
+## 18. DEPLOYMENT — 2026-09-02 (owner-authorised)
+
+**Both fix branches pushed (no force):**
+`origin/fix/bridge3-history-sync-quarantine-20260902` (core, `e41965d`) ·
+`origin/fix/bridge3-history-sync-flag-20260902` (whatsapp-mcp, `eb3a1ad`).
+
+**Core deployed via `scripts/restart_gate.sh --restart`** (gate PASS both times):
+
+| # | UTC | Core PID | HEAD | Notes |
+|---|---|---|---|---|
+| fix deploy | 2026-09-02 00:25:40Z | 3470442 → **3625932** | `06ea00b` | F1–F4 + fail-closed state machine + F6 |
+| API-consistency follow-up | 2026-09-02 00:29:53Z | 3625932 → **3649821** | `e41965d` | `outbound_allowed` now computed from the authoritative `_bridge_outbound_held` |
+
+Post-deploy: `/health` **ok** (all business probes) · `NRestarts` 0 · Phase-2 flag **absent
+(OFF)** in `/proc/3649821/environ` · **Bridge1 PID 3640163 / Bridge2 PID 3688844 —
+byte-unchanged, never restarted** · Bridge3 `inactive`.
+
+**`bridge3.pairing_state` set through the sanctioned authenticated API** →
+`HISTORY_SYNC_QUARANTINE`. Read back: API `GET /api/wa/bridge/bridge3/pairing-state` →
+`{"pairing_state":"HISTORY_SYNC_QUARANTINE","outbound_allowed":false}`; authoritative
+storage `fazle_runtime_settings['bridge3.pairing_state'] = 'HISTORY_SYNC_QUARANTINE'`
+(updated 2026-09-02 00:26:20Z). bridge1/bridge2 → `pairing_state: null`, `outbound_allowed:
+true` (unaffected).
+
+**Reviewed Bridge3 bridge binary — built reproducibly, checksummed, staged (NOT started):**
+- source: whatsapp-mcp `fix/bridge3-history-sync-flag-20260902 @ eb3a1ad`
+- build: `CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-buildid=" -o …` (go 1.23.4) — **two independent builds produced byte-identical output**
+- artifact: `/home/azim/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge.candidate-b3fix-20260902`
+  · **sha256 `36dee63f5c5802163355ca4238d064aab78ffe2fecc72eaf0f59ef1c5c08c781`** (also in the `.sha256` sidecar)
+- `go test ./...` on that commit: **PASS**
+- **rollback artifact preserved**: current shared candidate (`c1eaf67` build, sha256
+  `25e2d7b025ccc6964f0404b21420d8630373a1527225e3aab71e0bb94de647ec`) copied to
+  `/home/azim/backups/fazle/bridge3-incident-20260902/rollback-whatsapp-bridge.candidate-c1eaf67`
+  (mode 600) + recorded in that dir's `SHA256SUMS`.
+- the **shared `whatsapp-bridge.candidate` is UNCHANGED** — Bridge1/Bridge2 keep running it.
+
+**Non-sending verification (Bridge3 outbound blocked):**
+1. authoritative gate (`_bridge_outbound_held`, the same function the poller / `outbound.enqueue` / `sweep_once` / recovery sweep call) → `outbound_allowed = False`.
+2. behavioural: `tests/unit/test_outbound_pairing_hold.py` (5) — real `enqueue()` returns `None` (refused) for a held bridge3; `sweep_once()` leaves an already-queued bridge3 row `pending`.
+3. `fazle_outbound_queue` — **0** non-terminal bridge3 rows, 0 rows created since deploy.
+4. `wbom_whatsapp_messages` platform=bridge3 — 0 rows since deploy.
+5. `logs/fazle-core.log` since deploy — no `BRIDGE_SEND`/`OUTBOUND_SEND` for bridge3.
+6. Bridge3 service `inactive`, `whatsmeow_device` 0.
+
+**Other containment reconfirmed post-deploy:** `auto_reply.recruitment=false` ·
+`recruitment_recovery_sweep_live_send` kill-switched · `phone_block.447710173736=true`.
+
+### OWNER_ACTION_REQUIRED (1 item — needs root)
+
+1. **Wire the reviewed Bridge3 binary into systemd** (the drop-in dir is root-owned;
+   `azim` has no NOPASSWD sudo for `daemon-reload` or `/etc/systemd/system` writes). This
+   does **not** start Bridge3 — it only changes which binary Bridge3 *would* exec when
+   next started:
+
+   ```
+   sudo tee /etc/systemd/system/whatsapp-bridge3.service.d/zz-b3fix.conf >/dev/null <<'EOF'
+   [Service]
+   ExecStart=
+   ExecStart=/home/azim/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge.candidate-b3fix-20260902
+   EOF
+   sudo systemctl daemon-reload
+   systemctl show whatsapp-bridge3.service -p ExecStart   # verify it points at -b3fix-20260902
+   systemctl is-active whatsapp-bridge3                    # must still be: inactive
+   ```
+   Verify `sha256sum /home/azim/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge.candidate-b3fix-20260902`
+   == `36dee63f5c5802163355ca4238d064aab78ffe2fecc72eaf0f59ef1c5c08c781` first.
+   **Do not `systemctl start whatsapp-bridge3`** — pairing is a separate, later,
+   owner-approved step.
+
+### Resume instruction
+
+`RESUME BRIDGE3 PAIRING` — only after: the WhatsApp restriction countdown has expired and
+the account is re-verified from the mobile app; the systemd drop-in above is in place; and
+the owner explicitly authorises the pairing. The agent will then (per §9): confirm the
+hold, restart Bridge3 for the QR (owner scans), validate the new session while
+`pairing_state` stays `HISTORY_SYNC_QUARANTINE`, and **only on a separate explicit owner
+approval** advance to `LIVE_INBOUND_VERIFIED` and later `OUTBOUND_OWNER_APPROVED` (the
+latter needs `confirm == "RELEASE OUTBOUND bridge3"`).
+
+---
+
+`BRIDGE3 FIX DEPLOYED — BRIDGE3 STOPPED — HISTORY_SYNC_QUARANTINE ACTIVE — NO PAIRING PERFORMED`
+_(one OWNER_ACTION open: root `daemon-reload` to wire the pre-built, checksum-verified Bridge3 binary — not required until Bridge3 is next started for pairing.)_
