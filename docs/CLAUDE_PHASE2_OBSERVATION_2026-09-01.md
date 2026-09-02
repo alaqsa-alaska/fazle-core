@@ -13,6 +13,8 @@
 > | — | Meta secret rotation (`.env` edited by owner) | ~2026-09-01 19:43Z | — | value only; not loaded yet |
 > | **2** | **Meta-secret activation restart** (`restart_gate --restart`, all 10 PASS) — **NEW BASELINE** | **2026-09-01 23:30:00Z** (01:30 CEST 09-02) | **3470442** | `feat/phase2-inbound-identity-2026-09-01 @ 351324f`; Phase-2 still OFF; Bridge1/2 PIDs untouched; Bridge3 stopped; `META_APP_SECRET` new value loaded + HMAC self-test PASS |
 > | 3 | Bridge3 fix deploy (`restart_gate --restart`) | _(recorded at deploy time)_ | _(recorded)_ | `fix/bridge3-history-sync-quarantine-20260902`; F1–F4 + pairing-state machine (bridge3 FAIL-CLOSED) + F6; Phase-2 still OFF; **Bridge3 stays stopped, `bridge3.pairing_state=HISTORY_SYNC_QUARANTINE`, no pairing** |
+> | 3 | Bridge3 fix deploy (`restart_gate --restart` ×2) | 2026-09-02 00:25:40Z / 00:29:53Z | 3625932 → 3649821 | `fix/bridge3-history-sync-quarantine-20260902 @ e41965d`; F1–F4 + fail-closed pairing-state machine + F6; Phase-2 OFF; Bridge3 stopped, `HISTORY_SYNC_QUARANTINE` |
+> | 4 | Bridge1/Bridge2 conversational continuity deploy (`restart_gate --restart`) | 2026-09-02 04:36:18Z (06:36 CEST) | 3649821 → **4169686** | `feat/bridge1-2-conversation-continuity-20260902 @ bb4c79c`; F6 extended to bridge1/bridge2; `auto_reply.recruitment` + `auto_reply.employee` → true (live). Phase-2 OFF. Bridge1/Bridge2 processes NOT restarted. Bridge3 unchanged (`HISTORY_SYNC_QUARANTINE`, `outbound_allowed=false` verified with the global toggle ON). |
 >
 > `PHASE2_IDENTITY_RESOLVER_ENABLED` has been **absent / OFF through every one of
 > these restarts** and stays OFF. The Phase-2 enable decision (§14 of the
