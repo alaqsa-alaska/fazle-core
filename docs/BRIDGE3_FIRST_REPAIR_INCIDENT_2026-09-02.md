@@ -694,15 +694,38 @@ The owner installed `/etc/systemd/system/whatsapp-bridge3.service.d/zz-b3fix.con
 | `phone_block.447710173736` | `true` |
 | core PID 3649821 `/health` · `NRestarts` · Phase-2 | `ok` · 0 · **absent from `.env` and `/proc/…/environ`** |
 
-### Resume instruction
+## 19. Pairing #2 under HISTORY_SYNC_QUARANTINE — 2026-09-02
 
-`RESUME BRIDGE3 PAIRING` — only after: the WhatsApp restriction countdown has expired and
-the account is re-verified from the mobile app; the systemd drop-in above is in place; and
-the owner explicitly authorises the pairing. The agent will then (per §9): confirm the
-hold, restart Bridge3 for the QR (owner scans), validate the new session while
-`pairing_state` stays `HISTORY_SYNC_QUARANTINE`, and **only on a separate explicit owner
-approval** advance to `LIVE_INBOUND_VERIFIED` and later `OUTBOUND_OWNER_APPROVED` (the
-latter needs `confirm == "RELEASE OUTBOUND bridge3"`).
+Owner: restriction expired, account opens normally, "Link a device" available, the old
+Bridge3 linked-device entry removed from the mobile list. `RESUME BRIDGE3 PAIRING` given.
+
+**Pre-pairing read-only checks (all PASS, 2026-09-02 ~01:08Z):** `pairing_state =
+HISTORY_SYNC_QUARANTINE` / `outbound_allowed = false` · `auto_reply.recruitment = false` ·
+sweep `effective_enabled = false` · `phone_block.447710173736 = true` · bridge3 poller
+cursor `2026-09-01 21:12:23Z` (unchanged) · 0 non-terminal bridge3 queue rows · effective
+`ExecStart` = the b3fix binary (`36dee63f…`) · bridge3 `inactive`, port 8083 free ·
+`whatsmeow_device` 0 · store dir `azim 775`, 92 G free · Bridge1/Bridge2 on the unchanged
+shared candidate (`25e2d7b0…`), `NRestarts` 0 · core `/health` ok, Phase-2 OFF.
+
+**Pre-pairing #2 snapshot:** `/home/azim/backups/fazle/bridge3-prepairing2-20260902/`
+(`messages.pre-pairing2.db` 6,640 rows, `whatsapp.pre-pairing2.db` device 0 / lid_map 827,
+`SHA256SUMS`, mode 700). `messages.db` byte-identical to the post-incident backup (nothing
+touched Bridge3 since). **Postgres baseline to re-check unchanged after pairing:**
+`wbom_whatsapp_messages` platform=bridge3 = **5,825** · `processed_bridge_messages` bridge3
+= **3,377** · `wbom_candidates` = **546** · `fazle_recruitment_sessions` = **564**.
+
+Why pairing #2 is safe this time (defence in depth): (1) `pairing_state =
+HISTORY_SYNC_QUARANTINE` ⇒ every bridge3 inbound is persist-only, no routing / reply /
+enqueue; (2) the b3fix binary flags every history-sync row `from_history_sync = 1` and F2
+excludes them from the routing SELECT; (3) F6 suppresses OTP / system messages on bridge3;
+(4) `bridge_poller_cursor[bridge3]` + `processed_bridge_messages` dedup still hold.
+
+### Resume instruction (after pairing #2 is validated)
+
+`pairing_state` **stays `HISTORY_SYNC_QUARANTINE`** through pairing and validation. Advancing
+to `LIVE_INBOUND_VERIFIED` (still non-sending) and then `OUTBOUND_OWNER_APPROVED` (needs
+`confirm == "RELEASE OUTBOUND bridge3"`) each require a **separate explicit owner
+instruction**.
 
 ---
 
