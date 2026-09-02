@@ -391,8 +391,11 @@ def test_hold_and_f6_branches_continue_before_routing():
     # both branches finalise + dedup + continue
     assert block.count("_mark_processed(") >= 2
     assert block.count("continue") >= 2
-    # F6 is applied only for bridge3 (recruitment channel)
-    assert 'bridge_name == "bridge3" and is_automated_system_message(text)' in block
+    # F6 is applied to the WhatsApp bridges (bridge1 became the recruitment
+    # entry number 2026-09-02); Meta is deliberately NOT in the tuple.
+    assert 'bridge_name in ("bridge1", "bridge2", "bridge3")' in block
+    assert "is_automated_system_message(text)" in block
+    assert '"meta"' not in block.split("is_automated_system_message")[0].split("bridge_name in")[-1]
 
 
 # ── the sanctioned pairing-state API ───────────────────────────────────────

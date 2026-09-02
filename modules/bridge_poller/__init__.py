@@ -1167,21 +1167,26 @@ async def _poll_bridge(config: dict):
                     )
                     continue
 
-                # F6 (owner amendment 2026-09-02, Bridge3 ingestion scope): an
-                # automated OTP / login-code / platform system notification is
-                # NEVER a job applicant. On bridge3 an unknown sender defaults
-                # to the recruitment funnel, so these become a phantom
-                # candidate + session + auto-reply (the incident). Preserve the
-                # raw forensic row with full provenance (already done by
-                # _save_raw_core_copy) but do NOT let it reach identity
-                # resolution, recruitment routing, a recruitment session or
-                # wbom_candidates row, a workflow-state write, or any reply.
-                # Deterministic, tight allowlist (shared.system_message) — a
-                # miss falls through to normal routing, a hit only SUPPRESSES.
-                # Scoped to bridge3 (recruitment channel); bridge1/bridge2 do
-                # not funnel unknowns into recruitment so the failure mode does
-                # not exist there and the surface stays minimal.
-                if bridge_name == "bridge3" and is_automated_system_message(text):
+                # F6 (owner amendment 2026-09-02): an automated OTP / login-code
+                # / platform system notification is NEVER a job applicant or an
+                # employee. An unknown sender on a recruitment-entry WhatsApp
+                # number defaults into the recruitment funnel, so these become a
+                # phantom candidate + session + auto-reply (the 2026-09-02
+                # Bridge3 incident). Extended to bridge1/bridge2 (owner
+                # decision 2026-09-02): Bridge1 becomes the Facebook
+                # Click-to-WhatsApp recruitment number, so the same OTP magnet
+                # now lands there too. Preserve the raw forensic row with full
+                # provenance (already done by _save_raw_core_copy) but do NOT
+                # let it reach identity resolution, recruitment/employee
+                # routing, a recruitment session or wbom_candidates row, a
+                # workflow-state write, or any reply. Deterministic, tight
+                # allowlist (shared.system_message) — a miss falls through to
+                # normal routing, a hit only SUPPRESSES. Meta is NOT included
+                # (its own webhook path has its own guards).
+                if (
+                    bridge_name in ("bridge1", "bridge2", "bridge3")
+                    and is_automated_system_message(text)
+                ):
                     f6_system_msg_persist_only += 1
                     await _mark_processed(msg_id, bridge_name, phone)
                     await _finalize_core_copy(
