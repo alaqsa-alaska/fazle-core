@@ -1,6 +1,6 @@
 # BRIDGE1 / BRIDGE2 CONVERSATIONAL CONTINUITY — 2026-09-02
 
-**`<STATUS — filled at the end>`**
+**`READY FOR OWNER TEST — NO LIVE MESSAGE SENT`**
 
 Owner decision (2026-09-02): Bridge3 stays stopped/quarantined (new ≈16 h WhatsApp
 restriction); **Bridge1 becomes the primary Facebook boosting / Click-to-WhatsApp
@@ -15,7 +15,18 @@ Author: Claude (VS Code agent). Session type: implementation + deployment.
 
 ## 1. Executive status
 
-_(filled at the end)_
+`READY FOR OWNER TEST — NO LIVE MESSAGE SENT`
+
+Bridge1/Bridge2 conversational continuity is **deployed dark-verified**: the F6
+OTP/system-message suppression now covers Bridge1/Bridge2 (one-line poller change, gate
+PASS, `fazle-core` PID **4169686**), and the sanctioned runtime toggles
+`auto_reply.recruitment` + `auto_reply.employee` are **`true`** (applied live, no restart).
+Bridge3 is provably still held (`outbound_allowed=false` under the very-same
+`_bridge_outbound_held` the poller/queue use, with `auto_reply.recruitment=true` global).
+Bridge1/Bridge2 processes were **not restarted**. No WhatsApp/Meta message was sent.
+Actual end-to-end live behaviour is **not yet exercised** — the Facebook ad still points at
+the restricted Bridge3 number and there was no organic recruitment traffic in the window.
+The owner-controlled manual test plan (§12) is the next step.
 
 ## 2. Bridge3 — frozen state (unchanged this session)
 
@@ -91,7 +102,36 @@ the conversational `_recruit_gate` block).
 
 ## 7. Tests
 
-_(filled with the run results)_
+**New / changed** (isolated, existing fixtures, no live message):
+- `tests/unit/test_bridge1_bridge2_conversation_continuity.py` (new) — F6 covers
+  bridge1/bridge2/bridge3 (not Meta); customer-reply enqueues use `source_bridge=bridge_name`
+  (no hard-coded bridge, no fan-out loop); **Bridge3 held even with
+  `auto_reply.recruitment` + `auto_reply.employee` = true**; `outbound.enqueue` still refuses
+  a held Bridge3 with the globals on.
+- `tests/unit/test_bridge_poller_history_sync_quarantine.py` — structural F6 assertion
+  updated to the 3-bridge tuple.
+
+**Regression — all green:**
+- 403-test batch: `admin_commands`, `rbac`, `drafts_router_mounted`, 6 recruitment suites
+  (`bridge3_recruitment_golden_baseline` + cooldown / answer-first / salary-context /
+  age-override / bengali-digits), `payment_relay_accounting`,
+  `bridge_poller_payment_relay_gate`, `recruitment_recovery_sweep`,
+  `history_sync_quarantine`, `outbound_pairing_hold`, `bridge1_bridge2_conversation_continuity`,
+  `group_ingestion_stage_e3`, `struct_bypass`, `system_notification_guard`,
+  `system_echo_guard`, `media_placeholder_hardening`, `owner_contact_registry`,
+  `phase2_bridge_poller_regression`, `phase2_identity_resolver`.
+- 193-test batch: `attendance`, `attendance_crud`, `escort_lifecycle`, `escort_module`,
+  `escort_completion_company_name`, `admin_commands_escort_review`,
+  `escort_client_identity_convergence`.
+- `scripts/restart_gate.sh --restart` → **OVERALL PASS (0 warnings)**, all 10 checks,
+  RESTART: SUCCESS. (Check 4b `Timeout >30.0s` flaked twice under box load1 ≈ 5–7 — a
+  pre-existing LLM-network/CPU-contention artifact documented for this suite, unrelated to
+  this change; the same batch passes in isolation and the gate passed cleanly at load1 2.79.
+  The gate was **not** weakened.)
+
+Pre-existing failures NOT introduced here (verified on the clean deployed branch):
+`test_route_b_handoff.py` (2, no Ollama-cloud network in the sandbox);
+`test_bridge_poller_phone_block.py` (4, a specific multi-file monkeypatch-pollution batch).
 
 ## 8. Bridge3 boot-safety
 
@@ -116,7 +156,13 @@ ledger row.
 
 ## 10. Structured-parser regression status
 
-_(filled with results — attendance / escort / admin / RBAC / recruitment / Payment-relay suites)_
+**Untouched — all green.** attendance (`test_attendance`, `test_attendance_crud`), escort
+(`test_escort_lifecycle`, `test_escort_module`, `test_escort_completion_company_name`,
+`test_admin_commands_escort_review`, `test_escort_client_identity_convergence`), admin
+(`test_admin_commands`), RBAC (`test_rbac`), recruitment golden baseline + 5 recruitment
+suites, Payment-relay (`test_payment_relay_accounting`,
+`test_bridge_poller_payment_relay_gate`), restart-gate check 4/4b/4c. The diff contains no
+attendance / escort / admin / payment / FPE / parser file.
 
 ## 11. Facebook ad — OWNER ACTION
 
@@ -162,7 +208,39 @@ the "expected" happened and the "must not" did not.
 
 ## 13. Deployment / restart evidence
 
-_(filled)_
+| Repo / branch | Commits | Pushed |
+|---|---|---|
+| core `feat/bridge1-2-conversation-continuity-20260902` | `21015f1` F6→b1/b2 · `bb4c79c` doc | (pushed at end) |
+
+`scripts/restart_gate.sh --restart` — all 10 checks PASS (0 warnings), **RESTART: SUCCESS**:
+
+| | before → after |
+|---|---|
+| `fazle-core` PID | 3649821 → **4169686** · `NRestarts` 0 |
+| started | 2026-09-02 06:36:18 CEST |
+| branch / HEAD | `feat/bridge1-2-conversation-continuity-20260902` / `bb4c79c` |
+| `/health` | ok → **ok** (all business probes) |
+| Phase-2 flag | absent → **absent (OFF)** in `/proc/4169686/environ` |
+| Bridge1 PID / Bridge2 PID | 3640163 / 3688844 — **unchanged, not restarted** |
+| Bridge3 | inactive → inactive · `pairing_state=HISTORY_SYNC_QUARANTINE` · `outbound_allowed=false` |
+
+Runtime settings via `PATCH /api/wa/settings` (live, no restart):
+`auto_reply.recruitment` false → **true**, `auto_reply.employee` false → **true**.
+
+**Post-deploy verification (read-only, non-sending):**
+- Bridge3 `outbound_allowed=false` via the authoritative `_bridge_outbound_held` **with
+  `auto_reply.recruitment=true` global** — the exact proof required. Bridge1/Bridge2
+  `outbound_allowed=true`, `pairing_state=null`.
+- recovery sweep `effective_enabled=false`; `phone_block.447710173736=true`; bridge3 poller
+  cursor `2026-09-01 21:12:23Z` unchanged.
+- 0 Bridge3 rows in `fazle_outbound_queue` / `wbom_whatsapp_messages` since the deploy
+  window; the only 2 queue rows in the window are routine `draft-only-contact-review`
+  admin notifications on Bridge1. No `customer-reply` on any bridge since the toggles were
+  applied (no organic traffic; ad still restricted).
+- Payment/FPE: latest relay txn `id 4510` / `payment-relay-send:7747:0` /
+  `2026-09-01 17:03Z` — **identical to the pre-deploy baseline**.
+- No WhatsApp/Meta message sent during deployment. Pollers fresh (age ≈ 14 s). No new
+  errors in `logs/fazle-core.log` since the restart.
 
 ## 14. Rollback
 
@@ -173,4 +251,18 @@ _(filled)_
 
 ## 15. Remaining owner actions
 
-_(filled)_
+1. **Facebook ad** (§11) — change the Click-to-WhatsApp destination from the old Bridge3
+   number to the Bridge1 number (`880195…`); expect a fresh review / a new ad. Confirm the
+   status back to the agent.
+2. **Manual live test** (§12) — run tests 1–3 from owner-controlled phones; the agent
+   verifies each read-only. Test 4 (structured parser) only if you separately authorise it.
+3. **Bridge3** — still frozen. Pairing #2 stays blocked until: the new ≈16 h restriction
+   expires, the account is re-verified from the mobile app, and you give
+   `RESUME BRIDGE3 PAIRING` again. `pairing_state` stays `HISTORY_SYNC_QUARANTINE`;
+   advancing to `LIVE_INBOUND_VERIFIED` / `OUTBOUND_OWNER_APPROVED` each need a separate
+   explicit instruction.
+4. From earlier: incident-data soft-invalidation (spurious `fazle_recruitment_sessions`
+   571 / `wbom_candidates` 548); MCP server reload onto `8a3f7f0`; prune the old-secret
+   `.env.bak.*` snapshots.
+5. Consider re-running the pre-existing flaky-suite fixes (`test_route_b_handoff`,
+   `test_bridge_poller_phone_block` multi-file isolation) — tracked, not ours.
