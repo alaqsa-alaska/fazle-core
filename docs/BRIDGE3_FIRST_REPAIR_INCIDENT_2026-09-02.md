@@ -673,27 +673,26 @@ true` (unaffected).
 **Other containment reconfirmed post-deploy:** `auto_reply.recruitment=false` ·
 `recruitment_recovery_sweep_live_send` kill-switched · `phone_block.447710173736=true`.
 
-### OWNER_ACTION_REQUIRED (1 item — needs root)
+### systemd wiring — DONE (owner, root, 2026-09-02)
 
-1. **Wire the reviewed Bridge3 binary into systemd** (the drop-in dir is root-owned;
-   `azim` has no NOPASSWD sudo for `daemon-reload` or `/etc/systemd/system` writes). This
-   does **not** start Bridge3 — it only changes which binary Bridge3 *would* exec when
-   next started:
+The owner installed `/etc/systemd/system/whatsapp-bridge3.service.d/zz-b3fix.conf`
+(`ExecStart=` reset + `ExecStart=…/whatsapp-bridge.candidate-b3fix-20260902`) and ran
+`daemon-reload`. **Read-only verification (agent):**
 
-   ```
-   sudo tee /etc/systemd/system/whatsapp-bridge3.service.d/zz-b3fix.conf >/dev/null <<'EOF'
-   [Service]
-   ExecStart=
-   ExecStart=/home/azim/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge.candidate-b3fix-20260902
-   EOF
-   sudo systemctl daemon-reload
-   systemctl show whatsapp-bridge3.service -p ExecStart   # verify it points at -b3fix-20260902
-   systemctl is-active whatsapp-bridge3                    # must still be: inactive
-   ```
-   Verify `sha256sum /home/azim/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge.candidate-b3fix-20260902`
-   == `36dee63f5c5802163355ca4238d064aab78ffe2fecc72eaf0f59ef1c5c08c781` first.
-   **Do not `systemctl start whatsapp-bridge3`** — pairing is a separate, later,
-   owner-approved step.
+| Check | Result |
+|---|---|
+| effective `whatsapp-bridge3.service` `ExecStart` | `…/whatsapp-bridge.candidate-b3fix-20260902` |
+| `DropInPaths` | `canary.conf`, `zz-b3fix.conf` (zz- wins, alphabetical) |
+| Bridge3 `ActiveState` / `SubState` | **inactive / dead** — not started |
+| b3fix binary owner / mode / sha256 | `azim:azim` · `0755` · **`36dee63f5c5802163355ca4238d064aab78ffe2fecc72eaf0f59ef1c5c08c781`** ✓ |
+| shared `whatsapp-bridge.candidate` sha256 | **`25e2d7b025ccc6964f0404b21420d8630373a1527225e3aab71e0bb94de647ec`** — unchanged |
+| Bridge1 PID 3640163 `/proc/…/exe` sha256 | `25e2d7b0…` — still the shared candidate, `NRestarts` 0 |
+| Bridge2 PID 3688844 `/proc/…/exe` sha256 | `25e2d7b0…` — still the shared candidate, `NRestarts` 0 |
+| `bridge3.pairing_state` (API + `fazle_runtime_settings`) | `HISTORY_SYNC_QUARANTINE`, `outbound_allowed: false` |
+| `auto_reply.recruitment` | `false` |
+| `recruitment_recovery_sweep_live_send` | `is_active=false`, `kill_switch=true`, `effective_enabled=false` |
+| `phone_block.447710173736` | `true` |
+| core PID 3649821 `/health` · `NRestarts` · Phase-2 | `ok` · 0 · **absent from `.env` and `/proc/…/environ`** |
 
 ### Resume instruction
 
@@ -707,5 +706,4 @@ latter needs `confirm == "RELEASE OUTBOUND bridge3"`).
 
 ---
 
-`BRIDGE3 FIX DEPLOYED — BRIDGE3 STOPPED — HISTORY_SYNC_QUARANTINE ACTIVE — NO PAIRING PERFORMED`
-_(one OWNER_ACTION open: root `daemon-reload` to wire the pre-built, checksum-verified Bridge3 binary — not required until Bridge3 is next started for pairing.)_
+`CORE FIX DEPLOYED — FIXED BRIDGE3 BINARY WIRED BUT NOT STARTED — HISTORY_SYNC_QUARANTINE ACTIVE — NO PAIRING PERFORMED`
