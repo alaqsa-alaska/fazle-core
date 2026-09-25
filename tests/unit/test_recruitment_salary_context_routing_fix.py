@@ -35,6 +35,8 @@ class TestSalaryMisrouteFixAtMessageRouterLevel:
     async def _run(self, monkeypatch, *, role: str, recruit_eligible: bool,
                     recruit_reply: str, text: str = "Salary"):
         import modules.message_router as router
+        import modules.route_b as route_b
+        import modules.knowledge_base as knowledge_base
 
         monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
         monkeypatch.setattr(
@@ -49,6 +51,10 @@ class TestSalaryMisrouteFixAtMessageRouterLevel:
         monkeypatch.setattr(router, "classify", lambda _t: "salary_query")
         monkeypatch.setattr(router, "ec_get_session", AsyncMock(return_value=None))
         monkeypatch.setattr(router, "get_verification_session", AsyncMock(return_value=None))
+        monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value=""))
+        monkeypatch.setattr(route_b, "ollama_generate_reply", AsyncMock(return_value=""))
+        monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=""))
+        monkeypatch.setattr(knowledge_base, "get_reply", AsyncMock(return_value=""))
         monkeypatch.setattr(router, "is_attendance_message", lambda _t: False)
         monkeypatch.setattr(
             router, "recruitment_eligibility",

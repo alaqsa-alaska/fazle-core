@@ -185,7 +185,7 @@ async def approve_draft(
     Every other intent keeps this endpoint's original behavior unchanged.
     """
     draft = await fetch_one(
-        "SELECT id, status, recipient, reply_text, source, intent FROM fazle_draft_replies WHERE id = $1",
+        "SELECT id, status, recipient, reply_text, source, intent, meta FROM fazle_draft_replies WHERE id = $1",
         draft_id,
     )
     if not draft:
@@ -205,7 +205,7 @@ async def approve_draft(
             "employee_id": result.get("employee_id"),
         }
 
-    if draft["status"] not in ("pending", "pending_selfie", "edited"):
+    if draft["status"] not in ("pending", "pending_selfie", "edited", "approved"):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot approve draft with status: {draft['status']}",
@@ -215,8 +215,9 @@ async def approve_draft(
         UPDATE fazle_draft_replies
         SET status      = 'approved',
             approved_at = NOW(),
-            reviewed    = true
-        WHERE id = $1
+            reviewed    = true,
+            meta = COALESCE(meta, '{}'::jsonb) || '{"submission_protocol": 1}'::jsonb
+        WHERE id = $1 AND status IN ('pending','pending_selfie','edited')
         """,
         draft_id,
     )
@@ -227,31 +228,26 @@ async def approve_draft(
     source_bridge = "bridge1" if source in ("bridge1", "meta") else "bridge2"
     queued = False
     try:
-        from modules.outbound import enqueue as _enqueue
-        qid = await _enqueue(
-            recipient=draft["recipient"],
+        from shared.draft_reply import submit_approved_draft
+        qid = await submit_approved_draft(
+            draft,
             body=draft["reply_text"],
             source_bridge=source_bridge,
             purpose="admin_approve",
-            idempotency_key=f"draft-approve-{draft_id}",
         )
         if qid:
-            await execute(
-                "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                draft_id,
-            )
             queued = True
             log.info("Draft %d queued (outbound id=%s) for %s", draft_id, qid, draft["recipient"])
         else:
             log.warning("Draft %d enqueue dedup'd — already queued", draft_id)
-            queued = True
+            queued = False
     except Exception as _err:
         log.error("Draft %d enqueue failed: %s", draft_id, _err)
 
     return {
         "ok": True,
         "draft_id": draft_id,
-        "status": "sent" if queued else "approved",
+        "status": "approved",
         "queued": queued,
         "recipient": draft["recipient"],
     }
@@ -270,11 +266,13 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
     if not req.new_body or len(req.new_body.strip()) < 2:
         raise HTTPException(status_code=400, detail="new_body too short")
     draft = await fetch_one(
-        "SELECT id, status, recipient, source FROM fazle_draft_replies WHERE id = $1",
+        "SELECT id, status, recipient, source, meta FROM fazle_draft_replies WHERE id = $1",
         draft_id,
     )
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+    if draft["status"] not in ("pending", "pending_selfie", "edited"):
+        raise HTTPException(status_code=409, detail="Draft already reviewed")
     note_suffix = f" | admin_edit: {req.admin_note}" if req.admin_note else ""
     await execute(
         """
@@ -283,8 +281,10 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
             status     = 'edited',
             edited_at  = NOW(),
             reviewed   = true,
+            meta = COALESCE(meta, '{}'::jsonb) || '{"submission_protocol": 1}'::jsonb,
             error_text = COALESCE(error_text, '') || $2
-        WHERE id = $3
+        WHERE id = $3 AND status IN ('pending','pending_selfie','edited')
+          AND NOT (COALESCE(meta, '{}'::jsonb) ? 'outbound_queue_id')
         """,
         req.new_body.strip(),
         note_suffix,
@@ -297,31 +297,26 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
     source_bridge = "bridge1" if source in ("bridge1", "meta") else "bridge2"
     queued = False
     try:
-        from modules.outbound import enqueue as _enqueue
-        qid = await _enqueue(
-            recipient=draft["recipient"],
+        from shared.draft_reply import submit_approved_draft
+        qid = await submit_approved_draft(
+            draft,
             body=req.new_body.strip(),
             source_bridge=source_bridge,
             purpose="admin_edit",
-            idempotency_key=f"draft-edit-{draft_id}",
         )
         if qid:
-            await execute(
-                "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                draft_id,
-            )
             queued = True
             log.info("Edited draft %d queued (outbound id=%s) for %s", draft_id, qid, draft["recipient"])
         else:
             log.warning("Edited draft %d enqueue dedup'd — already queued", draft_id)
-            queued = True
+            queued = False
     except Exception as _err:
         log.error("Edited draft %d enqueue failed: %s", draft_id, _err)
 
     return {
         "ok": True,
         "draft_id": draft_id,
-        "status": "sent" if queued else "edited",
+        "status": "edited",
         "queued": queued,
         "recipient": draft["recipient"],
     }

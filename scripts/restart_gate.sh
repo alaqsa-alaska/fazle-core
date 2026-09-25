@@ -109,13 +109,14 @@ check4() {
     [[ -x "$py" ]] || py="python3"
     local suites=(tests/unit/test_admin_commands.py tests/unit/test_drafts_router_mounted.py)
     [[ -f tests/unit/test_rbac.py ]] && suites+=(tests/unit/test_rbac.py)
-    # The test DB shares the `postgres` role/password with production today
-    # (tests/conftest.py's TEST_DB_PASSWORD env var, documented as
-    # "CI-friendly" there) — resolve it from the same .env template so this
-    # check doesn't silently break every time the shared password rotates.
+    # Use only the existing disposable test container; never derive test credentials from production.
     local tdp
-    tdp=$(grep -oP '(?<=^DATABASE_URL_TEMPLATE=postgresql://postgres:)[^@]+' "$ENV_FILE" 2>/dev/null)
-    if TEST_DB_PASSWORD="$tdp" "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4.log 2>&1; then
+    tdp=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' fazle-test-postgres 2>/dev/null | sed -n 's/^POSTGRES_PASSWORD=//p')
+    if [[ -z "$tdp" ]]; then
+        block "4. Targeted tests ............. isolated fazle-test-postgres credential unavailable"
+        return
+    fi
+    if TEST_DATABASE_URL="postgresql://postgres:${tdp}@127.0.0.1:5433/fazle_test" PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4.log 2>&1; then
         summary=$(tail -1 /tmp/restart_gate_check4.log)
         pass "4. Targeted tests ............. ${summary}"
     else
@@ -148,8 +149,12 @@ check4b() {
         tests/unit/test_recruitment_phone_confirm_bengali_digits.py
     )
     local tdp
-    tdp=$(grep -oP '(?<=^DATABASE_URL_TEMPLATE=postgresql://postgres:)[^@]+' "$ENV_FILE" 2>/dev/null)
-    if TEST_DB_PASSWORD="$tdp" "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4b.log 2>&1; then
+    tdp=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' fazle-test-postgres 2>/dev/null | sed -n 's/^POSTGRES_PASSWORD=//p')
+    if [[ -z "$tdp" ]]; then
+        block "4b. Bridge3 recruitment golden . isolated fazle-test-postgres credential unavailable"
+        return
+    fi
+    if TEST_DATABASE_URL="postgresql://postgres:${tdp}@127.0.0.1:5433/fazle_test" PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4b.log 2>&1; then
         summary=$(tail -1 /tmp/restart_gate_check4b.log)
         pass "4b. Bridge3 recruitment golden . ${summary}"
     else
@@ -287,7 +292,11 @@ check7a() {
 
 echo "Restart Gate — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "──────────────────────────────────────────────────────────"
-check1; check2; check3; check4; check4b; check5; check5b; check6; check7; check7a
+check1; check2; check3; check4; check4b; check5; check5b; check6; check7
+# check-only is explicitly checks 1-7. check7a writes recovery material and is a prerequisite for an actual restart.
+if [[ "${1:-}" == "--restart" ]]; then
+    check7a
+fi
 for r in "${RESULTS[@]}"; do echo "$r"; done
 echo "──────────────────────────────────────────────────────────"
 if [[ "$BLOCKED" -gt 0 ]]; then

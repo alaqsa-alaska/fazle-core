@@ -1223,12 +1223,13 @@ async def whatsapp_messages_lookup(
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
+        candidates = _METADATA_COLUMNS + _CONTENT_COLUMNS + ("classification",)
+        present = await _existing_columns("wbom_whatsapp_messages", candidates)
+        selected = ["metadata_json->'provenance' AS provenance" if c == "metadata_json" else c
+                    for c in candidates if c in present]
         rows = await fetch_all(
             f"""
-            SELECT message_id, sender_number, canonical_phone, platform, direction,
-                   message_type, is_processed, status, received_at, processed_at,
-                   identity_role, identity_confidence, intent_detected,
-                   classification, workflow_triggered, message_body, extracted_text
+            SELECT {", ".join(selected) or "message_id"}
               FROM wbom_whatsapp_messages
               {where_clause}
              ORDER BY received_at DESC
@@ -1236,7 +1237,8 @@ async def whatsapp_messages_lookup(
             """,
             *params,
         )
-        return {"filters_applied": bool(conditions), "count": len(rows), "messages": [dict(r) for r in rows], "ts": time.time()}
+        from modules.outbound import attach_message_provenance
+        return {"filters_applied": bool(conditions), "count": len(rows), "messages": await attach_message_provenance(rows), "ts": time.time()}
     except Exception as exc:
         log.warning("[whatsapp] /api/whatsapp/messages/lookup error: %s", exc)
         return {"count": 0, "messages": [], "error": str(exc)[:200], "ts": time.time()}
@@ -1249,11 +1251,18 @@ async def whatsapp_messages_lookup(
 # Extends this same canonical table/endpoint family (wbom_whatsapp_messages,
 # /api/whatsapp/messages/*) rather than a new framework/service.
 
+@app.post("/admin/inbound/{message_id}/reconcile", dependencies=[Depends(require_command("inbound_recovery"))])
+async def reconcile_inbound_message(message_id: int):
+    """Finalize one stranded inbound provenance row without replaying it."""
+    from modules.message_router import reconcile_stranded_inbound
+    return await reconcile_stranded_inbound(message_id)
+
 _METADATA_COLUMNS = (
     "message_id", "direction", "platform", "sender_number", "canonical_phone",
     "conversation_key", "actor_type", "actor_id", "identity_role",
     "identity_confidence", "intent_detected", "workflow_triggered",
     "message_type", "is_processed", "status", "received_at", "processed_at",
+    "source_message_ref", "metadata_json",
 )
 _CONTENT_COLUMNS = ("message_body", "extracted_text")
 
@@ -1406,6 +1415,7 @@ async def whatsapp_messages_query(
         # rather than 500 on `column "..." does not exist`.
         _present = await _existing_columns("wbom_whatsapp_messages", columns)
         columns = tuple(c for c in columns if c in _present) or ("message_id",)
+        columns = tuple("metadata_json->'provenance' AS provenance" if c == "metadata_json" else c for c in columns)
         # Fetch one extra row to determine has_more without a second COUNT query.
         fetch_limit = limit + 1
         params.append(fetch_limit)
@@ -1480,6 +1490,9 @@ async def whatsapp_conversation_history(
 
         where_clause = f"WHERE {' AND '.join(conditions)}"
         columns = _METADATA_COLUMNS + _CONTENT_COLUMNS
+        present = await _existing_columns("wbom_whatsapp_messages", columns)
+        columns = tuple(c for c in columns if c in present)
+        columns = tuple("metadata_json->'provenance' AS provenance" if c == "metadata_json" else c for c in columns)
         fetch_limit = limit + 1
         params.append(fetch_limit)
         rows = await fetch_all(
@@ -1499,12 +1512,13 @@ async def whatsapp_conversation_history(
         # conversation's own history reads naturally oldest-first --
         # reverse just this page before returning.
         chronological = list(reversed(page))
+        from modules.outbound import attach_message_provenance
         return {
             "conversation_key": conversation_key,
             "count": len(chronological),
             "has_more": has_more,
             "next_cursor": next_cursor,
-            "messages": [dict(r) for r in chronological],
+            "messages": await attach_message_provenance(chronological),
             "ts": time.time(),
         }
     except Exception as exc:
@@ -1850,8 +1864,8 @@ async def get_outbound_status(queue_id: int | None = None, recipient: str = "", 
     or recipient for the most recent rows to that phone (useful when the
     queue_id wasn't captured). status is one of: pending, sending, sent,
     failed, dlq -- pending/sending are still in flight (not yet resolved
-    either way); sent means the bridge/outbound layer confirmed delivery;
-    failed/dlq mean it did not go out and IS an error, not a success."""
+    either way); sent means transport acceptance only. Recipient delivery
+    requires an actual provider receipt. Failed rows may retry; dlq does not."""
     if not queue_id and not recipient:
         return {"error": "queue_id or recipient is required", "items": [], "ts": time.time()}
     limit = max(1, min(limit, 50))
@@ -1868,7 +1882,7 @@ async def get_outbound_status(queue_id: int | None = None, recipient: str = "", 
     rows = await fetch_all(
         f"""
         SELECT id, recipient, source_bridge, purpose, status, attempts,
-               max_attempts, last_error, created_at, sent_at, updated_at
+               max_attempts, last_error, created_at, sent_at, updated_at, meta_json, external_id
           FROM fazle_outbound_queue
          WHERE {where_clause}
          ORDER BY created_at DESC
@@ -1877,17 +1891,9 @@ async def get_outbound_status(queue_id: int | None = None, recipient: str = "", 
         *params,
     )
     items = [dict(r) for r in rows]
+    from modules.outbound import delivery_details
     for item in items:
-        item["delivered"] = item["status"] == "sent"
-        item["in_flight"] = item["status"] in ("pending", "sending")
-        # 'dlq' alone already means "will never retry" regardless of how
-        # attempts compares to max_attempts (a row can reach dlq with
-        # attempts < max_attempts via a manual/administrative stop, not
-        # just by exhausting retries) -- confirmed live 2026-08-21, queue
-        # id 2371, attempts=1/max_attempts=3 but genuinely never retrying.
-        item["definitively_failed"] = item["status"] == "dlq" or (
-            item["status"] == "failed" and item["attempts"] >= item["max_attempts"]
-        )
+        item.update(delivery_details(item))
     return {"items": items, "count": len(items), "ts": time.time()}
 
 
@@ -2545,6 +2551,12 @@ async def meta_webhook(request: Request):
             value = change.get("value", {})
 
             if field == "messages":
+                from modules.outbound import record_meta_receipt
+                # Legacy unsigned inbound policy is unchanged. Delivery
+                # confirmation itself requires authenticated provider evidence.
+                if sig and settings.meta_app_secret:
+                    for receipt in value.get("statuses", []):
+                        await record_meta_receipt(receipt)
                 # WhatsApp Cloud API inbound messages
                 for msg in value.get("messages", []):
                     await _handle_meta_message(msg, value)
@@ -2600,7 +2612,7 @@ async def _handle_meta_message(msg: dict, value: dict):
     log.info(f"[META] from={sender} type={msg_type} text={text[:60]!r}")
 
     if not text:
-        return
+        text = f"[media:{msg_type or 'unsupported'}]"
 
     if message_id:
         existing = await fetch_one(
@@ -2637,7 +2649,7 @@ async def _handle_meta_message(msg: dict, value: dict):
     except Exception as _p2_exc:
         log.debug("[META] Phase-2 identity enrichment skipped (non-fatal): %s", _p2_exc)
 
-    await _save_message(
+    core_message_id = await _save_message(
         "meta",
         sender,
         text,
@@ -2646,9 +2658,26 @@ async def _handle_meta_message(msg: dict, value: dict):
         extracted_text=extracted_text,
         actor_type="external_user",
         source_message_ref=message_id,
-        metadata={"delivery_state": "received", "meta_message_id": message_id},
+        metadata={"processing_state": "received", "meta_message_id": message_id},
+        return_message_id=True,
         **_p2,
     )
+
+    if core_message_id is None:
+        return
+    from modules.message_router import inbound_execution, record_inbound_action
+    async with inbound_execution(core_message_id, "meta", message_id) as execution:
+        if execution is None:
+            return
+        if msg_type != "text" and not extracted_text:
+            execution["processing_outcome"] = "skipped"
+            record_inbound_action("suppression", reason="unsupported_media")
+            return
+        await _finish_meta_inbound(msg, sender, text, message_id, queue_key, msg_type)
+
+
+async def _finish_meta_inbound(msg, sender, text, message_id, queue_key, msg_type):
+    """Existing Meta policy cascade, inside the shared provenance scope."""
 
     try:
         await record_heartbeat(
@@ -2666,6 +2695,9 @@ async def _handle_meta_message(msg: dict, value: dict):
     # above; only reply/draft generation is skipped. (As of 2026-08 'meta'
     # IS in the live list, so this guard normally passes through.)
     if "meta" not in settings.auto_reply_source_list:
+        from modules.message_router import record_inbound_action, set_inbound_outcome
+        set_inbound_outcome("skipped", "sync_only")
+        record_inbound_action("suppression", reason="sync_only")
         log.debug(f"[META] sync-only, skipping reply/draft for {sender}")
         return
 
@@ -3207,13 +3239,17 @@ async def _handle_bridge_event(payload: dict, source: str):
             log.debug(f"[{source.upper()}] Phase-2 identity enrichment skipped (non-fatal): {_p2_exc}")
 
         try:
-            await _save_message(
+            core_message_id = await _save_message(
                 source, sender_clean, text, direction="inbound",
                 identity_role=_id_role, identity_confidence=_id_conf,
                 msg_type=media_type if media_type else "text",
                 actor_type="external_user",
+                source_message_ref=dedup_id,
+                return_message_id=True,
                 **_p2_kw,
             )
+            if core_message_id is None:
+                continue
         except Exception as _save_err:
             if dedup_id and pre_marked:
                 try:
@@ -3229,8 +3265,6 @@ async def _handle_bridge_event(payload: dict, source: str):
             log.error(f"[{source.upper()}] inbound save failed for {sender_clean}: {_save_err}")
             continue
 
-        _forward_to_agent_if_admin(sender_clean, text, source)
-
         # 2026-07-21: identity-first routing — social_auto_reply's keyword
         # gate is retired here too (mirrors the same change in
         # modules.bridge_poller._poll_bridge). Every inbound mcp1/mcp2
@@ -3240,6 +3274,8 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         # Sync-only sources: message is saved, no reply, no draft, no admin notify.
         if source not in settings.auto_reply_source_list:
+            from modules.bridge_poller import _mark_core_queue_status
+            await _mark_core_queue_status(source, {"id": dedup_id}, "skipped", "sync_only")
             log.debug(f"[{source.upper()}] sync-only, skipping reply/draft for {sender_clean}")
             continue
 
@@ -3247,15 +3283,35 @@ async def _handle_bridge_event(payload: dict, source: str):
         # (mirrors the SQLite poller's own `unresolved:` skip). The row is
         # already persisted above; we only skip reply/draft generation.
         if str(sender_clean).startswith("unresolved:"):
+            from modules.bridge_poller import _mark_core_queue_status
+            await _mark_core_queue_status(source, {"id": dedup_id}, "skipped", "unresolved_identity")
             log.info(f"[{source.upper()}] unresolved LID — row saved, routing skipped: {sender_clean}")
             continue
+
+        from modules.bridge_poller import _mark_core_queue_status, is_media_placeholder
+        from modules.outbound import _pairing_held
+        from shared.system_message import is_automated_system_message
+        chat_jid = str(event.get("chat_jid") or event.get("chatId") or sender)
+        held, _ = await _pairing_held(source)
+        suppressed = (
+            "group_read_index_only" if chat_jid.endswith("@g.us") else
+            "pairing_hold" if held else
+            "automated_system_message" if is_automated_system_message(text) else
+            "unsupported_media" if is_media_placeholder(text) else ""
+        )
+        if suppressed:
+            await _mark_core_queue_status(source, {"id": dedup_id}, "skipped", suppressed)
+            continue
+        _forward_to_agent_if_admin(sender_clean, text, source)
 
         # Full production pipeline — identical to bridge_poller path
         from modules.bridge_poller import process_bridge_inbound
         await process_bridge_inbound(
             source, sender_clean, text,
             id_role=_id_role, id_conf=_id_conf, id_name=_id_name,
-            message_id=msg_id,
+            message_id=dedup_id,
+            core_message_id=core_message_id,
+            chat_jid=chat_jid,
         )
 
         # Background: extract structured facts from inbound message
@@ -3301,6 +3357,10 @@ def _forward_to_agent_if_admin(sender_clean: str, text: str, source: str) -> Non
 
 
 async def _process_message(sender: str, text: str, source: str) -> tuple[str, dict | None]:
+    from modules.message_router import inbound_reference
+    reference = inbound_reference()
+    if reference:
+        return await process_message(sender, text, source, message_id=reference["source_message_ref"])
     return await process_message(sender, text, source)
 
 
@@ -3684,6 +3744,7 @@ async def _save_message(
     sender_name_confidence: Optional[int] = None,
     canonical_message_key: Optional[str] = None,
     resolved_phone: Optional[str] = None,
+    return_message_id: bool = False,
 ):
     """actor_type/actor_id (2026-08-28, Stage B1/B4): same attribution
     concept as modules.bridge_poller._save_message's own actor_type/
@@ -3744,7 +3805,7 @@ async def _save_message(
             "message_type": msg_type,
             "direction": direction,
             "platform": source,
-            "is_processed": True,
+            "is_processed": direction != "inbound" if return_message_id else True,
             "contact_identifier": sender,
             "identity_role": identity_role or None,
             "identity_confidence": identity_confidence or None,
@@ -3801,6 +3862,19 @@ async def _save_message(
             for i in range(1, len(values) + 1)
         )
 
+        if return_message_id:
+            if not source_message_ref or "metadata_json" not in present_columns:
+                raise RuntimeError("Inbound provenance requires source ID and metadata_json")
+            from modules.bridge_poller import _core_message_hash
+            columns.append("message_hash")
+            values.append(_core_message_hash(source, source_message_ref))
+            row = await fetch_one(
+                f"INSERT INTO {table} ({', '.join(columns)}) "
+                f"VALUES ({placeholders}, ${len(values)}) "
+                "ON CONFLICT (message_hash) DO NOTHING RETURNING message_id",
+                *values,
+            )
+            return row["message_id"] if row else None
         await execute(
             f"""
             INSERT INTO {table} ({insert_columns})
@@ -3810,6 +3884,8 @@ async def _save_message(
         )
     except Exception as e:
         log.warning(f"Message save error: {e}")
+        if return_message_id:
+            raise
 
 
 def _fallback_webhook_dedup_key(source: str, sender: str, text: str, media_type: str) -> str:
@@ -3824,7 +3900,7 @@ async def _record_meta_delivery_state(message_id: str, state: str, error: str = 
         await execute(
             """UPDATE wbom_whatsapp_messages
                SET metadata_json=COALESCE(metadata_json, '{}'::jsonb) ||
-                   jsonb_build_object('delivery_state', $2::text, 'delivery_error', $3::text)
+                   jsonb_build_object('processing_state', $2::text, 'processing_error', $3::text)
                WHERE platform='meta' AND direction='inbound' AND source_message_ref=$1""",
             message_id, state, error[:500],
         )
@@ -3849,6 +3925,8 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
         log.debug(f"[draft] creation disabled, skipping source={source} recipient={recipient}")
         return
     reply_body = reply_text or ""
+    from modules.message_router import inbound_reference, record_inbound_action
+    reference = inbound_reference()
     # Suppress tight-loop duplicates for the same source+recipient+reply text.
     try:
         dup = await fetch_one(
@@ -3880,29 +3958,36 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
         _obs.inc("drafts_rejected_total", labels={"reason": reason or "unknown", "source": source})
         log.warning(f"[draft_quality] rejected source={source} recipient={recipient} reason={reason}")
         try:
-            await execute(
+            draft = await fetch_one(
                 """
                 INSERT INTO fazle_draft_replies
                     (source, recipient, reply_text, intent, draft_only, status, created_at, meta)
                 VALUES ($1, $2, $3, $4, true, $5, NOW(),
-                        jsonb_build_object('quality_reason', $6, 'gate', 'b25'))
+                        jsonb_build_object('quality_reason', $6::text, 'gate', 'b25') || $7::jsonb)
+                RETURNING id
                 """,
                 source, recipient, reply_body, intent,
                 "rejected_fallback" if reason == "llm_fallback" else "rejected_quality",
                 reason or "unknown",
+                json.dumps(reference),
             )
+            if draft:
+                record_inbound_action("draft", draft_id=draft["id"], outcome="rejected_quality")
         except Exception as e:
             log.warning(f"Draft save (rejected) error: {e}")
         return
     try:
-        await execute(
+        draft = await fetch_one(
             """
             INSERT INTO fazle_draft_replies
-                (source, recipient, reply_text, intent, draft_only, status, created_at)
-            VALUES ($1, $2, $3, $4, true, 'pending', NOW())
+                (source, recipient, reply_text, intent, draft_only, status, created_at, meta)
+            VALUES ($1, $2, $3, $4, true, 'pending', NOW(), $5::jsonb)
+            RETURNING id
             """,
-            source, recipient, reply_body, intent,
+            source, recipient, reply_body, intent, json.dumps(reference),
         )
+        if draft:
+            record_inbound_action("draft", draft_id=draft["id"], outcome="created")
     except Exception as e:
         log.warning(f"Draft save error: {e}")
 

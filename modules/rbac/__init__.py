@@ -115,6 +115,8 @@ COMMAND_ROLE: dict[str, str] = {
     # other read-only cash/report commands (report_cash="viewer"), not
     # the mutation tier.
     "cash_details":        "viewer",
+    # Exact inbound provenance recovery; metadata/queue finalization only.
+    "inbound_recovery":    "admin",
     # Stage J7 (2026-08-29): same tier as the existing task_approve
     # (superadmin) for authorizing a proposal's execution; reject/details
     # mirror cash_reject/cash_details' own tiers.

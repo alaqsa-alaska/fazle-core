@@ -719,7 +719,7 @@ async def _cmd_reject_many(ids: list[int], admin_phone: str) -> str:
 
 async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
     """
-    Approve a draft reply — mark approved then SEND to recipient immediately.
+    Approve a draft reply and submit it to the existing outbound queue.
     Admin approval IS the decision to send, regardless of AUTO_REPLY_ENABLED.
     """
     try:
@@ -754,7 +754,9 @@ async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
 
         # Mark approved first
         await execute(
-            "UPDATE fazle_draft_replies SET status='approved', admin_phone=$1, approved_at=NOW() WHERE id=$2",
+            "UPDATE fazle_draft_replies SET status='approved', admin_phone=$1, approved_at=NOW(), "
+            "meta=COALESCE(meta, '{}'::jsonb) || '{\"submission_protocol\": 1}'::jsonb "
+            "WHERE id=$2 AND (status IN ('pending','edited') OR status IS NULL)",
             admin_phone, draft_id,
         )
 
@@ -762,17 +764,14 @@ async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
         sent = False
         error_text = ""
         try:
-            from app.bridge import get_bridge1, get_bridge2
-            bridge = get_bridge1() if source in ("bridge1", "meta") else get_bridge2()
-            # Bridge expects JID format for non-meta sends
-            jid = recipient if "@" in recipient else f"{recipient}@s.whatsapp.net"
-            sent = await bridge.send(jid, reply_text)
+            from shared.draft_reply import submit_approved_draft
+            qid = await submit_approved_draft(
+                dict(row), body=reply_text, purpose="admin_approve",
+                source_bridge="bridge1" if source in ("bridge1", "meta") else "bridge2",
+            )
+            sent = qid is not None
             if sent:
-                await execute(
-                    "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                    draft_id,
-                )
-                log.info(f"[admin_cmd] Draft #{draft_id} sent to {recipient} via {source}")
+                log.info("Draft #%s approved; queued as %s", draft_id, qid)
             else:
                 error_text = "Bridge send returned false"
                 await execute(
@@ -790,7 +789,7 @@ async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
         preview = reply_text[:200] if reply_text else ""
         if sent:
             return (
-                f"✅ Draft #{draft_id} অনুমোদিত ও পাঠানো হয়েছে।\n\n"
+                f"✅ Draft #{draft_id} অনুমোদিত; পাঠানোর জন্য কিউতে রাখা হয়েছে।\n\n"
                 f"প্রাপক: {recipient}\n"
                 f"বার্তা:\n{preview}"
             )
@@ -846,8 +845,14 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         recipient = row.get("recipient", "")
         source = row.get("source", "bridge1")
 
+        if row.get("status") not in ("pending", None, "edited"):
+            return f"⚠️ Draft #{draft_id} ইতিমধ্যে {row.get('status', 'processed')}।"
+
         await execute(
-            "UPDATE fazle_draft_replies SET reply_text=$1, status='edited', admin_phone=$2 WHERE id=$3",
+            "UPDATE fazle_draft_replies SET reply_text=$1, status='edited', admin_phone=$2, "
+            "meta=COALESCE(meta, '{}'::jsonb) || '{\"submission_protocol\": 1}'::jsonb "
+            "WHERE id=$3 AND (status IN ('pending','edited') OR status IS NULL) "
+            "AND NOT (COALESCE(meta, '{}'::jsonb) ? 'outbound_queue_id')",
             new_text, admin_phone, draft_id,
         )
 
@@ -866,16 +871,15 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         sent = False
         error_text = ""
         try:
-            from app.bridge import get_bridge1, get_bridge2
-            bridge = get_bridge1() if source in ("bridge1", "meta") else get_bridge2()
-            jid = recipient if "@" in recipient else f"{recipient}@s.whatsapp.net"
-            sent = await bridge.send(jid, new_text)
+            from shared.draft_reply import submit_approved_draft
+            qid = await submit_approved_draft(
+                dict(row), body=new_text, purpose="admin_edit",
+                source_bridge="bridge1" if source in ("bridge1", "meta") else "bridge2",
+            )
+            sent = qid is not None
             if sent:
-                await execute(
-                    "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                    draft_id,
-                )
-                log.info(f"[admin_cmd] Edited draft #{draft_id} sent to {recipient} via {source}")
+                log.info("Edited draft #%s queued as %s", draft_id, qid)
+                log.info(f"[admin_cmd] Edited draft #{draft_id} queued for {recipient} via {source}")
             else:
                 error_text = "Bridge send returned false"
                 await execute(
@@ -893,7 +897,7 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         preview = new_text[:200] if new_text else ""
         if sent:
             return (
-                f"✏️ Draft #{draft_id} আপডেট করে পাঠানো হয়েছে।\n\n"
+                f"✏️ Draft #{draft_id} আপডেট হয়েছে; পাঠানোর জন্য কিউতে রাখা হয়েছে।\n\n"
                 f"প্রাপক: {recipient}\n"
                 f"বার্তা:\n{preview}"
             )

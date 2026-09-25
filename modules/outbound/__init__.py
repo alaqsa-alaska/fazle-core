@@ -70,11 +70,22 @@ async def enqueue(
     rows enqueued by any path that bypasses this check.
     """
     import json
+    import hashlib
+    from modules.message_router import inbound_reference, record_inbound_action
+    reference = inbound_reference()
+    meta = {**reference, **(meta or {})}
+    if reference and not idempotency_key:
+        action = hashlib.sha256(
+            json.dumps([recipient, source_bridge, purpose, body], ensure_ascii=False).encode()
+        ).hexdigest()
+        idempotency_key = f"inbound:{reference['core_message_id']}:{action}"
 
     _hs_bridge = source_bridge or ""
     if _hs_bridge:
         _hheld, _hstate = await _pairing_held(_hs_bridge)
         if _hheld:
+            record_inbound_action("outbound", outcome="refused", reason="pairing_hold",
+                                  source_bridge=source_bridge, purpose=purpose)
             log.warning(
                 "[OUTBOUND_ENQUEUE] REFUSED bridge=%s pairing_state=%s recipient=%s purpose=%s "
                 "key=%s — bridge is in a non-sending pairing state",
@@ -90,7 +101,7 @@ async def enqueue(
     # idempotency_key dedup is the authoritative gate. Falls closed to
     # "no recent reply" on any DB error.
     try:
-        if purpose and _was_recently_replied(recipient, purpose, body):
+        if purpose and await _was_recently_replied(recipient, purpose, body):
             log.warning(
                 "[OUTBOUND_PHASE7] similar recent reply recipient=%s purpose=%s "
                 "dedup_window_minutes=%s (informational, NOT blocking send)",
@@ -100,15 +111,31 @@ async def enqueue(
         log.debug("[OUTBOUND_PHASE7] similar-reply check skipped (non-fatal): %s", _phase7_exc)
 
     meta_json = json.dumps(meta or {})
-    row = await fetch_one(
-        """INSERT INTO fazle_outbound_queue
+    try:
+        row = await fetch_one(
+            """INSERT INTO fazle_outbound_queue
               (recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json)
            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
            ON CONFLICT (idempotency_key) DO NOTHING
-           RETURNING id""",
-        recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json,
-    )
+               RETURNING id""",
+            recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json,
+        )
+    except Exception as exc:
+        record_inbound_action("outbound", outcome="enqueue_failed", error_type=type(exc).__name__,
+                              purpose=purpose, source_bridge=source_bridge)
+        raise
     qid = row["id"] if row else None
+    if reference or meta.get("core_message_id"):
+        linked_id = qid
+        if linked_id is None and idempotency_key:
+            existing = await fetch_one(
+                "SELECT id FROM fazle_outbound_queue WHERE idempotency_key=$1",
+                idempotency_key,
+            )
+            linked_id = existing["id"] if existing else None
+        record_inbound_action("outbound", queue_id=linked_id,
+                              outcome="queued" if qid else "duplicate_or_refused",
+                              purpose=purpose, source_bridge=source_bridge)
     if qid:
         log.info(f"[OUTBOUND_ENQUEUE] id={qid} recipient={recipient} bridge={source_bridge} purpose={purpose} key={idempotency_key} body={body[:60]!r}")
     else:
@@ -164,6 +191,101 @@ async def pending_count() -> int:
     return int(await fetch_val(
         "SELECT COUNT(*) FROM fazle_outbound_queue WHERE status IN ('pending','failed')"
     ) or 0)
+
+
+def delivery_details(row: dict) -> dict:
+    """Queue 'sent' means transport acceptance, not recipient delivery."""
+    import json
+    meta = row.get("meta_json") or {}
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    receipt = meta.get("delivery_receipt") or {}
+    delivered = receipt.get("status") in ("delivered", "read")
+    status = row.get("status")
+    failed = not delivered and (receipt.get("status") == "failed" or status == "dlq" or (
+        status == "failed" and (row.get("attempts") or 0) >= (row.get("max_attempts") or 3)
+    ))
+    return {
+        "send_accepted": status == "sent" or receipt.get("status") == "sent" or delivered,
+        "delivered": delivered,
+        "delivery_outcome": receipt.get("status") or {
+            "pending": "queued", "sending": "send_attempted", "sent": "unconfirmed",
+            "failed": "failed", "dlq": "dead_lettered",
+        }.get(status, "unknown"),
+        "in_flight": not delivered and not failed and status in ("pending", "sending", "failed"),
+        "definitively_failed": failed,
+    }
+
+
+async def record_meta_receipt(receipt: dict) -> None:
+    """Use one exact provider row; reject zero or ambiguous matches."""
+    import json
+    ranks = {"sent": 1, "failed": 2, "delivered": 3, "read": 4}
+    state = receipt.get("status")
+    if not receipt.get("id") or state not in ranks:
+        return
+    value = {"status": state, "rank": ranks[state],
+             "external_id": receipt["id"], "timestamp": receipt.get("timestamp")}
+
+    matches = await fetch_all(
+        """SELECT id FROM fazle_outbound_queue
+              WHERE source_bridge IN ('meta','meta_whatsapp') AND external_id=$1
+              ORDER BY id""",
+        receipt["id"],
+    )
+    if len(matches) != 1:
+        if len(matches) > 1:
+            log.warning("[META_EVENT] receipt_ambiguous external_id=%s matches=%d; ignored",
+                        receipt["id"], len(matches))
+        return
+    await execute(
+        """UPDATE fazle_outbound_queue
+           SET meta_json=COALESCE(meta_json, '{}'::jsonb) ||
+               jsonb_build_object('delivery_receipt', $2::jsonb)
+           WHERE id=$1
+             AND COALESCE((meta_json->'delivery_receipt'->>'rank')::int, 0) < $3""",
+        matches[0]["id"], json.dumps(value), ranks[state],
+    )
+
+
+async def attach_message_provenance(rows: list[dict]) -> list[dict]:
+    """Read existing one-to-many draft/queue relations without recipient guesses."""
+    import json
+    result = [dict(row) for row in rows]
+    for row in result:
+        if isinstance(row.get("provenance"), str):
+            row["provenance"] = json.loads(row["provenance"])
+    ids = [str(r.get("message_id", r.get("id"))) for r in result if r.get("provenance")]
+    actions = [a for r in result for a in (r.get("provenance") or {}).get("actions", [])]
+    draft_ids = [a["draft_id"] for a in actions if a.get("draft_id")]
+    queue_ids = [a["queue_id"] for a in actions if a.get("queue_id")]
+    drafts = queues = []
+    if ids:
+        drafts = await fetch_all(
+            """SELECT id, status, approved_at, sent_at, meta->>'core_message_id' AS inbound_id
+               FROM fazle_draft_replies WHERE meta->>'core_message_id'=ANY($1::text[])
+                  OR id=ANY($2::bigint[])""", ids, draft_ids,
+        )
+        queues = await fetch_all(
+            """SELECT id, status, purpose, source_bridge, attempts, max_attempts,
+                      last_error, external_id, sent_at, meta_json,
+                      meta_json->>'core_message_id' AS inbound_id
+               FROM fazle_outbound_queue WHERE meta_json->>'core_message_id'=ANY($1::text[])
+                  OR id=ANY($2::bigint[])""", ids, queue_ids,
+        )
+    for row in result:
+        provenance = row.get("provenance")
+        if isinstance(provenance, str):
+            provenance = json.loads(provenance)
+        mid = str(row.get("message_id", row.get("id")))
+        row["provenance"] = provenance or {"processing_outcome": "unknown", "actions": []}
+        own_actions = row["provenance"].get("actions", [])
+        own_drafts = {a["draft_id"] for a in own_actions if a.get("draft_id")}
+        own_queues = {a["queue_id"] for a in own_actions if a.get("queue_id")}
+        row["drafts"] = [dict(d) for d in drafts if d["inbound_id"] == mid or d["id"] in own_drafts]
+        row["outbound"] = [{**{k: v for k, v in q.items() if k != "meta_json"}, **delivery_details(q)}
+                           for q in queues if q["inbound_id"] == mid or q["id"] in own_queues]
+    return result
 
 
 async def dlq_count() -> int:
@@ -375,6 +497,23 @@ async def sweep_once(limit: int = 20) -> dict:
                     rid, attempts, external_id,
                 )
                 sent += 1
+                # A draft reaches legacy 'sent' only after transport acceptance.
+                # Failure to update its projection must never resend the message.
+                try:
+                    import json
+                    queue_meta = r.get("meta_json") or {}
+                    if isinstance(queue_meta, str):
+                        queue_meta = json.loads(queue_meta)
+                    if queue_meta.get("draft_id"):
+                        await conn.execute(
+                            """UPDATE fazle_draft_replies SET status='sent', sent_at=NOW(),
+                               meta=COALESCE(meta, '{}'::jsonb) ||
+                                 jsonb_build_object('send_accepted', true, 'outbound_queue_id', $2::bigint)
+                               WHERE id=$1 AND status IN ('approved','edited')""",
+                            queue_meta["draft_id"], rid,
+                        )
+                except Exception as projection_error:
+                    log.error("Accepted queue id=%s; draft projection failed: %s", rid, projection_error)
                 _meta_outbound_log("meta_outbound_sent", source_bridge=r["source_bridge"], queue_id=rid, attempts=attempts)
 
                 # Owner-authoritative accounting boundary (2026-08-30): a

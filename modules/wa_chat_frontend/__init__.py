@@ -491,7 +491,7 @@ async def get_messages(
         """
         SELECT message_id AS id, sender_number, message_body AS body,
                direction, platform, received_at, identity_role, intent_detected,
-               receiver_number
+               receiver_number, metadata_json->'provenance' AS provenance
         FROM wbom_whatsapp_messages
         WHERE (
             sender_number = ANY($2::text[])
@@ -504,6 +504,8 @@ async def get_messages(
         limit, variants, before_id,
     )
 
+    from modules.outbound import attach_message_provenance
+    rows = await attach_message_provenance(rows)
     messages = []
     oldest_id = None
     for r in rows:
@@ -604,8 +606,7 @@ async def list_drafts(
         LEFT JOIN LATERAL (
             SELECT message_body, received_at
             FROM wbom_whatsapp_messages
-            WHERE sender_number = d.recipient
-            ORDER BY received_at DESC
+            WHERE message_id::text = d.meta->>'core_message_id'
             LIMIT 1
         ) orig ON true
         WHERE d.reviewed = false
@@ -636,11 +637,15 @@ class DraftEdit(BaseModel):
 
 @router.post("/api/wa/drafts/{draft_id}/edit")
 async def edit_draft(draft_id: int, body: DraftEdit, _: None = Depends(_require_api_key)):
-    draft = await fetch_one("SELECT id FROM fazle_draft_replies WHERE id=$1", draft_id)
+    draft = await fetch_one("SELECT id, status, meta FROM fazle_draft_replies WHERE id=$1", draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+    if draft.get("status") not in ("pending", "pending_selfie", "edited"):
+        raise HTTPException(status_code=409, detail="Draft already reviewed")
     await execute(
-        "UPDATE fazle_draft_replies SET reply_text=$1, status='edited' WHERE id=$2",
+        "UPDATE fazle_draft_replies SET reply_text=$1, status='edited' WHERE id=$2 "
+        "AND status IN ('pending','pending_selfie','edited') "
+        "AND NOT (COALESCE(meta, '{}'::jsonb) ? 'outbound_queue_id')",
         body.new_body, draft_id,
     )
     return {"edited": True}
@@ -649,32 +654,31 @@ async def edit_draft(draft_id: int, body: DraftEdit, _: None = Depends(_require_
 @router.post("/api/wa/drafts/{draft_id}/approve")
 async def approve_draft(draft_id: int, _: None = Depends(_require_api_key)):
     draft = await fetch_one(
-        "SELECT id, status, recipient, reply_text, source FROM fazle_draft_replies WHERE id=$1",
+        "SELECT id, status, recipient, reply_text, source, meta FROM fazle_draft_replies WHERE id=$1",
         draft_id,
     )
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
-    if draft["status"] in ("sent", "approved"):
+    if draft["status"] not in ("pending", "pending_selfie", "edited", "approved"):
         raise HTTPException(status_code=400, detail=f"Draft already {draft['status']}")
 
     await execute(
-        "UPDATE fazle_draft_replies SET status='approved', approved_at=NOW(), reviewed=true WHERE id=$1",
+        "UPDATE fazle_draft_replies SET status='approved', approved_at=COALESCE(approved_at,NOW()), reviewed=true, "
+        "meta=COALESCE(meta, '{}'::jsonb) || '{\"submission_protocol\": 1}'::jsonb "
+        "WHERE id=$1 AND status IN ('pending','pending_selfie','edited')",
         draft_id,
     )
     source = draft.get("source") or "bridge1"
     source_bridge = "bridge1" if source in ("bridge1", "meta") else "bridge2"
-    from modules.outbound import enqueue as _enqueue
-    qid = await _enqueue(
-        recipient=draft["recipient"],
+    from shared.draft_reply import submit_approved_draft
+    qid = await submit_approved_draft(
+        draft,
         body=draft["reply_text"],
         source_bridge=source_bridge,
         purpose="draft_approved_wa_chat",
     )
-    await execute(
-        "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-        draft_id,
-    )
-    return {"approved": True, "queue_id": qid}
+    return {"approved": True, "queued": qid is not None, "queue_id": qid,
+            "delivered": False}
 
 
 @router.post("/api/wa/drafts/{draft_id}/reject")
@@ -858,8 +862,8 @@ async def sse_stream(
                     LEFT JOIN wbom_contacts c ON c.whatsapp_number = d.recipient
                     LEFT JOIN LATERAL (
                         SELECT message_body FROM wbom_whatsapp_messages
-                        WHERE sender_number = d.recipient
-                        ORDER BY received_at DESC LIMIT 1
+                        WHERE message_id::text = d.meta->>'core_message_id'
+                        LIMIT 1
                     ) orig ON true
                     WHERE d.id > $1
                       AND d.status NOT IN ('rejected', 'sent', 'approved')

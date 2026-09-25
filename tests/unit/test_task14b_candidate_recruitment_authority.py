@@ -79,6 +79,8 @@ def _base_router_mocks(
     monkeypatch.setattr(router, "get_contact_context", AsyncMock(return_value=""))
     monkeypatch.setattr(router, "get_recent_history", AsyncMock(return_value=[]))
     monkeypatch.setattr(router.ai, "classify_intent_llm", AsyncMock(return_value=intent))
+    monkeypatch.setattr(router.ai, "generate_reply", AsyncMock(return_value=""))
+    monkeypatch.setattr(router, "kb_get_reply", AsyncMock(return_value=""))
     monkeypatch.setattr(
         router, "recruitment_eligibility",
         AsyncMock(return_value={

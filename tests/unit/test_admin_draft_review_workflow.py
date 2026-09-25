@@ -323,11 +323,14 @@ class TestApproveFlow:
             with patch("modules.admin_commands.execute", side_effect=_fake_execute):
                 with patch("app.bridge.get_bridge1", return_value=_FakeBridge()):
                     with patch("app.bridge.get_bridge2", return_value=_FakeBridge()):
-                        result = await _cmd_approve(55, "8801700000001")
+                        with patch("shared.draft_reply.submit_approved_draft", new=AsyncMock(return_value=901)) as queued:
+                            result = await _cmd_approve(55, "8801700000001")
 
         assert "✅" in result
-        assert sent["jid"] == "8801711111111@s.whatsapp.net"
-        assert sent["text"] == "Stored AI reply"
+        assert sent == {}
+        assert queued.await_args.args[0]["recipient"] == "8801711111111"
+        assert queued.await_args.kwargs["body"] == "Stored AI reply"
+        assert queued.await_args.kwargs["source_bridge"] == "bridge2"
 
     @pytest.mark.asyncio
     async def test_approve_uses_bridge1_for_meta_source(self):
@@ -360,9 +363,11 @@ class TestApproveFlow:
             with patch("modules.admin_commands.execute", side_effect=_fake_execute):
                 with patch("app.bridge.get_bridge1", return_value=_FakeBridge1()):
                     with patch("app.bridge.get_bridge2", return_value=_FakeBridge2()):
-                        await _cmd_approve(56, "8801700000001")
+                        with patch("shared.draft_reply.submit_approved_draft", new=AsyncMock(return_value=902)) as queued:
+                            await _cmd_approve(56, "8801700000001")
 
-        assert bridge_used == ["bridge1"]
+        assert bridge_used == []
+        assert queued.await_args.kwargs["source_bridge"] == "bridge1"
 
 
 # ── 5. Edit Flow ───────────────────────────────────────────────────────────────
@@ -401,11 +406,14 @@ class TestEditFlow:
                 with patch("app.bridge.get_bridge1", return_value=_FakeBridge()):
                     with patch("app.bridge.get_bridge2", return_value=_FakeBridge()):
                         with patch("modules.reviewed_reply_memory.create_or_update_from_edit", new=AsyncMock()):
-                            result = await _cmd_edit(66, "edited reply text", "8801700000001")
+                            with patch("shared.draft_reply.submit_approved_draft", new=AsyncMock(return_value=903)) as queued:
+                                result = await _cmd_edit(66, "edited reply text", "8801700000001")
 
         assert "✏️" in result
-        assert sent["jid"] == "8801711111111@s.whatsapp.net"
-        assert sent["text"] == "edited reply text"
+        assert sent == {}
+        assert queued.await_args.args[0]["recipient"] == "8801711111111"
+        assert queued.await_args.kwargs["body"] == "edited reply text"
+        assert queued.await_args.kwargs["source_bridge"] == "bridge2"
 
     @pytest.mark.asyncio
     async def test_edit_uses_same_bridge_as_inbound(self):
@@ -439,9 +447,11 @@ class TestEditFlow:
                 with patch("app.bridge.get_bridge1", return_value=_FakeBridge1()):
                     with patch("app.bridge.get_bridge2", return_value=_FakeBridge2()):
                         with patch("modules.reviewed_reply_memory.create_or_update_from_edit", new=AsyncMock()):
-                            await _cmd_edit(67, "new text", "8801700000001")
+                            with patch("shared.draft_reply.submit_approved_draft", new=AsyncMock(return_value=904)) as queued:
+                                await _cmd_edit(67, "new text", "8801700000001")
 
-        assert bridge_used == ["bridge1"]
+        assert bridge_used == []
+        assert queued.await_args.kwargs["source_bridge"] == "bridge1"
 
 
 # ── 6. Reject Flow ─────────────────────────────────────────────────────────────

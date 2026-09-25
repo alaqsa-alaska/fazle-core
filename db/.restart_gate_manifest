@@ -446,3 +446,20 @@ docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md
 # is expected to be dirty across a `--restart` run. Remove this entry once the
 # Phase-2 observation window closes and the doc is final.
 docs/CLAUDE_PHASE2_DEPLOYMENT_CHECKPOINT_2026-09-01.md
+# 2026-09-25: Phase 3 candidate-manifest reconciliation. These exact paths are the reviewed provenance, approval/queue, fixture, and regression-test changes already present in the Phase 1/2 candidate. Runtime paths are covered by DB-backed provenance/admin/webhook qualification; test paths are covered by focused and offline qualification. No wildcard authorization.
+app/database.py
+modules/admin_commands/__init__.py
+modules/wa_chat_frontend/__init__.py
+modules/drafts/routes.py
+shared/draft_reply.py
+tests/conftest.py
+tests/integration/test_webhooks.py
+tests/unit/test_admin_commands.py
+tests/unit/test_admin_draft_review_workflow.py
+tests/unit/test_draft_approval_idempotency_stage_g.py
+tests/unit/test_outbound_status_route.py
+tests/unit/test_phase5_t020_legacy_control_isolation.py
+tests/unit/test_recruitment_salary_context_routing_fix.py
+tests/unit/test_task14b_candidate_recruitment_authority.py
+tests/unit/test_whatsapp_messages_lookup_route.py
+tests/unit/test_whatsapp_messages_query_and_conversation_routes.py

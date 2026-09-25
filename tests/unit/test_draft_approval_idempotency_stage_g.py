@@ -49,9 +49,9 @@ class TestRepeatedApproveIsIdempotent:
         assert "ইতিমধ্যে" in result or "already" in result.lower()
         exec_mock.assert_not_awaited()
 
-    async def test_pending_draft_is_allowed_to_send_once(self):
-        """Contrast case: a genuinely pending draft IS allowed through --
-        proves the idempotency guard isn't over-broad."""
+    async def test_pending_draft_is_allowed_to_queue_once(self):
+        """Contrast case: a genuinely pending draft is queued once;
+        approval is not delivery."""
         from modules.admin_commands import _cmd_approve
 
         row = {
@@ -59,13 +59,9 @@ class TestRepeatedApproveIsIdempotent:
             "reply_text": "text", "source": "bridge2", "intent": "unknown",
         }
         with patch("modules.admin_commands.fetch_one", new=AsyncMock(return_value=row)), \
-             patch("modules.admin_commands.execute", new=AsyncMock()) as exec_mock, \
-             patch("app.bridge.get_bridge2") as mock_get_bridge:
-            mock_bridge = AsyncMock()
-            mock_bridge.send = AsyncMock(return_value=True)
-            mock_get_bridge.return_value = mock_bridge
+             patch("modules.admin_commands.execute", new=AsyncMock()) as exec_mock:
             result = await _cmd_approve(5, "8801880446111")
-        assert "পাঠানো হয়েছে" in result
+        assert "কিউতে রাখা হয়েছে" in result
         assert exec_mock.await_count >= 1
 
 

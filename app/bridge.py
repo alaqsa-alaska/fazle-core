@@ -113,9 +113,11 @@ class BridgeClient:
 
     async def send_strict(self, jid: str, text: str) -> None:
         """Strict send: raises BridgeSendError on any failure. Used by outbound queue."""
+        from modules.message_router import record_inbound_action
         if not jid.endswith("@s.whatsapp.net") and not jid.endswith("@g.us"):
             jid = jid + "@s.whatsapp.net"
         log.info(f"[BRIDGE_SEND_START] label={self.label} jid={jid} body={text[:60]!r}")
+        record_inbound_action("direct_send", transport=self.label, recipient=jid, outcome="attempted")
         try:
             await self._set_send(True)
             r = await self._client.post(
@@ -123,25 +125,36 @@ class BridgeClient:
                 json={"recipient": jid, "message": text},
             )
             if r.status_code != 200:
+                record_inbound_action("direct_send", transport=self.label, recipient=jid,
+                                      outcome="failed", http_status=r.status_code)
                 log.error(f"[BRIDGE_SEND_FAIL] label={self.label} jid={jid} http={r.status_code} body={r.text[:100]}")
                 raise BridgeSendError(f"http {r.status_code}: {r.text[:200]}")
             log.info(f"[BRIDGE_SEND_SUCCESS] label={self.label} jid={jid}")
+            record_inbound_action("direct_send", transport=self.label, recipient=jid,
+                                  outcome="send_accepted", delivery_outcome="unconfirmed")
         except httpx.HTTPError as e:
+            record_inbound_action("direct_send", transport=self.label, recipient=jid,
+                                  outcome="failed", error_type=type(e).__name__)
             log.error(f"[BRIDGE_SEND_FAIL] label={self.label} jid={jid} transport={e}")
             raise BridgeSendError(f"transport: {e}") from e
         finally:
             await self._set_send(False)
 
     async def send_multi(self, jid: str, messages: list[str]) -> bool:
+        from modules.message_router import record_inbound_action
         if not jid.endswith("@s.whatsapp.net") and not jid.endswith("@g.us"):
             jid = jid + "@s.whatsapp.net"
         try:
             await self._set_send(True)
             for msg in messages:
-                await self._client.post(
+                record_inbound_action("direct_send", transport=self.label, recipient=jid, outcome="attempted")
+                response = await self._client.post(
                     f"{self.base_url}/api/send",
                     json={"recipient": jid, "message": msg},
                 )
+                record_inbound_action("direct_send", transport=self.label, recipient=jid,
+                                      outcome="send_accepted" if response.status_code == 200 else "failed",
+                                      delivery_outcome="unconfirmed", http_status=response.status_code)
             return True
         except Exception as e:
             log.error(f"[{self.label}] send_multi error: {e}")

@@ -72,7 +72,7 @@ class TestOutboundStatus:
         assert item["in_flight"] is False
         assert item["definitively_failed"] is True
 
-    async def test_sent_status_is_delivered(self, auth_headers):
+    async def test_sent_status_is_accepted_but_not_confirmed_delivered(self, auth_headers):
         row = {
             "id": 2375, "recipient": "8801880446111", "source_bridge": "bridge2",
             "purpose": "hermes_admin_send", "status": "sent", "attempts": 1,
@@ -87,7 +87,9 @@ class TestOutboundStatus:
                     "/api/outbound/status", params={"queue_id": 2375}, headers=auth_headers
                 )
         item = response.json()["items"][0]
-        assert item["delivered"] is True
+        assert item["delivered"] is False
+        assert item["send_accepted"] is True
+        assert item["delivery_outcome"] == "unconfirmed"
         assert item["in_flight"] is False
         assert item["definitively_failed"] is False
 

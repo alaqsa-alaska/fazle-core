@@ -1582,7 +1582,7 @@ async def recruitment_eligibility(
     from modules.recruitment_detector import detect_recruitment_intent
 
     detector = await detect_recruitment_intent(text=text, phone=phone, intent=intent)
-    if detector["is_recruitment"]:
+    if detector.get("is_recruitment"):
         return {
             "eligible": True,
             "autosend": detector["layer"] == "entity",

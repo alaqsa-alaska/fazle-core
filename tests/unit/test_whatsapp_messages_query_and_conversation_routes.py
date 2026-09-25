@@ -19,6 +19,16 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def schema_columns():
+    # This suite mocks message reads; schema introspection is a separate
+    # database call and must not consume the message-row mock.
+    async def existing(_table, columns):
+        return set(columns)
+    with patch("app.main._existing_columns", new=existing):
+        yield
+
+
 @pytest.fixture
 def auth_headers():
     from app.config import get_settings

@@ -23,6 +23,9 @@ import asyncio
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import get_settings
@@ -604,6 +607,183 @@ async def _task13_authoritative_dispatch(
     return None, None
 
 
+_inbound_execution = ContextVar("inbound_execution", default=None)
+
+
+def inbound_reference() -> dict:
+    """Exact source of work in this turn; never infer from a recipient."""
+    execution = _inbound_execution.get()
+    if not execution:
+        return {}
+    # Detached existing tasks inherit this immutable identity even after the
+    # synchronous turn ends; their queue/draft INSERTs remain traceable.
+    return {k: execution[k] for k in ("core_message_id", "source", "source_message_ref")}
+
+
+def record_inbound_action(kind: str, **fields) -> None:
+    execution = _inbound_execution.get()
+    if execution and execution.get("active"):
+        action = {"kind": kind, **fields}
+        execution["actions"].append(action)
+
+
+def set_inbound_outcome(status: str, reason: str = "") -> None:
+    execution = _inbound_execution.get()
+    if execution and execution.get("active"):
+        execution["processing_outcome"] = status
+        if reason:
+            execution["processing_reason"] = reason
+
+
+@asynccontextmanager
+async def inbound_execution(core_message_id, source, source_message_ref, **identity):
+    """Finalize existing message metadata, preserving one-to-many actions.
+
+    Draft/queue references are also stored on those rows at INSERT. Failed
+    or interrupted turns require review: domain writes are not one atomic
+    transaction, so silently replaying them could duplicate business work.
+    """
+    from app.database import fetch_one as read, execute as write
+    import json
+
+    if core_message_id is None:
+        yield None
+        return
+    current = _inbound_execution.get()
+    if current and current.get("active") and current["core_message_id"] == core_message_id:
+        yield current
+        return
+    claimed = await read(
+        """UPDATE wbom_whatsapp_messages
+           SET metadata_json=COALESCE(metadata_json, '{}'::jsonb) ||
+               jsonb_build_object('provenance', $2::jsonb)
+           WHERE message_id=$1 AND is_processed=false AND NOT (COALESCE(metadata_json, '{}'::jsonb) ? 'provenance')
+           RETURNING message_id""",
+        core_message_id, json.dumps({"processing_outcome": "processing",
+                                     "started_at": datetime.now(timezone.utc).isoformat()}),
+    )
+    if not claimed:
+        yield None
+        return
+    execution = {
+        "core_message_id": core_message_id, "source": source,
+        "source_message_ref": source_message_ref, "identity": identity,
+        "processing_outcome": "done", "actions": [], "active": True,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    token = _inbound_execution.set(execution)
+    try:
+        yield execution
+    except BaseException as exc:
+        execution["processing_outcome"] = "failed"
+        execution["error_type"] = type(exc).__name__
+        raise
+    finally:
+        execution["active"] = False
+        _inbound_execution.reset(token)
+        decisions = [a for a in execution["actions"] if a["kind"] == "decision"]
+        identities = [a for a in execution["actions"] if a["kind"] == "identity"]
+        if identities:
+            execution["identity"] = {k: v for k, v in identities[-1].items() if k != "kind"}
+        workflows = list(dict.fromkeys(a["workflow"] for a in decisions if a.get("workflow")))
+        execution["workflows"] = workflows
+        execution["finished_at"] = datetime.now(timezone.utc).isoformat()
+        decision = decisions[-1] if decisions else {}
+        # Keep active=False on the shared object: child tasks inherit its
+        # reference, and must not append events after this turn has ended.
+        await write(
+            """UPDATE wbom_whatsapp_messages SET
+                   metadata_json=COALESCE(metadata_json, '{}'::jsonb) ||
+                       jsonb_build_object('provenance', $2::jsonb, 'stage', 'processed',
+                         'status', $2::jsonb->>'processing_outcome'),
+                   is_processed=true,
+                   workflow_triggered=COALESCE(NULLIF($3::text, ''), workflow_triggered),
+                   intent_detected=COALESCE(intent_detected, NULLIF($4::text, '')),
+                   identity_role=COALESCE(NULLIF($5::text, ''), identity_role)
+               WHERE message_id=$1""",
+            core_message_id, json.dumps(execution), ",".join(workflows),
+            decision.get("intent", ""), decision.get("role") or execution["identity"].get("role", ""),
+        )
+
+
+async def reconcile_stranded_inbound(core_message_id: int) -> dict:
+    """Finalize one stranded inbound turn without replaying its handlers.
+
+    The message ID is the only selector. This is intentionally a metadata
+    and queue-projection repair, not a second processing path.
+    """
+    from app.database import fetch_one as read, execute as write
+    import json
+
+    row = await read(
+        """SELECT message_id, direction, source_message_ref, is_processed,
+                         metadata_json
+                  FROM wbom_whatsapp_messages
+                 WHERE message_id=$1""",
+        core_message_id,
+    )
+    if not row:
+        return {"ok": False, "status": "not_found", "message_id": core_message_id}
+    if row.get("direction") != "inbound":
+        return {"ok": False, "status": "not_inbound", "message_id": core_message_id}
+
+    metadata = row.get("metadata_json") or {}
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    provenance = metadata.get("provenance") or {}
+    if provenance.get("processing_outcome") != "processing" or row.get("is_processed"):
+        return {
+            "ok": False, "status": "not_stranded", "message_id": core_message_id,
+            "processing_outcome": provenance.get("processing_outcome"),
+        }
+    claimed_id = provenance.get("core_message_id")
+    if claimed_id is not None and int(claimed_id) != int(core_message_id):
+        return {"ok": False, "status": "identity_mismatch", "message_id": core_message_id}
+
+    recovered = dict(provenance)
+    actions = list(recovered.get("actions") or [])
+    actions.append({
+        "kind": "recovery",
+        "outcome": "finalized_without_replay",
+        "core_message_id": core_message_id,
+        "source_message_ref": row.get("source_message_ref"),
+    })
+    recovered.update({
+        "processing_outcome": "done",
+        "processing_reason": "finalization_reconciled",
+        "recovered_without_replay": True,
+        "actions": actions,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    })
+    updated_metadata = dict(metadata)
+    updated_metadata.update({"stage": "processed", "status": "done", "provenance": recovered})
+    updated = await read(
+        """UPDATE wbom_whatsapp_messages
+              SET metadata_json=$2::jsonb, is_processed=true
+            WHERE message_id=$1
+              AND COALESCE(metadata_json->'provenance'->>'processing_outcome', '')=$3
+         RETURNING message_id""",
+        core_message_id, json.dumps(updated_metadata, ensure_ascii=False), "processing",
+    )
+    if not updated:
+        return {"ok": False, "status": "already_reconciled", "message_id": core_message_id}
+
+    await write(
+        """UPDATE fazle_message_queue
+              SET status=$2, last_error=NULL, processed_at=NOW()
+            WHERE extra->>'core_message_id'=$1 AND status=$3""",
+        str(core_message_id), "done", "processing",
+    )
+    return {
+        "ok": True,
+        "status": "reconciled",
+        "message_id": core_message_id,
+        "source_message_ref": row.get("source_message_ref"),
+        "processing_outcome": "done",
+        "replayed": False,
+    }
+
+
 async def process_message(
     sender: str, text: str, source: str, *, message_id: Optional[str] = None,
     is_extracted_media: bool = False,
@@ -661,6 +841,9 @@ async def process_message(
 
     def _hk_fire(role: str, intent: str, action: str, explanation: str = "") -> None:
         """Fire-and-forget shadow log; never raises; never blocks."""
+        record_inbound_action("decision", role=role, intent=intent,
+                              action=action, workflow=explanation,
+                              audit_trace_id=str(_hk_record.trace_id) if _hk_record else None)
         if _hk_record is None:
             return
         try:
@@ -735,6 +918,8 @@ async def process_message(
         f"(conf={identity['identity_confidence']}, src={identity['identity_source']})"
     )
     # Populate kernel record with identity data now that it's resolved.
+    record_inbound_action("identity", role=role_str, confidence=identity.get("identity_confidence"),
+                          identity_source=identity.get("identity_source"))
     if _hk_record is not None:
         _hk_record.identity_role = role_str
         _hk_record.identity_confidence = identity.get("confidence")  # 0.0-1.0 float
@@ -747,6 +932,7 @@ async def process_message(
         return (_family_deflection_reply(name, text), None)
 
     if role_str != "admin" and _looks_like_slip_or_complaint(text):
+        _hk_fire(role_str, "escort_duty", "draft", "escort-review-not-order")
         title = "⚠️ ESCORT REVIEW DRAFT — ORDER নয়"
         if _has_client_supplied_escort_assignment(text):
             title = "⚠️ ESCORT COMPLAINT/ASSIGNMENT-LIKE MESSAGE — ADMIN REVIEW"
@@ -783,6 +969,7 @@ async def process_message(
         strict_order = _looks_like_escort_order(text)
         escort_intent = intent_check in ("client_order", "escort_duty") or strict_order
         if strict_order and escort_intent:
+            _hk_fire(role_str, "escort_duty", "business_action", "escort-order")
             return await handle_escort_client_message(
                 text,
                 sender,
@@ -790,6 +977,7 @@ async def process_message(
                 is_verified=is_verified_escort,
             )
         if escort_intent or _looks_like_escort_buying_intent(text):
+            _hk_fire(role_str, "escort_duty", "draft", "escort-client-non-order-review")
             return "", _admin_review_note(
                 sender=sender,
                 source=source,
@@ -861,6 +1049,7 @@ async def process_message(
             return "", None
 
         if is_completed_escort_draft(text):
+            _hk_fire(role_str, "escort_duty", "business_action", "escort-admin-confirmation")
             # Admin can finalize by replying directly to the system as well.
             confirm_text, client_delivery = await handle_admin_escort_completion(
                 text,
@@ -872,6 +1061,7 @@ async def process_message(
             return (confirm_text or "Escort confirmation processed."), client_delivery
 
         if is_admin_command(text):
+            _hk_fire(role_str, "admin_command", "business_action", "admin-command")
             result = await process_admin_command(text, sender)
             if isinstance(result, tuple):
                 confirm_text, extra_msg = result
@@ -892,6 +1082,7 @@ async def process_message(
         # Phase 1.1 (v1.1.0): Natural-language admin queries (no LLM).
         # Runs AFTER structured commands so APPROVE/REJECT/etc still win.
         if is_nl_admin_query(text):
+            _hk_fire(role_str, "admin_query", "query", "admin-natural-query")
             reply = await process_nl_admin_query(text, sender)
             if reply:
                 return reply, None
@@ -903,6 +1094,7 @@ async def process_message(
         # preserved by construction — only explicit keywords
         # reach this branch, never unmatched free text).
         if is_admin_ai_command(text):
+            _hk_fire(role_str, "admin_query", "query", "admin-ai-command")
             ai_reply = await process_admin_ai_command(
                 text, sender_phone=sender, source_bridge=source
             )
@@ -1017,6 +1209,7 @@ async def process_message(
     else:
         _intent_method = "llm"
     log.info(f"[INTENT] {sender} → {intent}")
+    record_inbound_action("intent", intent=intent, method=_intent_method)
     if _hk_record is not None:
         _hk_record.intent = intent
         _hk_record.intent_method = _intent_method

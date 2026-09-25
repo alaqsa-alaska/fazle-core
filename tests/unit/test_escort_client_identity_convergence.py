@@ -475,7 +475,10 @@ class TestWebhookLidResolutionParity:
         timeout depending on unrelated test ordering/state. Unrelated to the
         LID resolution behavior itself, just test hygiene."""
         import modules.bridge_poller as poller_module
+        import modules.route_b as route_b
 
+        monkeypatch.setattr(route_b, "ollama_generate_reply", AsyncMock(return_value="ধন্যবাদ।"))
+        monkeypatch.setattr(poller_module, "process_message", AsyncMock(return_value=("", None)))
         monkeypatch.setattr(
             poller_module, "_load_lid_map",
             lambda whatsapp_db: {"999888777": "8801844444444"},
@@ -513,8 +516,11 @@ class TestWebhookLidResolutionParity:
         unresolved/unknown sender's generic text otherwise reaches the real
         AI reply path."""
         import modules.bridge_poller as poller_module
+        import modules.route_b as route_b
 
         monkeypatch.setattr(poller_module, "_load_lid_map", lambda whatsapp_db: {})
+        monkeypatch.setattr(route_b, "ollama_generate_reply", AsyncMock(return_value="ধন্যবাদ।"))
+        monkeypatch.setattr(poller_module, "process_message", AsyncMock(return_value=("", None)))
 
         unique_text = "hello there — lid-unresolved-test-marker-001"
         payload = {

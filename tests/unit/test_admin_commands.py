@@ -82,19 +82,27 @@ class TestProcessApproveCommand:
 
         from modules.admin_commands import process_admin_command
 
-        with patch("modules.rbac.check_permission", new=AsyncMock(return_value={"allowed": True, "required_role": "operator", "admin": True})):
+        with patch("modules.rbac.check_permission", new=AsyncMock(return_value={
+            "allowed": True, "required_role": "operator",
+            "admin": {"id": 1, "phone": "8801700000001", "name": "ops", "status": "active"},
+        })), patch("modules.rbac.record_audit", new=AsyncMock()):
             with patch("app.bridge.BridgeClient.send", new=AsyncMock(return_value=True)):
                 result = await process_admin_command(
                     text=f"APPROVE {draft_id}",
                     admin_phone="8801700000001",
                 )
 
-        # Draft should be marked sent
+        # Approval is separate from transport acceptance.
         async with test_db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT status FROM fazle_draft_replies WHERE id=$1", draft_id
+            row = await conn.fetchrow("SELECT status FROM fazle_draft_replies WHERE id=$1", draft_id)
+            queue = await conn.fetchrow(
+                "SELECT status FROM fazle_outbound_queue WHERE purpose=\x27admin_approve\x27 "
+                "AND meta_json->>\x27draft_id\x27=$1 ORDER BY id DESC LIMIT 1",
+                str(draft_id),
             )
-        assert row["status"] == "sent"
+        assert row["status"] == "approved"
+        assert queue["status"] == "pending"
+
 
     async def test_reject_pending_draft(self, test_db_pool, seed_employee):
         import app.database as db_module

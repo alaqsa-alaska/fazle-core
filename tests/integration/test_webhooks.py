@@ -9,6 +9,21 @@ from unittest.mock import AsyncMock, patch
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def offline_providers(monkeypatch):
+    """Mock current provider entrypoints, not a stale daemon-only call."""
+    from app import llm, ollama
+    from modules import route_b, hermes_dispatch
+    from modules.intent import classify
+    monkeypatch.setattr(llm, "classify_intent_llm", AsyncMock(side_effect=classify))
+    monkeypatch.setattr(llm, "generate_reply", AsyncMock(return_value="ধন্যবাদ।"))
+    monkeypatch.setattr(ollama, "generate_reply", AsyncMock(return_value="ধন্যবাদ।"))
+    monkeypatch.setattr(route_b, "ollama_generate_reply", AsyncMock(return_value="ধন্যবাদ।"))
+    monkeypatch.setattr(hermes_dispatch, "_call_hermes", AsyncMock(return_value=None))
+    monkeypatch.setattr("app.main._forward_to_agent_if_admin", lambda *a: None)
+    monkeypatch.setattr("modules.memory_extractor.extract_and_save_memory", AsyncMock())
+
 # Re-use payload builders from conftest
 from tests.conftest import (
     make_bridge_payload,
@@ -29,6 +44,109 @@ def _meta_signature(payload: dict, secret: str = "test_app_secret") -> str:
 
 def _meta_body(payload: dict) -> bytes:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+@pytest.mark.parametrize("source", ["bridge1", "bridge2", "bridge3", "meta"])
+@pytest.mark.parametrize("automatic", [True, False])
+async def test_inbound_to_reply_or_draft_provenance_after_reload(client, test_db_pool, monkeypatch, source, automatic):
+    """Existing HTTP/bridge ingestion → real router → real DB → queue → lookup.
+
+    The family branch is deterministic; identity and transport are mocked.
+    Domain-specific routing has its own regression suites.
+    """
+    from app import main
+    from modules import bridge_poller as bp, message_router as router, outbound
+    phone, reference = "8801700999000", "provenance-http-1"
+    identity = {"role": "family", "identity_role": "family", "identity_confidence": 100,
+                "identity_source": "test", "display_name": "Test", "confidence": 1.0}
+    monkeypatch.setattr("modules.identity_brain.detect_identity", AsyncMock(return_value=identity))
+    monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=identity))
+    monkeypatch.setattr(router, "_should_silent_skip", AsyncMock(return_value=(False, "")))
+    monkeypatch.setattr(bp, "_can_reply", AsyncMock(return_value=True))
+    monkeypatch.setattr(bp, "_record_reply", AsyncMock())
+    monkeypatch.setattr(bp, "_check_loop_detect", lambda *a: False)
+    monkeypatch.setattr(bp, "_check_keyword_flood", lambda *a: False)
+    monkeypatch.setattr(bp, "_is_draft_always", AsyncMock(return_value=False))
+    monkeypatch.setattr("modules.wa_chat_frontend.get_effective_auto_reply", AsyncMock(return_value=automatic))
+    monkeypatch.setattr(main, "_force_draft_by_saved_contact_name", AsyncMock(return_value=False))
+    monkeypatch.setattr(main, "_should_recruitment_autoreply", AsyncMock(return_value=False))
+    monkeypatch.setattr(outbound, "_pairing_held", AsyncMock(return_value=(False, "")))
+    monkeypatch.setattr(outbound, "_send_with_channel", AsyncMock(return_value="receipt-http-1"))
+    for settings in (main.settings, bp._settings):
+        monkeypatch.setattr(settings, "auto_reply_enabled", automatic)
+        monkeypatch.setattr(settings, "recruitment_autoreply_enabled", False)
+        monkeypatch.setattr(settings, "auto_reply_sources", "bridge1,bridge2,bridge3,meta")
+        monkeypatch.setattr(settings, "ai_safe_mode", False)
+    for _ in range(2):
+        if source == "meta":
+            msg = {"from": phone, "id": reference, "type": "text", "text": {"body": "hello"}}
+            payload = {"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": {"messages": [msg]}}]}]}
+            response = await client.post("/webhook/meta", content=_meta_body(payload),
+                headers={"Content-Type": "application/json", "X-Hub-Signature-256": _meta_signature(payload)})
+            assert response.status_code == 200
+        elif source == "bridge3":
+            mid = await bp._save_raw_core_copy(source, {"id": reference, "content": "hello"}, phone, "hello")
+            await bp.process_bridge_inbound(source, phone, "hello", id_role="family", id_conf=100,
+                                           core_message_id=mid, message_id=reference)
+        else:
+            payload = {"sender": phone, "text": "hello", "id": reference}
+            response = await client.post(f"/webhook/mcp{source[-1]}", json=payload)
+            assert response.status_code == 200
+    rows = await test_db_pool.fetch("SELECT * FROM wbom_whatsapp_messages WHERE direction='inbound' AND source_message_ref=$1", reference)
+    assert len(rows) == 1
+    mid = rows[0]["message_id"]
+    provenance = json.loads(rows[0]["metadata_json"])["provenance"]
+    assert provenance["processing_outcome"] == "done"
+    assert "family-personal" in provenance["workflows"]
+    assert rows[0]["identity_role"] == "family"
+    assert rows[0]["intent_detected"] == "greeting"
+    headers = {"X-Internal-Key": main.settings.internal_api_key}
+    if not automatic:
+        drafts = await test_db_pool.fetch("SELECT * FROM fazle_draft_replies WHERE meta->>'core_message_id'=$1", str(mid))
+        assert len(drafts) == 1
+        assert await test_db_pool.fetchval("SELECT count(*) FROM fazle_outbound_queue") == 0
+        did = drafts[0]["id"]
+        for _ in range(2):
+            result = await client.post(f"/api/wa/drafts/{did}/approve", headers=headers)
+            assert result.status_code == 200 and result.json()["queued"] is True
+        assert await test_db_pool.fetchval("SELECT status FROM fazle_draft_replies WHERE id=$1", did) == "approved"
+    assert await test_db_pool.fetchval("SELECT count(*) FROM fazle_outbound_queue") == 1
+    monkeypatch.setenv("OUTBOUND_ENABLED", "true")
+    assert (await outbound.sweep_once())["sent"] == 1
+    for endpoint, params in [
+        ("/api/whatsapp/messages/lookup", {"message_id": mid}),
+        ("/api/whatsapp/messages/conversation", {"conversation_key": f"{phone}:{source}"}),
+        (f"/api/wa/messages/{phone}", {}),
+    ]:
+        response = await client.get(endpoint, params=params, headers=headers)
+        assert response.status_code == 200
+        body = response.json()
+        assert "error" not in body
+        inbound = next(m for m in body["messages"] if m.get("message_id", m.get("id")) == mid)
+        assert inbound["provenance"]["processing_outcome"] == "done"
+        assert len(inbound["outbound"]) == 1
+        assert inbound["outbound"][0]["send_accepted"] is True
+        assert inbound["outbound"][0]["delivered"] is False
+
+
+async def test_meta_delivery_receipt_requires_signature_and_exact_provider_id(client, test_db_pool, monkeypatch):
+    from app import main
+    from modules import outbound
+    monkeypatch.setattr(main.settings, "meta_webhook_signature_enforcement", False)
+    monkeypatch.setattr(outbound, "_pairing_held", AsyncMock(return_value=(False, "")))
+    qid = await outbound.enqueue("8801700999000", "reply", source_bridge="meta", idempotency_key="receipt-check")
+    await test_db_pool.execute("UPDATE fazle_outbound_queue SET status='sent',external_id='provider-exact-1' WHERE id=$1", qid)
+    payload = {"entry": [{"changes": [{"field": "messages", "value": {
+        "statuses": [{"id": "provider-exact-1", "status": "delivered", "timestamp": "100"}]}}]}]}
+    response = await client.post("/webhook/meta", content=_meta_body(payload))
+    assert response.status_code == 200  # existing unsigned inbound policy
+    row = dict(await test_db_pool.fetchrow("SELECT * FROM fazle_outbound_queue WHERE id=$1", qid))
+    assert outbound.delivery_details(row)["delivered"] is False
+    response = await client.post("/webhook/meta", content=_meta_body(payload),
+                                headers={"X-Hub-Signature-256": _meta_signature(payload)})
+    assert response.status_code == 200
+    row = dict(await test_db_pool.fetchrow("SELECT * FROM fazle_outbound_queue WHERE id=$1", qid))
+    assert outbound.delivery_details(row)["delivered"] is True
 
 
 class TestBridgeWebhookRouting:
