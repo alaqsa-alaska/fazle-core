@@ -13,7 +13,7 @@ Sources indexed:
   2. Active rows of fazle_knowledge_base (key, reply_text)
 
 Public API (all async, safe to call from FastAPI handlers):
-  • await build_index()              → (re)build the in-memory index
+  • await build_index(sync_qdrant=True) → (re)build BM25 and optionally sync Qdrant
   • await ensure_index()             → build if not yet built
   • await search(q, k=5, min_score=0.0, role="candidate") → list[dict]
   • await stats()                    → diagnostics dict
@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from app.database import fetch_all
+from modules.recruitment_authority import facts_for_evidence
 
 log = logging.getLogger("fazle.rag")
 
@@ -784,6 +785,7 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
                             "source_kind":       chunk["source"].split(":", 1)[0],
                             "indexed_at":        indexed_at,
                             "allowed_roles":     sorted(chunk.get("allowed_roles", _DEFAULT_ALLOWED)),
+                            "fact_authority":    chunk.get("fact_authority", []),
                             "content_hash":      content_hash,
                         },
                     ))
@@ -852,8 +854,14 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
 # ── END HYBRID RAG Milestone 2: Vector Index Build Path ───────────────────────
 
 # ── Build ──────────────────────────────────────────────────────────────────────
-async def build_index() -> dict[str, Any]:
+async def build_index(*, sync_qdrant: bool = True) -> dict[str, Any]:
     """(Re)build the in-memory RAG index. Safe under concurrency.
+
+    ``sync_qdrant`` controls only the optional hybrid vector-index mutation.
+    BM25 construction always runs. Existing callers retain the historical
+    behavior because the default is True; the application startup task passes
+    the explicit RAG_STARTUP_QDRANT_SYNC_ENABLED setting. Retrieval-triggered
+    lazy construction uses ``False`` so retrieval itself never mutates Qdrant.
 
     2026-07-13: the slow Qdrant embedding pass (_build_qdrant_index) now
     runs AFTER _IDX.lock is released, not inside it — it doesn't touch
@@ -897,6 +905,7 @@ async def build_index() -> dict[str, Any]:
                     "len": len(tokens),
                     "safe_for_customer": True,       # guaranteed: unsafe chunks never stored
                     "allowed_roles": allowed_roles,  # Phase 3: role-aware visibility
+                    "fact_authority": [fact.as_marker() for fact in facts_for_evidence(source_id, chunk)],
                 })
                 safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
 
@@ -921,14 +930,17 @@ async def build_index() -> dict[str, Any]:
     # Hybrid vector build only if the flag is enabled — outside _IDX.lock,
     # so it no longer blocks rag.search() for its full duration. If Hybrid
     # fails, BM25 serves requests normally.
-    if HYBRID_SEARCH_ENABLED:
+    if HYBRID_SEARCH_ENABLED and sync_qdrant:
         await _build_qdrant_index(safe_chunks)
     return stats_result
 
 
 async def ensure_index() -> None:
     if _IDX.built_at is None:
-        await build_index()
+        # Retrieval may need BM25 before the background startup build has
+        # completed. Build the local index, but keep Qdrant mutation owned by
+        # explicit startup/scheduled/manual build callers.
+        await build_index(sync_qdrant=False)
 
 
 def is_rebuilding() -> bool:
@@ -1033,6 +1045,7 @@ async def _vector_search(query: str, k: int) -> list[dict[str, Any]]:
                 "chunk_idx":    payload.get("chunk_idx", 0),
                 "text":         payload.get("text", ""),
                 "vector_score": h.score,
+                "fact_authority": payload.get("fact_authority", []),
             })
         return results
 
@@ -1117,6 +1130,7 @@ def _rrf_fuse(
                 "tokens":            [],   # internal BM25 field — not used in output
                 "len":               0,
                 "safe_for_customer": True,
+                "fact_authority":    vhit.get("fact_authority", []),
             }
 
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
@@ -1129,6 +1143,7 @@ def _rrf_fuse(
             "title":     doc["title"],
             "chunk_idx": doc["chunk_idx"],
             "text":      doc["text"],
+            "fact_authority": doc.get("fact_authority", []),
         })
     return out
 
@@ -1243,8 +1258,18 @@ async def search(
                 "title": d["title"],
                 "chunk_idx": d["chunk_idx"],
                 "text": d["text"],
+                "fact_authority": d.get("fact_authority", []),
             })
         _bm25_cache_put(_cache_key, out)
+    for result in out:
+        if not result.get("fact_authority"):
+            result["fact_authority"] = [
+                fact.as_marker() for fact in facts_for_evidence(result.get("source", ""), result.get("text", ""))
+            ]
+        if result.get("fact_authority"):
+            result["authority_statuses"] = sorted({
+                record.get("status", "unverified") for record in result["fact_authority"]
+            })
     # ── END HYBRID RAG Milestone 3 ─────────────────────────────────────────────
 
     # PATCH 7: source traceability — log every search with top hit details
@@ -1288,7 +1313,9 @@ async def answer(q: str, k: int = 3, min_score: float = 1.0, role: str = "candid
     citations = []
     for i, h in enumerate(hits, 1):
         parts.append(f"[{i}] {h['text']}")
-        citations.append({"n": i, "source": h["source"], "title": h["title"], "score": h["score"]})
+        citations.append({"n": i, "source": h["source"], "title": h["title"], "score": h["score"],
+                          "fact_authority": h.get("fact_authority", []),
+                          "authority_statuses": h.get("authority_statuses", [])})
     return {
         "answer": "\n\n".join(parts),
         "citations": citations,

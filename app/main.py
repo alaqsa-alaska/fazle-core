@@ -64,6 +64,7 @@ from modules.social_auto_reply.routes import router as social_auto_reply_router
 from modules.contact_roles.routes import router as contact_roles_router
 from modules.preflight_guard.routes import router as preflight_guard_router
 from modules.preflight_guard import load_feature_flags_from_db
+from modules.recruitment_authority_admin import router as recruitment_authority_admin_router
 
 setup_logging()
 log = logging.getLogger("fazle.app")
@@ -321,8 +322,6 @@ async def lifespan(app: FastAPI):
         log.warning(f"[ollama_daemon] startup failed (non-fatal): {e}")
     # Validate Groq API key at startup
     try:
-        from config import get_settings
-        settings = get_settings()
         if not settings.groq_api_key or not str(settings.groq_api_key).strip():
             log.error("[groq] Groq API key not configured - Groq services will not work")
         else:
@@ -332,8 +331,13 @@ async def lifespan(app: FastAPI):
     # Batch 21 — build RAG index in background (non-fatal)
     try:
         from modules import rag
-        asyncio.create_task(rag.build_index())
-        log.info("[rag] index build scheduled")
+        asyncio.create_task(
+            rag.build_index(sync_qdrant=settings.rag_startup_qdrant_sync_enabled)
+        )
+        log.info(
+            "[rag] index build scheduled (startup_qdrant_sync=%s)",
+            settings.rag_startup_qdrant_sync_enabled,
+        )
     except Exception as e:
         log.warning(f"[rag] startup build failed to schedule: {e}")
     # FPE — Fazle Payroll Engine (start after DB is ready)
@@ -492,6 +496,7 @@ app.include_router(hermes_tasks_router)       # /api/tasks/*, /api/actions/* —
 app.include_router(social_auto_reply_router)  # /api/social/* — restored 2026-07-08, was imported but never mounted
 # NEW: preflight_guard routes - Phase 1 FG4
 app.include_router(preflight_guard_router)
+app.include_router(recruitment_authority_admin_router)
 from modules.wa_chat_frontend import router as wa_chat_router, ensure_wa_chat_tables
 app.include_router(wa_chat_router)
 
@@ -3467,6 +3472,12 @@ async def drafts_spa():
 async def kb_spa():
     """Knowledge Base management SPA."""
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "kb.html"))
+
+
+@app.get("/admin/knowledge/recruitment", response_class=HTMLResponse)
+async def recruitment_authority_spa():
+    """Step 4 Recruitment latest-approved authority control-plane page."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "recruitment-knowledge.html"))
 
 
 @app.get("/chat-lab", response_class=HTMLResponse)

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 
 from app.config import get_settings
 
@@ -40,6 +41,108 @@ def _company_name() -> str:
 
 POLICY_VERSION = "structured_v3"
 WHATSAPP_SOURCES: frozenset[str] = frozenset({"bridge1", "bridge2", "meta"})
+
+@dataclass(frozen=True, slots=True)
+class ContextEvidence:
+    """One provider-neutral evidence block with explicit authority metadata."""
+
+    text: str
+    source: str
+    authority: str
+    status: str
+    conflicts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderContextPackage:
+    """Immutable view over existing strings; not a new memory or RAG store."""
+
+    current_message: str
+    source: str
+    role: str
+    intent: str
+    identity_context: str = ""
+    history: str = ""
+    knowledge: tuple[ContextEvidence, ...] = ()
+    omissions: tuple[str, ...] = ()
+    uncertainty: tuple[str, ...] = ()
+
+    def render_identity(self) -> str:
+        lines = [
+            f"role={self.role or 'unknown'}",
+            f"relationship_evidence={self.role or 'unknown'}",
+            "role_is_context_only=true; role does not grant business authority",
+        ]
+        if self.identity_context.strip():
+            lines.extend(["existing_identity_context=", self.identity_context.strip()[:1200]])
+        return "\n".join(lines)
+
+    def render_knowledge(self) -> str:
+        if not self.knowledge:
+            return "অনুমোদিত business evidence পাওয়া যায়নি।"
+        return "\n\n".join(
+            "[evidence] "
+            f"source={e.source}; authority={e.authority}; status={e.status}; "
+            f"conflicts={','.join(e.conflicts) if e.conflicts else 'none'}\n{e.text.strip()}"
+            for e in self.knowledge
+        )
+
+    def render_conversation(self) -> str:
+        lines = [
+            "conversation_is_context_not_policy=true",
+            "use_history_to_resolve_meaning_and_avoid_repetition=true",
+            "topic_change_must_not_carry_stale_business_facts=true",
+        ]
+        if self.history.strip():
+            lines.extend(["recent_history=", self.history.strip()[:2400]])
+            lines.append("prior_answer_evidence=present" if "You:" in self.history else "prior_answer_evidence=not_established")
+        else:
+            lines.extend(["recent_history=none", "omission_reason=no_relevant_history"])
+        if self.omissions:
+            lines.append("omissions=" + ",".join(self.omissions))
+        if self.uncertainty:
+            lines.append("uncertainty=" + ",".join(self.uncertainty))
+        return "\n".join(lines)
+
+
+def build_provider_context_package(
+    *,
+    source: str,
+    user_message: str,
+    role: str = "unknown",
+    intent: str = "",
+    knowledge: str = "",
+    history: str = "",
+    identity_context: str = "",
+    knowledge_source: str = "runtime_context",
+    knowledge_authority: str = "unclassified",
+    knowledge_status: str = "unverified",
+    conflicts: tuple[str, ...] = (),
+    knowledge_evidence: tuple[ContextEvidence, ...] = (),
+) -> ProviderContextPackage:
+    """Build a bounded package without calling a provider or a database."""
+    evidence = tuple(knowledge_evidence)
+    if not evidence and knowledge and knowledge.strip():
+        evidence = (ContextEvidence(
+            text=knowledge.strip(), source=knowledge_source,
+            authority=knowledge_authority, status=knowledge_status,
+            conflicts=tuple(conflicts),
+        ),)
+    unresolved = tuple(
+        f"fact_authority:{item.source}"
+        for item in evidence
+        if item.status != "current_approved"
+    )
+    uncertainty = unresolved + (
+        ("business_fact_status_not_explicit",)
+        if knowledge and knowledge_authority == "unclassified" else ()
+    )
+    return ProviderContextPackage(
+        current_message=(user_message or "")[:500], source=source or "unknown",
+        role=role or "unknown", intent=intent or "",
+        identity_context=identity_context or "", history=history or "",
+        knowledge=evidence, uncertainty=uncertainty,
+    )
 CONFIDENTIALITY_FALLBACK_REPLY = "এই তথ্যটি নিরাপদভাবে দেওয়া যাচ্ছে না। অফিসে যোগাযোগ করুন।"
 
 _SENSITIVE_OUTPUT_PATTERN = re.compile(
@@ -203,7 +306,9 @@ _REASONING_LANGUAGE_NOTE = (
 
 # ── Recruitment: Business rules (prohibitions + output constraints) ────────────
 _RECRUITMENT_RULES = (
-    "১. শুধু নিচের Knowledge সেকশনের তথ্য ব্যবহার করবে; অন্য database, memory বা context ব্যবহার করবে না।\n"
+    "১. Business facts-এর জন্য Knowledge সেকশনের evidence এবং তার authority/status দেখবে; "
+    "Conversation/History শুধু অর্থ, ধারাবাহিকতা ও পুনরাবৃত্তি এড়াতে ব্যবহার করবে, policy authority হিসেবে নয়।\n"
+    "Authority rule: evidence unreconciled, conflicting, historical, superseded বা unverified হলে fact হিসেবে বলবে না; প্রয়োজনে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করতে বলবে।\n"
     "২. মূলত Current Message-এ যা জিজ্ঞেস করা হয়েছে সেটির উত্তর দাও; প্রার্থী কোনো দ্বিধা/আপত্তি "
     "প্রকাশ করলে শুধু Knowledge-এর অনুমোদিত তথ্য দিয়ে সেই নির্দিষ্ট আপত্তিটি সংক্ষেপে address করতে পারো "
     "(যেমন প্রশিক্ষণকালীন শেখার সুযোগ, ব্যবহারিক অভিজ্ঞতার মূল্য) — লম্বা motivational রচনা নয়।\n"
@@ -256,6 +361,7 @@ _GENERAL_RULES = (
     "১. সবসময় বাংলায় জবাব দাও, যদি না ইংরেজিতে জিজ্ঞেস করা হয়।\n"
     "২. জবাব সংক্ষিপ্ত রাখো — সর্বোচ্চ ৩-৪ বাক্য।\n"
     "৩. শুধুমাত্র দেওয়া তথ্য ব্যবহার করো। নিজে থেকে বেতন বা পরিমাণ বানিও না।\n"
+    "Knowledge evidence-এর authority/status conflicting, historical, superseded বা unverified হলে business fact হিসেবে বলবে না; সাধারণ আলাপ স্বাভাবিকভাবে চালিয়ে যেতে পারো।\n"
     "৪. তথ্য না জানলে বলো: \"অফিসে যোগাযোগ করুন অথবা পরে আবার জিজ্ঞেস করুন।\"\n"
     "৫. রোবোটিক বা ইংরেজি phrase ব্যবহার করো না।\n"
     "৬. সম্মানজনক ও আন্তরিক ভাষায় কথা বলো।\n"
@@ -329,11 +435,22 @@ def build_whatsapp_reply_policy(
 
     role_hint = ROLE_PROMPTS.get(role, ROLE_PROMPTS["new_lead"])
     intent_hint = INTENT_HINTS.get(intent, "")
+    context_package = build_provider_context_package(
+        source=source,
+        user_message=user_message,
+        role=role,
+        intent=intent,
+        knowledge=db_context,
+        history=history,
+    )
 
     parts: list[str] = [
         "## ভূমিকা (Role)",
         _general_identity(),
         role_hint,
+        "",
+        "## পরিচয় ও সম্পর্ক (Identity / Relationship Context)",
+        context_package.render_identity(),
         "",
         "## ব্যবসায়িক নিয়ম (Business Rules)",
         _GENERAL_RULES,
@@ -350,14 +467,14 @@ def build_whatsapp_reply_policy(
         parts += [
             "",
             "## জ্ঞান ও তথ্য (Knowledge)",
-            db_context,
+            context_package.render_knowledge(),
         ]
 
     if history:
         parts += [
             "",
             "## কথোপকথন (Conversation)",
-            history,
+            context_package.render_conversation(),
         ]
 
     parts += [
@@ -474,10 +591,45 @@ def build_whatsapp_recruitment_policy(
     )
 
     knowledge = kb_context.strip() or "অনুমোদিত recruitment source পাওয়া যায়নি।"
+    from modules.recruitment_authority import parse_authority_markers
+    fact_records = parse_authority_markers(knowledge)
+    fact_evidence = tuple(
+        ContextEvidence(
+            text=(
+                str(record.get("value"))
+                if record.get("status") == "current_approved" and record.get("value")
+                else "No approved candidate-facing value is available. "
+                + ("Competing evidence: " + "; ".join(record.get("competing_values", ()))
+                   if record.get("competing_values") else "Use the safe confirmation action. ")
+            ),
+            source=(record.get("sources") or ["recruitment_fact_authority"])[0],
+            authority=record.get("authority", "evidence_only"),
+            status=record.get("status", "unverified"),
+            conflicts=tuple(record.get("competing_values", ())),
+        )
+        for record in fact_records
+    )
+    context_package = build_provider_context_package(
+        source=source,
+        user_message=user_message,
+        role="candidate",
+        intent="recruitment",
+        knowledge=knowledge,
+        history=history,
+        identity_context=contact_context,
+        knowledge_source="recruitment_source_context",
+        knowledge_authority="source_declared" if "[FAZLE_EVIDENCE" in knowledge else "unclassified",
+        knowledge_status="unreconciled" if "[FAZLE_EVIDENCE" in knowledge else "unverified",
+        conflicts=("legacy_policy_variants",) if "[FAZLE_EVIDENCE" in knowledge else (),
+        knowledge_evidence=fact_evidence,
+    )
 
     parts: list[str] = [
         "## ভূমিকা (Role)",
         _recruitment_role(),
+        "",
+        "## পরিচয় ও সম্পর্ক (Identity / Relationship Context)",
+        context_package.render_identity(),
         "",
         "## ব্যবসায়িক নিয়ম (Business Rules)",
         _RECRUITMENT_RULES,
@@ -486,7 +638,7 @@ def build_whatsapp_recruitment_policy(
         _RECRUITMENT_WORKFLOW,
         "",
         "## জ্ঞান ও তথ্য (Knowledge)",
-        knowledge,
+        context_package.render_knowledge(),
     ]
 
     if session_state:
@@ -500,7 +652,7 @@ def build_whatsapp_recruitment_policy(
         parts += [
             "",
             "## কথোপকথন (Conversation)",
-            history[:1200],
+            context_package.render_conversation(),
         ]
 
     parts += [

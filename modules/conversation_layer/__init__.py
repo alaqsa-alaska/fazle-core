@@ -70,7 +70,6 @@ async def generate_recruitment_reply(
     facts that aren't in source-of-truth. When decision_context is the
     empty string, behavior is byte-identical to before.
     """
-    del contact_context  # not used by conversation_layer (same as recruitment_ai)
     effective_history = history or None
     if decision_context:
         # Decision-context is an additive policy block; history remains
@@ -84,6 +83,7 @@ async def generate_recruitment_reply(
         text=text,
         source=source,
         history=effective_history,
+        contact_context=contact_context or None,
         use_llm=True,
     )
     reply = (result.get("reply") or "").strip()

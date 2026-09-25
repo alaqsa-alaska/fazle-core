@@ -274,9 +274,20 @@ check7() {
     fi
 }
 
+# ── Check 7a: writable Recruitment authority backup ─────────────────────────
+check7a() {
+    local py="/home/azim/.venv/bin/python"
+    [[ -x "$py" ]] || py="python3"
+    if "$py" -c 'from modules.backup import backup_authority_register; result = backup_authority_register(); print(result["sha256"])' >/tmp/restart_gate_authority_backup.log 2>&1; then
+        pass "7a. Authority backup .......... validated atomic backup created"
+    else
+        block "7a. Authority backup .......... FAILED, see /tmp/restart_gate_authority_backup.log"
+    fi
+}
+
 echo "Restart Gate — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "──────────────────────────────────────────────────────────"
-check1; check2; check3; check4; check4b; check5; check5b; check6; check7
+check1; check2; check3; check4; check4b; check5; check5b; check6; check7; check7a
 for r in "${RESULTS[@]}"; do echo "$r"; done
 echo "──────────────────────────────────────────────────────────"
 if [[ "$BLOCKED" -gt 0 ]]; then

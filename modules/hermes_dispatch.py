@@ -205,9 +205,11 @@ def build_recruitment_context(message: str) -> str:
     full_text = _load_recruitment_source_raw()
     if not full_text:
         return ""
+    from modules.recruitment_authority import render_authority_markers
+    fact_markers = render_authority_markers("resources/ops/recruitment_source_of_truth.txt", full_text, include_all=True)
     if _looks_like_fee_question(message):
-        return full_text
-    return _FEE_SECTION_RE.sub("", full_text)
+        return "[FAZLE_EVIDENCE authority=source_declared status=unreconciled conflicts=legacy_policy_variants source=resources/ops/recruitment_source_of_truth.txt]\n" + fact_markers + "\n" + full_text
+    return "[FAZLE_EVIDENCE authority=source_declared status=unreconciled conflicts=legacy_policy_variants source=resources/ops/recruitment_source_of_truth.txt]\n" + fact_markers + "\n" + _FEE_SECTION_RE.sub("", full_text)
 
 
 # Phase 3, 2026-08-25 recovery pass ("employee-info grounding gap"): the

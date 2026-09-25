@@ -12,6 +12,7 @@ import logging
 import re
 from typing import Optional
 
+from modules.recruitment_authority import facts_for_evidence
 from app.database import fetch_one, fetch_all
 
 log = logging.getLogger("fazle.knowledge_base")
@@ -229,7 +230,7 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
     # 1. Try DB
     try:
         rows = await fetch_all(
-            "SELECT key, trigger_keywords, reply_text FROM fazle_knowledge_base WHERE is_active = true",
+            "SELECT key, category, trigger_keywords, reply_text FROM fazle_knowledge_base WHERE is_active = true",
         )
         for row in rows:
             keywords = row.get("trigger_keywords") or []
@@ -237,6 +238,11 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
                 if _should_skip(kw):
                     continue
                 if kw.lower() in text_lower:
+                    if (row.get("category") or "").lower() == "recruitment" and facts_for_evidence(
+                        f"kb:{row['key']}", row.get("reply_text") or ""
+                    ):
+                        log.info("[KB] authority-aware fallback required: key=%s", row["key"])
+                        continue
                     log.info(f"[KB] DB match: key={row['key']} kw={kw!r}")
                     return row["reply_text"]
     except Exception as e:
@@ -248,6 +254,8 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
             if _should_skip(kw):
                 continue
             if kw.lower() in text_lower:
+                if facts_for_evidence("fallback:recruitment", reply):
+                    continue
                 log.info(f"[KB] fallback match: kw={kw!r}")
                 return reply
 
@@ -295,12 +303,14 @@ async def get_recruitment_reply(text: str) -> Optional[str]:
     text_lower = text.lower().strip()
     try:
         rows = await fetch_all(
-            "SELECT trigger_keywords, reply_text FROM fazle_knowledge_base "
+            "SELECT key, trigger_keywords, reply_text FROM fazle_knowledge_base "
             "WHERE is_active = true AND category = 'recruitment'",
         )
         for row in rows:
             for kw in (row.get("trigger_keywords") or []):
                 if kw.lower() in text_lower:
+                    if facts_for_evidence(f"kb:{row.get('key', 'recruitment')}", row.get("reply_text") or ""):
+                        continue
                     return row["reply_text"]
     except Exception as _e:
         from app.error_log import record_error
@@ -309,5 +319,7 @@ async def get_recruitment_reply(text: str) -> Optional[str]:
     for keywords, reply in _FALLBACK:
         for kw in keywords:
             if kw.lower() in text_lower:
+                if facts_for_evidence("fallback:recruitment", reply):
+                    continue
                 return reply
     return None

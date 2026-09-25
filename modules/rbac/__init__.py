@@ -65,6 +65,10 @@ COMMAND_ROLE: dict[str, str] = {
     "schedule_run":        "admin",
     "backup_now":          "admin",
     "user_list":           "admin",
+    # Step 4 — latest-approved Recruitment authority control plane
+    "recruitment_authority_read": "viewer",
+    "recruitment_authority_write": "admin",
+    "recruitment_authority_approve": "admin",
     # superadmin
     "user_add":            "superadmin",
     "user_role":           "superadmin",

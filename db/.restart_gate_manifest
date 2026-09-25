@@ -23,6 +23,50 @@
 # rejected -> delete the draft file and this entry).
 db/migrations_drafts/
 
+# 2026-09-24: accumulated Step 1-4 Hermes, Recruitment authority, local-model
+# selection, and Admin control-plane candidate. Reviewed for restart preflight;
+# keep the root ARCHITECTURE.md worktree change explicitly outside this set.
+README.md
+app/llm.py
+app/static/dashboard.html
+docs/ARCHITECTURE.md
+docs/DEVELOPER_GUIDE.md
+modules/ai_console/model_router.py
+modules/knowledge_base/__init__.py
+modules/rag/__init__.py
+shared/reply_policy.py
+app/static/recruitment-knowledge.html
+knowledge_base/00_governance/recruitment_fact_authority.json
+knowledge_base/04_business_rules/recruitment_lifecycle_authority.md
+modules/recruitment_authority.py
+modules/recruitment_authority_admin.py
+tests/unit/test_hermes_intelligence_foundation.py
+tests/unit/test_recruitment_authority_admin.py
+
+# 2026-09-25: reviewed Recruitment fallback authority-boundary correction.
+# Hermes remains first; only the existing failure fallback prompt/source and
+# its focused offline regression tests are approved here. Exact paths only.
+modules/conversation_layer/prompting.py
+modules/conversation_layer/recruitment.py
+tests/unit/test_recruitment_fallback_authority_boundary.py
+
+# 2026-09-24: restart-gate blocker resolution for authority backup coverage.
+# The manifest and backup implementation remain reviewable candidate changes;
+# no new self-whitelist entry is added by this blocker-resolution change.
+modules/backup/__init__.py
+scripts/restart_gate.sh
+
+# 2026-09-24: runtime mutation-boundary correction. Startup passes the
+# explicit RAG Qdrant-sync control; BM25/retrieval and the scheduled job keep
+# their existing paths. The authority lock is intentionally ignored by the
+# exact .gitignore rule and is not a manifest candidate.
+.gitignore
+app/config.py
+app/main.py
+modules/rag/__init__.py
+tests/unit/test_rag_startup_sync_boundary.py
+tests/unit/test_authority_backup.py
+
 # 2026-08-01: moonshot_test.py — found untracked and dirty (dated 2026-07-31)
 # while deploying an unrelated FPE payroll-parser fix; not created or
 # reviewed by this session, not part of the app module tree (no import

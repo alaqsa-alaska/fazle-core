@@ -20,13 +20,13 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "phi4-mini:latest"
+    ollama_model: str = "hermes3:3b"
     # Task-tier model routing (falls back to ollama_model when empty)
-    ollama_runtime_model: str = "phi4-mini"
-    ollama_business_model: str = "qwen3:8b"
-    ollama_memory_model: str = "phi4-mini"
-    ollama_general_model: str = "phi4-mini"
-    ollama_deep_reasoning_model: str = "qwen3:8b"
+    ollama_runtime_model: str = "hermes3:3b"
+    ollama_business_model: str = "hermes3:3b"
+    ollama_memory_model: str = "hermes3:3b"
+    ollama_general_model: str = "hermes3:3b"
+    ollama_deep_reasoning_model: str = "hermes3:3b"
     # Safe bounded concurrency for local inference paths
     ollama_infer_concurrency: int = 1
     ollama_chat_concurrency: int = 1
@@ -157,6 +157,14 @@ class Settings(BaseSettings):
     debug: bool = False
     internal_api_key: str = ""
     ai_console_chat_enabled: bool = False
+
+    # RAG startup control: BM25 is always built by the startup task, while
+    # Qdrant synchronization can be disabled independently. The default is
+    # False so an unset RAG_STARTUP_QDRANT_SYNC_ENABLED leaves Qdrant untouched
+    # at startup. Set it to true only when startup synchronization is intended;
+    # hybrid vector retrieval remains enabled, and the scheduled rag_rebuild
+    # job keeps its existing build_index() behavior.
+    rag_startup_qdrant_sync_enabled: bool = False
 
     @field_validator("debug", mode="before")
     @classmethod

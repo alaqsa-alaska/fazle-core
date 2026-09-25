@@ -13,10 +13,9 @@ order): OmniRoute -> Groq -> local Ollama/Hermes -> Kimi.
     hermes3:3b, hermes3, hermes3:latest, hermes, hermes:latest -- "hermes3"
     is the real Ollama-library family name, "hermes"/"hermes:latest" kept
     as aliases in case a model is ever tagged that way manually), otherwise
-    settings.ollama_model unchanged (currently qwen3:8b). Skipped entirely
-    if OLLAMA_REPLY_DISABLED=true, same as before. 2026-08-05 server check:
-    no Hermes-family model is provisioned yet -- see the Owner-facing report
-    for the exact `ollama pull hermes3:3b` command, not run automatically.
+    settings.ollama_model unchanged (currently hermes3:3b). Skipped entirely
+    if OLLAMA_REPLY_DISABLED=true, same as before. current local inspection confirms `hermes3:3b` is provisioned; no model
+    pull is performed by this resolver.
   - Kimi: reached through the SAME local Ollama client, using
     settings.kimi_model_name (default kimi-k2.6:cloud, Ollama's own
     cloud-model proxy -- confirmed already provisioned on this server).
