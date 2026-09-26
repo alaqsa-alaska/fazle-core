@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -391,6 +392,29 @@ def test_L_parse_semantic_decision_invalid_domain_returns_no_match():
 
 # Config-missing → NO_MATCH with rationale=not_configured
 @pytest.mark.asyncio
+
+
+@pytest.mark.asyncio
+async def test_hermes_customer_payload_carries_trusted_workload_id(monkeypatch):
+    from modules import hermes_dispatch
+
+    captured = {}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status_code=200, json=lambda: {"reply": "ok"})
+
+    monkeypatch.setattr(hermes_dispatch, "_configured", lambda: ("http://runner.test", "secret"))
+    monkeypatch.setattr(hermes_dispatch.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    assert await hermes_dispatch._call_hermes("hello", sender_phone="8801", log_label="test") == "ok"
+    assert captured["json"]["workload_id"] == hermes_dispatch.HERMES_CUSTOMER_WORKLOAD_ID
 async def test_semantic_gate_not_configured_returns_no_match():
     with patch("modules.hermes_dispatch._configured", return_value=(None, None)):
         d = await semantic_gate({"text": "hi", "sender_phone": "x"})

@@ -234,18 +234,23 @@ async def test_E_release_travel_expense_semantic_layer_creates_nothing(monkeypat
     ec_mock.assert_not_awaited()
 
 
-async def test_E_salary_query_intent_also_deferred_to_legacy(monkeypatch):
-    """A second order-dependent legacy protection (the 2026-08-21 salary/
-    keyword-trigger context-routing fix) must also stay unshortcut."""
+async def test_E_salary_query_uses_informational_employee_handler(monkeypatch):
+    """Salary queries use the approved informational employee handler and
+    do not fall through to the unrelated payment-request handler."""
     decision = SemanticDecision(domain="employee_conversation", confidence=0.9, identity_reference={"employee_id": 77})
     ec_mock = AsyncMock(return_value=("SHOULD_NOT_BE_CALLED", None))
-    with patch.object(router, "ec_handle_payment_request", ec_mock):
+    informational_mock = AsyncMock(return_value=("salary handled", None))
+    with (
+        patch.object(router, "ec_handle_payment_request", ec_mock),
+        patch("modules.employee_conversation.handle_employee_informational_query", informational_mock),
+    ):
         reply, note = await router._task13_authoritative_dispatch(
             decision, sender="880171", text="আমার বেতন কবে দিবেন?", source="bridge1",
             role_str="employee", intent="salary_query", db_ctx="", history="",
             recruitment_authoritative=False, employee_authoritative=True,
         )
-    assert (reply, note) == (None, None)
+    assert (reply, note) == ("salary handled", None)
+    informational_mock.assert_awaited_once()
     ec_mock.assert_not_awaited()
 
 
@@ -294,27 +299,13 @@ async def test_F_confirmed_escort_order_never_reaches_semantic_gate(monkeypatch,
 
 
 def test_G_admin_section_structurally_precedes_task13_block():
-    """Runtime proof via is_admin_command()'s real APPROVE/PAID/... branch
-    is blocked by an UNRELATED pre-existing bug in this file (confirmed,
-    2026-08-22 BUILD+VERIFY session): process_message()'s "── 6. ACCOUNTANT"
-    branch does `from modules.admin_commands import is_report_command,
-    process_admin_command` as a LOCAL import -- which makes
-    `process_admin_command` a local variable for the ENTIRE function under
-    normal Python scoping rules, so the unrelated "── 3. ADMIN" branch's own
-    reference to the module-level `process_admin_command` (line ~699,
-    `result = await process_admin_command(text, sender)`) raises
-    UnboundLocalError whenever is_admin_command(text) is True -- reproduced
-    directly: `"process_admin_command" in router.process_message.__code__.
-    co_varnames` is True. This predates and is unrelated to the Task-13
-    promotion (git diff of this file for this promotion is purely additive,
-    0 deletions) -- flagged in the BUILD+VERIFY report's KNOWN_GAPS, not
-    fixed here (out of this task's scope). This test therefore proves
-    placement structurally instead of via a live call through that branch."""
+    """The existing admin section remains before the Task-13 section.
+    The admin command helper is intentionally imported at module scope, so
+    this test must not inspect function-local implementation details."""
     src = inspect.getsource(router)
     admin_idx = src.index('# ── 3. ADMIN ')
     task13_idx = src.index("# ── Task 13 (2026-08-22): SHADOW-ONLY semantic gate")
     assert admin_idx < task13_idx
-    assert "process_admin_command" in router.process_message.__code__.co_varnames
 
 
 @pytest.mark.parametrize("flag_on", [True, False])
@@ -327,14 +318,16 @@ async def test_H_accountant_report_never_reaches_semantic_gate(monkeypatch, flag
     monkeypatch.setattr(router, "detect_identity", AsyncMock(return_value=identity))
     monkeypatch.setattr(router.ai, "classify_intent_llm", AsyncMock(return_value="unknown"))
     gate_mock = AsyncMock(return_value=SemanticDecision(domain="no_match"))
+    admin_mock = AsyncMock(return_value="report handled")
     with (
         patch("modules.admin_commands.is_report_command", MagicMock(return_value=True)),
-        patch("modules.admin_commands.process_admin_command", AsyncMock(return_value="report handled")),
+        patch.object(router, "process_admin_command", admin_mock),
         patch("modules.hermes_dispatch.semantic_gate", gate_mock),
         patch("modules.preflight_guard.is_feature_active", _flags(task13_recruitment_authoritative=flag_on, task13_employee_authoritative=flag_on)),
     ):
         reply, _ = await router.process_message("8801788888888", "report cash 30", "bridge1")
     assert reply == "report handled"
+    admin_mock.assert_awaited_once()
     gate_mock.assert_not_awaited()
 
 

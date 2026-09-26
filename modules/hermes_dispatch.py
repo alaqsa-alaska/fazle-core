@@ -754,6 +754,9 @@ _TIMEOUT_SECONDS = 45.0
 # (SYSTEM_PREAMBLE) and must own the customer-path equivalent too, keyed
 # off caller_scope="customer", so there is exactly one place that decides
 # "what does Hermes believe its role is" rather than two call sites
+# Stable caller identity accepted by hermes-runner's workload-scoped resolver.
+HERMES_CUSTOMER_WORKLOAD_ID = "fazle-core.customer"
+
 # layering possibly-conflicting preambles on top of each other. This
 # module sends only the task content (the reply_policy-built prompt).
 
@@ -790,7 +793,7 @@ async def _call_hermes(message: str, *, sender_phone: str, log_label: str) -> Op
         log.debug("[hermes_dispatch] not configured (missing hermes_runner_url or hermes_runner_customer_secret)")
         return None
 
-    payload = {"message": message, "caller_scope": "customer"}
+    payload = {"message": message, "caller_scope": "customer", "workload_id": HERMES_CUSTOMER_WORKLOAD_ID}
     if sender_phone:
         payload["readonly_key"] = f"customer:{sender_phone}"
 
@@ -1467,7 +1470,7 @@ async def call_decision_llm(
                 headers={"Authorization": f"Bearer {secret}"},
                 json={
                     "message": composed,
-                    "caller_scope": "customer",
+                    "caller_scope": "customer", "workload_id": HERMES_CUSTOMER_WORKLOAD_ID,
                     "readonly_key": (f"customer:decision:{sender_phone}"
                                      if sender_phone else "customer:decision"),
                     # Decision path is structured classification only --
