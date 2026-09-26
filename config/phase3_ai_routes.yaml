@@ -1,0 +1,117 @@
+version: "3B.1"
+ownership:
+  selection: outer_phase3_policy
+  retry: outer_phase3_executor
+  fallback: outer_phase3_executor
+  delivery: business_caller_only
+
+workloads:
+  simple_intent_classification: {status: integrated, structured_output: false}
+  structured_extraction: {status: registered_not_integrated, structured_output: true}
+  conversational_reply: {status: integrated, structured_output: false}
+  recruitment_reply: {status: integrated, structured_output: false}
+  recruitment_decision: {status: integrated, structured_output: true}
+  administrative_reasoning: {status: runner_integrated, structured_output: true}
+  rag_answer: {status: registered_not_integrated, structured_output: false}
+  memory_extraction: {status: registered_not_integrated, structured_output: true}
+  payroll_parse_enhancement: {status: registered_not_integrated, structured_output: true}
+  voice_intent_classification: {status: registered_not_integrated, structured_output: false}
+  social_reply_polish: {status: registered_not_integrated, structured_output: false}
+  historical_replay_evaluation: {status: development_only, structured_output: false}
+
+# Secret values never belong here. credential_ref values are names resolved
+# against runtime settings. Every route is explicit about workload eligibility,
+# environment, compatibility and bounded retry ownership.
+routes:
+  - route_id: core-omniroute-default
+    display_name: OmniRoute default
+    priority: 10
+    transport: omniroute_gateway
+    provider: omniroute
+    model: approved_gateway_alias/default
+    base_url: http://127.0.0.1:20128/v1
+    credential_type: api_key
+    credential_ref: omniroute_api_key
+    allowed_workloads: [conversational_reply, recruitment_reply, recruitment_decision]
+    capabilities: [text_generation, structured_output, long_context]
+    modalities: [text]
+    privacy_classes: [private_gateway, approved_external]
+    cost_class: standard
+    latency_classes: [interactive, background]
+    context_limit: 200000
+    structured_output: true
+    enabled: true
+    environments: [development, test, production]
+    max_attempts: 2
+    retry_backoff_seconds: 1
+
+  - route_id: core-groq-default
+    display_name: Groq default
+    priority: 20
+    transport: direct_provider
+    provider: groq
+    model: approved_runtime_alias/groq_default
+    base_url: https://api.groq.com/openai/v1
+    credential_type: api_key
+    credential_ref: groq_api_key
+    allowed_workloads: [simple_intent_classification, conversational_reply, recruitment_reply, recruitment_decision]
+    capabilities: [text_generation, structured_output]
+    modalities: [text]
+    privacy_classes: [approved_external]
+    cost_class: low
+    latency_classes: [interactive, background]
+    context_limit: 32768
+    structured_output: true
+    enabled: true
+    environments: [development, test, production]
+    max_attempts: 2
+    retry_backoff_seconds: 1
+
+  - route_id: core-ollama-local
+    display_name: Ollama local preferred
+    priority: 30
+    transport: local_ollama
+    provider: ollama-local
+    model: approved_runtime_alias/local_preferred
+    base_url: http://127.0.0.1:11434
+    credential_type: local_runtime
+    credential_ref: local_runtime
+    allowed_workloads: [simple_intent_classification, conversational_reply, recruitment_reply, recruitment_decision]
+    capabilities: [text_generation, structured_output]
+    modalities: [text]
+    privacy_classes: [local_only, private_gateway, approved_external]
+    cost_class: low
+    latency_classes: [interactive, background, batch]
+    context_limit: 8192
+    structured_output: true
+    enabled: true
+    environments: [development, test, production]
+    max_attempts: 1
+    retry_backoff_seconds: 0
+
+  - route_id: core-kimi-ollama-proxy
+    display_name: Kimi Ollama proxy
+    priority: 40
+    transport: local_ollama
+    provider: ollama-local
+    model: approved_runtime_alias/kimi_cloud
+    base_url: http://127.0.0.1:11434
+    credential_type: local_runtime
+    credential_ref: local_runtime
+    allowed_workloads: [conversational_reply, recruitment_reply, recruitment_decision]
+    capabilities: [text_generation, structured_output, long_context]
+    modalities: [text]
+    privacy_classes: [approved_external]
+    cost_class: standard
+    latency_classes: [interactive, background]
+    context_limit: 128000
+    structured_output: true
+    enabled: true
+    environments: [development, test, production]
+    max_attempts: 1
+    retry_backoff_seconds: 0
+
+dispositions:
+  github_models: dormant_legacy
+  minimax_direct: migrate_to_policy_not_registered_yet
+  historical_replay: development_only

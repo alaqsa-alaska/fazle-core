@@ -174,6 +174,22 @@ async def classify_intent_llm(text: str) -> str:
     after llama-3.1-8b-instant was confirmed retired by Groq.
     """
     settings = get_settings()
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "simple_intent_classification"):
+        request = unified_routing.make_request(
+            "simple_intent_classification", {"text": text}
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            return routed.content
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return "unknown"
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request("simple_intent_classification", {"text": text}), settings
+        )
 
     try:
         from app import ollama
@@ -228,6 +244,46 @@ async def generate_reply(
     """
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "conversational_reply"):
+        request = unified_routing.make_request(
+            "conversational_reply",
+            {
+                "user_message": user_message,
+                "intent": intent,
+                "db_context": db_context,
+                "history": history,
+                "role": role,
+                "source": source,
+            },
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            asyncio.create_task(_save_to_memory(
+                provider=routed.final_provider,
+                model=routed.final_model,
+                trigger_text=user_message,
+                reply_text=routed.content,
+                intent=intent,
+                role=role,
+                source=source,
+                context_used=db_context,
+                is_fallback=routed.final_route_ordinal > 0,
+            ))
+            return routed.content
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return _FALLBACK_REPLY
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request(
+                "conversational_reply",
+                {"user_message": user_message, "intent": intent, "db_context": db_context,
+                 "history": history, "role": role, "source": source},
+            ),
+            settings,
+        )
 
     if settings.omniroute_api_key:
         try:
@@ -379,6 +435,44 @@ async def generate_recruitment_reply(
     """Recruitment-specific reply. OmniRoute → Groq → local Ollama/Hermes → Kimi → safe fallback."""
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "recruitment_reply"):
+        request = unified_routing.make_request(
+            "recruitment_reply",
+            {
+                "user_message": user_message,
+                "kb_context": kb_context,
+                "history": history,
+                "contact_context": contact_context,
+                "source": source,
+            },
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            asyncio.create_task(_save_to_memory(
+                provider=routed.final_provider,
+                model=routed.final_model,
+                trigger_text=user_message,
+                reply_text=routed.content,
+                intent="recruitment",
+                source=source,
+                context_used=kb_context,
+                is_fallback=routed.final_route_ordinal > 0,
+            ))
+            return routed.content
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request(
+                "recruitment_reply",
+                {"user_message": user_message, "kb_context": kb_context, "history": history,
+                 "contact_context": contact_context, "source": source},
+            ),
+            settings,
+        )
 
     if settings.omniroute_api_key:
         try:
@@ -620,6 +714,36 @@ async def decision_call(
     """
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "recruitment_decision"):
+        request = unified_routing.make_request(
+            "recruitment_decision",
+            {
+                "system_prompt": system_prompt,
+                "user_payload": user_payload,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "timeout": timeout,
+            },
+            structured=True,
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            return routed.content
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return None
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request(
+                "recruitment_decision",
+                {"system_prompt": system_prompt, "user_payload": user_payload,
+                 "max_tokens": max_tokens, "temperature": temperature, "timeout": timeout},
+                structured=True,
+            ),
+            settings,
+        )
 
     # 1. OmniRoute
     if settings.omniroute_api_key:

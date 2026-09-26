@@ -103,6 +103,18 @@ class Settings(BaseSettings):
     bridge1_number: str = ""
     bridge1_label: str = "HR"
 
+    # Phase 3B route-policy controls. Defaults preserve the existing static
+    # policy and keep database-backed route selection inactive.
+    unified_ai_routing_enabled: bool = False
+    unified_ai_routing_shadow_mode: bool = False
+    unified_ai_routing_policy_source: str = "bootstrap"
+    system_secret_master_key: str = ""
+    ai_policy_runner_bearer: str = ""
+    ai_policy_observer_bearer: str = ""
+    unified_ai_routing_workloads: str = (
+        "conversational_reply,recruitment_reply,recruitment_decision,"
+        "simple_intent_classification"
+    )
     bridge2_url: str = "http://localhost:8081"
     bridge2_number: str = ""
     bridge2_label: str = "OPS"

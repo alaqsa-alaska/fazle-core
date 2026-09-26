@@ -63,6 +63,8 @@ from modules.social_auto_reply import ingest_social_event, start_social_auto_rep
 from modules.social_auto_reply.routes import router as social_auto_reply_router
 from modules.contact_roles.routes import router as contact_roles_router
 from modules.preflight_guard.routes import router as preflight_guard_router
+from modules.ai_route_registry import router as ai_route_registry_router
+from modules.system_secret_store import router as system_secret_store_router
 from modules.preflight_guard import load_feature_flags_from_db
 from modules.recruitment_authority_admin import router as recruitment_authority_admin_router
 
@@ -496,6 +498,10 @@ app.include_router(hermes_tasks_router)       # /api/tasks/*, /api/actions/* —
 app.include_router(social_auto_reply_router)  # /api/social/* — restored 2026-07-08, was imported but never mounted
 # NEW: preflight_guard routes - Phase 1 FG4
 app.include_router(preflight_guard_router)
+# Phase 3B administrative route registry and encrypted secret APIs. The
+# feature remains default-off; static/bootstrap routing remains authoritative.
+app.include_router(ai_route_registry_router)
+app.include_router(system_secret_store_router)
 app.include_router(recruitment_authority_admin_router)
 from modules.wa_chat_frontend import router as wa_chat_router, ensure_wa_chat_tables
 app.include_router(wa_chat_router)
