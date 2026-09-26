@@ -116,6 +116,8 @@
 076_hermes_action_approvals_business_actions.sql
 077_wbom_candidates_linked_employee.sql
 078_phase2_identity_and_canonical_dedup.sql
+084_phase3_ai_route_registry.sql
+085_phase3_system_secrets_and_route_health.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
