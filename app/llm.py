@@ -425,6 +425,22 @@ async def generate_reply(
     return _FALLBACK_REPLY
 
 
+def _recruitment_reply_is_authority_safe(
+    user_message: str,
+    kb_context: str,
+    reply: str,
+) -> bool:
+    """Apply the same authority boundary to every provider-chain leg."""
+    from modules.recruitment_authority import facts_for_recruitment_question
+    facts = facts_for_recruitment_question(user_message)
+    if any(not fact.answerable for fact in facts):
+        return False
+    if not reply or not kb_context:
+        return bool(reply)
+    from modules.hermes_dispatch import _recruitment_reply_matches_source
+    return _recruitment_reply_matches_source(reply, kb_context)
+
+
 async def generate_recruitment_reply(
     user_message: str,
     kb_context: str,
@@ -460,7 +476,10 @@ async def generate_recruitment_reply(
                 context_used=kb_context,
                 is_fallback=routed.final_route_ordinal > 0,
             ))
-            return routed.content
+            if _recruitment_reply_is_authority_safe(user_message, kb_context, routed.content):
+                return routed.content
+            _record_attempt(routed.final_provider, routed.final_model, "authority_rejected")
+            return "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
         except unified_routing.RoutingExhausted as exc:
             _LAST_ATTEMPTS.set(list(exc.attempts))
             return "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
@@ -484,7 +503,7 @@ async def generate_recruitment_reply(
                 contact_context=contact_context,
                 source=source,
             )
-            if reply:
+            if reply and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
                 _record_attempt("omniroute", settings.omniroute_model_name, "success")
                 asyncio.create_task(_save_to_memory(
                     provider="omniroute",
@@ -515,7 +534,7 @@ async def generate_recruitment_reply(
                 contact_context=contact_context,
                 source=source,
             )
-            if reply:
+            if reply and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
                 _record_attempt("groq", settings.groq_model_name, "success")
                 asyncio.create_task(_save_to_memory(
                     provider="groq",
@@ -548,7 +567,7 @@ async def generate_recruitment_reply(
                 source=source,
                 model=local_model,
             )
-            if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT:
+            if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
                 _record_attempt("ollama", local_model, "success")
                 asyncio.create_task(_save_to_memory(
                     provider="ollama",
@@ -579,7 +598,7 @@ async def generate_recruitment_reply(
             source=source,
             model=settings.kimi_model_name,
         )
-        if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT:
+        if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
             _record_attempt("kimi", settings.kimi_model_name, "success")
             asyncio.create_task(_save_to_memory(
                 provider="kimi",

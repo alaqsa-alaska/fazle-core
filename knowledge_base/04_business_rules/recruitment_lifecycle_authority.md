@@ -1,3 +1,5 @@
+> Governance control only: this file defines authority and reconciliation rules; it is not one of the two canonical Recruitment knowledge documents.
+
 # Recruitment lifecycle and fact authority
 
 Status: living reconciliation narrative; candidate-facing values are not
@@ -23,19 +25,22 @@ facts have an answer value. `historical`, `unverified`, `conflicting`, and
 candidate-facing policy.
 
 The lifecycle model and the rule that selection/joining requires office review
-are current approved process semantics. The office address recorded in the
-current Recruitment source is usable as a current address. The evidence also
-supports that processing or joining fees may exist, that illegal bribes are not
-allowed, and that financial difficulty or an instalment arrangement may be
-discussed; this does not approve any exact fee amount or an absolute advance
-requirement.
+are current approved process semantics. The approved Recruitment brand, office
+address, office hours/contact, role taxonomy, eligibility, required documents,
+training/probation, salary role/stage values, fees, and duty hours/shifts are
+recorded in the register. The current vacancy list, Escort/Survey post-training
+range, fee deduction/refund calendar, overtime rate, and other role- or
+employment-scoped benefits remain unresolved or narrowly pending. Approved
+facts do not authorize automatic wage deductions, formal verification, or
+hiring.
 
 The applicant-facing conversation should therefore explain the next lifecycle
 step naturally: clarify role interest, collect only the next needed intake
 field, preserve identity and session state, and direct the person to office
-review when a decision or verification is required. It should not promise a
-vacancy, salary, training length, document list, duty schedule, benefit,
-selection, or joining date unless that fact is later owner-approved.
+review when a decision or verification is required. It may state current
+approved facts with their conditions, but must not promise a current vacancy,
+the conflicting Escort/Survey post-training range, the fee schedule, overtime
+rate, unapproved benefits, selection, or joining date.
 
 ## Source reconciliation
 
@@ -55,17 +60,16 @@ approved, historical, conflicting, unverified, or superseded.
 
 ## Owner Decision Required
 
-The following subjects remain unresolved and deliberately have no approved
-candidate-facing value in the register:
+The following subjects remain unresolved or narrowly pending and deliberately
+have no exact approved candidate-facing value for the listed detail:
 
 | Subject | Competing evidence | Existing sources | Why automatic resolution is unsafe |
 |---|---|---|---|
-| Available roles and current vacancies | Nine-role lists, seed vacancy replies, role-based historical flow | `resources/ops/recruitment_source_of_truth.txt`, `scripts/seed_recruitment_kb.sql`, `db/migrations/014_career_hr_dataset.sql` | A historical role list is not a current vacancy decision. |
-| Salary by role and joining salary | Multiple role bands, package figures, training amounts | `resources/ops/recruitment_source_of_truth.txt`, `resources/ops/salary_structure.txt`, seed/migration SQL | Repetition does not establish owner approval and figures conflict. |
-| Form/joining fee amount | 330, 1,000 minimum, 3,500, and instalment variants | `resources/ops/joining_fee_policy.txt`, `resources/ops/master_recruitment_employee_information.txt`, source/seed files | Fee existence is supported, exact amount and timing are not reconciled. |
-| Recruitment contact and office hours/Friday | 01958-122300 vs 01958-122322; 09:00 vs 10:00; Friday variants | source, fee policy, seed/migration SQL | Candidate-facing contact and opening times need one current decision. |
-| Duties, eligibility, documents, training, probation | Role-specific and general variants | source, employee/form documents, salary/seed/migration files | Applicability depends on role and current policy; legacy text conflicts. |
-| Duty hours, weekly duty, overtime, leave, food/accommodation | Role and operational-condition variants | source, employee policy, salary/seed files | Conditions vary by assignment and lack current owner confirmation. |
+| Current vacancies | Nine-role list and historical vacancy replies | resources/ops/recruitment_source_of_truth.txt, seed/migration SQL | The approved nine-role taxonomy is not a current vacancy decision. |
+| Escort/Survey post-training salary | 12,000–24,000 vs 12,000–17,000 | resources/ops/salary_structure.txt, source/seed files | Prior K2 salary values are retained; only this range conflicts. |
+| Fee deduction/refund calendar | BDT 500 monthly proposal and refund arrangement; exact calendar absent | resources/ops/joining_fee_policy.txt, owner decision | The owner approved the principle and amounts, not the precise schedule. |
+| Role-duty detail beyond approved hours/shifts | Role-specific operational variants | source, employee policy, salary/seed files | Do not turn operational evidence into a complete public duty promise. |
+| Overtime rate, leave, food/accommodation, other benefits | Role and employment-condition variants | source, employee policy, salary/seed files | These conditions remain role- or employment-scoped without a current owner decision. |
 
 The owner should update the register through a future approved editing path with
 fact key, value, source, approver, effective date, conditions, and superseded

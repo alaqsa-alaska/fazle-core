@@ -1,12 +1,15 @@
 ---
 title: Recruitment Business Rules
 owner: Fazle Core Admin
-status: active
+status: reference_only
+canonical: false
 last_verified: 2026-07-21
-runtime_index: true
+runtime_index: false
 ---
 
 # Recruitment Business Rules
+
+> This file is retained as implementation evidence and historical decision context. The canonical Recruitment policy is `../01_employee_knowledge/recruitment_policy.md`; the canonical conversation workflow is `../05_workflows/recruitment_workflow.md`. Do not use this file as a competing candidate-facing policy source.
 
 ## Candidate Eligibility
 
@@ -138,7 +141,7 @@ Audit persistence is fail-open: an unavailable audit store does not block an oth
 
 **Business Rule:** If the question is unclear or falls outside the 4 fast-reply categories, the safe fallback message is returned rather than using LLM.
 
-**Source of Truth File:** `resources/ops/recruitment_source_of_truth.txt`
+**Historical evidence source:** `resources/ops/recruitment_source_of_truth.txt` (not an active policy source)
 
 **Source Module (historical, superseded 2026-07-11):** `modules/recruitment_ai`
 **Source Function:** `_looks_like_fee_question()`, `_looks_like_contact_question()`

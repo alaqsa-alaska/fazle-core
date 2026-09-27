@@ -1,8 +1,20 @@
-# Recruitment Source of Truth — AUTHORITATIVE
+STATUS: HISTORICAL EVIDENCE ONLY (2026-09-26)
+Active Recruitment context is selected from the two canonical documents in
+knowledge_base/05_workflows/recruitment_workflow.md and
+knowledge_base/01_employee_knowledge/recruitment_policy.md, then resolved
+through knowledge_base/00_governance/recruitment_fact_authority.json.
+This file remains for provenance and compatibility, not candidate policy.
 
-এই ফাইলটি শুধু চাকরিপ্রার্থী ও নিয়োগ-সংক্রান্ত WhatsApp উত্তরের জন্য।
-অন্য কোনো KB, database context, conversation memory, employee record বা resource থেকে
-recruitment factual answer নেওয়া যাবে না।
+# Recruitment Source Evidence Archive — NOT ACTIVE POLICY
+
+এই ফাইলটি পুরোনো Recruitment route-এর provenance ও evidence archive।
+এখানে থাকা তথ্যের কিছু অংশ owner-approved principle-এর evidence এবং কিছু অংশ
+historical বা conflicting operational text। এটি একক candidate-facing authority নয়।
+Candidate-facing উত্তর শুধু দুইটি canonical Recruitment document এবং
+knowledge_base/00_governance/recruitment_fact_authority.json-এর approved facts
+থেকে তৈরি হবে।
+এই archive-এ থাকা পুরোনো ১০:০০–১৭:০০/শুক্রবার সংক্রান্ত wording বা অন্য
+conflicting value register-এর current_approved fact-কে override করে না।
 
 ## উত্তর দেওয়ার সীমা
 

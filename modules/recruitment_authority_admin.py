@@ -34,6 +34,18 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{1,180}$")
 _WRITE_COMMAND = "recruitment_authority_write"
 _APPROVE_COMMAND = "recruitment_authority_approve"
 _READ_COMMAND = "recruitment_authority_read"
+_CANONICAL_DOCUMENTS = (
+    {
+        "name": "Recruitment Conversation Workflow",
+        "path": "knowledge_base/05_workflows/recruitment_workflow.md",
+        "status": "canonical",
+    },
+    {
+        "name": "Consolidated Recruitment Policy",
+        "path": "knowledge_base/01_employee_knowledge/recruitment_policy.md",
+        "status": "canonical",
+    },
+)
 
 
 def _now() -> str:
@@ -197,7 +209,7 @@ async def list_recruitment_authority(actor: dict[str, Any] = Depends(_read_actor
             item = _public_fact(fact)
             item["draft_count"] = sum(1 for draft in drafts if draft.get("key") == fact.get("key") and draft.get("status") == "draft")
             facts.append(item)
-        return {"facts": facts, "drafts": [copy.deepcopy(d) for d in drafts if d.get("status") == "draft"]}
+        return {"canonical_documents": copy.deepcopy(_CANONICAL_DOCUMENTS), "facts": facts, "drafts": [copy.deepcopy(d) for d in drafts if d.get("status") == "draft"]}
 
 
 @router.get("/{fact_key}/history")

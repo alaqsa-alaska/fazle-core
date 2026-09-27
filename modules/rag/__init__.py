@@ -199,6 +199,22 @@ _CATEGORY_ROLE_MAP: dict[str, frozenset[str]] = {
 _DEFAULT_ALLOWED: frozenset[str] = frozenset({
     "candidate", "employee", "supervisor", "accountant", "admin", "developer"
 })
+# Resource files explicitly marked as employee/operational or historical
+# evidence are not candidate policy. Candidate Recruitment context comes from
+# the two canonical documents through shared.reply_policy.
+_RESTRICTED_RESOURCE_ROLES: dict[str, frozenset[str]] = {
+    "file:ops/recruitment_source_of_truth.txt": frozenset({"admin", "developer"}),
+    "file:ops/master_recruitment_employee_information.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/employee_policy_rules_joining_form.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/attendance_rules.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/food_expense_policy.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/joining_fee_policy.txt": frozenset({"admin", "developer"}),
+    "file:ops/probation_and_training.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/release_workflow.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/salary_structure.txt": frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "file:ops/selected_contacts_normalized_unique.csv": frozenset({"admin", "developer"}),
+    "file:ops/transport_allowances.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+}
 # ── END Phase 3 constants ──────────────────────────────────────────────────────
 
 # Module-level singletons — None until first lazy call.
@@ -564,7 +580,9 @@ def _load_resource_files() -> list[tuple[str, str, str, bool, frozenset[str]]]:
             if not text.strip():
                 continue
             title = name.rsplit(".", 1)[0]
-            out.append((f"file:{rel_prefix}{name}", title, text, True, _DEFAULT_ALLOWED))
+            source_id = f"file:{rel_prefix}{name}"
+            allowed_roles = _RESTRICTED_RESOURCE_ROLES.get(source_id, _DEFAULT_ALLOWED)
+            out.append((source_id, title, text, True, allowed_roles))
 
     _scan_dir(RESOURCES_DIR, "", 0)
     return out
@@ -1148,6 +1166,12 @@ def _rrf_fuse(
     return out
 
 
+def _candidate_authority_safe(document: dict[str, Any]) -> bool:
+    """Candidate retrieval may expose only explicitly approved evidence."""
+    records = document.get("fact_authority") or ()
+    return not records or all(record.get("status") == "current_approved" for record in records)
+
+
 async def _hybrid_search(
     query: str,
     q_tokens: list[str],
@@ -1175,6 +1199,8 @@ async def _hybrid_search(
             continue
         if role not in d.get("allowed_roles", _DEFAULT_ALLOWED):  # Phase 3: role filter
             continue
+        if role == "candidate" and not _candidate_authority_safe(d):
+            continue
         s = _bm25_score(q_tokens, d, n_docs)
         if s > 0.0:  # exclude zero-score docs; include all positive scorers
             bm25_candidates.append((s, d))
@@ -1189,6 +1215,7 @@ async def _hybrid_search(
         (d["source"], d["chunk_idx"])
         for d in _IDX.docs
         if role in d.get("allowed_roles", _DEFAULT_ALLOWED)
+        and (role != "candidate" or _candidate_authority_safe(d))
     }
     vector_hits = [
         h for h in vector_hits
@@ -1245,6 +1272,8 @@ async def search(
                 continue
             # Phase 3: role filter — skip chunks the caller's tier cannot access
             if _effective_role not in d.get("allowed_roles", _DEFAULT_ALLOWED):
+                continue
+            if _effective_role == "candidate" and not _candidate_authority_safe(d):
                 continue
             s = _bm25_score(q_tokens, d, n_docs)
             if s > min_score:

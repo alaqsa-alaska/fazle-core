@@ -98,16 +98,16 @@ class TestRecruitmentRagIndexing:
             os.remove(marker_file)
             os.rmdir(nested_dir)
 
-    def test_indexed_ops_files_are_customer_safe_and_default_allowed(self):
-        from modules.rag import _load_resource_files, _DEFAULT_ALLOWED
+    def test_historical_ops_files_are_not_candidate_visible(self):
+        from modules.rag import _load_resource_files
         sources = _load_resource_files()
         recruitment_src = next(
             s for s in sources if s[0] == "file:ops/recruitment_source_of_truth.txt"
         )
         source_id, title, text, safe_for_customer, allowed_roles = recruitment_src
         assert safe_for_customer is True
-        assert allowed_roles == _DEFAULT_ALLOWED
-        assert "candidate" in allowed_roles
+        assert "candidate" not in allowed_roles
+        assert "admin" in allowed_roles
 
 
 class TestCompanyNameCentralization:

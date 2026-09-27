@@ -65,7 +65,7 @@ log = logging.getLogger("fazle.hermes_dispatch")
 # min_score=2.0 -- the same call conversation_layer/recruitment.py's own
 # _safe_rag_context() makes) does not reliably surface this file for
 # natural phrasings ("পোষ্ট" vs the file's own "পদ"), even though the
-# file's own header declares itself the sole authoritative source for
+# legacy file's header previously declared itself authoritative; it is now
 # recruitment facts ("অন্য কোনো KB, database context...থেকে recruitment
 # factual answer নেওয়া যাবে না।"). It's short (112 lines, ~4KB, well
 # under any prompt budget) so for the Hermes customer-dispatch call
@@ -88,7 +88,7 @@ _recruitment_source_cache: Optional[str] = None
 
 
 def _load_recruitment_source_raw() -> str:
-    """Read + cache resources/ops/recruitment_source_of_truth.txt whole,
+    """Read + cache the legacy Recruitment evidence file for compatibility only,
     unmodified. Cached at module level after the first successful read
     (process lifetime -- matches how the real fazle-core.service, a
     long-running process, would only pay this cost once). Fails closed
@@ -194,22 +194,32 @@ def build_decision_context(decision) -> str:
 
 
 def build_recruitment_context(message: str) -> str:
-    """recruitment_source_of_truth.txt content for a specific inbound
-    message: the fee/deposit section is included ONLY when the message
-    itself looks like a fee question, matching the source file's own
-    instruction ("ফি সম্পর্কে প্রশ্ন না করলে নিজে থেকে এই তথ্য বলবে না।" --
-    don't volunteer fee figures unless asked). Reads the cached raw file
-    once (no repeated disk I/O) and strips the fee section per call via a
-    cheap regex when not applicable. Fails closed to "" if the file
-    itself failed to load."""
-    full_text = _load_recruitment_source_raw()
-    if not full_text:
-        return ""
+    """Build bounded context from the two canonical Recruitment documents.
+
+    The legacy source-of-truth file remains available as historical evidence
+    and for compatibility with retired callers, but it is not an active
+    candidate policy source.
+    """
+    from shared.reply_policy import build_canonical_recruitment_context
     from modules.recruitment_authority import render_authority_markers
-    fact_markers = render_authority_markers("resources/ops/recruitment_source_of_truth.txt", full_text, include_all=True)
-    if _looks_like_fee_question(message):
-        return "[FAZLE_EVIDENCE authority=source_declared status=unreconciled conflicts=legacy_policy_variants source=resources/ops/recruitment_source_of_truth.txt]\n" + fact_markers + "\n" + full_text
-    return "[FAZLE_EVIDENCE authority=source_declared status=unreconciled conflicts=legacy_policy_variants source=resources/ops/recruitment_source_of_truth.txt]\n" + fact_markers + "\n" + _FEE_SECTION_RE.sub("", full_text)
+
+    canonical = build_canonical_recruitment_context(message)
+    if not canonical:
+        return ""
+    markers = render_authority_markers(
+        "knowledge_base/01_employee_knowledge/recruitment_policy.md",
+        canonical,
+        include_all=True,
+    )
+    return (
+        "[FAZLE_EVIDENCE authority=canonical_recruitment_documents "
+        "status=authority_checked "
+        "source=knowledge_base/01_employee_knowledge/recruitment_policy.md,"
+        "knowledge_base/05_workflows/recruitment_workflow.md]\n"
+        + markers
+        + "\n"
+        + canonical
+    )
 
 
 # Phase 3, 2026-08-25 recovery pass ("employee-info grounding gap"): the
