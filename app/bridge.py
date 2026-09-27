@@ -163,7 +163,15 @@ class BridgeClient:
             await self._set_send(False)
 
     async def ensure_enabled(self) -> bool:
-        """Enable outbound send-control and confirm. Called at startup to survive bridge restarts."""
+        """Enable automatic outbound sending only when explicitly authorized.
+
+        Startup and periodic recovery use this method. A real authorized send
+        uses ``send_strict``'s short-lived gate instead, so inbound polling and
+        explicit manual-send behavior remain independent of maintenance mode.
+        """
+        if os.getenv("OUTBOUND_ENABLED", "").strip().lower() not in {"1", "true", "yes"}:
+            log.info("[%s] send-control enable skipped: OUTBOUND_ENABLED is not true", self.label)
+            return False
         try:
             await self._client.post(
                 f"{self.base_url}/api/send-control",
