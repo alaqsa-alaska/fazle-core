@@ -696,6 +696,15 @@ async def _probe_outbound() -> dict:
         pend = await outbound_queue.pending_count()
         dlq = await outbound_queue.dlq_count()
         actionable_dlq = await outbound_queue.actionable_dlq_count()
+        if not outbound_queue._outbound_enabled():
+            return {
+                "status": "ok",
+                "processing": "paused",
+                "maintenance_mode": True,
+                "pending": pend,
+                "dlq": dlq,
+                "actionable_dlq": actionable_dlq,
+            }
         status = "ok"
         if pend > 0:
             status = "degraded"

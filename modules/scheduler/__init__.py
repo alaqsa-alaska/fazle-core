@@ -89,6 +89,14 @@ async def _heartbeat_scheduler() -> None:
         log.warning(f"[scheduler] heartbeat failed: {e}")
 
 
+async def _write_startup_heartbeat(scheduler: AsyncIOScheduler) -> None:
+    """Record readiness only after APScheduler has successfully started."""
+    await asyncio.sleep(0)
+    if scheduler is not _scheduler or not scheduler.running:
+        return
+    await _heartbeat_scheduler()
+
+
 def _next_run_for(name: str) -> Optional[datetime]:
     if _scheduler is None:
         return None
@@ -896,6 +904,7 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
         )
 
     _scheduler.start()
+    asyncio.create_task(_write_startup_heartbeat(_scheduler), name="scheduler-startup-heartbeat")
     log.info(f"[scheduler] started tz={_tz()} jobs={len(_scheduler.get_jobs())}")
     return _scheduler
 

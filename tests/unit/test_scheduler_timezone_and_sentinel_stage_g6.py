@@ -84,6 +84,39 @@ class TestSchedulerHeartbeatHealthProbe:
         assert result["status"] == "critical"
 
 
+class TestSchedulerStartupHeartbeat:
+    async def test_successful_startup_writes_heartbeat_before_interval_jobs(self, monkeypatch):
+        import modules.scheduler as sch
+        from types import SimpleNamespace
+
+        scheduler = SimpleNamespace(running=True)
+        heartbeat = AsyncMock()
+        monkeypatch.setattr(sch, "_scheduler", scheduler)
+        monkeypatch.setattr(sch, "_heartbeat_scheduler", heartbeat)
+
+        await sch._write_startup_heartbeat(scheduler)
+
+        heartbeat.assert_awaited_once()
+
+    async def test_stopped_or_replaced_scheduler_does_not_write_heartbeat(self, monkeypatch):
+        import modules.scheduler as sch
+        from types import SimpleNamespace
+
+        scheduler = SimpleNamespace(running=False)
+        heartbeat = AsyncMock()
+        monkeypatch.setattr(sch, "_scheduler", scheduler)
+        monkeypatch.setattr(sch, "_heartbeat_scheduler", heartbeat)
+
+        await sch._write_startup_heartbeat(scheduler)
+
+        heartbeat.assert_not_awaited()
+
+    def test_startup_heartbeat_is_scheduled_only_after_scheduler_start(self):
+        import modules.scheduler as sch
+
+        src = inspect.getsource(sch.start_scheduler)
+        assert src.index("_scheduler.start()") < src.index("_write_startup_heartbeat")
+
 class TestAdminHelpCommand:
     async def test_help_returns_command_list_without_rbac_or_mutation(self):
         from modules.admin_commands import process_admin_command
