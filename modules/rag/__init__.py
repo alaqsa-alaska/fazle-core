@@ -1464,6 +1464,10 @@ async def rebuild_index() -> dict[str, Any]:
                 tokens = _tokenize(chunk)
                 if not tokens:
                     continue
+                authority_facts = facts_for_evidence(source_id, chunk, include_all=True)
+                candidate_safe = candidate_evidence_safe(
+                    source_id, chunk, title, [fact.as_marker() for fact in authority_facts]
+                )
                 chunk_safe = source_safe and _is_chunk_safe(chunk)
                 if not chunk_safe:
                     unsafe_count += 1
@@ -1481,6 +1485,8 @@ async def rebuild_index() -> dict[str, Any]:
                     "len": len(tokens),
                     "safe_for_customer": True,
                     "allowed_roles": allowed_roles,
+                    "fact_authority": [fact.as_marker() for fact in authority_facts],
+                    "candidate_safe": candidate_safe,
                 })
                 safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
         for d in _IDX.docs:

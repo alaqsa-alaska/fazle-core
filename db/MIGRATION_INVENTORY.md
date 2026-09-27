@@ -27,6 +27,14 @@
 
 **Updated again 2026-07-19** (Dispatch Phase 2A.3 Stage 2): added `051_dispatch_2a3_change_request_action_widen.sql` (widens `escort_roster_change_requests`'s own `action` CHECK constraint -- separate from and in addition to the application-level whitelist in `create_roster_change_request()` -- to accept `'manual_review_same_date_escort_change'`). Discovered mid-implementation, not anticipated in the Decision Report. Purely additive, no existing row rewritten.
 
+**Updated 2026-09-27** (K3.2/K3.3 Recruitment Knowledge reconciliation): added
+`086_k32_recruitment_reconciliation.sql`. This guarded, transactional migration
+verifies the exact 66 Recruitment FAQ identities and nine governance identities,
+suppresses 65 legacy policy FAQ rows, retains row 117 (`b11_greeting`) as a
+non-policy greeting, and deprecates the nine superseded governance facts. It is
+registered here but remains **not yet applied to production** pending Owner
+approval and the activation gate.
+
 **Updated again 2026-07-19** (Workstream 2, draft-confirmation invariant, Stage 1): added `052_unmatched_escort_confirmations.sql` -- new table `wbom_unmatched_confirmations`, replacing `handle_admin_escort_completion()`'s silent auto-create-on-no-match with a durable admin-review queue (see `modules/escort/__init__.py::_find_pending_program()`/`_create_confirmed_from_admin()`). Purely additive, no existing table touched. Includes a partial unique index on `(source_bridge, source_message_id)` closing a real cross-path duplicate-admission gap: `processed_bridge_messages` and `processed_outgoing_escort_messages` (both `modules/bridge_poller/__init__.py`) each dedup their own ingestion path independently, so the same physical admin confirmation could otherwise reach this queue twice via two different paths. Verified on a genuinely disposable, throwaway `postgres:17-alpine` Docker container (not the shared test DB, which was unavailable this session) before production application: idempotent re-run, unique-violation on true duplicate, multiple `NULL` message-ids permitted (webhook path lacks a reliable id), status `CHECK` enforced, FK to `wbom_escort_programs` enforced. See `knowledge_base/00_governance/management_decisions.md` → "Draft-Confirmation Invariant, Workstream 2 Stage 1" for full detail.
 
 **Updated again 2026-07-19** (Phase B, Conversation Memory Engine, Stage 1): added `053_conversation_memory_engine.sql` -- new table `fazle_conversation_threads` (generic, JSONB-structured per-field provenance -- value/source_message_id/confidence/extraction_method per accumulated field) plus a dedup table `processed_conversation_messages` following the exact existing `processed_bridge_messages`/`processed_outgoing_escort_messages` pattern. Deliberately reuses `wbom_whatsapp_messages` as the raw message-event source and computes `system_generated` on read via the already-deployed `modules.bridge_poller._is_system_generated_notification()` rather than storing it -- neither is a new table. Owner-approved scope decision: coexists with, does not replace, `fazle_recruitment_sessions`/`intake_message()` (recruitment keeps its own existing, working mechanism). Verified on a genuinely disposable `postgres:17-alpine` container before production application: idempotent re-run, `state` `CHECK` enforced, dedup `(message_id, bridge)` uniqueness enforced, JSONB field structure round-trips correctly. See `knowledge_base/00_governance/management_decisions.md` → "Phase B, Conversation Memory Engine, Stage 1" for full detail.
@@ -118,6 +126,7 @@
 078_phase2_identity_and_canonical_dedup.sql
 084_phase3_ai_route_registry.sql
 085_phase3_system_secrets_and_route_health.sql
+086_k32_recruitment_reconciliation.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.

@@ -63,7 +63,7 @@ def test_legacy_faq_and_missing_metadata_cannot_bypass_candidate_boundary():
 
 
 @pytest.mark.asyncio
-async def test_bm25_build_marks_suppressed_content_candidate_unsafe(monkeypatch):
+async def test_bm25_build_and_rebuild_preserve_candidate_authority_boundary(monkeypatch):
     from modules import rag
 
     async def rows():
@@ -75,15 +75,29 @@ async def test_bm25_build_marks_suppressed_content_candidate_unsafe(monkeypatch)
     monkeypatch.setattr(rag, "_load_resource_files", lambda: [])
     monkeypatch.setattr(rag, "_load_knowledge_base_files", lambda: [])
     monkeypatch.setattr(rag, "_load_kb_rows", rows)
-    await rag.build_index(sync_qdrant=False)
-    try:
-        docs = {doc["source"]: doc for doc in rag._IDX.docs}
-        assert docs["kb:b11_salary"]["candidate_safe"] is False
-        assert docs["kb:approved_contact"]["candidate_safe"] is True
-        assert rag._candidate_authority_safe(docs["kb:b11_salary"]) is False
-        assert rag._candidate_authority_safe(docs["kb:approved_contact"]) is True
-    finally:
-        rag._IDX.reset()
+    monkeypatch.setattr(rag, "HYBRID_SEARCH_ENABLED", False)
+    snapshots = []
+    for indexer in ("build", "rebuild"):
+        if indexer == "build":
+            await rag.build_index(sync_qdrant=False)
+        else:
+            await rag.rebuild_index()
+        try:
+            docs = {doc["source"]: doc for doc in rag._IDX.docs}
+            snapshots.append({
+                source: {
+                    "candidate_safe": docs[source]["candidate_safe"],
+                    "fact_authority": docs[source]["fact_authority"],
+                }
+                for source in ("kb:b11_salary", "kb:approved_contact")
+            })
+            assert docs["kb:b11_salary"]["candidate_safe"] is False
+            assert docs["kb:approved_contact"]["candidate_safe"] is True
+            assert rag._candidate_authority_safe(docs["kb:b11_salary"]) is False
+            assert rag._candidate_authority_safe(docs["kb:approved_contact"]) is True
+        finally:
+            rag._IDX.reset()
+    assert snapshots[0] == snapshots[1]
 
 
 @pytest.mark.asyncio
