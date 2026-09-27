@@ -207,3 +207,82 @@ async def test_existing_k31_guard_fails_closed_for_unknown_vacancies(monkeypatch
     assert await kb.get_reply("এখন কয়টি vacancy আছে?", "unknown") == (
         "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
     )
+
+
+@pytest.mark.asyncio
+async def test_recorded_migration_recovery_is_scoped_and_idempotent_on_disposable_postgres():
+    import importlib.util
+    import os
+    import asyncpg
+
+    utility_path = ROOT / "scripts/reconcile_recorded_k32.py"
+    spec = importlib.util.spec_from_file_location("reconcile_recorded_k32", utility_path)
+    utility = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(utility)
+
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    try:
+        await conn.execute("""
+            CREATE TEMP TABLE schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE TEMP TABLE fazle_knowledge_base (
+                id BIGINT PRIMARY KEY,
+                key TEXT NOT NULL,
+                category TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL
+            );
+            CREATE TEMP TABLE fazle_knowledge_governance (
+                id UUID PRIMARY KEY,
+                fact_key TEXT NOT NULL,
+                category TEXT NOT NULL,
+                status TEXT NOT NULL,
+                deprecated_at TIMESTAMPTZ,
+                deprecation_reason TEXT
+            );
+        """)
+        await conn.execute(
+            "INSERT INTO schema_migrations(name) VALUES($1)",
+            utility.MIGRATION_NAME,
+        )
+        for row_id, (key, _retain) in utility.FAQ_EXPECTED.items():
+            await conn.execute(
+                "INSERT INTO fazle_knowledge_base(id, key, category, is_active) VALUES($1, $2, 'recruitment', true)",
+                row_id,
+                key,
+            )
+        await conn.execute(
+            "INSERT INTO fazle_knowledge_base(id, key, category, is_active) VALUES(9001, 'payment_policy', 'payment', true)"
+        )
+        for key, row_id in utility.GOVERNANCE_EXPECTED.items():
+            await conn.execute(
+                "INSERT INTO fazle_knowledge_governance(id, fact_key, category, status) VALUES($1::uuid, $2, 'recruitment', 'active')",
+                row_id,
+                key,
+            )
+
+        first = await utility.reconcile_recorded_k32(conn)
+        second = await utility.reconcile_recorded_k32(conn)
+
+        assert first["status"] == "reconciled"
+        assert second["status"] == "already_reconciled"
+        assert await conn.fetchval(
+            "SELECT count(*) FROM schema_migrations WHERE name = $1",
+            utility.MIGRATION_NAME,
+        ) == 1
+        assert await conn.fetchval(
+            "SELECT count(*) FROM fazle_knowledge_base WHERE category = 'recruitment' AND is_active"
+        ) == 1
+        assert await conn.fetchval(
+            "SELECT is_active FROM fazle_knowledge_base WHERE id = 117"
+        ) is True
+        assert await conn.fetchval(
+            "SELECT is_active FROM fazle_knowledge_base WHERE id = 9001"
+        ) is True
+        assert await conn.fetchval(
+            "SELECT count(*) FROM fazle_knowledge_governance WHERE status = 'deprecated' AND deprecated_at IS NOT NULL"
+        ) == 9
+    finally:
+        await conn.close()

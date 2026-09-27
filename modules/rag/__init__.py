@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import os
@@ -685,7 +686,7 @@ def _chunk_point_id(chunk: dict[str, Any]) -> str:
     return str(_uuid.uuid5(_uuid.NAMESPACE_DNS, f"{chunk['source']}:{chunk['chunk_idx']}"))
 
 
-async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
+async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Build the Qdrant vector index from BM25-verified safe chunks.
 
@@ -706,20 +707,27 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
     holding _IDX.lock for the full ~15-36 min duration):
       1. Validate input; ensure collection exists (create-if-missing, never drop)
       2. Compute each chunk's point_id + content_hash
-      3. Batched-retrieve existing points' content_hash by ID; anything whose
-         hash still matches needs no re-encoding — skip it entirely
+      3. Batched-retrieve existing points' content_hash and authority metadata.
+         Matching content with stale metadata gets a payload-only update;
+         only matching content and metadata is skipped.
       4. Load encoder + encode ONLY the new/changed chunks
       5. Upsert only those points (in batches of _QDRANT_UPSERT_BATCH)
-      6. Delete any existing point whose ID is no longer in the current
+      6. Refresh authority metadata on unchanged points (in batches of
+         _QDRANT_UPSERT_BATCH)
+      7. Delete any existing point whose ID is no longer in the current
          corpus (source removed/renamed) — keeps the collection exactly in
          sync with the corpus without ever dropping it wholesale
-      7. Log completion metrics
+      8. Log completion metrics
     """
     if not safe_chunks:
         log.info("[HYBRID] no safe chunks available — Qdrant build skipped")
-        return
+        return {"status": "skipped", "reason": "no_safe_chunks"}
 
     async with _QDRANT_BUILD_LOCK:
+        encoded_count = 0
+        metadata_updated_count = 0
+        skipped_count = 0
+        stale_deleted = 0
         t_start: float = time.monotonic()
         log.info("[HYBRID] Build started — chunks=%d", len(safe_chunks))
 
@@ -735,31 +743,38 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
             ]
             current_ids = [pid for _, pid, _ in current]
 
-            # ── Step 2: Batched-retrieve existing hashes, diff, skip unchanged ──
-            def _retrieve_hashes_sync() -> dict[str, str]:
-                existing: dict[str, str] = {}
+            # ── Step 2: Retrieve content and required authority metadata ──────
+            def _retrieve_existing_sync() -> dict[str, dict[str, Any]]:
+                existing: dict[str, dict[str, Any]] = {}
                 for i in range(0, len(current_ids), _QDRANT_UPSERT_BATCH):
                     batch_ids = current_ids[i : i + _QDRANT_UPSERT_BATCH]
                     for pt in client.retrieve(
                         collection_name=QDRANT_COLLECTION_NAME,
                         ids=batch_ids,
-                        with_payload=["content_hash"],
+                        with_payload=["content_hash", "candidate_safe", "fact_authority"],
                         with_vectors=False,
                     ):
-                        h = (pt.payload or {}).get("content_hash")
-                        if h:
-                            existing[str(pt.id)] = h
+                        existing[str(pt.id)] = dict(pt.payload or {})
                 return existing
 
-            existing_hashes = await loop.run_in_executor(_encoding_executor, _retrieve_hashes_sync)
+            existing_payloads = await loop.run_in_executor(_encoding_executor, _retrieve_existing_sync)
             to_encode = [
                 (chunk, pid, chash) for chunk, pid, chash in current
-                if existing_hashes.get(pid) != chash
+                if existing_payloads.get(pid, {}).get("content_hash") != chash
             ]
-            skipped_count = len(current) - len(to_encode)
+            metadata_only = [
+                (chunk, pid) for chunk, pid, chash in current
+                if existing_payloads.get(pid, {}).get("content_hash") == chash
+                and (
+                    type(existing_payloads[pid].get("candidate_safe")) is not bool
+                    or existing_payloads[pid].get("candidate_safe") != bool(chunk.get("candidate_safe", True))
+                    or existing_payloads[pid].get("fact_authority") != chunk.get("fact_authority", [])
+                )
+            ]
+            skipped_count = len(current) - len(to_encode) - len(metadata_only)
             log.info(
-                "[HYBRID] Diff complete — total=%d unchanged_skipped=%d to_encode=%d",
-                len(current), skipped_count, len(to_encode),
+                "[HYBRID] Diff complete — total=%d unchanged_skipped=%d metadata_refresh=%d to_encode=%d",
+                len(current), skipped_count, len(metadata_only), len(to_encode),
             )
 
             if not to_encode:
@@ -812,6 +827,7 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
                         },
                     ))
                 total_points: int = len(points)
+                encoded_count = total_points
                 del vectors
 
                 t_upsert_start: float = time.monotonic()
@@ -827,7 +843,35 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
                 )
                 del points
 
-            # ── Step 4: Delete points whose source chunk no longer exists ───────
+            # ── Step 4: Refresh metadata without re-encoding unchanged points ──
+            if metadata_only:
+                metadata_groups: dict[tuple[bool, str], list[str]] = {}
+                for chunk, point_id in metadata_only:
+                    authority = chunk.get("fact_authority", [])
+                    group_key = (
+                        bool(chunk.get("candidate_safe", True)),
+                        json.dumps(authority, ensure_ascii=False, sort_keys=True),
+                    )
+                    metadata_groups.setdefault(group_key, []).append(point_id)
+                for (candidate_safe, authority_json), point_ids in metadata_groups.items():
+                    payload = {
+                        "candidate_safe": candidate_safe,
+                        "fact_authority": json.loads(authority_json),
+                    }
+                    for i in range(0, len(point_ids), _QDRANT_UPSERT_BATCH):
+                        batch_ids = point_ids[i : i + _QDRANT_UPSERT_BATCH]
+                        client.set_payload(
+                            collection_name=QDRANT_COLLECTION_NAME,
+                            payload=payload,
+                            points=batch_ids,
+                        )
+                        metadata_updated_count += len(batch_ids)
+                log.info(
+                    "[HYBRID] Metadata refresh completed — points=%d",
+                    metadata_updated_count,
+                )
+
+            # ── Step 5: Delete points whose source chunk no longer exists ──────
             def _cleanup_stale_sync() -> int:
                 current_id_set = set(current_ids)
                 stale_ids: list[str] = []
@@ -864,14 +908,33 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
             if to_encode:
                 await _seed_embedding_cache()
 
+            return {
+                "status": "ok",
+                "total_chunks": len(current),
+                "encoded": encoded_count,
+                "metadata_updated": metadata_updated_count,
+                "skipped": skipped_count,
+                "stale_removed": stale_deleted,
+            }
+
         except Exception as exc:
-            # Hybrid failure is non-fatal. BM25 is already committed.
+            # Hybrid failure is non-fatal to BM25, but explicit to callers so
+            # the operator can preserve evidence and retry safely.
             log.error(
                 "[HYBRID] FAILED — BM25 index still active and serving requests. "
                 "error_type=%s error=%s",
                 type(exc).__name__,
                 exc,
             )
+            return {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "encoded": encoded_count,
+                "metadata_updated": metadata_updated_count,
+                "skipped": skipped_count,
+                "stale_removed": stale_deleted,
+            }
 
 # ── END HYBRID RAG Milestone 2: Vector Index Build Path ───────────────────────
 
@@ -956,7 +1019,7 @@ async def build_index(*, sync_qdrant: bool = True) -> dict[str, Any]:
     # so it no longer blocks rag.search() for its full duration. If Hybrid
     # fails, BM25 serves requests normally.
     if HYBRID_SEARCH_ENABLED and sync_qdrant:
-        await _build_qdrant_index(safe_chunks)
+        stats_result["qdrant"] = await _build_qdrant_index(safe_chunks)
     return stats_result
 
 
@@ -1509,7 +1572,7 @@ async def rebuild_index() -> dict[str, Any]:
     # so it no longer blocks rag.search() for its full duration. If Hybrid
     # fails, BM25 serves requests normally.
     if HYBRID_SEARCH_ENABLED:
-        await _build_qdrant_index(safe_chunks)
+        stats_result["qdrant"] = await _build_qdrant_index(safe_chunks)
     return stats_result
 
 
