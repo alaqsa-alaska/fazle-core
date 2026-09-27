@@ -33,7 +33,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from app.database import fetch_all
-from modules.recruitment_authority import facts_for_evidence
+from modules.recruitment_authority import (
+    candidate_evidence_safe,
+    facts_for_evidence,
+)
 
 log = logging.getLogger("fazle.rag")
 
@@ -800,6 +803,7 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
                             "chunk_idx":         chunk["chunk_idx"],
                             "text":              chunk["text"],
                             "safe_for_customer": True,
+                            "candidate_safe": chunk.get("candidate_safe", True),
                             "source_kind":       chunk["source"].split(":", 1)[0],
                             "indexed_at":        indexed_at,
                             "allowed_roles":     sorted(chunk.get("allowed_roles", _DEFAULT_ALLOWED)),
@@ -906,6 +910,8 @@ async def build_index(*, sync_qdrant: bool = True) -> dict[str, Any]:
                     continue
                 # PATCH 2 + STEP 1: Unsafe chunks are PURGED from the index entirely.
                 # They are counted for logging but never stored — unsafe_docs=0 guaranteed.
+                authority_facts = facts_for_evidence(source_id, chunk, include_all=True)
+                candidate_safe = candidate_evidence_safe(source_id, chunk, title, [fact.as_marker() for fact in authority_facts])
                 chunk_safe = source_safe and _is_chunk_safe(chunk)
                 if not chunk_safe:
                     unsafe_count += 1
@@ -923,7 +929,8 @@ async def build_index(*, sync_qdrant: bool = True) -> dict[str, Any]:
                     "len": len(tokens),
                     "safe_for_customer": True,       # guaranteed: unsafe chunks never stored
                     "allowed_roles": allowed_roles,  # Phase 3: role-aware visibility
-                    "fact_authority": [fact.as_marker() for fact in facts_for_evidence(source_id, chunk)],
+                    "fact_authority": [fact.as_marker() for fact in authority_facts],
+                    "candidate_safe": candidate_safe,
                 })
                 safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
 
@@ -1001,7 +1008,7 @@ def _bm25_score(q_tokens: list[str], doc: dict[str, Any], n_docs: int) -> float:
 
 # ── HYBRID RAG — Milestone 3: Search Helpers ──────────────────────────────────
 
-async def _vector_search(query: str, k: int) -> list[dict[str, Any]]:
+async def _vector_search(query: str, k: int, role: str = "candidate") -> list[dict[str, Any]]:
     """
     Encode query (with LRU cache) and search Qdrant for nearest neighbours.
 
@@ -1056,6 +1063,13 @@ async def _vector_search(query: str, k: int) -> list[dict[str, Any]]:
             # Qdrant payload has safe_for_customer=True for all indexed chunks
             # (set by _build_qdrant_index CONTRACT), but we re-verify defensively.
             if not payload.get("safe_for_customer", False):
+                continue
+            if role == "candidate" and not candidate_evidence_safe(
+                payload.get("source", ""),
+                payload.get("text", ""),
+                payload.get("title", ""),
+                payload.get("fact_authority", []),
+            ):
                 continue
             results.append({
                 "source":       payload.get("source", ""),
@@ -1168,8 +1182,12 @@ def _rrf_fuse(
 
 def _candidate_authority_safe(document: dict[str, Any]) -> bool:
     """Candidate retrieval may expose only explicitly approved evidence."""
-    records = document.get("fact_authority") or ()
-    return not records or all(record.get("status") == "current_approved" for record in records)
+    return candidate_evidence_safe(
+        document.get("source", ""),
+        document.get("text", ""),
+        document.get("title", ""),
+        document.get("fact_authority", []),
+    )
 
 
 async def _hybrid_search(
@@ -1207,7 +1225,7 @@ async def _hybrid_search(
     bm25_candidates.sort(key=lambda x: x[0], reverse=True)
 
     # Vector search with visibility filter applied inside _vector_search
-    vector_hits = await _vector_search(query, k=_candidates)
+    vector_hits = await _vector_search(query, k=_candidates, role=role)
 
     # Phase 3: role-filter vector hits using BM25 index as source of truth for allowed_roles.
     # (Qdrant payload now stores allowed_roles on new indexes; cross-reference handles old ones.)

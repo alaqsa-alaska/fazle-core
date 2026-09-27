@@ -8,6 +8,7 @@ facts intentionally carry no answer value.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -102,6 +103,100 @@ def facts_for_evidence(source: str, text: str = "", *, include_all: bool = False
             selected.append(fact)
     return tuple(dict((fact.key, fact) for fact in selected).values())
 
+
+
+def _normalise_authority_text(text: str) -> str:
+    return re.sub(r"\W+", "", (text or "").casefold(), flags=re.UNICODE)
+
+
+def verified_facts_for_evidence(source: str, text: str = "") -> tuple[FactAuthority, ...]:
+    """Return approved facts whose actual value occurs in the evidence text."""
+    normalised = _normalise_authority_text(text)
+    if not normalised:
+        return ()
+    return tuple(
+        fact for fact in load_recruitment_authority()
+        if fact.answerable
+        and _normalise_authority_text(fact.value or "") in normalised
+    )
+
+
+def _historical_values_for(fact: FactAuthority) -> tuple[str, ...]:
+    try:
+        item = next(item for item in _load_register_payload().get("facts", ()) if item.get("key") == fact.key)
+        values: list[str] = []
+        for history in item.get("history", ()):
+            value = history.get("value")
+            if value:
+                values.append(str(value))
+            values.extend(str(value) for value in history.get("values", ()) if value)
+        return tuple(values)
+    except (OSError, ValueError, TypeError, StopIteration, json.JSONDecodeError):
+        return ()
+
+
+def candidate_evidence_safe(
+    source: str,
+    text: str = "",
+    title: str = "",
+    fact_authority: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
+) -> bool:
+    """Fail closed unless Recruitment evidence contains an approved value.
+
+    Existing metadata is evidence only; it cannot approve a value that is not
+    present in the retrieved text. Empty or stale metadata therefore remains
+    unsafe for candidate-facing Recruitment policy retrieval.
+    """
+    source_lower = (source or "").casefold()
+    key = source_lower.removeprefix("kb:")
+    if key.startswith("b11_"):
+        return key == "b11_greeting"
+
+    facts = facts_for_evidence(source, text, include_all=True)
+    recruitment_source = (
+        "(recruitment)" in (title or "").casefold()
+        or source_lower.startswith(("file:ops/", "kb_file:"))
+        or any(
+            _source_matches(source, reference)
+            for fact in load_recruitment_authority()
+            for reference in fact.sources
+        )
+    )
+    if not recruitment_source:
+        return True
+    normalised = _normalise_authority_text(text)
+    claim_markers = {
+        "recruitment.vacancies.current": ("vacancy", "নিয়োগ চলছে", "আসন আছে", "লোক নিচ্ছেন", "currently hiring", "limited seats"),
+        "recruitment.role.duties": ("কাজ কী", "দায়িত্ব", "duties"),
+        "benefits.food_accommodation": ("থাকা", "খাওয়া", "accommodation", "food", "বাসা"),
+        "leave_and_overtime": ("ছুটি", "leave", "overtime", "ওভারটাইম"),
+        "legacy.seed_replies": ("seed", "faq", "reply"),
+        "fee.deduction_refund_schedule": ("calendar", "schedule", "deadline", "6-7", "6–7", "six to seven"),
+    }
+    verified = verified_facts_for_evidence(source, text)
+    checked_facts = {fact.key: fact for fact in (*facts, *verified)}
+    if (
+        any(marker.casefold() in (text or "").casefold() for marker in claim_markers["recruitment.vacancies.current"])
+        and "recruitment.roles.available" in {fact.key for fact in verified}
+    ):
+        return False
+    for fact in checked_facts.values():
+        if fact.status == "current_approved":
+            current_value = _normalise_authority_text(fact.value or "")
+            if any(
+                _normalise_authority_text(value) in normalised
+                and _normalise_authority_text(value) not in current_value
+                for value in _historical_values_for(fact)
+            ):
+                return False
+            continue
+        if fact.competing_values and any(
+            _normalise_authority_text(value) in normalised for value in fact.competing_values
+        ):
+            return False
+        if any(marker.casefold() in (text or "").casefold() for marker in claim_markers.get(fact.key, ())):
+            return False
+    return bool(verified)
 
 _RECRUITMENT_FOCUS_FACT_KEYS = {
     "salary": ("salary.by_role",),
