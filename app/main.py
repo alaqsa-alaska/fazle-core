@@ -66,6 +66,7 @@ from modules.contact_roles.routes import router as contact_roles_router
 from modules.preflight_guard.routes import router as preflight_guard_router
 from modules.ai_route_registry import router as ai_route_registry_router
 from modules.system_secret_store import router as system_secret_store_router
+from modules.business_read_service import router as business_read_service_router
 from modules.preflight_guard import load_feature_flags_from_db
 from modules.recruitment_authority_admin import router as recruitment_authority_admin_router
 from modules.identity_role_admin import router as identity_role_admin_router
@@ -506,6 +507,7 @@ app.include_router(ai_route_registry_router)
 app.include_router(system_secret_store_router)
 app.include_router(recruitment_authority_admin_router)
 app.include_router(identity_role_admin_router)
+app.include_router(business_read_service_router)
 from modules.wa_chat_frontend import router as wa_chat_router, ensure_wa_chat_tables
 app.include_router(wa_chat_router)
 
