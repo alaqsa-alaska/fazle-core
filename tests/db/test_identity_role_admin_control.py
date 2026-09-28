@@ -110,3 +110,34 @@ async def test_identifier_revocation_actor_and_audit_failure_contract(test_db_po
         })
     async with test_db_pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM fazle_identity_role_assignments WHERE identity_id=$1 AND role_name='rollback-role'", identity_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_identity_subject_creation_is_explicit_and_unverified_by_default(test_db_pool, client):
+    response = await client.post("/admin/identity-role", json={
+        "display_name": "Synthetic Owner Canary",
+        "reason": "offline canary qualification",
+    })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "created"
+    assert body["verification_state"] == "unverified"
+    identity_id = body["identity_id"]
+
+    rejected = await client.post("/admin/identity-role", json={
+        "display_name": "Must Not Start Verified",
+        "verification_state": "verified",
+        "reason": "must be rejected",
+    })
+    assert rejected.status_code == 400
+
+    async with test_db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT verification_state, lifecycle_state FROM fazle_identity_subjects WHERE identity_id=$1",
+            identity_id,
+        )
+        assert dict(row) == {"verification_state": "unverified", "lifecycle_state": "active"}
+        assert await conn.fetchval(
+            "SELECT count(*) FROM fazle_admin_audit WHERE command='identity_create' AND args LIKE $1",
+            f'%"identity_id":{identity_id}%',
+        ) == 1

@@ -463,3 +463,7 @@ tests/unit/test_recruitment_salary_context_routing_fix.py
 tests/unit/test_task14b_candidate_recruitment_authority.py
 tests/unit/test_whatsapp_messages_lookup_route.py
 tests/unit/test_whatsapp_messages_query_and_conversation_routes.py
+# 2026-09-29: preserved pre-existing identity-role agent documentation.
+# Documentation-only; intentionally excluded from the runtime candidate and
+# retained uncommitted for separate owner review.
+knowledge_base/06_developer_system/identity_role_agent/

@@ -162,7 +162,11 @@ async def plan_reply(platform: str, target_id: str, events: list[dict]) -> Reply
         await _update_thread_state(platform, target_id, intents, reply)
         return ReplyPlan(reply, "+".join(intents), True, None, event_ids, target_id, _comment_id(events), needs_review=False)
 
-    polished = await _polish_with_ai(reply, combined_text, history, intents, persona_text, resolved_role)
+    polished = await _polish_with_ai(
+        reply, combined_text, history, intents, persona_text, resolved_role,
+        platform=platform,
+        sender_phone=target_id,
+    )
     # Dynamic office-numbers (2026-08-04, Owner decision — see
     # reply_rules.get_effective_office_numbers()'s docstring): whatever the
     # AI was actually told in business_facts (static default, or a live
@@ -366,7 +370,7 @@ _REPLY_POLICY_COMPAT_ROLE: dict[str, str] = {
 
 async def _polish_with_ai(
     rule_reply: str, current_text: str, history: list[dict], intents: list[str],
-    persona_text: str = "", resolved_role: str = "unknown",
+    persona_text: str = "", resolved_role: str = "unknown", platform: str = "meta", sender_phone: str = "",
 ) -> str:
     if os.getenv("SOCIAL_AI_REPLY_ENABLED", "true").lower() not in {"1", "true", "yes"}:
         return ""
@@ -415,6 +419,26 @@ async def _polish_with_ai(
         f"Safe draft to improve without changing facts:\n{rule_reply[:1200]}"
     )
     try:
+        # Keep Social/Meta on the same customer-facing AI contract as the
+        # WhatsApp routes: Hermes first when explicitly enabled, then the
+        # existing local/provider chain on timeout, error, or empty output.
+        # The reply still passes through _safe_polish() in plan_reply() before
+        # it can be queued or drafted.
+        from modules.preflight_guard import is_feature_active
+        if is_feature_active("hermes_customer_social", default=False):
+            from modules.hermes_dispatch import generate_reply as hermes_generate_reply
+            hermes_reply = await hermes_generate_reply(
+                current_text,
+                "recruitment",
+                prompt_context,
+                history=history_text,
+                role=_REPLY_POLICY_COMPAT_ROLE.get(resolved_role, "new_lead"),
+                source=f"social:{platform}",
+                sender_phone=sender_phone,
+            )
+            if hermes_reply:
+                return hermes_reply
+
         # 2026-08-05 (Owner decision): routed through app.llm's full
         # provider chain (OmniRoute -> Groq -> local Ollama/Hermes -> Kimi)
         # instead of calling app.ollama directly, so AI-polish inherits the

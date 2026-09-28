@@ -74,6 +74,7 @@ async def _audit(conn: Any, actor: dict, command: str, identity_id: int,
     required = {"identity_identifier": _IDENTITY_WRITE,
                 "identity_correct": _IDENTITY_WRITE,
                 "identity_role_assign": _ROLE_WRITE,
+                "identity_create": _IDENTITY_WRITE,
                 "identity_role_revoke": _ROLE_WRITE,
                 "identity_hold": _HOLD_WRITE,
                 "identity_hold_release": _HOLD_WRITE}.get(command, _READ)
@@ -107,6 +108,35 @@ def _identifier_view(row: dict) -> dict:
             "active": row.get("active"), "revoked_at": row.get("revoked_at"),
             "revoked_by": row.get("revoked_by"), "revocation_reason": row.get("revocation_reason"),
             "authorization_version_at_change": row.get("authorization_version_at_change")}
+
+
+@router.post("", dependencies=[Depends(_permission(_IDENTITY_WRITE))])
+async def create_identity(payload: dict, key: str = Depends(_API_KEY)):
+    """Create one explicit identity subject; links and roles remain separate audited steps."""
+    body = payload or {}
+    identity_kind = _text(body.get("identity_kind") or "person", "identity_kind", True, 20)
+    if identity_kind not in {"person", "organization"}:
+        raise HTTPException(400, "identity_kind must be person or organization")
+    display_name = _text(body.get("display_name"), "display_name", True, 400)
+    verified_name = _text(body.get("verified_name"), "verified_name", limit=400)
+    requested_state = _text(body.get("verification_state") or "unverified", "verification_state", limit=20)
+    if requested_state not in {"unverified", "pending"}:
+        raise HTTPException(400, "new identities must start unverified or pending")
+    reason = _text(body.get("reason"), "reason", True)
+    actor = await _actor(key)
+    async with db_conn() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "INSERT INTO fazle_identity_subjects "
+                "(identity_kind, display_name, verified_name, verification_state, verification_reason) "
+                "VALUES ($1,$2,$3,$4,$5) "
+                "RETURNING identity_id, identity_kind, display_name, verified_name, "
+                "verification_state, lifecycle_state, authorization_version, created_at",
+                identity_kind, display_name, verified_name, requested_state, reason,
+            )
+            result = {"status": "created", **dict(row)}
+            await _audit(conn, actor, "identity_create", int(row["identity_id"]), reason, result)
+    return result
 
 
 @router.get("/search", dependencies=[Depends(_permission(_READ))])

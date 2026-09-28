@@ -3600,7 +3600,7 @@ async def wbom_link_review_spa():
 @app.get("/dashboard/legacy", response_class=HTMLResponse)
 async def dashboard_legacy():
     try:
-        emp_count     = await fetch_one("SELECT COUNT(*) as n FROM wbom_employees WHERE status='active'")
+        emp_count     = await fetch_one("SELECT COUNT(*) as n FROM wbom_employees WHERE LOWER(status)='active'")
         contact_count = await fetch_one("SELECT COUNT(*) as n FROM wbom_contacts")
         msg_count     = await fetch_one("SELECT COUNT(*) as n FROM wbom_whatsapp_messages")
         escort_count  = await fetch_one("SELECT COUNT(*) as n FROM wbom_escort_programs")
@@ -4918,7 +4918,7 @@ async def b20_overview():
             return int(r["n"]) if r and r.get("n") is not None else 0
         msg_time_expr, msg_time_column = await _whatsapp_message_time_expr()
         out["counts"] = {
-            "active_employees": await _n("SELECT COUNT(*) AS n FROM wbom_employees WHERE status='active'"),
+            "active_employees": await _n("SELECT COUNT(*) AS n FROM wbom_employees WHERE LOWER(status)='active'"),
             "contacts": await _n("SELECT COUNT(*) AS n FROM wbom_contacts"),
             "messages": await _n("SELECT COUNT(*) AS n FROM wbom_whatsapp_messages"),
             "messages_last_24h": await _n(

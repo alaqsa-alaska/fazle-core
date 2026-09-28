@@ -45,7 +45,7 @@ Supporting files created alongside it: `db/.restart_gate_manifest` (check 1), `d
 - If `DATABASE_URL` can't be resolved or the DB can't be reached, this **warns** (does not block) and asks for a manual check, so a credential/network hiccup never hard-blocks a restart.
 
 ### 6. Current `.env` critical flags acknowledged
-- Maintain a short list of safety-critical flags (`AUTO_REPLY_ENABLED`, `RECRUITMENT_AUTOREPLY_ENABLED`, `SOCIAL_AUTO_REPLY_SINGLE_ENGINE`, `AI_SAFE_MODE`, `INTERNAL_NOTIFICATIONS_ENABLED`) and their last-acknowledged values (`db/.env_flags_acknowledged`, key=value pairs).
+- Maintain a short list of safety-critical flags (`OUTBOUND_ENABLED`, `AUTO_REPLY_ENABLED`, `RECRUITMENT_AUTOREPLY_ENABLED`, `SOCIAL_AUTO_REPLY_SINGLE_ENGINE`, `AI_SAFE_MODE`, `INTERNAL_NOTIFICATIONS_ENABLED`) and their last-acknowledged values (`db/.env_flags_acknowledged`, key=value pairs).
 - Gate logic: read current `.env` values for these keys; if any differs from the acknowledged file, **warn, don't hard-block** (an intentional flag change is a valid reason to restart) — but require the operator to explicitly re-run with an `--ack-flags` step that updates the acknowledged file, so a flag change can never be silently unnoticed the way `AUTO_REPLY_ENABLED` was (see the 2026-07-08/09 KB reconciliation).
 
 ### 7. DB backup freshness

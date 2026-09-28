@@ -322,6 +322,16 @@ async def _should_silent_skip(sender: str) -> tuple[bool, str]:
     _acct = normalize_phone(settings.accountant_phone) or (settings.accountant_phone or "").strip()
     if _acct and sender == _acct:
         return True, f"accountant phone match ({sender})"
+    # Reuse the same Owner-managed phone registry as bridge_poller before any
+    # name/domain routing. Registered employees remain exempt from this gate.
+    try:
+        if await is_registered_employee_phone(sender):
+            return False, ""
+        from modules.owner_contact_registry import is_owner_managed_contact
+        if is_owner_managed_contact(sender):
+            return True, f"owner-managed contact ({sender})"
+    except Exception as _e:
+        log.debug("[SILENT_SKIP] owner registry lookup error for %s: %s", sender, _e)
     try:
         contact = None
         for v in _phone_variants(sender):
@@ -888,7 +898,9 @@ async def process_message(
     if _skip:
         if is_completed_escort_draft(text) or _looks_like_escort_order(text) or _looks_like_escort_buying_intent(text):
             log.info("[SILENT_SKIP_BYPASS] %s → escort workflow allowed (%s)", sender, _skip_reason)
-        elif "display_name contains" in _skip_reason or "display_name starts with" in _skip_reason:
+        elif ("display_name contains" in _skip_reason
+              or "display_name starts with" in _skip_reason
+              or "owner-managed contact" in _skip_reason):
             log.info("[DRAFT_ONLY_CONTACT] %s → admin draft, no auto-reply (%s)", sender, _skip_reason)
             _hk_fire("", "", "draft", "draft-only-contact")
             return "", {
