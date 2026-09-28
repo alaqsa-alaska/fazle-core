@@ -58,6 +58,7 @@ def context(*roles, **changes):
             authorization_version="v1",
             role_names=frozenset({"candidate"}),
             domain="recruitment",
+            conversation_key="conversation-1",
         ),
     )
     result = replace(base, **changes)
@@ -120,7 +121,7 @@ def test_identity_and_conversation_holds_are_isolated():
     other_conversation = replace(
         held_conversation,
         conversation_key="conversation-2",
-        queued=replace(held_conversation.queued),
+        queued=replace(held_conversation.queued, conversation_key="conversation-2"),
         dispatch=DispatchState(),
     )
     assert evaluate(other_conversation).reason_code == ALLOWED
@@ -159,12 +160,16 @@ def test_domain_restriction_is_scoped_to_customer_auto_reply():
 
     protected = replace(
         restricted,
-        identity=None,
+        identity=IdentityEvidence("identity-1", "verified"),
         conversation_key=None,
         domain=None,
         current_roles=(),
-        current_authorization_version=None,
-        queued=QueuedAuthorizationSnapshot.legacy(),
+        current_authorization_version="v1",
+        queued=QueuedAuthorizationSnapshot(
+            identity_id="identity-1",
+            authorization_version="v1",
+            domain=None,
+        ),
         purpose=PROTECTED_ADMIN_ALERT,
         purpose_authorized=True,
     )
@@ -215,12 +220,16 @@ def test_old_role_cannot_authorize_current_dispatch_even_with_same_version():
 
 def test_protected_purpose_requires_its_own_authorization():
     unauthorized = context(
-        identity=None,
+        identity=IdentityEvidence("identity-1", "verified"),
         conversation_key=None,
         domain=None,
         current_roles=(),
-        current_authorization_version=None,
-        queued=QueuedAuthorizationSnapshot.legacy(),
+        current_authorization_version="v1",
+        queued=QueuedAuthorizationSnapshot(
+            identity_id="identity-1",
+            authorization_version="v1",
+            domain=None,
+        ),
         purpose=PROTECTED_ADMIN_ALERT,
     )
     assert evaluate(unauthorized).reason_code == PROTECTED_PURPOSE_UNAUTHORIZED

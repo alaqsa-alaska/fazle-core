@@ -34,6 +34,7 @@ IDENTITY_UNVERIFIED = "identity_unverified"
 CONTEXT_MISSING = "authorization_context_missing"
 LEGACY_QUEUE_CONTEXT = "legacy_queue_context"
 CONTEXT_MISMATCH = "authorization_context_mismatch"
+AUTHORIZATION_LOOKUP_FAILED = "authorization_lookup_failed"
 VERSION_MISMATCH = "authorization_version_mismatch"
 MANUAL_REVIEW_REQUIRED = "manual_review_required"
 PROTECTED_PURPOSE_UNAUTHORIZED = "protected_purpose_unauthorized"
@@ -94,6 +95,7 @@ class QueuedAuthorizationSnapshot:
     authorization_version: str | int | None = None
     role_names: FrozenSet[str] = field(default_factory=frozenset)
     domain: str | None = None
+    conversation_key: str | None = None
     scope_type: str = GLOBAL
     scope_key: str | None = None
     requires_manual_review: bool = False
@@ -126,6 +128,7 @@ class AuthorizationContext:
     domain: str | None
     current_roles: tuple[RoleGrant, ...] = ()
     current_authorization_version: str | int | None = None
+    authorization_state_available: bool = True
     queued: QueuedAuthorizationSnapshot = field(
         default_factory=QueuedAuthorizationSnapshot
     )
@@ -189,12 +192,35 @@ def evaluate(context: AuthorizationContext) -> AuthorizationDecision:
     if not context.channel_identifier:
         return _deny(CONTEXT_MISSING, version, manual_review=True, category="context")
 
+    if not context.authorization_state_available:
+        return _deny(AUTHORIZATION_LOOKUP_FAILED, version, manual_review=True, category="authorization")
+
     identity_id = context.identity.identity_id if context.identity else None
     if state.identity_hold_active and identity_id:
         return _deny(IDENTITY_HOLD, version, category="identity")
 
     if state.conversation_hold_active and context.conversation_key:
         return _deny(CONVERSATION_HOLD, version, category="conversation")
+
+    if context.identity is None or not context.identity.identity_id:
+        return _deny(IDENTITY_MISSING, version, manual_review=True, category="identity")
+    if context.identity.ambiguous:
+        return _deny(IDENTITY_AMBIGUOUS, version, manual_review=True, category="identity")
+    if context.identity.verification_state != VERIFIED:
+        return _deny(IDENTITY_UNVERIFIED, version, manual_review=True, category="identity")
+    queued = context.queued
+    if not queued.present:
+        return _deny(LEGACY_QUEUE_CONTEXT, version, manual_review=True, category="review")
+    if version is None:
+        return _deny(CONTEXT_MISSING, version, manual_review=True, category="context")
+    if queued.requires_manual_review or state.manual_review_required:
+        return _deny(MANUAL_REVIEW_REQUIRED, version, manual_review=True, category="review")
+    if queued.identity_id != context.identity.identity_id:
+        return _deny(CONTEXT_MISMATCH, version, manual_review=True, category="context")
+    if queued.domain != context.domain or queued.conversation_key != context.conversation_key or queued.scope_type != context.scope_type or queued.scope_key != context.scope_key:
+        return _deny(CONTEXT_MISMATCH, version, manual_review=True, category="context")
+    if queued.authorization_version != version:
+        return _deny(VERSION_MISMATCH, version, manual_review=True, category="authorization")
 
     is_protected_purpose = context.purpose in {
         PROTECTED_ADMIN_ALERT,
@@ -203,8 +229,6 @@ def evaluate(context: AuthorizationContext) -> AuthorizationDecision:
     if is_protected_purpose:
         if not context.purpose_authorized:
             return _deny(PROTECTED_PURPOSE_UNAUTHORIZED, version, category="purpose")
-        if state.manual_review_required:
-            return _deny(MANUAL_REVIEW_REQUIRED, version, manual_review=True, category="review")
         return AuthorizationDecision(
             allowed=True,
             reason_code=ALLOWED_PROTECTED_PURPOSE,
@@ -212,31 +236,10 @@ def evaluate(context: AuthorizationContext) -> AuthorizationDecision:
             manual_review_required=False,
         )
 
+    if not context.conversation_key or not context.domain:
+        return _deny(CONTEXT_MISSING, version, manual_review=True, category="context")
     if not state.domain_auto_reply_enabled:
         return _deny(DOMAIN_RESTRICTED, version, category="domain")
-
-    if context.identity is None or not context.identity.identity_id:
-        return _deny(IDENTITY_MISSING, version, manual_review=True, category="identity")
-    if context.identity.ambiguous:
-        return _deny(IDENTITY_AMBIGUOUS, version, manual_review=True, category="identity")
-    if context.identity.verification_state != VERIFIED:
-        return _deny(IDENTITY_UNVERIFIED, version, manual_review=True, category="identity")
-    if not context.channel_identifier or not context.conversation_key or not context.domain:
-        return _deny(CONTEXT_MISSING, version, manual_review=True, category="context")
-    if version is None:
-        return _deny(CONTEXT_MISSING, version, manual_review=True, category="context")
-
-    queued = context.queued
-    if not queued.present:
-        return _deny(LEGACY_QUEUE_CONTEXT, version, manual_review=True, category="review")
-    if queued.requires_manual_review or state.manual_review_required:
-        return _deny(MANUAL_REVIEW_REQUIRED, version, manual_review=True, category="review")
-    if queued.identity_id != context.identity.identity_id:
-        return _deny(CONTEXT_MISMATCH, version, manual_review=True, category="context")
-    if queued.domain != context.domain or queued.scope_type != context.scope_type or queued.scope_key != context.scope_key:
-        return _deny(CONTEXT_MISMATCH, version, manual_review=True, category="context")
-    if queued.authorization_version != version:
-        return _deny(VERSION_MISMATCH, version, manual_review=True, category="authorization")
 
     matching_roles = tuple(
         grant
@@ -265,6 +268,7 @@ __all__ = [
     "ALLOWED_PROTECTED_PURPOSE",
     "AuthorizationContext",
     "AuthorizationDecision",
+    "AUTHORIZATION_LOOKUP_FAILED",
     "CHANNEL_RESTRICTED",
     "CONTEXT_MISMATCH",
     "CONTEXT_MISSING",
