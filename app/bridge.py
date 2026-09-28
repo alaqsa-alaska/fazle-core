@@ -102,17 +102,23 @@ class BridgeClient:
         except Exception:
             pass  # nosec: optional permission toggle, real send still attempted
 
-    async def send(self, jid: str, text: str) -> bool:
+    async def send(self, jid: str, text: str, *, authorization=None) -> bool:
         """Best-effort send (legacy). Returns bool. Use send_strict for queue."""
         try:
-            await self.send_strict(jid, text)
+            await self.send_strict(jid, text, authorization=authorization)
             return True
         except BridgeSendError as e:
-            log.error(f"[{self.label}] send error to {jid}: {e}")
+            if str(e) == "authorization_required":
+                log.warning("[%s] send blocked: authorization_required", self.label)
+            else:
+                log.error("[%s] send error: %s", self.label, type(e).__name__)
             return False
 
-    async def send_strict(self, jid: str, text: str) -> None:
+    async def send_strict(self, jid: str, text: str, *, authorization=None) -> None:
         """Strict send: raises BridgeSendError on any failure. Used by outbound queue."""
+        from modules.outbound_authorization import is_transport_authorized
+        if not is_transport_authorized(authorization):
+            raise BridgeSendError("authorization_required")
         from modules.message_router import record_inbound_action
         if not jid.endswith("@s.whatsapp.net") and not jid.endswith("@g.us"):
             jid = jid + "@s.whatsapp.net"
@@ -140,8 +146,12 @@ class BridgeClient:
         finally:
             await self._set_send(False)
 
-    async def send_multi(self, jid: str, messages: list[str]) -> bool:
+    async def send_multi(self, jid: str, messages: list[str], *, authorization=None) -> bool:
         from modules.message_router import record_inbound_action
+        from modules.outbound_authorization import is_transport_authorized
+        if not is_transport_authorized(authorization):
+            log.warning("[%s] send_multi blocked: authorization_required", self.label)
+            return False
         if not jid.endswith("@s.whatsapp.net") and not jid.endswith("@g.us"):
             jid = jid + "@s.whatsapp.net"
         try:

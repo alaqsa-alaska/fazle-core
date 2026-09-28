@@ -44,6 +44,7 @@ from modules.payment_workflow import create_escort_payment_draft, finalize_payme
 from modules.message_router import process_message, get_primary_admin
 from modules.health_monitor import check_system_health as c1b_health_check
 from modules import outbound as outbound_queue
+from modules.outbound_authorization import is_transport_authorized
 from modules import scheduler as fazle_scheduler
 from shared.queue import record_heartbeat
 from modules.fazle_payroll_engine import start_fpe, stop_fpe
@@ -3663,7 +3664,10 @@ h1{{color:#1a472a;font-size:24px}}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-async def _send_meta(to: str, text: str) -> bool:
+async def _send_meta(to: str, text: str, *, authorization=None) -> bool:
+    if not is_transport_authorized(authorization):
+        log.warning("[META] send blocked: authorization_required")
+        return False
     url = f"{settings.meta_api_url}/{settings.meta_phone_number_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
@@ -3685,7 +3689,10 @@ async def _send_meta(to: str, text: str) -> bool:
         return False
 
 
-async def _send_messenger(recipient_id: str, text: str) -> bool:
+async def _send_messenger(recipient_id: str, text: str, *, authorization=None) -> bool:
+    if not is_transport_authorized(authorization):
+        log.warning("[MESSENGER] send blocked: authorization_required")
+        return False
     """Send a Facebook Messenger reply via Page Access Token."""
     if not settings.fb_page_access_token:
         log.error("[MESSENGER] fb_page_access_token not configured")
@@ -3711,7 +3718,10 @@ async def _send_messenger(recipient_id: str, text: str) -> bool:
         return False
 
 
-async def _send_fb_comment_reply(comment_id: str, text: str) -> bool:
+async def _send_fb_comment_reply(comment_id: str, text: str, *, authorization=None) -> bool:
+    if not is_transport_authorized(authorization):
+        log.warning("[FB-COMMENT] send blocked: authorization_required")
+        return False
     """Reply to a Facebook Page comment via Page Access Token."""
     if not settings.fb_page_access_token:
         log.error("[FB-COMMENT] fb_page_access_token not configured")

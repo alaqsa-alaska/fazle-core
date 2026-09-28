@@ -10,13 +10,22 @@ Tables: fazle_outbound_queue
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any, Optional
 
 from app.database import execute, fetch_one, fetch_all, fetch_val, get_pool
 from app.error_log import record_error
-from modules.outbound_authorization import QueueAuthorizationSnapshotRecord
+from modules.outbound_authorization import (
+    QueueRevalidationResult,
+    QueueAuthorizationSnapshotRecord,
+    issue_transport_authorization,
+    is_transport_authorized,
+    revalidate_queued_outbound,
+    snapshot_from_queue_row,
+)
+from modules.identity_role_authorization import AUTHORIZATION_LOOKUP_FAILED, AuthorizationDecision
 
 log = logging.getLogger("fazle.outbound")
 
@@ -350,19 +359,83 @@ async def list_dlq_entries(limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def _send_with_channel(source_bridge: str, recipient: str, body: str) -> str:
+def _authorization_context(row: dict):
+    try:
+        snapshot = snapshot_from_queue_row(row)
+    except Exception:
+        return None, None, "global", None
+    if snapshot is None:
+        return None, None, "global", None
+    return snapshot.conversation_key, snapshot.domain, snapshot.scope_type, snapshot.scope_key
+
+
+def _purpose_authorized(row: dict) -> bool:
+    meta = row.get("meta_json") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except json.JSONDecodeError:
+            return False
+    return isinstance(meta, dict) and meta.get("purpose_authorized") is True
+
+
+async def _authorize_claimed_row(conn, row: dict, *, channel: str):
+    conversation_key, domain, scope_type, scope_key = _authorization_context(row)
+    try:
+        return await revalidate_queued_outbound(
+            conn, row["id"], conversation_key=conversation_key, domain=domain,
+            scope_type=scope_type, scope_key=scope_key, channel_identifier=channel,
+            global_outbound_enabled=True, purpose_authorized=_purpose_authorized(row),
+            claimed=True,
+        )
+    except Exception as exc:
+        log.warning("[OUTBOUND_AUTH_LOOKUP_FAILED] queue_id=%s error_type=%s",
+                    row["id"], type(exc).__name__)
+        decision = AuthorizationDecision(
+            allowed=False, reason_code=AUTHORIZATION_LOOKUP_FAILED,
+            authorization_version=None, manual_review_required=True,
+            restriction_category="authorization",
+        )
+        return QueueRevalidationResult(row["id"], row.get("status"), decision, None, False)
+
+
+async def _record_authorization_review(conn, row: dict, result) -> None:
+    decision = result.decision
+    reason = f"authorization_denied:{decision.reason_code}"
+    await conn.execute(
+        """UPDATE fazle_outbound_queue
+              SET status='failed', next_retry_at=NOW() + INTERVAL '1 day',
+                  last_error=$2, locked_at=NULL, updated_at=NOW(),
+                  meta_json=COALESCE(meta_json, '{}'::jsonb) ||
+                      jsonb_build_object('authorization_review', jsonb_build_object(
+                          'reason_code', $3::text,
+                          'restriction_category', $4::text,
+                          'manual_review_required', $5::boolean,
+                          'authorization_version', $6::bigint
+                      ))
+            WHERE id=$1""",
+        row["id"], reason, decision.reason_code, decision.restriction_category,
+        decision.manual_review_required, decision.authorization_version,
+    )
+    log.warning("[OUTBOUND_AUTH_DENIED] queue_id=%s reason=%s category=%s",
+                row["id"], decision.reason_code, decision.restriction_category)
+
+
+async def _send_with_channel(source_bridge: str, recipient: str, body: str, *, authorization=None) -> str:
+    if not is_transport_authorized(authorization):
+        raise PermissionError("transport authorization required")
     """Send through a supported channel and return an external delivery id."""
     if source_bridge in {"meta", "meta_whatsapp", "messenger", "instagram", "facebook_comment"}:
         from modules.social_auto_reply.send_queue import (
             _send_comment, _send_instagram, _send_messenger, _send_meta_whatsapp,
         )
         if source_bridge in {"meta", "meta_whatsapp"}:
-            return await _send_meta_whatsapp(recipient, body)
+            return await _send_meta_whatsapp(recipient, body, authorization=authorization)
         if source_bridge == "messenger":
-            return await _send_messenger(recipient, body)
+            return await _send_messenger(recipient, body, authorization=authorization)
         if source_bridge == "instagram":
-            return await _send_instagram(recipient, body)
-        return await _send_comment(recipient, body)
+            return await _send_instagram(recipient, body, authorization=authorization)
+        return await _send_comment(recipient, body, authorization=authorization)
 
     from app.bridge import get_bridge1, get_bridge2, get_bridge3, BridgeSendError
     if source_bridge == "bridge2":
@@ -378,7 +451,7 @@ async def _send_with_channel(source_bridge: str, recipient: str, body: str) -> s
 
     log.info(f"[OUTBOUND_SEND_START] bridge={source_bridge} recipient={recipient} body={body[:60]!r}")
     try:
-        await client.send_strict(recipient, body)
+        await client.send_strict(recipient, body, authorization=authorization)
         client.breaker.record_success()
         log.info(f"[OUTBOUND_SEND_SUCCESS] bridge={source_bridge} recipient={recipient}")
         return f"{source_bridge}:{recipient}"
@@ -436,7 +509,11 @@ async def sweep_once(limit: int = 20) -> dict:
         async with conn.transaction():
             rows = await conn.fetch(
                 """SELECT id, recipient, body, source_bridge, fallback_channel, attempts, max_attempts,
-                          purpose, meta_json, idempotency_key
+                          purpose, meta_json, idempotency_key,
+                          authorization_identity_id, authorization_version,
+                          authorization_conversation_key, authorization_domain,
+                          authorization_scope_type, authorization_scope_key,
+                          authorization_role_names, authorization_captured_at
                      FROM fazle_outbound_queue
                     WHERE status IN ('pending','failed')
                       AND next_retry_at <= NOW()
@@ -482,10 +559,18 @@ async def sweep_once(limit: int = 20) -> dict:
                 )
                 continue
 
+            auth_result = await _authorize_claimed_row(conn, r, channel=_src)
+            if not auth_result.decision.allowed:
+                await _record_authorization_review(conn, r, auth_result)
+                held += 1
+                continue
+            auth_token = issue_transport_authorization(auth_result.decision)
+
             try:
                 try:
                     external_id = await _send_with_channel(
-                        r["source_bridge"], r["recipient"], r["body"]
+                        r["source_bridge"], r["recipient"], r["body"],
+                        authorization=auth_token,
                     )
                 except Exception:
                     fallback = r.get("fallback_channel")
@@ -505,8 +590,15 @@ async def sweep_once(limit: int = 20) -> dict:
                         "[OUTBOUND_FAILOVER] id=%s from=%s to=%s",
                         rid, r["source_bridge"], fallback,
                     )
+                    fallback_result = await _authorize_claimed_row(conn, r, channel=fallback)
+                    if not fallback_result.decision.allowed:
+                        await _record_authorization_review(conn, r, fallback_result)
+                        held += 1
+                        continue
+                    fallback_token = issue_transport_authorization(fallback_result.decision)
                     external_id = await _send_with_channel(
-                        fallback, r["recipient"], r["body"]
+                        fallback, r["recipient"], r["body"],
+                        authorization=fallback_token,
                     )
                 await conn.execute(
                     """UPDATE fazle_outbound_queue

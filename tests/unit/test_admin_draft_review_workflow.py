@@ -17,6 +17,12 @@ from __future__ import annotations
 import sys
 import os
 import pytest
+
+
+def _authorized():
+    from modules.identity_role_authorization import AuthorizationDecision
+    from modules.outbound_authorization import issue_transport_authorization
+    return issue_transport_authorization(AuthorizationDecision(True, "allowed", 1, False))
 from unittest.mock import AsyncMock, patch, MagicMock
 
 _CORE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -68,7 +74,7 @@ class TestFooterRemoval:
         client._set_send = _fake_set_send
 
         import asyncio
-        asyncio.run(client.send_strict("8801700000000", "hello world"))
+        asyncio.run(client.send_strict("8801700000000", "hello world", authorization=_authorized()))
 
         assert captured["message"] == "hello world"
 
@@ -99,7 +105,7 @@ class TestFooterRemoval:
         client._set_send = _fake_set_send
 
         import asyncio
-        asyncio.run(client.send_multi("8801700000000", ["part one", "part two"]))
+        asyncio.run(client.send_multi("8801700000000", ["part one", "part two"], authorization=_authorized()))
 
         assert captured["messages"] == ["part one", "part two"]
 

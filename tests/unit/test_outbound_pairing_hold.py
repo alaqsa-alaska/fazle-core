@@ -11,6 +11,7 @@ outbound work:
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_enqueue_refused_when_bridge3_held():
     from modules import outbound
+    from modules.identity_role_authorization import AuthorizationDecision
     with patch.object(outbound, "_pairing_held", new=AsyncMock(return_value=(True, "HISTORY_SYNC_QUARANTINE"))), \
          patch.object(outbound, "fetch_one", new=AsyncMock()) as mock_insert:
         qid = await outbound.enqueue("8801711111111", "hi", source_bridge="bridge3",
@@ -31,6 +33,7 @@ async def test_enqueue_refused_when_bridge3_held():
 
 async def test_enqueue_allowed_when_bridge3_released():
     from modules import outbound
+    from modules.identity_role_authorization import AuthorizationDecision
     with patch.object(outbound, "_pairing_held", new=AsyncMock(return_value=(False, ""))), \
          patch.object(outbound, "fetch_one", new=AsyncMock(return_value={"id": 42})):
         qid = await outbound.enqueue("8801711111111", "hi", source_bridge="bridge3",
@@ -40,6 +43,7 @@ async def test_enqueue_allowed_when_bridge3_released():
 
 async def test_enqueue_bridge1_never_consults_hold_for_normal_case():
     from modules import outbound
+    from modules.identity_role_authorization import AuthorizationDecision
     # bridge1 is not fail-closed; _pairing_held returns (False, "") for it
     with patch.object(outbound, "_pairing_held", new=AsyncMock(return_value=(False, ""))), \
          patch.object(outbound, "fetch_one", new=AsyncMock(return_value={"id": 7})):
@@ -52,6 +56,7 @@ async def test_enqueue_bridge1_never_consults_hold_for_normal_case():
 
 async def test_pairing_held_wrapper_fail_closed_on_exception():
     from modules import outbound
+    from modules.identity_role_authorization import AuthorizationDecision
 
     def _boom(_name, *a, **k):
         raise RuntimeError("bridge_poller import broke")
@@ -74,6 +79,7 @@ def _row(rid, bridge, fallback=None):
 
 async def test_sweep_leaves_held_bridge3_row_pending(monkeypatch):
     from modules import outbound
+    from modules.identity_role_authorization import AuthorizationDecision
 
     monkeypatch.setenv("OUTBOUND_ENABLED", "true")
     rows = [_row(1, "bridge3"), _row(2, "bridge1")]
@@ -102,7 +108,7 @@ async def test_sweep_leaves_held_bridge3_row_pending(monkeypatch):
 
     sent_via = []
 
-    async def _fake_send(bridge, recipient, body):
+    async def _fake_send(bridge, recipient, body, *, authorization=None):
         sent_via.append(bridge)
         return f"{bridge}:{recipient}"
 
@@ -112,6 +118,7 @@ async def test_sweep_leaves_held_bridge3_row_pending(monkeypatch):
     with patch.object(outbound, "get_pool", return_value=_Pool()), \
          patch.object(outbound, "_send_with_channel", new=_fake_send), \
          patch.object(outbound, "_pairing_held", new=_held), \
+             patch.object(outbound, "_authorize_claimed_row", new=AsyncMock(return_value=SimpleNamespace(decision=AuthorizationDecision(True, "allowed", 1, False)))), \
          patch.object(outbound, "record_error", new=AsyncMock()):
         result = await outbound.sweep_once(limit=10)
 

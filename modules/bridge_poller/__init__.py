@@ -1516,6 +1516,7 @@ async def _poll_bridge(config: dict):
                             file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
                             filename = msg.get("filename", "")
                             _doc_ack_sent = False
+                            _doc_ack_blocked = False
                             try:
                                 doc_result = await _proc_doc(file_path, filename)
                                 doc_type = doc_result.get("doc_type", "unknown")
@@ -1553,6 +1554,7 @@ async def _poll_bridge(config: dict):
                                     else:
                                         log.warning("[DOC_ACK_FAIL] bridge=%s phone=%s", bridge_name, phone)
                                         await _save_draft(bridge_name, phone, ack_reply, f"doc:{doc_type}")
+                                        _doc_ack_blocked = True
                                 else:
                                     await _save_draft(bridge_name, phone, ack_reply,
                                                       f"doc:{doc_type}" if doc_type != "unknown" else "doc:unknown")
@@ -1569,6 +1571,14 @@ async def _poll_bridge(config: dict):
                                 )
                             await _mark_processed(msg_id, bridge_name, phone)
                             log.info("[DOC_MARK_PROCESSED] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
+                            if _doc_ack_blocked:
+                                await _finalize_core_copy(
+                                    core_message_id, bridge_name, msg, phone, text,
+                                    msg_type=msg.get("type") or "document",
+                                    extracted_text=_extracted_text,
+                                    status="blocked", error="authorization_required",
+                                )
+                                continue
                             if _doc_ack_sent:
                                 await _finalize_core_copy(
                                     core_message_id, bridge_name, msg, phone, text,

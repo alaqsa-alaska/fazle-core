@@ -29,6 +29,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+
+def _authorized():
+    from modules.identity_role_authorization import AuthorizationDecision
+    from modules.outbound_authorization import issue_transport_authorization
+    return issue_transport_authorization(AuthorizationDecision(True, "allowed", 1, False))
+
 def _fake_response(status_code: int = 200, json_body: dict | None = None, text: str = ""):
     resp = MagicMock()
     resp.status_code = status_code
@@ -49,7 +55,7 @@ class TestSendQueueTokenTransport:
                 fb_page_access_token="fake-secret-token-not-real",
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
-            await _send_messenger("PSID1", "hi")
+            await _send_messenger("PSID1", "hi", authorization=_authorized())
         kwargs = mock_post.call_args.kwargs
         assert kwargs["headers"] == {"Authorization": "Bearer fake-secret-token-not-real"}
         assert "params" not in kwargs
@@ -63,7 +69,7 @@ class TestSendQueueTokenTransport:
                 fb_page_access_token="fake-secret-token-not-real",
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
-            await _send_instagram("IGSID1", "hi")
+            await _send_instagram("IGSID1", "hi", authorization=_authorized())
         kwargs = mock_post.call_args.kwargs
         assert kwargs["headers"] == {"Authorization": "Bearer fake-secret-token-not-real"}
         assert "params" not in kwargs
@@ -76,7 +82,7 @@ class TestSendQueueTokenTransport:
                 fb_page_access_token="fake-secret-token-not-real",
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
-            await _send_comment("comment123", "hi")
+            await _send_comment("comment123", "hi", authorization=_authorized())
         kwargs = mock_post.call_args.kwargs
         assert kwargs["headers"] == {"Authorization": "Bearer fake-secret-token-not-real"}
         assert "params" not in kwargs
@@ -94,7 +100,7 @@ class TestAppMainTokenTransport:
              patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_fake_response())) as mock_post:
             mock_settings.fb_page_access_token = "fake-secret-token-not-real"
             mock_settings.meta_api_url = "https://graph.facebook.com/v23.0"
-            await _send_messenger("PSID1", "hi")
+            await _send_messenger("PSID1", "hi", authorization=_authorized())
         kwargs = mock_post.call_args.kwargs
         assert kwargs["headers"] == {"Authorization": "Bearer fake-secret-token-not-real"}
         assert "params" not in kwargs
@@ -105,7 +111,7 @@ class TestAppMainTokenTransport:
              patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_fake_response())) as mock_post:
             mock_settings.fb_page_access_token = "fake-secret-token-not-real"
             mock_settings.meta_api_url = "https://graph.facebook.com/v23.0"
-            await _send_fb_comment_reply("comment123", "hi")
+            await _send_fb_comment_reply("comment123", "hi", authorization=_authorized())
         kwargs = mock_post.call_args.kwargs
         assert kwargs["headers"] == {"Authorization": "Bearer fake-secret-token-not-real"}
         assert "params" not in kwargs

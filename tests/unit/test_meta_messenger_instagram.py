@@ -20,10 +20,22 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
 
 import pytest
 
 pytestmark = pytest.mark.asyncio
+
+
+def _authorized():
+    from modules.identity_role_authorization import AuthorizationDecision
+    from modules.outbound_authorization import issue_transport_authorization
+    return issue_transport_authorization(AuthorizationDecision(True, "allowed", 1, False))
+
+
+def _queue_authorized():
+    from modules.identity_role_authorization import AuthorizationDecision
+    return SimpleNamespace(decision=AuthorizationDecision(True, "allowed", 1, False))
 
 
 class TestMetaChannelDuplicateDelivery:
@@ -369,24 +381,26 @@ class TestOutboundChannelWiring:
 
     async def test_send_with_channel_routes_instagram(self):
         from modules.outbound import _send_with_channel
+        auth = _authorized()
         with patch(
             "modules.social_auto_reply.send_queue._send_instagram",
             new=AsyncMock(return_value="ig-msg-1"),
         ) as mock_send:
-            result = await _send_with_channel("instagram", "IGSID1", "hello")
-        mock_send.assert_awaited_once_with("IGSID1", "hello")
+            result = await _send_with_channel("instagram", "IGSID1", "hello", authorization=auth)
+        mock_send.assert_awaited_once_with("IGSID1", "hello", authorization=auth)
         assert result == "ig-msg-1"
 
     async def test_send_with_channel_still_routes_messenger(self):
         """Regression: adding the instagram branch must not disturb the
         existing messenger routing."""
         from modules.outbound import _send_with_channel
+        auth = _authorized()
         with patch(
             "modules.social_auto_reply.send_queue._send_messenger",
             new=AsyncMock(return_value="msg-1"),
         ) as mock_send:
-            result = await _send_with_channel("messenger", "PSID1", "hello")
-        mock_send.assert_awaited_once_with("PSID1", "hello")
+            result = await _send_with_channel("messenger", "PSID1", "hello", authorization=auth)
+        mock_send.assert_awaited_once_with("PSID1", "hello", authorization=auth)
         assert result == "msg-1"
 
 
@@ -403,6 +417,10 @@ class TestMetaOutboundQueueObservability:
     Uses the real fazle_outbound_queue table (test_db_pool) with
     _send_with_channel mocked at the network boundary — caplog captures
     in-memory only, so no test writes into logs/fazle-core.log."""
+
+    @pytest.fixture(autouse=True)
+    def _synthetic_authorization(self, monkeypatch):
+        monkeypatch.setattr("modules.outbound._authorize_claimed_row", AsyncMock(return_value=_queue_authorized()))
 
     @pytest.fixture(autouse=True)
     def _wire_test_pool(self, test_db_pool):
@@ -488,7 +506,7 @@ class TestSendInstagramRequestConstruction:
              patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
             mock_settings.return_value = MagicMock(fb_page_access_token="", meta_api_url="https://graph.facebook.com/v23.0")
             with pytest.raises(PermissionError):
-                await _send_instagram("IGSID1", "hello")
+                await _send_instagram("IGSID1", "hello", authorization=_authorized())
         mock_post.assert_not_awaited()
 
     async def test_success_posts_to_me_messages_with_page_token_and_returns_message_id(self):
@@ -501,7 +519,7 @@ class TestSendInstagramRequestConstruction:
                 fb_page_access_token="fake-page-token-not-real",
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
-            result = await _send_instagram("IGSID1", "hello there")
+            result = await _send_instagram("IGSID1", "hello there", authorization=_authorized())
         assert result == "mid.ig.999"
         mock_post.assert_awaited_once()
         _, kwargs = mock_post.call_args
@@ -534,7 +552,7 @@ class TestSendInstagramRequestConstruction:
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
             with pytest.raises(PermissionError):
-                await _send_instagram("IGSID1", "hello")
+                await _send_instagram("IGSID1", "hello", authorization=_authorized())
 
     async def test_other_failure_raises_runtime_error_not_permission_error(self):
         from modules.social_auto_reply.send_queue import _send_instagram
@@ -547,7 +565,7 @@ class TestSendInstagramRequestConstruction:
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
             with pytest.raises(RuntimeError):
-                await _send_instagram("IGSID1", "hello")
+                await _send_instagram("IGSID1", "hello", authorization=_authorized())
 
     async def test_missing_message_id_in_success_response_returns_empty_string_not_crash(self):
         from modules.social_auto_reply.send_queue import _send_instagram
@@ -557,7 +575,7 @@ class TestSendInstagramRequestConstruction:
                 fb_page_access_token="fake-page-token-not-real",
                 meta_api_url="https://graph.facebook.com/v23.0",
             )
-            result = await _send_instagram("IGSID1", "hello")
+            result = await _send_instagram("IGSID1", "hello", authorization=_authorized())
         assert result == ""
 
 

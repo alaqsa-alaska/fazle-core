@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -28,6 +29,8 @@ async def provenance_db(test_db_pool, monkeypatch):
     from modules import outbound, bridge_poller as bp
     monkeypatch.setattr(db, "_pool", test_db_pool)
     monkeypatch.setattr(outbound, "_pairing_held", AsyncMock(return_value=(False, "")))
+    from modules.identity_role_authorization import AuthorizationDecision
+    monkeypatch.setattr(outbound, "_authorize_claimed_row", AsyncMock(return_value=SimpleNamespace(decision=AuthorizationDecision(True, "allowed", 1, False))))
     monkeypatch.setattr(outbound, "_send_with_channel", AsyncMock(return_value="provider-acceptance-1"))
     monkeypatch.setattr(bp, "_phase2_enrich_raw_copy", AsyncMock())
     monkeypatch.setenv("OUTBOUND_ENABLED", "true")
@@ -291,10 +294,9 @@ async def test_poller_finalizes_media_and_suppression_before_router(provenance_d
     assert len(rows) == 5
     outcomes = {r["source_message_ref"]: json.loads(r["metadata_json"])["provenance"] for r in rows}
     assert all(outcomes[key]["processing_outcome"] == "skipped" for key in ("group", "system", "media", "lid"))
-    assert outcomes["document"]["processing_outcome"] == "done"
-    accepted = [a for a in outcomes["document"]["actions"] if a.get("outcome") == "send_accepted"]
-    assert len(accepted) == 1 and accepted[0]["delivery_outcome"] == "unconfirmed"
-    bridge._client.post.assert_awaited_once()
+    assert outcomes["document"]["processing_outcome"] == "blocked"
+    assert not [a for a in outcomes["document"]["actions"] if a.get("outcome") == "send_accepted"]
+    bridge._client.post.assert_not_awaited()
 
 
 

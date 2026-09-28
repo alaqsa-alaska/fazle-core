@@ -9,6 +9,7 @@ import httpx
 
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_val, get_pool
+from modules.outbound_authorization import is_transport_authorized
 
 from .message_deduplicator import reply_key
 
@@ -175,27 +176,33 @@ def _event_ids(row: dict) -> list[int]:
     return [int(row["event_id"])]
 
 
-async def _send(row: dict) -> str:
+async def _send(row: dict, *, authorization=None) -> str:
+    if not is_transport_authorized(authorization):
+        raise PermissionError("transport authorization required")
     platform = row["platform"]
     if platform == "messenger":
-        return await _send_messenger(row["target_id"], row["reply_text"])
+        return await _send_messenger(row["target_id"], row["reply_text"], authorization=authorization)
     if platform == "facebook_comment":
-        return await _send_comment(row["reply_to_comment_id"] or row["target_id"], row["reply_text"])
+        return await _send_comment(row["reply_to_comment_id"] or row["target_id"], row["reply_text"], authorization=authorization)
     if platform == "meta_whatsapp":
-        return await _send_meta_whatsapp(row["target_id"], row["reply_text"])
+        return await _send_meta_whatsapp(row["target_id"], row["reply_text"], authorization=authorization)
     if platform in ("bridge1", "bridge2"):
-        return await _send_bridge(platform, row["target_id"], row["reply_text"])
+        return await _send_bridge(platform, row["target_id"], row["reply_text"], authorization=authorization)
     raise ValueError(f"unsupported platform: {platform}")
 
 
-async def _send_bridge(platform: str, recipient_id: str, text: str) -> str:
+async def _send_bridge(platform: str, recipient_id: str, text: str, *, authorization=None) -> str:
+    if not is_transport_authorized(authorization):
+        raise PermissionError("transport authorization required")
     from app.bridge import get_bridge1, get_bridge2
     bridge = get_bridge1() if platform == "bridge1" else get_bridge2()
-    await bridge.send_strict(recipient_id, text)
+    await bridge.send_strict(recipient_id, text, authorization=authorization)
     return f"{platform}:{recipient_id}"
 
 
-async def _send_messenger(recipient_id: str, text: str) -> str:
+async def _send_messenger(recipient_id: str, text: str, *, authorization=None) -> str:
+    if not is_transport_authorized(authorization):
+        raise PermissionError("transport authorization required")
     settings = get_settings()
     if not settings.fb_page_access_token:
         raise PermissionError("fb_page_access_token missing")
@@ -213,7 +220,9 @@ async def _send_messenger(recipient_id: str, text: str) -> str:
     return str(resp.json().get("message_id") or "")
 
 
-async def _send_instagram(recipient_id: str, text: str) -> str:
+async def _send_instagram(recipient_id: str, text: str, *, authorization=None) -> str:
+    if not is_transport_authorized(authorization):
+        raise PermissionError("transport authorization required")
     """Send an Instagram DM reply via the Page-linked Instagram Messaging
     API (Owner directive, 2026-08-27). Uses the SAME /me/messages Send API
     endpoint and Page access token as _send_messenger() above -- for a
@@ -242,7 +251,9 @@ async def _send_instagram(recipient_id: str, text: str) -> str:
     return str(resp.json().get("message_id") or "")
 
 
-async def _send_comment(comment_id: str, text: str) -> str:
+async def _send_comment(comment_id: str, text: str, *, authorization=None) -> str:
+    if not is_transport_authorized(authorization):
+        raise PermissionError("transport authorization required")
     settings = get_settings()
     if not settings.fb_page_access_token:
         raise PermissionError("fb_page_access_token missing")
@@ -257,7 +268,9 @@ async def _send_comment(comment_id: str, text: str) -> str:
     return str(resp.json().get("id") or "")
 
 
-async def _send_meta_whatsapp(to: str, text: str) -> str:
+async def _send_meta_whatsapp(to: str, text: str, *, authorization=None) -> str:
+    if not is_transport_authorized(authorization):
+        raise PermissionError("transport authorization required")
     settings = get_settings()
     if not settings.meta_api_token or not settings.meta_phone_number_id:
         raise PermissionError("meta whatsapp credentials missing")

@@ -8,7 +8,7 @@ It never changes queue status and never calls a transport.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -36,6 +36,25 @@ _META_PLATFORMS = {"meta", "meta_whatsapp", "messenger", "instagram", "facebook_
 
 class AuthorizationSnapshotError(ValueError):
     """Explicit authorization evidence cannot produce a queue snapshot."""
+
+_TRANSPORT_MARKER = object()
+
+@dataclass(frozen=True)
+class TransportAuthorization:
+    """Short-lived capability issued only after a successful final check."""
+
+    decision: AuthorizationDecision
+    _marker: object = field(default=_TRANSPORT_MARKER, repr=False, compare=False)
+
+
+def issue_transport_authorization(decision: AuthorizationDecision) -> TransportAuthorization:
+    if not decision.allowed:
+        raise PermissionError(f"authorization denied: {decision.reason_code}")
+    return TransportAuthorization(decision=decision)
+
+
+def is_transport_authorized(value: object) -> bool:
+    return isinstance(value, TransportAuthorization) and value._marker is _TRANSPORT_MARKER and value.decision.allowed
 
 
 @dataclass(frozen=True)
@@ -448,6 +467,7 @@ async def revalidate_queued_outbound(
     channel_identifier: str | None = None,
     global_outbound_enabled: bool = False,
     purpose_authorized: bool = False,
+    claimed: bool = False,
 ) -> QueueRevalidationResult:
     """Lock one due candidate, re-read current state, and return only a decision.
 
@@ -476,8 +496,10 @@ async def revalidate_queued_outbound(
                 restriction_category="queue",
             )
             return QueueRevalidationResult(queue_id, None, decision, None, False)
-        if (row["status"] not in {"pending", "failed"} or
-                (row["next_retry_at"] is not None and row["next_retry_at"] > datetime.now(timezone.utc))):
+        claimable_status = row["status"] in {"pending", "failed"}
+        claimed_status = claimed and row["status"] == "sending"
+        if ((not claimable_status and not claimed_status) or
+                (claimable_status and row["next_retry_at"] is not None and row["next_retry_at"] > datetime.now(timezone.utc))):
             decision = AuthorizationDecision(
                 allowed=False, reason_code=QUEUE_NOT_CLAIMABLE,
                 authorization_version=None, manual_review_required=True,
@@ -510,7 +532,10 @@ __all__ = [
     "QUEUE_NOT_CLAIMABLE",
     "QueueAuthorizationSnapshotRecord",
     "QueueRevalidationResult",
+    "TransportAuthorization",
     "capture_authorization_snapshot",
+    "issue_transport_authorization",
+    "is_transport_authorized",
     "load_current_authorization_evidence",
     "revalidate_queued_outbound",
     "snapshot_from_queue_row",
