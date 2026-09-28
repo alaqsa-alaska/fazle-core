@@ -997,6 +997,10 @@ async def _truncate_all_tables(conn: asyncpg.Connection) -> None:
         await conn.execute(f"TRUNCATE TABLE {safe_names} RESTART IDENTITY CASCADE")
     except Exception:
         pass  # non-fatal — some tables may have FK cycles
+    # TRUNCATE ... CASCADE can clear referenced seed tables indirectly, even
+    # when fazle_roles itself is excluded from the generated table list.
+    # Restore the small immutable RBAC role catalog before the next test.
+    await conn.execute(_SEED_SQL)
 
 
 @pytest_asyncio.fixture
