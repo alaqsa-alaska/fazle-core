@@ -341,6 +341,25 @@ async def record_audit(
     return int(rid)
 
 
+async def record_audit_conn(
+    conn: Any, *, channel: str, command: str,
+    actor_phone: Optional[str] = None, actor_admin: Optional[dict] = None,
+    args: Optional[str] = None, allowed: bool, required_role: Optional[str] = None,
+    denied_reason: Optional[str] = None, result_summary: Optional[str] = None,
+) -> int:
+    """Write an audit event on a caller-owned transaction connection."""
+    label = (actor_admin or {}).get("name") or actor_phone or "unknown"
+    aid = (actor_admin or {}).get("id")
+    rid = await conn.fetchval(
+        "INSERT INTO fazle_admin_audit (actor_phone, actor_user_id, actor_label, "
+        "channel, command, args, allowed, required_role, denied_reason, result_summary) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
+        actor_phone, aid, label, channel, command, (args[:4000] if args else None),
+        allowed, required_role, denied_reason, (result_summary[:4000] if result_summary else None),
+    )
+    return int(rid)
+
+
 async def list_audit(limit: int = 50, command: Optional[str] = None) -> list[dict]:
     if command:
         rows = await fetch_all(
