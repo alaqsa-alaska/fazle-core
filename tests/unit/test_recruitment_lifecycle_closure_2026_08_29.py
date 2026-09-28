@@ -451,8 +451,11 @@ def test_invite_instruction_parse_and_absolute_date():
     # past date in-year rolls to next year, never stays past
     assert _resolve_office_date("5 January", now=now) == "2027-01-05"
 
-    p = parse_invite_batch_instruction("রেডি লোকদের প্রথম ৫ জনকে ৫ সেপ্টেম্বর অফিসে আসতে বলো")
-    assert p == {"count": 5, "office_date": "2026-09-05"}
+    future_date = (datetime.now(_BD) + timedelta(days=30)).date().isoformat()
+    p = parse_invite_batch_instruction(
+        f"রেডি লোকদের প্রথম ৫ জনকে {future_date} অফিসে আসতে বলো"
+    )
+    assert p == {"count": 5, "office_date": future_date}
     # under-specified -> clarification, never executes
     assert parse_invite_batch_instruction("রাজি লোকদের অফিসে আসতে বলো").get("needs_clarification")
     # not an invite instruction at all -> None (falls through to Hermes)

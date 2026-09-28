@@ -127,6 +127,9 @@ approval and the activation gate.
 084_phase3_ai_route_registry.sql
 085_phase3_system_secrets_and_route_health.sql
 086_k32_recruitment_reconciliation.sql
+087_identity_role_persistence.sql
+088_outbound_authorization_snapshot.sql
+089_identity_role_admin_revocation_actor.sql
 ```
 
 **Note — no `009`**: never existed in this directory's history, or was removed before it. Intentionally left as a documented gap (see governance section) — do not backfill.
