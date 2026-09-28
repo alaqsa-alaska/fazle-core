@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from app.database import execute, fetch_one, fetch_all, fetch_val, get_pool
 from app.error_log import record_error
+from modules.outbound_authorization import QueueAuthorizationSnapshotRecord
 
 log = logging.getLogger("fazle.outbound")
 
@@ -61,6 +62,7 @@ async def enqueue(
     purpose: Optional[str] = None,
     idempotency_key: Optional[str] = None,
     meta: Optional[dict[str, Any]] = None,
+    authorization: Optional[QueueAuthorizationSnapshotRecord] = None,
 ) -> Optional[int]:
     """Insert into queue. Returns id, or None if dedup'd by idempotency_key.
 
@@ -112,14 +114,31 @@ async def enqueue(
 
     meta_json = json.dumps(meta or {})
     try:
-        row = await fetch_one(
-            """INSERT INTO fazle_outbound_queue
-              (recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json)
-           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-           ON CONFLICT (idempotency_key) DO NOTHING
-               RETURNING id""",
-            recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json,
-        )
+        if authorization is None:
+            # Keep legacy callers compatible while migration 088 is pending.
+            row = await fetch_one(
+                """INSERT INTO fazle_outbound_queue
+                  (recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+               ON CONFLICT (idempotency_key) DO NOTHING
+                   RETURNING id""",
+                recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json,
+            )
+        else:
+            snapshot = authorization.db_values()
+            row = await fetch_one(
+                """INSERT INTO fazle_outbound_queue
+                  (recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json,
+                   authorization_identity_id, authorization_version, authorization_conversation_key,
+                   authorization_domain, authorization_scope_type, authorization_scope_key,
+                   authorization_role_names, authorization_captured_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
+                       $8, $9, $10, $11, $12, $13, $14::jsonb, $15)
+               ON CONFLICT (idempotency_key) DO NOTHING
+                   RETURNING id""",
+                recipient, body, source_bridge, fallback_channel, purpose, idempotency_key, meta_json,
+                *snapshot,
+            )
     except Exception as exc:
         record_inbound_action("outbound", outcome="enqueue_failed", error_type=type(exc).__name__,
                               purpose=purpose, source_bridge=source_bridge)
