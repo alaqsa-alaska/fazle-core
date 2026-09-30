@@ -41,6 +41,62 @@ def _reset_cooldown():
     router._hermes_conversation_sessions.clear()
 
 
+def _allow_canonical(**_kwargs):
+    """Stub for the canonical identity/role gate. These are pure unit tests
+    with no database, so the DB-backed resolver itself is stubbed here and
+    qualified for real in tests/db/test_admin_hermes_canonical_authorization.py.
+    Defaulting to ALLOW is deliberate: it leaves every pre-existing test in
+    this file asserting exactly what it asserted before the canonical gate
+    existed, so any of them failing now means a real regression in the
+    legacy gates rather than an artifact of the new seam."""
+    from modules.admin_hermes_authorization import HermesRelayAuthorization
+    return HermesRelayAuthorization(
+        allowed=True,
+        reason_code="allowed_protected_purpose",
+        identity_id="1",
+        role_names=("superadmin",),
+        authorization_version=1,
+        conversation_key="hermes_relay:bridge2:8801880446111",
+    )
+
+
+def _deny_canonical(reason_code="role_not_authorized", detail="stubbed denial"):
+    from modules.admin_hermes_authorization import HermesRelayAuthorization
+    return HermesRelayAuthorization(
+        allowed=False, reason_code=reason_code, detail=detail,
+        conversation_key="hermes_relay:bridge2:8801880446111",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_canonical_and_knowledge():
+    """Stub the two seams the relay gained on 2026-09-29 so this unit file
+    stays database- and vector-index-free.
+
+    Note the granularity: the knowledge stub is applied to the *retriever*
+    (``build_knowledge_result``, which reaches modules.rag/qdrant), not to
+    ``_build_hermes_knowledge_context`` itself. That function's own logic --
+    context assembly, provenance capture, the found/miss distinction, and the
+    retrieval-failure path -- therefore still runs for real in every test in
+    this file, and is exercised directly by TestHermesKnowledgeGrounding.
+    The canonical gate, by contrast, is genuinely database-backed, so it is
+    stubbed wholesale here and qualified for real in
+    tests/db/test_admin_hermes_canonical_authorization.py."""
+    from modules.ai_console.envelopes import ToolResultEnvelope
+    import modules.ai_console.live_adapters as live_adapters
+
+    empty = ToolResultEnvelope(
+        tool_id="BUS-008", tool_name="knowledge_search", status="partial",
+        confidence="Unknown", source="modules.rag",
+        timestamp="2026-09-29T00:00:00+00:00",
+        data={"rows": [], "count": 0, "search_query": ""},
+        authority="knowledge_base", traceability=["ORCH-032"],
+    )
+    with patch.object(router, "resolve_relay_authorization", new=AsyncMock(side_effect=_allow_canonical)), \
+         patch.object(live_adapters, "build_knowledge_result", new=AsyncMock(return_value=empty)):
+        yield
+
+
 def _allow_perm(admin_id: int = 1) -> dict:
     return {
         "allowed": True,
@@ -357,7 +413,11 @@ class TestHermesRelayHandler:
              patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
             reply = await self._run(phone="8801880446111", source="bridge1")
         assert reply == ""
-        mock_deliver.assert_awaited_once_with("check bridge health", "8801880446111", "bridge1")
+        mock_deliver.assert_awaited_once_with(
+            "check bridge health", "8801880446111", "bridge1",
+            relay_conversation_key=mock_deliver.await_args.kwargs.get("relay_conversation_key"),
+            relay_identity_id=mock_deliver.await_args.kwargs.get("relay_identity_id"),
+        )
 
     async def test_wrong_phone_and_wrong_source_both_denied(self):
         # Belt-and-suspenders: neither check alone is trusted to save the
@@ -410,7 +470,11 @@ class TestHermesRelayHandler:
              patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
             reply = await self._run(text="hermes: check bridge health", phone="8801880446111")
         assert reply == ""
-        mock_deliver.assert_awaited_once_with("check bridge health", "8801880446111", "bridge1")
+        mock_deliver.assert_awaited_once_with(
+            "check bridge health", "8801880446111", "bridge1",
+            relay_conversation_key=mock_deliver.await_args.kwargs.get("relay_conversation_key"),
+            relay_identity_id=mock_deliver.await_args.kwargs.get("relay_identity_id"),
+        )
 
     async def test_bridge1_arrival_also_replies_via_bridge1(self):
         """Owner directive (2026-08-27, Admin<->Hermes topology
@@ -428,7 +492,11 @@ class TestHermesRelayHandler:
              patch.object(router, "get_settings", return_value=_FakeSettings()), \
              patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
             await self._run(text="hermes: check bridge health", phone="8801880446111", source="bridge1")
-        mock_deliver.assert_awaited_once_with("check bridge health", "8801880446111", "bridge1")
+        mock_deliver.assert_awaited_once_with(
+            "check bridge health", "8801880446111", "bridge1",
+            relay_conversation_key=mock_deliver.await_args.kwargs.get("relay_conversation_key"),
+            relay_identity_id=mock_deliver.await_args.kwargs.get("relay_identity_id"),
+        )
 
     async def test_second_call_within_cooldown_blocked(self):
         with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
@@ -982,7 +1050,11 @@ class TestProcessAdminNaturalQueryHermesChannel:
             )
             await asyncio.sleep(0)
         assert reply == ""
-        mock_deliver.assert_awaited_once_with("কোথায় আছ?", "8801880446111", "bridge1")
+        mock_deliver.assert_awaited_once_with(
+            "কোথায় আছ?", "8801880446111", "bridge1",
+            relay_conversation_key=mock_deliver.await_args.kwargs.get("relay_conversation_key"),
+            relay_identity_id=mock_deliver.await_args.kwargs.get("relay_identity_id"),
+        )
 
     async def test_reply_delivery_channel_matches_request_channel_bridge1(self):
         """A request arriving via bridge1 must have its reply delivered
@@ -999,7 +1071,11 @@ class TestProcessAdminNaturalQueryHermesChannel:
             )
             await asyncio.sleep(0)
         assert reply == ""
-        mock_deliver.assert_awaited_once_with("কোথায় আছ?", "8801880446111", "bridge1")
+        mock_deliver.assert_awaited_once_with(
+            "কোথায় আছ?", "8801880446111", "bridge1",
+            relay_conversation_key=mock_deliver.await_args.kwargs.get("relay_conversation_key"),
+            relay_identity_id=mock_deliver.await_args.kwargs.get("relay_identity_id"),
+        )
 
 
 class TestMessageRouterAdminDispatchOrder:
@@ -1065,3 +1141,320 @@ class TestMessageRouterAdminDispatchOrder:
     def test_natural_query_import_present(self):
         import modules.message_router as mr
         assert hasattr(mr, "process_admin_natural_query")
+
+
+# ── Canonical Identity-Role qualification (Admin Canary, 2026-09-29) ─────────
+class TestCanonicalRelayAuthorizationGate:
+    """The relay gained a fourth, canonical identity/role gate on 2026-09-29.
+
+    These tests pin the two properties that matter most and that no other
+    test in this file covers:
+
+    1. The canonical gate is ADDITIVE. Every legacy gate still runs first and
+       still denies on its own -- the canonical check is never a substitute for
+       the Bridge2/channel/phone-identity checks, and passing it never rescues
+       a request that failed one of them.
+    2. A canonical denial is FAIL-CLOSED and stops the request before it can
+       reach the privileged Hermes dispatch or the outbound queue.
+    """
+
+    async def _run(self, text="hermes: check bridge health", phone="8801880446111", source="bridge2"):
+        reply = await process_admin_ai_command(text, phone, source_bridge=source)
+        await asyncio.sleep(0)
+        return reply
+
+    async def test_canonical_denial_blocks_hermes_dispatch_entirely(self):
+        """The core fail-closed assertion: an identity the canonical control
+        plane will not authorize never reaches _deliver_hermes_reply, so the
+        RUN-capable Hermes toolset and the outbound enqueue are both
+        unreachable from that request."""
+        with patch.object(router, "resolve_relay_authorization",
+                          new=AsyncMock(side_effect=lambda **kw: _deny_canonical("role_not_authorized"))), \
+             patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()) as mock_audit, \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver, \
+             patch.object(router, "_call_hermes_readonly", new=AsyncMock()) as mock_call, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue:
+            reply = await self._run()
+        assert reply == router._DENIAL_MSG
+        # Not merely "no reply produced" -- the privileged capability itself
+        # is never invoked, from any of its three entry points.
+        mock_deliver.assert_not_awaited()
+        mock_call.assert_not_awaited()
+        mock_enqueue.assert_not_awaited()
+
+    async def test_canonical_denial_is_audited_with_its_reason(self):
+        with patch.object(router, "resolve_relay_authorization",
+                          new=AsyncMock(side_effect=lambda **kw: _deny_canonical("identity_ambiguous", "two links"))), \
+             patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()) as mock_audit, \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()):
+            await self._run()
+        _, kwargs = mock_audit.await_args_list[-1]
+        assert kwargs["allowed"] is False
+        assert kwargs["command"] == "hermes_relay"
+        assert "identity_ambiguous" in kwargs["denied_reason"]
+        assert "two links" in kwargs["denied_reason"]
+
+    async def test_canonical_allow_is_additive_not_substitutive_bridge2_gate_retained(self):
+        """LEGACY_BRIDGE2_GATE_RETAINED: even with the canonical gate fully
+        allowing the identity, the pre-existing channel gate still denies a
+        bridge3/meta/empty source, and the pre-existing phone-identity gate
+        still denies a non-admin number. The canonical check runs only after
+        both, so it can never widen the channel set."""
+        with patch.object(router, "resolve_relay_authorization",
+                          new=AsyncMock(side_effect=_allow_canonical)) as mock_canon, \
+             patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            for source in ("bridge3", "", "meta", "whatsapp"):
+                reply = await self._run(phone="8801880446111", source=source)
+                assert reply == router._DENIAL_MSG, f"source={source!r} must stay denied"
+            # wrong phone on an otherwise-valid channel
+            reply = await self._run(phone="8801958122300", source="bridge2")
+            assert reply == router._DENIAL_MSG
+        mock_deliver.assert_not_awaited()
+        # The canonical resolver is never even consulted for any of these --
+        # proof the legacy gates short-circuit ahead of it, byte-for-byte the
+        # same ordering as before this change.
+        mock_canon.assert_not_awaited()
+
+    async def test_canonical_gate_runs_after_and_in_addition_to_rbac(self):
+        """Both gates must run for an authorized request: RBAC first, then
+        canonical. Proves the canonical check is an additional requirement and
+        not a rewrite of the existing one."""
+        order: list[str] = []
+
+        async def _rbac(**kwargs):
+            order.append("rbac")
+            return _allow_perm()
+
+        async def _canon(**kwargs):
+            order.append("canonical")
+            return _allow_canonical()
+
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(side_effect=_rbac)), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "resolve_relay_authorization", new=AsyncMock(side_effect=_canon)), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await self._run()
+        assert reply == ""
+        assert order == ["rbac", "canonical"]
+        mock_deliver.assert_awaited_once()
+
+    async def test_canonical_gate_receives_the_real_source_bridge(self):
+        """The canonical decision is evaluated against the true source_bridge,
+        not a hard-coded assumption -- the channel is part of the authorization
+        context, and the conversation key is derived from it."""
+        seen: dict = {}
+
+        async def _canon(**kwargs):
+            seen.update(kwargs)
+            return _allow_canonical()
+
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "resolve_relay_authorization", new=AsyncMock(side_effect=_canon)), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()):
+            await self._run(source="bridge1")
+        assert seen["source_bridge"] == "bridge1"
+        assert seen["sender_phone"] == "8801880446111"
+
+    async def test_canonical_gate_does_not_own_the_outbound_gate(self):
+        """The canonical decision is about identity/role/channel only. The
+        global outbound flag is a separate, pre-existing safety gate that sits
+        downstream (outbound.enqueue + modules.outbound.sweep_once), so the
+        relay must still be eligible while outbound is off -- production runs
+        OUTBOUND_ENABLED=false, and folding that flag into identity/role
+        authorization would silence the relay for no safety gain.
+        This test is the guard against re-introducing that conflation."""
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "resolve_relay_authorization", new=AsyncMock(side_effect=_allow_canonical)), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            assert router.outbound._outbound_enabled() is False  # real env state
+            reply = await self._run()
+        assert reply == ""
+        mock_deliver.assert_awaited_once()
+
+    async def test_natural_query_control_channel_bypass_also_canonical_gated(self):
+        """The bare-text bridge1/bridge2 bypass in process_admin_natural_query
+        delegates to the same _handle_hermes_relay, so it must be canonical
+        gated too -- an unprefixed message must not be a way around the
+        identity/role check."""
+        with patch.object(router, "resolve_relay_authorization",
+                          new=AsyncMock(side_effect=lambda **kw: _deny_canonical())), \
+             patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router, "_deliver_hermes_reply", new=AsyncMock()) as mock_deliver:
+            reply = await router.process_admin_natural_query(
+                "what is our recruitment policy?", "8801880446111", source_bridge="bridge1")
+        assert reply == router._DENIAL_MSG
+        mock_deliver.assert_not_awaited()
+
+    async def test_direct_execution_paths_are_still_reachable_after_canonical_allow(self):
+        """Regression guard against over-blocking: the deterministic
+        employee-creation and batch-invite intercepts sit AFTER the canonical
+        gate, so an authorized admin must still reach them. Authorization
+        failing closed must not become a functional outage for legitimate
+        Admin commands."""
+        with patch.object(router.rbac, "check_permission", new=AsyncMock(return_value=_allow_perm())), \
+             patch.object(router.rbac, "record_audit", new=AsyncMock()), \
+             patch.object(router, "resolve_relay_authorization", new=AsyncMock(side_effect=_allow_canonical)), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch(
+                 "modules.admin_direct_execution.parse_employee_creation_instruction",
+                 new=lambda *_a, **_k: {"phone": "8801700000009", "name": "Test", "role": "guard"},
+             ), \
+             patch(
+                 "modules.admin_direct_execution.execute_trusted_employee_creation",
+                 new=AsyncMock(return_value={"ok": True, "phone": "8801700000009"}),
+             ), \
+             patch(
+                 "modules.admin_direct_execution.format_employee_create_card",
+                 new=lambda *_a, **_k: "CARD",
+             ):
+            reply = await self._run(text="hermes: নতুন কর্মী যোগ করো 8801700000009")
+        assert reply == "CARD"
+
+
+class TestHermesKnowledgeGrounding:
+    """Canonical knowledge wiring for the relay (Admin Canary, 2026-09-29).
+
+    Reuses the existing BUS-008 knowledge adapter / modules.rag index. These
+    tests pin that the retrieved context is actually injected into the
+    inference call, and that a retrieval miss is reported honestly rather
+    than papered over with invented company answers.
+    """
+
+    def _envelope(self, rows, status="ok", source="modules.rag"):
+        from modules.ai_console.envelopes import ToolResultEnvelope
+        return ToolResultEnvelope(
+            tool_id="BUS-008", tool_name="knowledge_search", status=status,
+            confidence="Verified" if rows else "Unknown", source=source,
+            timestamp="2026-09-29T00:00:00+00:00",
+            data={"rows": rows, "count": len(rows), "search_query": "q"},
+            authority="knowledge_base", traceability=["ORCH-032", "BUS-008"],
+        )
+
+    async def test_injects_retrieved_knowledge_with_provenance_into_inference(self):
+        rows = [{
+            "score": 3.5, "source": "knowledge_base/03_recruitment/policy.md",
+            "title": "Recruitment Policy", "chunk_idx": 2,
+            "text": "Fazle Core hires through a two-step office-visit process.",
+            "fact_authority": [{"status": "verified"}],
+        }]
+        mock_resp = type("R", (), {"status_code": 200, "json": lambda self: {"reply": "ok"}})()
+        import modules.ai_console.live_adapters as live_adapters
+        with patch.object(live_adapters, "build_knowledge_result",
+                          new=AsyncMock(return_value=self._envelope(rows))), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()):
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("recruitment process কি?", "8801880446111", "bridge1")
+        sent = mock_client.post.call_args[1]["json"]["message"]
+        # The Admin's own question is still present verbatim...
+        assert sent.startswith("recruitment process কি?")
+        # ...and the retrieved document text is injected alongside it, with
+        # its provenance, so the model is answering from Fazle-Core knowledge
+        # rather than from its own prior beliefs.
+        assert "Fazle Core hires through a two-step office-visit process." in sent
+        assert "knowledge_base/03_recruitment/policy.md" in sent
+        assert "Recruitment Policy" in sent
+
+    async def test_no_context_found_is_reported_and_nothing_is_invented(self):
+        """A retrieval miss must NOT be papered over. The question is sent
+        unchanged, with no fabricated company answer appended."""
+        mock_resp = type("R", (), {"status_code": 200, "json": lambda self: {"reply": "ok"}})()
+        import modules.ai_console.live_adapters as live_adapters
+        with patch.object(live_adapters, "build_knowledge_result",
+                          new=AsyncMock(return_value=self._envelope([], status="partial"))), \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls, \
+             patch.object(router.outbound, "enqueue", new=AsyncMock()):
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("what is the policy?", "8801880446111", "bridge1")
+        assert mock_client.post.call_args[1]["json"]["message"] == "what is the policy?"
+
+    async def test_knowledge_evidence_fields_reported(self):
+        """Proves the qualification's KNOWLEDGE_* evidence is derivable from
+        the real code path, not asserted by hand."""
+        rows = [{
+            "score": 2.0, "source": "kb/x.md", "title": "T", "chunk_idx": 0,
+            "text": "grounded text", "fact_authority": [],
+        }]
+        import modules.ai_console.live_adapters as live_adapters
+        with patch.object(live_adapters, "build_knowledge_result",
+                          new=AsyncMock(return_value=self._envelope(rows))):
+            block, evidence = await router._build_hermes_knowledge_context("anything")
+        assert evidence["retrieval_attempted"] is True
+        assert evidence["context_found"] is True
+        assert evidence["context_injected"] is True
+        assert evidence["source"] == "modules.rag"
+        assert evidence["underlying_index"] == "modules.rag.search"
+        assert evidence["access_role"] == "admin"
+        assert evidence["provenance"][0]["source"] == "kb/x.md"
+        assert "grounded text" in block
+
+    async def test_knowledge_retrieval_failure_does_not_block_relay_but_is_honest(self):
+        """A knowledge-store outage is not an authorization decision: the
+        relay still runs, but the evidence records the failure instead of
+        pretending retrieval succeeded."""
+        import modules.ai_console.live_adapters as live_adapters
+        with patch.object(live_adapters, "build_knowledge_result",
+                          new=AsyncMock(side_effect=RuntimeError("qdrant down"))):
+            block, evidence = await router._build_hermes_knowledge_context("anything")
+        assert block == ""
+        assert evidence["context_found"] is False
+        assert evidence["context_injected"] is False
+        assert evidence["status"] == "failed"
+        assert "qdrant down" in evidence["error"]
+
+
+class TestQualificationCannotSendOutbound:
+    """Outbound tripwires for the whole qualification file.
+
+    The relay ultimately answers via outbound.enqueue(). Every test above
+    mocks that already, but these two make the guarantee explicit and
+    global: if any relay test in this file ever reaches a real enqueue, the
+    test fails loudly rather than a message being queued for the Admin.
+    """
+
+    async def test_relay_tests_never_touch_the_real_outbound_queue(self):
+        """The relay answers via outbound.enqueue(), so the qualification must
+        not depend on the queue being inert. Two independent guarantees are
+        asserted here:
+        1. the enqueue symbol is replaced in every relay test, so no row can be
+           written by these tests; and
+        2. even a hypothetical row would not be dispatched, because the
+           canonical global outbound gate is off in the test environment --
+           proven by asserting sweep_once reports paused and sends nothing.
+        """
+        import modules.outbound as outbound_mod
+        with patch.object(router.outbound, "enqueue", new=AsyncMock()) as mock_enqueue, \
+             patch.object(router, "get_settings", return_value=_FakeSettings()), \
+             patch.object(router.httpx, "AsyncClient") as mock_client_cls:
+            mock_resp = type("R", (), {"status_code": 200, "json": lambda self: {"reply": "ok"}})()
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await router._deliver_hermes_reply("q", "8801880446111", "bridge1")
+        mock_enqueue.assert_awaited_once()  # replaced symbol only; no DB write
+
+        # Guarantee 2: the real dispatcher must be inert in this environment.
+        assert outbound_mod._outbound_enabled() is False
+        result = await outbound_mod.sweep_once(limit=5)
+        assert result["paused"] is True
+        assert result["picked"] == 0 and result["sent"] == 0

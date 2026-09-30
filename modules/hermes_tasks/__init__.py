@@ -567,6 +567,58 @@ async def is_action_approved(action_id: int, expected_action_type: Optional[str]
     return True
 
 
+async def is_action_type_authorized(action_type: str) -> dict:
+    """Is there a CURRENT, UNEXPIRED approval of ``action_type`` right now?
+
+    Added 2026-09-29 (Admin Canary capability-boundary audit) because
+    ``list_actions(status='approved')`` is a *discovery* helper that, by its
+    own documented contract, "Does NOT filter out expired rows here --
+    callers that need an authorization decision should use
+    is_action_approved(action_id) ... which does enforce expiry". The Hermes
+    ``task_action_policy`` plugin was calling the discovery helper directly
+    as if it were an authorization decision, so every expired approval row
+    ever left behind permanently satisfied the gate for SERVICE_MUTATION /
+    DATABASE_MUTATION / DEPLOYMENT. Live evidence at the time: 9 approved
+    rows, all expired in Aug 2026, so ``systemctl restart``, ``git push`` and
+    ``psql ... INSERT`` were all passing the "enforcement layer".
+
+    This function is the canonical, expiry-aware answer to the question, and
+    it is built ON the existing ``is_action_approved`` rather than
+    re-implementing expiry here. It is read-only for already-approved rows
+    (the lazy 'pending' -> 'expired' flip inside is_action_approved can
+    never trigger, because candidates are pre-filtered to
+    status='approved').
+
+    Returns the ids that currently authorize, plus the ids that did not and
+    why, so the caller can log something truthful. ``command`` is returned so
+    a caller that wants target binding can match the exact command rather
+    than settling for action-type-level consent.
+    """
+    if action_type not in ACTION_TYPES:
+        raise TaskError(f"action_type must be one of {sorted(ACTION_TYPES)}, got {action_type!r}")
+
+    candidates = await list_actions("approved", None, action_type)
+    valid: list[dict] = []
+    rejected: list[dict] = []
+    for action in candidates:
+        action_id = action.get("id")
+        if await is_action_approved(action_id, action_type):
+            valid.append(action)
+        else:
+            rejected.append({
+                "id": action_id,
+                "status": action.get("status"),
+                "expires_at": action.get("expires_at"),
+            })
+    return {
+        "action_type": action_type,
+        "authorized": bool(valid),
+        "action_ids": [a.get("id") for a in valid],
+        "commands": [a.get("command") for a in valid if a.get("command")],
+        "rejected": rejected,
+    }
+
+
 async def record_execution_result(
     action_id: int, result: dict, verification: Optional[dict] = None,
 ) -> dict:

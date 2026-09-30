@@ -467,3 +467,72 @@ tests/unit/test_whatsapp_messages_query_and_conversation_routes.py
 # Documentation-only; intentionally excluded from the runtime candidate and
 # retained uncommitted for separate owner review.
 knowledge_base/06_developer_system/identity_role_agent/
+
+# 2026-09-29: Bridge2 canonical identity enrollment reconciliation and
+# display-only bridge aliases for the existing FPE cash-ledger response paths.
+# Payment relay fixture correction is test-only; no ledger values or schema
+# migration are part of this candidate. The pre-existing identity-role-agent
+# knowledge-base work is explicitly preserved, not bundled into this candidate.
+modules/fazle_payroll_engine/bridge_alias.py
+modules/fazle_payroll_engine/routes.py
+tests/unit/test_fpe_bridge_alias.py
+tests/unit/test_payment_relay.py
+tests/unit/test_bridge_poller_payment_relay_gate.py
+knowledge_base/06_developer_system/identity_role_agent/
+
+# 2026-09-29: Admin Canary qualification -- canonical Identity-Role
+# authorization for the Admin -> Hermes relay, plus canonical Fazle-Core
+# knowledge grounding of that relay's inference. modules/admin_directives/
+# router.py gains one ADDITIVE gate (the three pre-existing RBAC / phone /
+# control-channel gates are untouched and still run first) and routes the
+# relay's inference through the EXISTING BUS-008 knowledge adapter and the
+# existing modules.rag index. No new authorization system, no new RAG
+# implementation, no schema migration, no .env flag change, no credential
+# change, and no change to the global outbound gate (which keeps its
+# existing downstream position). modules/admin_hermes_authorization.py is
+# the evidence-reading bridge only; it delegates every decision to the
+# existing capture_authorization_snapshot/evaluate path and cannot write.
+# The two test files are focused regression coverage for that gate and for
+# the knowledge wiring; they cannot send anything (asserted).
+modules/admin_hermes_authorization.py
+modules/admin_directives/router.py
+tests/db/test_admin_hermes_canonical_authorization.py
+tests/unit/test_admin_ai_router.py
+db/.restart_gate_manifest
+
+# 2026-09-29: Hermes capability-boundary enforcement (Admin Canary audit,
+# follow-on pass). EXPIRY FIX ONLY -- the 2026-08-20 RUN-capable Admin relay
+# architecture is deliberately preserved; no toolset, mode or key changed.
+# modules/hermes_tasks gains is_action_type_authorized(), a thin read-only
+# wrapper that delegates to the pre-existing is_action_approved() so the
+# expiry decision stays in exactly one place, plus its route
+# /api/actions/authorization-state. The Hermes task_action_policy plugin
+# previously called list_actions(status='approved') -- a discovery helper
+# that documents it does NOT filter expired rows -- and treated non-emptiness
+# as authorization, so 9 approvals left over from Aug 2026 permanently
+# authorized systemctl restart / git push / psql writes. No schema migration,
+# no .env change, no credential change, and no production approval record was
+# modified.
+#
+# NOT COVERED BY THIS GATE: the enforcement plugin itself lives outside this
+# repository, at ~/.hermes/plugins/task_action_policy/ (__init__.py,
+# action_policy.py, test_plugin.py), and its action_policy.py has a second
+# copy in the fazle-mcp repo. tests/unit/test_hermes_capability_boundary.py
+# asserts the copies are byte-identical and pins the plugin's wiring, but the
+# plugin's own execution is not restart-gated. See the audit report.
+modules/hermes_tasks/__init__.py
+modules/hermes_tasks/routes.py
+tests/unit/test_hermes_capability_boundary.py
+db/.restart_gate_manifest
+# 2026-09-30 (scoped Admin authorization for Hermes-originated outbound).
+# The relay stamps a scoped, expiring, single-use grant onto Hermes-proposed
+# drafts once resolve_relay_authorization has allowed the Admin; the approve
+# endpoint refuses a Hermes draft without it and spends it on use. This
+# IS restart-gated: modules/drafts/routes.py changes take effect with the
+# fazle-core service, which is what this gate governs.
+modules/admin_hermes_action_grant.py
+tests/db/test_admin_hermes_action_grant.py
+# Composite gate wrapper + the plugin integrity test. Neither is served by
+# fazle-core, but both are qualification inputs.
+scripts/composite_security_gate.sh
+tests/test_hermes_task_action_policy_plugin_integrity.py

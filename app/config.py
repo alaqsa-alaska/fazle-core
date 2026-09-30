@@ -245,6 +245,14 @@ class Settings(BaseSettings):
     hermes_runner_url: str = "http://127.0.0.1:8093"
     hermes_runner_secret: str = ""
 
+    # 2026-09-30: how long the hermes relay may spend writing Admin
+    # authorization grants (modules.admin_hermes_action_grant) before giving
+    # up and serving the message with no grant issued. Bounded on purpose --
+    # the grant ledger must never be able to stall an Admin's own message. The
+    # failure direction is safe: no grant means a proposed draft cannot be
+    # approved, which is strictly worse for the Admin, not better.
+    hermes_admin_grant_timeout_seconds: float = 5.0
+
     # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal Modification
     # Plan). A SEPARATE credential from hermes_runner_secret above --
     # deliberately not reused -- so a customer-facing call can never be

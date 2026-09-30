@@ -34,6 +34,22 @@ source_bridge is the caller-trusted value message_router already resolves
 from which poller/webhook ingested the message, never taken from message
 text.
 
+2026-09-29 (Admin Canary qualification): the Hermes relay gained a FOURTH,
+ADDITIVE gate -- canonical Identity-Role authorization via
+modules.admin_hermes_authorization, which resolves the real identity and
+role from wbom_identity_links / fazle_identity_subjects /
+fazle_identity_role_assignments / fazle_outbound_holds and evaluates them
+through the single existing decision function
+(modules.outbound_authorization.capture_authorization_snapshot ->
+modules.identity_role_authorization.evaluate). The three gates above are
+untouched and still run first, so this can only narrow access: neither
+"source_bridge == bridge2" nor "this is the admin phone number" is
+sufficient on its own, and a revoked canonical role, revoked identity,
+ambiguous link, or placed hold now actually stops the relay. The same
+change routed the relay's inference through the canonical knowledge path
+(_build_hermes_knowledge_context -> the existing BUS-008 adapter ->
+modules.rag), which previously never applied to this path at all.
+
 process_admin_ai_command() never raises to its caller -- every branch is
 exception-guarded and returns a user-facing Bangla string on failure,
 per the B25(H4) design constraint that WhatsApp admin free text must
@@ -53,6 +69,7 @@ import httpx
 from app.config import get_settings
 from modules import outbound, rbac
 from modules.admin_directives import revoke_directive, save_directive
+from modules.admin_hermes_authorization import resolve_relay_authorization
 from modules.ai_console.orchestrator import orchestrate_console_request
 from modules.wa_chat_frontend import get_runtime_setting, set_runtime_setting
 from shared.draft_reply import create_draft_reply
@@ -400,9 +417,106 @@ async def _handle_send(raw_phone: str, message_text: str, sender_phone: str) -> 
 _HERMES_NOT_CONFIGURED_MSG = "⚠️ Hermes relay কনফিগার করা নেই (HERMES_RUNNER_SECRET সেট করা হয়নি)।"
 
 
+# ── Canonical knowledge context (Admin Canary qualification, 2026-09-29) ─────
+# The Hermes relay used to hand hermes-runner nothing but the Admin's raw
+# question, so the relay answered with whatever the model already believed
+# about this company -- no Fazle-Core knowledge, no provenance, and no way for
+# a later auditor to tell a grounded answer from a plausible invention. The
+# AI-console path has had canonical knowledge retrieval the whole time
+# (``orchestrate_console_request`` -> BUS-008 -> ``build_knowledge_result`` ->
+# ``modules.rag.search``); the relay simply never used it. These helpers route
+# the relay through that same existing adapter, so there is exactly one RAG
+# implementation and one indexing/authority model in this codebase.
+_KNOWLEDGE_RESULT_LIMIT = 5
+_MAX_CONTEXT_CHARS = 4000
+
+
+async def _build_hermes_knowledge_context(request_text: str) -> tuple[str, dict]:
+    """Return (context_block, evidence) for one relay turn.
+
+    Reuses ``build_knowledge_result`` -- the canonical BUS-008 knowledge
+    adapter already wired into the AI console -- so retrieval, role filtering
+    and fact-authority markers are the existing ones, not a second RAG path.
+
+    Fails soft on retrieval *errors* (the relay still runs, with an explicit
+    "no authoritative context found" marker, because a knowledge-store outage
+    must not silently become a security decision), but never fabricates: when
+    nothing is found, the evidence says ``found=False`` and the context block
+    says so too. No hard-coded company answers exist anywhere in this path --
+    every fact in the injected block came out of ``modules.rag`` at call time.
+    """
+    from modules.ai_console.live_adapters import build_knowledge_result
+
+    evidence = {
+        "retrieval_attempted": True,
+        "context_found": False,
+        "source": None,
+        "provenance": [],
+        "context_injected": False,
+        "retriever": "modules.ai_console.live_adapters.build_knowledge_result",
+        "underlying_index": "modules.rag.search",
+        "access_role": "admin",
+        "status": "failed",
+    }
+    try:
+        envelope = await build_knowledge_result(request_text, limit=_KNOWLEDGE_RESULT_LIMIT)
+    except Exception as exc:  # noqa: BLE001 -- retrieval failure is not authorization
+        log.error("[admin_ai_router] knowledge retrieval raised for relay: %s", exc)
+        evidence["status"] = "failed"
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        return ("", evidence)
+
+    evidence["status"] = envelope.status
+    evidence["source"] = envelope.source
+    evidence["tool_id"] = envelope.tool_id
+    evidence["confidence"] = envelope.confidence
+    evidence["traceability"] = list(envelope.traceability)
+    rows = list((envelope.data or {}).get("rows") or [])
+    if not rows:
+        return ("", evidence)
+
+    lines: list[str] = []
+    provenance: list[dict] = []
+    for index, row in enumerate(rows, start=1):
+        source = str(row.get("source") or "")
+        title = str(row.get("title") or "")
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        provenance.append({
+            "n": index,
+            "source": source,
+            "title": title,
+            "chunk_idx": row.get("chunk_idx"),
+            "score": row.get("score"),
+            "fact_authority": row.get("fact_authority"),
+        })
+        lines.append(f"[{index}] ({source} / {title}) {text}")
+
+    if not lines:
+        return ("", evidence)
+
+    evidence["context_found"] = True
+    evidence["provenance"] = provenance
+    evidence["hits"] = len(lines)
+
+    block = (
+        "\n\n".join([
+            "ফাজল-কোর অনুমোদিত জ্ঞানভান্ডার থেকে প্রাপ্ত প্রাসঙ্গিক তথ্য "
+            "(Fazle-Core authoritative knowledge — answer ONLY from this, and say "
+            "so explicitly if it does not contain the answer):",
+            "\n\n".join(lines),
+        ])
+    )[:_MAX_CONTEXT_CHARS]
+    evidence["context_injected"] = True
+    evidence["context_chars"] = len(block)
+    return (block, evidence)
+
+
 async def _call_hermes_readonly(
     request_text: str, *, log_label: str, readonly_key: str | None = None,
     hermes_session_id: str | None = None, force_read_only: bool = True,
+    relay_conversation_key: str | None = None, relay_identity_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Shared core of the hermes-runner call -- extracted (2026-08-04,
     Phase 5B) so both the WhatsApp-triggered relay (_deliver_hermes_reply)
@@ -505,6 +619,19 @@ async def _call_hermes_readonly(
                     "read_only": force_read_only,
                     **({"readonly_key": readonly_key} if readonly_key else {}),
                     **({"hermes_session_id": hermes_session_id} if hermes_session_id else {}),
+                    # 2029-09-30 (Owner: the Admin<->Hermes relay and the
+                    # customer/employee conversation are never one authority).
+                    # This carries WHICH authorized conversation is speaking, so
+                    # anything Hermes proposes during this turn is attributable
+                    # to it. hermes-runner passes it into the hermes subprocess
+                    # environment, which is why the model cannot forge or
+                    # relabel it: it is ambient process context, not a tool
+                    # argument. A customer conversation never sets this, so
+                    # drafts it produces are never grantable by an Admin "yes".
+                    **({"relay_conversation_key": relay_conversation_key}
+                       if relay_conversation_key else {}),
+                    **({"relay_identity_id": relay_identity_id}
+                       if relay_identity_id else {}),
                 },
             )
         try:
@@ -532,7 +659,14 @@ async def _call_hermes_readonly(
         return "⚠️ Hermes-এর সাথে যোগাযোগ করা যায়নি।", None
 
 
-async def _deliver_hermes_reply(request_text: str, sender_phone: str, source_bridge: str = "bridge2") -> None:
+async def _deliver_hermes_reply(
+    request_text: str,
+    sender_phone: str,
+    source_bridge: str = "bridge2",
+    *,
+    relay_conversation_key: str | None = None,
+    relay_identity_id: str | None = None,
+) -> None:
     """Background task: makes the actual (potentially ~170s) call to
     hermes-runner and delivers the result as a separate outbound WhatsApp
     message. Never awaited inline by _handle_hermes_relay -- see that
@@ -581,9 +715,40 @@ async def _deliver_hermes_reply(request_text: str, sender_phone: str, source_bri
     else:
         resume_session_id = _get_active_hermes_session(source_bridge, sender_phone)
 
+    # Canonical knowledge grounding (Admin Canary qualification, 2026-09-29).
+    # Built here, at the point the message actually leaves for inference, so
+    # BOTH entry points into this relay (the explicit "hermes," command and
+    # the bare-text control-channel bypass in process_admin_natural_query) are
+    # grounded -- neither can reach Hermes ungrounded. Retrieval runs against
+    # the existing modules.rag index through the existing BUS-008 adapter.
+    knowledge_block, knowledge_evidence = await _build_hermes_knowledge_context(request_text)
+    # Metadata only, never retrieved text: enough to prove retrieval happened,
+    # what was found, and its provenance, without copying document content
+    # into the log. Same convention as the mode/session line below.
+    log.info(
+        "[admin_ai_router] hermes relay knowledge: attempted=%s found=%s status=%s "
+        "source=%s hits=%s injected=%s provenance=%s",
+        knowledge_evidence.get("retrieval_attempted"),
+        knowledge_evidence.get("context_found"),
+        knowledge_evidence.get("status"),
+        knowledge_evidence.get("source"),
+        knowledge_evidence.get("hits", 0),
+        knowledge_evidence.get("context_injected"),
+        [p.get("source") for p in knowledge_evidence.get("provenance", [])],
+    )
+    inference_text = f"{request_text}{knowledge_block}" if knowledge_block else request_text
+
     reply_text, new_session_id = await _call_hermes_readonly(
-        request_text, log_label=f"hermes relay for {sender_phone}", readonly_key="readonly:whatsapp_relay",
+        inference_text, log_label=f"hermes relay for {sender_phone}", readonly_key="readonly:whatsapp_relay",
         hermes_session_id=resume_session_id, force_read_only=False,
+        # 2026-09-30: which authorized conversation is speaking. Supplied by
+        # the caller, which already ran resolve_relay_authorization -- this
+        # function must not re-decide identity. When absent (non-relay callers
+        # and tests), no conversation is declared, so anything Hermes proposes
+        # in that turn is not attributable to an Admin conversation and cannot
+        # be authorized by an Admin "yes".
+        relay_conversation_key=relay_conversation_key,
+        relay_identity_id=relay_identity_id,
     )
     _remember_hermes_session(source_bridge, sender_phone, new_session_id)
 
@@ -1012,6 +1177,97 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
     if not settings.hermes_runner_secret:
         return _HERMES_NOT_CONFIGURED_MSG
 
+    # Canonical Identity-Role gate (Admin Canary qualification, 2026-09-29).
+    # Strictly ADDITIVE to the three gates above -- they already ran and were
+    # already required, and this one can only narrow access further. It is
+    # the first time this relay consults the canonical identity/role control
+    # plane (wbom_identity_links / fazle_identity_subjects /
+    # fazle_identity_role_assignments / fazle_outbound_holds) rather than only
+    # a settings number plus a channel membership test, so a revoked role, a
+    # revoked identity, a hold, an ambiguous link, or a missing enrollment now
+    # actually stops the relay. Fails closed on every path, including any
+    # lookup error. Never inferred from a phone number, a display name, or a
+    # legacy scalar role.
+    relay_auth = await resolve_relay_authorization(
+        sender_phone=sender_phone,
+        source_bridge=source_bridge,
+    )
+    if not relay_auth.allowed:
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command="hermes_relay", actor_phone=sender_phone,
+                actor_admin=admin, allowed=False,
+                denied_reason=(
+                    "canonical identity/role authorization denied "
+                    f"(reason={relay_auth.reason_code}, identity={relay_auth.identity_id or 'none'}, "
+                    f"detail={relay_auth.detail})"
+                ),
+            )
+        except Exception:
+            log.error(
+                "[admin_ai_router] record_audit failed for hermes_relay canonical-authz denial, phone=%s",
+                sender_phone,
+            )
+        log.warning(
+            "[admin_ai_router] hermes_relay denied by canonical authorization: reason=%s identity=%s bridge=%s",
+            relay_auth.reason_code, relay_auth.identity_id or "none", source_bridge,
+        )
+        return _DENIAL_MSG
+
+    # 2026-09-30 (Owner decision: Bridge2 -> Bridge1 is the trusted
+    # Admin<->Hermes control conversation; Hermes is meant to act on the
+    # Admin's requests, but must not be the one deciding it may).
+    #
+    # An authenticated Admin message IS the authorization for the action it
+    # confirms. It is recorded here, against the concrete drafts Hermes has
+    # proposed and is still awaiting a decision on -- scoped, expiring, and
+    # single-use (modules.admin_hermes_action_grant). Hermes then carries the
+    # conversation forward with its normal tools; it can read the grant but
+    # can never create one, because this line only runs after the canonical
+    # authorization above allowed the Admin, and the grant lives in a column
+    # Hermes has no tool to write.
+    #
+    # This mirrors the existing admin_direct_execution precedent below, where
+    # a direct instruction on this same trusted channel is itself the
+    # authorization. It is deliberately NOT parsed out of the message text:
+    # free-text intent detection is exactly the ambiguity that let a model
+    # talk its way past a gate. The evidence is "a verified Admin spoke in
+    # this conversation", and the scope is "the pending proposal in front of
+    # us".
+    from modules.admin_hermes_action_grant import authorize_pending_hermes_drafts
+    from app.database import db_conn
+
+    # Bounded: this write is an authorization ledger, not part of the relay's
+    # critical path. If the pool is saturated it must degrade to "no grant
+    # issued" rather than hang the Admin's message -- an ungranted proposal
+    # simply cannot be approved, which is the safe direction. It can never
+    # degrade to a grant existing without the ledger row, since the row is the
+    # grant. Never raise, never block indefinitely.
+    grant_deadline_s = float(settings.hermes_admin_grant_timeout_seconds)
+    try:
+        async with asyncio.timeout(grant_deadline_s):
+            async with db_conn() as grant_conn:
+                granted_drafts = await authorize_pending_hermes_drafts(
+                    grant_conn,
+                    conversation_key=relay_auth.conversation_key,
+                    identity_id=relay_auth.identity_id or "",
+                    role_names=tuple(relay_auth.role_names or ()),
+                )
+        if granted_drafts:
+            log.info(
+                "[admin_ai_router] Admin identity=%s authorized %d pending hermes draft(s) "
+                "in conversation=%s (drafts=%s)",
+                relay_auth.identity_id, len(granted_drafts),
+                relay_auth.conversation_key, granted_drafts,
+            )
+    except Exception:
+        # Never break the conversation on bookkeeping. A missing grant simply
+        # fails closed later at approval time.
+        log.error(
+            "[admin_ai_router] could not stamp Admin action grant for conversation=%s",
+            relay_auth.conversation_key, exc_info=True,
+        )
+
     # Stage H12 (2026-08-28): a deterministic, non-Ollama/non-Hermes
     # employee-creation instruction on this exact trusted channel is
     # intercepted BEFORE the Hermes dispatch below -- the direct
@@ -1088,7 +1344,13 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
     # reply's docstring for the full rationale and the pre-existing echo
     # guard that already safely absorbs the resulting bridge1->bridge2
     # landing pattern.
-    task = asyncio.create_task(_deliver_hermes_reply(request_text, sender_phone, "bridge1"))
+    task = asyncio.create_task(
+        _deliver_hermes_reply(
+            request_text, sender_phone, "bridge1",
+            relay_conversation_key=relay_auth.conversation_key,
+            relay_identity_id=relay_auth.identity_id,
+        )
+    )
     _hermes_relay_tasks.add(task)
     task.add_done_callback(_hermes_relay_tasks.discard)
 

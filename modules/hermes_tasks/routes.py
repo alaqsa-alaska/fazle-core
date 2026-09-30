@@ -274,6 +274,29 @@ async def list_actions_route(
     return {"actions": await list_actions(status, task_id, action_type, domain=domain)}
 
 
+@router.get("/api/actions/authorization-state", dependencies=[Depends(_require_command("task_read"))])
+async def action_authorization_state_route(action_type: str):
+    """Read-only, EXPIRY-AWARE authorization check for one action type.
+
+    2026-09-29 (Admin Canary capability-boundary audit). The CLI plugin's
+    SERVICE_MUTATION / DATABASE_MUTATION / DEPLOYMENT gate used
+    ``/api/actions?status=approved`` -- a discovery listing that explicitly
+    does not filter expired rows -- so any expired approval ever left in the
+    table authorized the action forever. This endpoint answers the actual
+    authorization question by delegating to the existing, expiry-enforcing
+    ``is_action_approved`` for every candidate.
+
+    Registered BEFORE ``/api/actions/{action_id}`` (int-typed) so this fixed
+    path is never shadowed, matching the /api/tasks/authorizing-path
+    convention in this same file.
+    """
+    from modules.hermes_tasks import is_action_type_authorized, TaskError
+    try:
+        return await is_action_type_authorized(action_type)
+    except TaskError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/api/actions/{action_id}", dependencies=[Depends(_require_command("task_read"))])
 async def get_action_route(action_id: int):
     from modules.hermes_tasks import get_action

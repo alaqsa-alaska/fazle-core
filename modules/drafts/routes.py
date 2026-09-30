@@ -56,6 +56,14 @@ class CreateDraftRequest(BaseModel):
     role: str = "unknown"
     intent: str = "hermes_suggested"
     context: str = ""
+    # Which authorized conversation proposed this draft, if any. 2026-09-30:
+    # supplied from the hermes-runner subprocess environment (the MCP server
+    # inherits it), NOT by the model. It is what keeps the Admin<->Hermes
+    # relay and the customer/employee conversation from ever being one
+    # authority -- an Admin "yes" can only reach a draft that was proposed in
+    # the Admin's own control conversation. Empty for a customer conversation,
+    # and such a draft is never grantable.
+    relay_conversation_key: str = ""
 
 
 # ── GET /api/drafts/stats ───────────────────────────────────────────────────
@@ -159,6 +167,23 @@ async def create_draft(
         context=body.context,
         source_module="hermes_admin",
     )
+    if draft_id is not None and body.relay_conversation_key:
+        # Stamp the originating conversation onto the draft so a later Admin
+        # authorization can be scoped to it. Best-effort: a failure here means
+        # the draft simply stays un-grantable, which is the safe direction.
+        try:
+            await execute(
+                """
+                UPDATE fazle_draft_replies
+                   SET meta = COALESCE(meta, '{}'::jsonb)
+                                 || jsonb_build_object('hermes_conversation_key', $2::text)
+                 WHERE id = $1
+                """,
+                draft_id,
+                body.relay_conversation_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("draft %d conversation stamp failed: %s", draft_id, exc)
     if draft_id is None:
         return {
             "ok": False,
@@ -191,6 +216,28 @@ async def approve_draft(
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
 
+    # 2026-09-30 (Owner: Bridge2 is the trusted Admin<->Hermes conversation).
+    # A draft that HERMES proposed may only be approved on the strength of an
+    # authenticated Admin authorization for that specific draft, recorded by
+    # modules.admin_hermes_action_grant when the Admin's message arrived.
+    # This is what stops Hermes approving the draft it just proposed: the
+    # grant lives in a column Hermes has no tool to write, and it expires and
+    # is single-use. Drafts that Hermes did not propose are unaffected, so
+    # every human/dashboard flow keeps working exactly as before.
+    from modules.admin_hermes_action_grant import verify_draft_grant
+
+    grant_ok, grant_reason = verify_draft_grant(draft)
+    if not grant_ok:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Hermes-proposed draft requires an authenticated Admin "
+                f"authorization that is not present ({grant_reason}). "
+                f"Ask the Admin to confirm this specific action in the "
+                f"Bridge2 control conversation, then retry."
+            ),
+        )
+
     if draft["intent"] == "attendance":
         from modules.attendance import finalize_attendance_draft
         actor = await _resolve_reviewer_identity(key)
@@ -221,6 +268,18 @@ async def approve_draft(
         """,
         draft_id,
     )
+    # Single-use: the grant is spent in the same breath as the approval, so
+    # an approved Hermes draft cannot be approved a second time by replaying
+    # the same Admin "yes".
+    from modules.admin_hermes_action_grant import consume_draft_grant
+    from app.database import db_conn
+
+    try:
+        async with db_conn() as conn:
+            await consume_draft_grant(conn, draft_id)
+    except Exception as exc:  # noqa: BLE001 -- never fail an approved send
+        log.error("Draft %d grant consume failed: %s", draft_id, exc)
+
     log.info("Draft %d approved for %s", draft_id, draft["recipient"])
 
     # Enqueue for sending — admin approval overrides AUTO_REPLY_ENABLED
