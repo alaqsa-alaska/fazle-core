@@ -216,4 +216,34 @@ independent owner approval record.
 
 ## 9. Commit & push status
 
-Filled at commit time: commit SHAs, branch, checkpoint path, push status.
+**Branch:** `feat/bridge1-2-conversation-continuity-20260902`
+**Base HEAD:** `993c7f4f0f59e8143cb7348e8f5441ff13f09e9f`
+**Checkpoint path:** `docs/SALARY_QUALIFICATION_CHECKPOINT_2026-10-01.md`
+
+Focused commits (oldest → newest):
+
+| SHA | Scope |
+|---|---|
+| `7cf759e` | Salary reconciliation + checkpoint + scope-test allowlist |
+| `a657c4b` | Queue-RBAC customer-reply authorization snapshot capture |
+| `c43b7bc` | 9Router bounded physical-model routing adapter (dev-only) |
+| `56659e1` | FPE transaction views bridge display aliases |
+| `d8337cd` | Test monkeypatch refactors + identity-role agent contract doc |
+
+**Push status:** PUSHED — `git push origin feat/bridge1-2-conversation-continuity-20260902` succeeded (`993c7f4..d8337cd`). Remote HEAD `d8337cdf0ff820143448dbb32270df32a2ec1270` verified identical to local HEAD. No force-push used.
+
+**Remaining gaps:**
+
+1. **Approval provenance UNVERIFIED** — all-role permanent range `17,000–24,700`,
+   30-working-day rule, and 9Router single-upstream guarantee lack an
+   independent owner-approval record outside KB files.
+2. **Prompt/reply NOT CAPTURED** — no static artifact of a live 9Router
+   inference call exists.
+3. **Salary qualification = PARTIAL** — the four deterministic test checks are
+   scoped; a general role+stage+component+conditions validation engine is not
+   implemented.
+4. **Runtime dependency** — tests must run under `./venv/bin/python`
+   (system python lacks `openai`); DB tests require the `fazle-test-postgres`
+   container on 127.0.0.1:5433 with `TEST_DB_PASSWORD`.
+5. **Production activation = NOT PERFORMED** — no restart, deployment,
+   activation, gateway change, or message send.
