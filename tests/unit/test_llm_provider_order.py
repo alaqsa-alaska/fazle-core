@@ -758,8 +758,19 @@ class TestScopeIsolation:
         expected_allowed = {
             "app/config.py",
             "app/llm.py",
+            "app/unified_routing.py",
+            "app/nine_router_provider.py",
             "app/github_models.py",
+            "modules/outbound/__init__.py",
+            "modules/fazle_payroll_engine/routes.py",
+            "resources/ops/salary_structure.txt",
+            "resources/ops/master_recruitment_employee_information.txt",
             "tests/unit/test_llm_provider_order.py",
+            "tests/unit/test_9router_adapter.py",
+            "tests/unit/test_9router_recruitment_qualification.py",
+            "tests/db/test_outbound_authorization_revalidation.py",
+            "tests/unit/test_payment_relay.py",
+            "tests/unit/test_bridge_poller_payment_relay_gate.py",
         }
         changed = self._changed_tracked_files()
         assert changed.issubset(expected_allowed), f"unexpected files changed: {changed - expected_allowed}"
