@@ -91,6 +91,18 @@ class Settings(BaseSettings):
     omniroute_api_key: str = ""
     omniroute_model_name: str = "auto"
 
+    # 9Router (Phase 3D development-only, not activated in production).
+    # Core issues exactly one gateway request; gateway-internal retry/account
+    # rotation is controlled by the upstream 9Router runtime. The single-
+    # upstream-attempt guarantee must be verified before any Core 9Router
+    # route may be used for customer-facing workloads.
+    nine_router_url: str = "http://127.0.0.1:20129/v1"
+    nine_router_private_url: str = ""
+    nine_router_data_path: str = "/home/azim/9router/data/db/data.sqlite"
+    nine_router_version: str = "0.5.75"
+    nine_router_credential_ref: str = "nine_router_core_api_key"
+    nine_router_single_upstream_guaranteed: bool = False
+
     # Kimi (2026-08-05): reached through the existing local Ollama client
     # (app/ollama.py), not a separate HTTP provider — Ollama's own cloud-
     # model proxy already has kimi-k2.6:cloud etc. provisioned on this

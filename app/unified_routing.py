@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
+from urllib.parse import urlsplit
 
 import yaml
 from app.database import fetch_all
@@ -113,6 +114,17 @@ class RouteCandidate:
             raise ValueError("route priority is invalid")
         if self.credential_type not in {"api_key", "bearer_token", "session_cookie", "local_runtime", "none"}:
             raise ValueError("unsupported credential_type")
+        if self.provider == "9router":
+            if self.transport != "direct_provider":
+                raise ValueError("9router uses the bounded physical-model transport")
+            if (self.credential_type, self.credential_ref) != ("api_key", "nine_router_core_api_key"):
+                raise ValueError("9router requires its dedicated API-key credential reference")
+            if self.model.strip().lower() in {"general", "coding", "fast", "auto"} or "/" not in self.model:
+                raise ValueError("9router Core routes require an explicit physical model ID")
+            if set(self.modalities) != {"text"}:
+                raise ValueError("9router Core routes are text-only to prevent capacity-adapter fallback")
+            if urlsplit(self.base_url).hostname not in {"127.0.0.1", "localhost"}:
+                raise ValueError("9router Core routes must use the local VPS endpoint")
 
 
 @dataclass(frozen=True)
@@ -465,6 +477,11 @@ async def _invoke_core_route(route, request, settings, *, use_secret_store=False
             if route.model:
                 payload["model"] = route.model
             result = await _call_operation(provider, request.workload, payload)
+        elif route.provider == "9router":
+            if not getattr(settings, "nine_router_single_upstream_guaranteed", False):
+                return ProviderResult.failure(FailureClass.INVALID_REQUEST_OR_POLICY_REJECTION)
+            from app import nine_router_provider as provider
+            result = await _call_operation(provider, request.workload, payload, route=route, route_credential=credential_value)
         else:
             return ProviderResult.failure(FailureClass.INVALID_REQUEST_OR_POLICY_REJECTION)
     except asyncio.TimeoutError:
