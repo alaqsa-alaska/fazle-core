@@ -51,6 +51,7 @@ from .models import (
     ReviewStatus,
 )
 from .payment_event import payment_event_from_operator, payment_event_to_request
+from .bridge_alias import bridge_alias_for_phone
 
 log = logging.getLogger("fazle.fpe.routes")
 
@@ -448,6 +449,14 @@ async def list_transactions(
     page_size_resp = limit
     page_resp = (offset // limit) + 1 if limit else 1
     pages_resp = (total + limit - 1) // limit if (total and limit) else 1
+    transactions = []
+    for row in rows:
+        item = dict(row)
+        alias = bridge_alias_for_phone(item.get("payout_phone"))
+        if alias:
+            item["employee_display_name"] = alias
+            item["actor_alias"] = alias
+        transactions.append(item)
     return {
         "total": total,
         "page": page_resp,
@@ -459,7 +468,7 @@ async def list_transactions(
             "first_txn": summary["first_txn"].isoformat() if summary["first_txn"] else None,
             "last_txn": summary["last_txn"].isoformat() if summary["last_txn"] else None,
         },
-        "transactions": [dict(r) for r in rows],
+        "transactions": transactions,
     }
 
 
@@ -487,7 +496,12 @@ async def get_transaction(txn_id: int):
     )
     if not row:
         raise HTTPException(404, "Transaction not found")
-    return dict(row)
+    result = dict(row)
+    alias = bridge_alias_for_phone(result.get("payout_phone"))
+    if alias:
+        result["employee_display_name"] = alias
+        result["actor_alias"] = alias
+    return result
 
 
 @router.post("/transactions/{txn_id}/reverse", dependencies=[Depends(_require_admin_role)])
@@ -1588,7 +1602,8 @@ async def employee_transaction_history(
             "amount": float(r["amount"]) if r["amount"] is not None else 0.0,
             "payment_method": r["payout_method"],
             "payout_phone": r["payout_phone"],
-            "employee_name": r["employee_display_name"],
+            "employee_name": bridge_alias_for_phone(r["payout_phone"]) or r["employee_display_name"],
+            "actor_alias": bridge_alias_for_phone(r["payout_phone"]),
             "employee_id_phone": r["employee_display_id_phone"],
             "comment": None,  # reserved for future remarks column
             "source_message": r["source_message_text"],
@@ -2521,13 +2536,21 @@ async def list_cash_transactions(
     )
 
     pages = (total + ps - 1) // ps if ps else 1
+    transactions = []
+    for row in rows:
+        item = dict(row)
+        alias = bridge_alias_for_phone(item.get("sender_phone"))
+        if alias:
+            item["employee_name"] = alias
+            item["actor_alias"] = alias
+        transactions.append(item)
     return {
         "total": int(total),
         "page": page,
         "page_size": ps,
         "pages": pages,
         "summary": {"total_amount": total_amount, "count": int(total)},
-        "transactions": [dict(r) for r in rows],
+        "transactions": transactions,
     }
 
 
@@ -2548,7 +2571,12 @@ async def get_cash_transaction(txn_id: int):
     )
     if not row:
         raise HTTPException(404, "Cash transaction not found")
-    return dict(row)
+    result = dict(row)
+    alias = bridge_alias_for_phone(result.get("payout_phone"))
+    if alias:
+        result["employee_name"] = alias
+        result["actor_alias"] = alias
+    return result
 
 
 # ── Shorthand / Staging Payments ─────────────────────────────────────────────
