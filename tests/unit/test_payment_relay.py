@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 import modules.payment_relay as pr
+import modules.outbound as outbound
 
 pytestmark = pytest.mark.unit
 
@@ -61,7 +62,7 @@ class _FakeEnqueue:
 @pytest.fixture
 def fake_enqueue(monkeypatch):
     fe = _FakeEnqueue()
-    monkeypatch.setattr("modules.outbound.enqueue", fe)
+    monkeypatch.setattr(outbound, "enqueue", fe)
     return fe
 
 
@@ -383,7 +384,7 @@ async def test_enqueue_error_returns_held_claim(monkeypatch):
     async def _raise(*a, **k):
         raise RuntimeError("bridge2 unavailable")
 
-    monkeypatch.setattr("modules.outbound.enqueue", _raise)
+    monkeypatch.setattr(outbound, "enqueue", _raise)
     res = await pr.maybe_relay_owner_payment(
         bridge_name="bridge2", sender=OWNER, body=SINGLE, message_id="wamid.ERR",
     )

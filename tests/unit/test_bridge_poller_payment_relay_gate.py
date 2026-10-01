@@ -17,6 +17,7 @@ import pytest
 
 import modules.bridge_poller as bp
 import modules.payment_relay as pr
+import modules.outbound as outbound
 
 pytestmark = pytest.mark.unit
 
@@ -71,7 +72,7 @@ async def test_relay_claim_stops_all_further_processing(monkeypatch):
         return {"relayed": True, "claimed": True, "status": "enqueued",
                 "dest_number": "8801844836824", "outbound_bridge": "bridge2"}
 
-    monkeypatch.setattr("modules.payment_relay.maybe_relay_owner_payment", _fake_relay)
+    monkeypatch.setattr(pr, "maybe_relay_owner_payment", _fake_relay)
     hit = _tripwires(monkeypatch)
 
     out = await bp.process_bridge_inbound("bridge2", OWNER, SINGLE, message_id="wamid.RELAY")
@@ -89,7 +90,7 @@ async def test_protected_message_held_on_enqueue_failure_stops(monkeypatch):
         sends.append((a, k))
         raise RuntimeError("bridge2 unavailable")
 
-    monkeypatch.setattr("modules.outbound.enqueue", _raise_enqueue)
+    monkeypatch.setattr(outbound, "enqueue", _raise_enqueue)
     hit = _tripwires(monkeypatch)
 
     out = await bp.process_bridge_inbound("bridge2", OWNER, SINGLE, message_id="wamid.HELD")
@@ -109,7 +110,7 @@ async def test_protected_message_held_when_relay_gate_itself_raises(monkeypatch)
     async def _raising_relay(*, bridge_name, sender, body, message_id=""):
         raise RuntimeError("relay gate blew up")
 
-    monkeypatch.setattr("modules.payment_relay.maybe_relay_owner_payment", _raising_relay)
+    monkeypatch.setattr(pr, "maybe_relay_owner_payment", _raising_relay)
     hit = _tripwires(monkeypatch)
 
     out = await bp.process_bridge_inbound("bridge2", OWNER, SINGLE, message_id="wamid.RAISE")
@@ -126,7 +127,7 @@ async def test_nonprotected_message_relay_gate_raises_continues_routing(monkeypa
     def _sentinel_classify(_text):
         raise RuntimeError("__reached_normal_pipeline__")
 
-    monkeypatch.setattr("modules.payment_relay.maybe_relay_owner_payment", _raising_relay)
+    monkeypatch.setattr(pr, "maybe_relay_owner_payment", _raising_relay)
     monkeypatch.setattr(bp, "classify_intent", _sentinel_classify)
 
     with pytest.raises(RuntimeError, match="__reached_normal_pipeline__"):
@@ -140,7 +141,7 @@ async def test_non_claim_continues_normal_pipeline(monkeypatch):
     def _sentinel_classify(_text):
         raise RuntimeError("__reached_normal_pipeline__")
 
-    monkeypatch.setattr("modules.payment_relay.maybe_relay_owner_payment", _fake_relay)
+    monkeypatch.setattr(pr, "maybe_relay_owner_payment", _fake_relay)
     monkeypatch.setattr(bp, "classify_intent", _sentinel_classify)
 
     with pytest.raises(RuntimeError, match="__reached_normal_pipeline__"):
