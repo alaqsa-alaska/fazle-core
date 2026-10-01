@@ -18,10 +18,13 @@ from typing import Any, Optional
 from app.database import execute, fetch_one, fetch_all, fetch_val, get_pool
 from app.error_log import record_error
 from modules.outbound_authorization import (
+    AuthorizationSnapshotError,
     QueueRevalidationResult,
     QueueAuthorizationSnapshotRecord,
+    capture_authorization_snapshot,
     issue_transport_authorization,
     is_transport_authorized,
+    load_current_authorization_evidence,
     revalidate_queued_outbound,
     snapshot_from_queue_row,
 )
@@ -60,6 +63,55 @@ def _meta_outbound_log(event: str, *, source_bridge: str, **fields: Any) -> None
     parts = [f"event={event}", f"channel={source_bridge}"]
     parts += [f"{k}={v}" for k, v in fields.items() if v not in (None, "")]
     log.info("[META_EVENT] " + " ".join(parts))
+
+
+async def _capture_customer_authorization_snapshot(
+    recipient: str, source_bridge: str, purpose: Optional[str]
+) -> Optional[QueueAuthorizationSnapshotRecord]:
+    """Best-effort capture of the current authorization context for an
+    AI-generated customer reply (purposes ``customer-reply:*``).
+
+    This centralizes the capture that modules.social_auto_reply.send_queue used
+    inline, so every customer-reply enqueue site (Meta recruitment/messaging
+    and the bridge AIs) is uniformly covered. Only ``customer-reply:*``
+    purposes are captured; admin, protected, and system purposes keep their
+    legacy behavior and the existing callers/tests are unaffected.
+
+    Capture is best-effort and never raises out of enqueue(): on any failure
+    (unverified/ambiguous/missing identity, no matching scoped role, active
+    hold, domain disabled, or lookup error) the enqueue falls back to a legacy
+    row, which sweep revalidation still denies. This preserves the fail-closed
+    no-send invariant and enqueue()'s existing None/draft contract.
+    """
+    if not purpose or not str(purpose).startswith("customer-reply:"):
+        return None
+    domain = str(purpose).split(":", 1)[1]
+    row = {
+        "recipient": recipient,
+        "source_bridge": source_bridge,
+        "purpose": str(purpose),
+        "meta_json": "{}",
+    }
+    try:
+        async with get_pool().acquire() as conn:
+            evidence = await load_current_authorization_evidence(
+                conn, row,
+                channel_identifier=source_bridge,
+                conversation_key=recipient,
+                domain=domain,
+                scope_type="global",
+                scope_key=None,
+                global_outbound_enabled=True,
+                purpose_authorized=False,
+            )
+            return capture_authorization_snapshot(evidence)
+    except AuthorizationSnapshotError:
+        log.info("[OUTBOUND_ENQUEUE] customer authorization capture refused "
+                 "recipient=%s purpose=%s — enqueuing as legacy", recipient, purpose)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[OUTBOUND_ENQUEUE] customer snapshot capture error: %s", exc)
+        return None
 
 
 async def enqueue(
@@ -120,6 +172,11 @@ async def enqueue(
             )
     except Exception as _phase7_exc:  # noqa: BLE001
         log.debug("[OUTBOUND_PHASE7] similar-reply check skipped (non-fatal): %s", _phase7_exc)
+
+    if authorization is None:
+        authorization = await _capture_customer_authorization_snapshot(
+            recipient, source_bridge, purpose,
+        )
 
     meta_json = json.dumps(meta or {})
     try:

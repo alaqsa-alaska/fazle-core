@@ -9,6 +9,7 @@ import pytest
 from modules.identity_role_authorization import (
     ALLOWED,
     ALLOWED_PROTECTED_PURPOSE,
+    AUTHORIZATION_LOOKUP_FAILED,
     CONTEXT_MISMATCH,
     CONVERSATION_HOLD,
     CUSTOMER_AUTO_REPLY,
@@ -37,7 +38,8 @@ MIGRATION_SQL = (
 ).read_text(encoding="utf-8")
 
 
-async def _settings(conn, *, recruitment=True, bridge1=None, bridge3=None, phone=None):
+async def _settings(conn, *, recruitment=True, bridge1=None, bridge3=None, phone=None,
+                    extra=None):
     await conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fazle_runtime_settings (
@@ -57,6 +59,8 @@ async def _settings(conn, *, recruitment=True, bridge1=None, bridge3=None, phone
         values["bridge3.pairing_state"] = bridge3
     if phone is not None:
         values[f"phone_block.{phone}"] = "true"
+    if extra:
+        values.update(extra)
     for key, value in values.items():
         await conn.execute(
             """
@@ -68,7 +72,7 @@ async def _settings(conn, *, recruitment=True, bridge1=None, bridge3=None, phone
         )
 
 
-async def _subject(conn, number: int, roles=("candidate",)):
+async def _subject(conn, number: int, roles=("candidate",), domain="recruitment"):
     phone = f"8801707{number:04d}"
     identity_id = await conn.fetchval(
         """
@@ -100,11 +104,11 @@ async def _subject(conn, number: int, roles=("candidate",)):
                 INSERT INTO fazle_identity_role_assignments
                     (identity_id, role_name, business_domain,
                      authorization_version_at_change, assignment_reason)
-                VALUES ($1, $2, 'recruitment', $3, 'ir2d1-test')
+                VALUES ($1, $2, $3, $4, 'ir2d1-test')
                 """,
-                identity_id, role_name, version,
+                identity_id, role_name, domain, version,
             )
-        grants.append(RoleGrant(role_name, frozenset({"recruitment"})))
+        grants.append(RoleGrant(role_name, frozenset({domain})))
     return identity_id, phone, version, tuple(grants)
 
 
@@ -528,3 +532,196 @@ async def test_fallback_revalidation_and_zero_transport_after_denial(test_db_poo
         deferred = await _revalidate(conn, queue_id)
         assert deferred.decision.reason_code == "queue_not_claimable"
         assert await conn.fetchval("SELECT attempts FROM fazle_outbound_queue WHERE id=$1", queue_id) == 1
+
+
+def _purpose(domain: str) -> str:
+    return f"customer-reply:{domain}"
+
+
+async def _auto_enqueue(test_db_pool, monkeypatch, phone, *, purpose, channel="bridge1",
+                        key="cust-key", meta=None):
+    from app import database
+    from modules import outbound
+    monkeypatch.setattr(database, "_pool", test_db_pool)
+    monkeypatch.setattr(outbound, "_pairing_held", AsyncMock(return_value=(False, "")))
+    return await outbound.enqueue(
+        phone, "synthetic reply", source_bridge=channel,
+        purpose=purpose, idempotency_key=key, meta=meta,
+    )
+
+
+@pytest.mark.asyncio
+async def test_customer_reply_capture_is_scoped_to_customer_reply_purposes():
+    """Routing guard: only 'customer-reply:*' purposes trigger an auto-capture.
+    Every other purpose must short-circuit to None without touching the pool,
+    so admin / protected / system / legacy sends keep their existing contract."""
+    from modules.outbound import _capture_customer_authorization_snapshot
+    assert await _capture_customer_authorization_snapshot("x", "bridge1", "system_alert") is None
+    assert await _capture_customer_authorization_snapshot("x", "bridge1", "protected_admin_alert") is None
+    assert await _capture_customer_authorization_snapshot("x", "bridge1", CUSTOMER_AUTO_REPLY) is None
+    assert await _capture_customer_authorization_snapshot("x", "bridge1", None) is None
+
+
+@pytest.mark.asyncio
+async def test_recruitment_authorized_customer_reply_captures_snapshot(
+    test_db_pool, monkeypatch,
+):
+    async with test_db_pool.acquire() as conn:
+        await conn.execute(MIGRATION_SQL)
+        identity_id, phone, version, _grants = await _subject(conn, 1, ("candidate",))
+        await _settings(conn)
+
+        qid = await _auto_enqueue(test_db_pool, monkeypatch, phone,
+                                  purpose=_purpose("recruitment"), key="cust-recruit")
+        assert qid is not None
+        row = await conn.fetchrow(
+            """
+            SELECT authorization_identity_id, authorization_domain, authorization_version,
+                   authorization_conversation_key, authorization_role_names, status
+              FROM fazle_outbound_queue WHERE id=$1
+            """,
+            qid,
+        )
+        assert row["authorization_identity_id"] == identity_id
+        assert row["authorization_domain"] == "recruitment"
+        assert row["authorization_version"] == version
+        assert row["authorization_conversation_key"] == phone
+        assert json.loads(row["authorization_role_names"]) == ["candidate"]
+        assert row["status"] == "pending"
+
+        res = await _revalidate(conn, qid, conversation=phone, domain="recruitment")
+        assert res.decision.allowed and res.decision.reason_code == ALLOWED
+
+
+@pytest.mark.asyncio
+async def test_employee_authorized_customer_reply_captures_snapshot(
+    test_db_pool, monkeypatch,
+):
+    async with test_db_pool.acquire() as conn:
+        await conn.execute(MIGRATION_SQL)
+        identity_id, phone, version, _grants = await _subject(
+            conn, 2, ("candidate",), domain="employee",
+        )
+        await _settings(conn, extra={"auto_reply.employee": "true"})
+
+        qid = await _auto_enqueue(test_db_pool, monkeypatch, phone,
+                                  purpose=_purpose("employee"), key="cust-employee")
+        assert qid is not None
+        row = await conn.fetchrow(
+            "SELECT authorization_identity_id, authorization_domain FROM fazle_outbound_queue WHERE id=$1",
+            qid,
+        )
+        assert row["authorization_identity_id"] == identity_id
+        assert row["authorization_domain"] == "employee"
+
+        res = await _revalidate(conn, qid, conversation=phone, domain="employee")
+        assert res.decision.allowed and res.decision.reason_code == ALLOWED
+
+
+@pytest.mark.asyncio
+async def test_unlinked_customer_reply_falls_back_to_legacy_and_denied(
+    test_db_pool, monkeypatch,
+):
+    async with test_db_pool.acquire() as conn:
+        await conn.execute(MIGRATION_SQL)
+        await _settings(conn)
+        unlinked_phone = "88017070099"
+
+        qid = await _auto_enqueue(test_db_pool, monkeypatch, unlinked_phone,
+                                  purpose=_purpose("recruitment"), key="cust-unlinked")
+        assert qid is not None
+        row = await conn.fetchrow(
+            "SELECT authorization_identity_id FROM fazle_outbound_queue WHERE id=$1", qid
+        )
+        assert row["authorization_identity_id"] is None
+
+        res = await _revalidate(conn, qid, conversation=unlinked_phone, domain="recruitment")
+        assert not res.decision.allowed
+        # An unlinked customer must never be eligible: either the identity
+        # cannot be resolved (authorization_lookup_failed) or the row is a
+        # legacy row (legacy_queue_context). Both are manual-review denials;
+        # the exact code depends on whether the phone maps to any identity.
+        assert res.decision.reason_code in (LEGACY_QUEUE_CONTEXT, AUTHORIZATION_LOOKUP_FAILED)
+        assert res.decision.manual_review_required is True
+
+
+@pytest.mark.asyncio
+async def test_customer_reply_for_wrong_domain_role_is_denied(
+    test_db_pool, monkeypatch,
+):
+    async with test_db_pool.acquire() as conn:
+        await conn.execute(MIGRATION_SQL)
+        # Identity has a role scoped to the 'employee' domain only.
+        identity_id, phone, version, grants = await _subject(
+            conn, 4, ("candidate",), domain="employee",
+        )
+        await _settings(conn, extra={"auto_reply.employee": "true"})
+
+        # Auto-capture targets the 'recruitment' domain: the employee-scoped role
+        # does not match, capture refuses, and the row lands as legacy.
+        qid = await _auto_enqueue(test_db_pool, monkeypatch, phone,
+                                  purpose=_purpose("recruitment"), key="cust-wrong-domain")
+        assert qid is not None
+        row = await conn.fetchrow(
+            "SELECT authorization_identity_id FROM fazle_outbound_queue WHERE id=$1", qid
+        )
+        assert row["authorization_identity_id"] is None
+        denied = await _revalidate(conn, qid, conversation=phone, domain="recruitment")
+        assert not denied.decision.allowed
+        assert denied.decision.reason_code == LEGACY_QUEUE_CONTEXT
+
+        # Conversely, an employee snapshot is bound to the employee domain:
+        # revalidating that same row under 'recruitment' is a context mismatch.
+        employee_evidence = _evidence(
+            identity_id, phone, version, grants,
+            conversation="conversation-employee", domain="employee",
+            purpose=_purpose("employee"),
+        )
+        snapshot = capture_authorization_snapshot(employee_evidence)
+        bound_id = await test_db_pool.fetchval(
+            """
+            INSERT INTO fazle_outbound_queue
+                (recipient, body, source_bridge, purpose, idempotency_key, meta_json,
+                 authorization_identity_id, authorization_version, authorization_conversation_key,
+                 authorization_domain, authorization_scope_type, authorization_scope_key,
+                 authorization_role_names, authorization_captured_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
+               RETURNING id
+            """,
+            phone, "synthetic reply", "bridge1", _purpose("employee"), "cust-employee-bound",
+            "{}", snapshot.identity_id, snapshot.authorization_version,
+            snapshot.conversation_key, snapshot.domain, snapshot.scope_type,
+            snapshot.scope_key, json.dumps(list(snapshot.role_names)), snapshot.captured_at,
+        )
+        mismatch = await _revalidate(
+            conn, bound_id, conversation="conversation-employee", domain="recruitment",
+        )
+        assert mismatch.decision.reason_code == CONTEXT_MISMATCH
+        assert not mismatch.decision.allowed
+
+
+@pytest.mark.asyncio
+async def test_internal_staff_identity_cannot_enter_customer_flow(
+    test_db_pool, monkeypatch,
+):
+    async with test_db_pool.acquire() as conn:
+        await conn.execute(MIGRATION_SQL)
+        # A verified internal/staff identity whose only role is non-customer
+        # ('internal_staff' in the 'internal' domain) must not be able to
+        # capture a customer-reply authorization snapshot.
+        identity_id, phone, version, _grants = await _subject(
+            conn, 5, ("internal_staff",), domain="internal",
+        )
+        await _settings(conn)
+
+        qid = await _auto_enqueue(test_db_pool, monkeypatch, phone,
+                                  purpose=_purpose("recruitment"), key="cust-internal")
+        assert qid is not None
+        row = await conn.fetchrow(
+            "SELECT authorization_identity_id FROM fazle_outbound_queue WHERE id=$1", qid
+        )
+        assert row["authorization_identity_id"] is None
+
+        res = await _revalidate(conn, qid, conversation=phone, domain="recruitment")
+        assert not res.decision.allowed
+        assert res.decision.reason_code == LEGACY_QUEUE_CONTEXT
