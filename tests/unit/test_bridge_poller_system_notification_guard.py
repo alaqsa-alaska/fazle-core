@@ -15,6 +15,12 @@ wbom_unmatched_confirmations (2026-07-19, source_message_id
 """
 from __future__ import annotations
 
+
+def _authorized():
+    from modules.identity_role_authorization import AuthorizationDecision
+    from modules.outbound_authorization import issue_transport_authorization
+    return issue_transport_authorization(AuthorizationDecision(True, "allowed", 1, False))
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -108,7 +114,7 @@ async def test_real_bridge_client_send_appends_nothing():
 
     client._set_send = _fake_set_send
 
-    await client.send_strict("8801700000000", "a genuine-looking notification body")
+    await client.send_strict("8801700000000", "a genuine-looking notification body", authorization=_authorized())
     assert captured["message"] == "a genuine-looking notification body"
 
 

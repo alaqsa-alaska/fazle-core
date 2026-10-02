@@ -1,0 +1,34 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R009",
+  "source_case_type": "A",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "pure_question (DOB is not a free-form age; clarify)",
+  "expected_intake_step_before": "age",
+  "expected_intake_fields_proposed": {
+    "age": null,
+    "dob": "31/12/1996"
+  },
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {
+    "age": "_looks_like_dob(text)=True -> age not extracted from DOB format"
+  },
+  "expected_should_advance_intake": false,
+  "expected_intake_step_after": "age",
+  "expected_questions": [
+    {
+      "topic": "age_value_to_use",
+      "must_answer_from_source_of_truth": false,
+      "evidence": "candidate gave DOB; clarify"
+    }
+  ],
+  "expected_should_answer_question": true,
+  "expected_needs_clarification": true,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": false,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "do NOT extract age=31 from DOB; ask for plain age value",
+  "phase_that_must_close_this": "B",
+  "reason_evidence": "EXPECTED: detect DOB format, refuse to parse as age, ask for the bare age value. Do NOT advance step."
+}

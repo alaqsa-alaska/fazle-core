@@ -1,0 +1,27 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R008",
+  "source_case_type": "A",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "pure_intake",
+  "expected_intake_step_before": "age",
+  "expected_intake_fields_proposed": {
+    "age": 30
+  },
+  "expected_intake_fields_accepted": {
+    "age": 30
+  },
+  "expected_intake_fields_rejected": {},
+  "expected_should_advance_intake": true,
+  "expected_intake_step_after": "area",
+  "expected_questions": [],
+  "expected_should_answer_question": false,
+  "expected_needs_clarification": false,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": false,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "extract age=30; advance step",
+  "phase_that_must_close_this": "B",
+  "reason_evidence": "EXPECTED: parser recognizes '৩০বছর' as age=30; intake advances to area; no question reply required."
+}

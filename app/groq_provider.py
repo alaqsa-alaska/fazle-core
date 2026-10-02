@@ -182,6 +182,50 @@ async def generate_recruitment_reply(
     return None
 
 
+async def decision_call(
+    *,
+    system_prompt: str,
+    user_payload: str,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
+    timeout: float = 12.0,
+    model: str | None = None,
+) -> Optional[str]:
+    """Raw Groq decision call. Returns raw model text or None on any
+    failure. Same shape as omniroute_provider.decision_call() — different
+    provider, identical contract. Used only via app/llm.decision_call().
+    Never raises."""
+    settings = get_settings()
+    if not settings.groq_api_key:
+        return None
+    use_model = model or settings.groq_model_name
+    t0 = time.monotonic()
+    async with _groq_sem:
+        try:
+            client = _make_client()
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=use_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    max_tokens=max(64, min(max_tokens, 1024)),
+                    temperature=max(0.0, min(temperature, 1.0)),
+                ),
+                timeout=timeout,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            log.info("[groq] decision_call OK latency=%dms model=%s", latency_ms, use_model)
+            return text or None
+        except (RateLimitError, APIError) as e:
+            log.warning("[groq] decision_call rate/API error: %s", e)
+        except Exception as e:
+            log.warning("[groq] decision_call error: %s: %s", type(e).__name__, e)
+    return None
+
+
 async def generate_chat_reply(
     question: str,
     context: str,

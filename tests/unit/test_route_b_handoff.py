@@ -409,7 +409,10 @@ async def test_ollama_failure_produces_safe_response_not_dropped(monkeypatch):
 
     assert reply == FALLBACK_REPLY_TEXT  # never empty, never dropped
     assert admin_note == failure_mock.return_value
-    failure_mock.assert_awaited_once_with("8801700000098", "bridge1", "msg-outage-1")
+    failure_mock.assert_awaited_once_with(
+        "8801700000098", "bridge1", "msg-outage-1",
+        sender_name="", sender_message="কেমন আছেন?",
+    )
 
 
 # ── 11. Feature flag off preserves the current baseline exactly ────────────────

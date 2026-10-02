@@ -148,6 +148,59 @@ async def generate_recruitment_reply(
     return None
 
 
+# ── Raw decision-call shape (2026-08-25, WS1 of the Hermes Owner-Authority
+# recovery pass) ──────────────────────────────────────────────────────
+# Thin wrapper around the SAME OmniRoute client every other call in this
+# module uses, but accepts a caller-supplied system+user prompt instead
+# of building one via shared.reply_policy. Returns raw model text (NOT a
+# pre-parsed string), so the caller (modules.recruitment_turn_decision
+# .decide) retains full control over JSON parsing, validation, and the
+# fail-closed AMBIGUOUS fallback. Used only via app/llm.decision_call(),
+# which walks the same provider chain as generate_reply()/generate_
+# recruitment_reply() so the existing provider-flexibility rule (any
+# configured model, not a hardcoded one) is preserved.
+async def decision_call(
+    *,
+    system_prompt: str,
+    user_payload: str,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
+    timeout: float = 12.0,
+) -> Optional[str]:
+    """Raw OmniRoute decision call. Returns raw model text or None on any
+    failure. Never raises; never logs the prompt body to the DB (caller
+    is responsible for any decision-prompt logging)."""
+    settings = get_settings()
+    if not settings.omniroute_api_key:
+        return None
+    model = settings.omniroute_model_name
+    t0 = time.monotonic()
+    async with _omniroute_sem:
+        try:
+            client = _make_client()
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    max_tokens=max(64, min(max_tokens, 1024)),
+                    temperature=max(0.0, min(temperature, 1.0)),
+                ),
+                timeout=timeout,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            log.info("[omniroute] decision_call OK latency=%dms model=%s", latency_ms, model)
+            return text or None
+        except (RateLimitError, APIError) as e:
+            log.warning("[omniroute] decision_call rate/API error: %s", e)
+        except Exception as e:
+            log.warning("[omniroute] decision_call error: %s: %s", type(e).__name__, e)
+    return None
+
+
 async def check_health() -> dict:
     settings = get_settings()
     if not settings.omniroute_api_key:

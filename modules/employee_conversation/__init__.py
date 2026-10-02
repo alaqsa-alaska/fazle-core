@@ -1098,6 +1098,52 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ── Task 13 (2026-08-22): identity-clarification helper ───────────────────────
+# When hermes_dispatch.semantic_gate returns no_match with rationale
+# 'identity_unresolved' for an employee-context question, message_router
+# routes here so the existing resolve_employee_identity() pipeline asks
+# for name/known-mobile/duty BEFORE any financial disclosure. Reuses the
+# existing clarification logic; this wrapper exists so the audit hook is
+# explicit and a single import surface in message_router.
+
+async def task13_handle_unresolved_employee_question(
+    phone: str,
+    text: str,
+    source: str,
+) -> tuple[str, Optional[dict]]:
+    """Identity-unresolved + semantic 'employee_conversation' branch.
+
+    NEVER discloses salary / advance / release / private employee data.
+    Invokes the existing resolve_employee_identity() so the worker asks
+    for name / known-mobile / duty / project evidence safely.
+    """
+    log.info(
+        "[ec/task13] unresolved employee question phone=%s source=%s",
+        phone[-4:] if phone else "?", source,
+    )
+    identity = await resolve_employee_identity(phone)
+    if identity.get("employee_id"):
+        # Clarification successfully resolved — defer to the existing
+        # payment-request pipeline so verification/confirmation lifecycle
+        # continues to be owned by start_employee_conversation().
+        return await handle_employee_payment_request(
+            phone=phone, text=text, source=source,
+            employee_id=identity.get("employee_id"),
+        )
+    # Identity still unresolved — return a clarification reply with NO
+    # private financial data. The caller (message_router) sends this
+    # reply verbatim; no draft, no DB write.
+    clarification = (
+        "আপনার পরিচয় নিশ্চিত করতে হবে — আপনার নাম, নিবন্ধিত মোবাইল নম্বর "
+        "এবং পোস্ট/ডিউটির তথ্য দিন।"
+    )
+    log.info(
+        "[ec/task13] clarification sent, no disclosure phone=%s",
+        phone[-4:] if phone else "?",
+    )
+    return clarification, None
+
+
 # ── Public entry point (called by message_router) ─────────────────────────────
 
 async def handle_employee_payment_request(
@@ -1140,3 +1186,228 @@ async def handle_employee_payment_request(
 
     identity = await resolve_employee_identity(phone, employee_id=employee_id)
     return await start_employee_conversation(phone, text, source, purpose, identity)
+
+
+# ── Phase 5 (2026-08-26): Employee informational query handler ───────────────
+# Reusable handler for salary_query / payment_due / "টাকা কবে" / "আমার
+# পাওনা আছে?" type questions. Builds verified employee payroll context,
+# enriches with general salary-policy KB (RAG), and calls Hermes with the
+# SAME Tier-15 confidentiality net the legacy §10 chain already applies.
+#
+# HARD GUARANTEES (mirrors handle_employee_payment_request()'s contract):
+#   - NEVER calls create_transaction(), _upsert_ledger(), accounting_worker(),
+#     or any financial-write function.
+#   - NEVER mutates payroll, ledger, balance, or attendance.
+#   - Returns a conversational reply (string) + admin_note (None) only.
+#   - On any failure: returns a safe clarification / fallback, never
+#     fabricates salary figures or payment dates that aren't in the
+#     authoritative payroll summary.
+#   - Privacy: db_ctx is scoped to the resolved emp_id (server-resolved,
+#     not user-supplied); the Tier-15 net strips any other phone/credential
+#     from the reply before it leaves.
+#
+# Reused by BOTH:
+#   - message_router §10 legacy chain (no behavior change for keyword path)
+#   - message_router _task13_authoritative_dispatch() (Phase 5, semantic
+#     employee path; same logic, same guarantees, called when
+#     task13_employee_authoritative=ON and intent in salary_query/payment_due).
+async def handle_employee_informational_query(
+    phone: str,
+    text: str,
+    source: str,
+    emp_id: int,
+    intent: str = "salary_query",
+) -> tuple[str, Optional[dict]]:
+    """Handle salary_query / payment_due / "টাকা কবে পাব?" / "আমার পাওনা আছে?"
+    questions for a verified employee.
+
+    Builds authoritative payroll context from get_payroll_summary(emp_id),
+    enriches with general salary-policy KB via RAG (fail-safe if RAG is
+    slow/unavailable), then either calls Hermes (hermes_customer_employee
+    flag ON) or falls through to the unchanged app.llm chain.
+
+    The reply is cleaned + passed through enforce_general_reply_confidentiality
+    (Tier 15 net) which permits the sender's own phone number, blocks
+    credential-like output and any OTHER phone number.
+
+    Returns (reply, None) on success or safe clarification.
+    """
+    try:
+        from modules.payroll_logic import get_payroll_summary, format_payroll_context
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ec/phase5] payroll_logic import failed: %s", exc)
+        return (
+            "এই মুহূর্তে বেতন/পে�েন্ট তথ্য পেতে অনুগ্রহ করে অ�িসে যোগাযোগ করুন।",
+            None,
+        )
+
+    try:
+        payroll = await get_payroll_summary(emp_id)
+        db_ctx = format_payroll_context(payroll)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ec/phase5] payroll summary failed emp=%s: %s", emp_id, exc)
+        db_ctx = ""
+
+    # KB / RAG enrichment — fail-safe. Adds general salary-policy content
+    # (payment-date rule, attendance condition, deductions) so the LLM has
+    # policy context beyond this employee's own row.
+    try:
+        from modules.rag import safe_search as _rag_search
+        _rag_hits = await _rag_search(text, k=3, role="employee")
+        if _rag_hits:
+            _rag_lines = [
+                f"- {h.get('title', '')}: {(h.get('text') or '').strip()[:300]}"
+                for h in _rag_hits
+                if (h.get("text") or "").strip()
+            ]
+            if _rag_lines:
+                db_ctx = (db_ctx + "\n\nKB Context:\n" + "\n".join(_rag_lines)).strip()
+    except Exception as _rag_err:  # noqa: BLE001 — RAG is best-effort
+        log.debug("[ec/phase5] rag enrichment skipped: %s", _rag_err)
+
+    # Build history (last few turns, bidirectional). Same source as §10.
+    try:
+        from modules.message_router import get_recent_history
+        history_lines = await get_recent_history(phone, limit=5)
+        history = "\n".join(history_lines)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[ec/phase5] history fetch failed: %s", exc)
+        history = ""
+
+    reply: Optional[str] = None
+
+    # Try Hermes first when the customer-dispatch flag is on.
+    try:
+        from modules.preflight_guard import is_feature_active
+        if is_feature_active("hermes_customer_employee", default=False):
+            from modules.hermes_dispatch import generate_reply as _hermes_generate_reply
+            reply = await _hermes_generate_reply(
+                text, intent, db_ctx, history=history, role="employee",
+                source=source, sender_phone=phone,
+            )
+    except Exception as exc:  # noqa: BLE001 — never block fallback
+        log.warning("[ec/phase5] hermes path failed: %s", exc)
+
+    # Fallback: legacy app.llm chain (unchanged).
+    if not reply:
+        try:
+            from app import llm as _ai
+            reply = await _ai.generate_reply(
+                text, intent, db_ctx, history=history, role="employee", source=source,
+            )
+        except Exception as exc:  # noqa: BLE001 — must always produce a reply
+            log.warning("[ec/phase5] ai.generate_reply failed: %s", exc)
+            reply = ""
+
+    # Tier-15 confidentiality net: strip credential-like output, echoed
+    # prompt sections, and any non-sender phone number.
+    try:
+        from shared.reply_policy import (
+            clean_general_reply as _clean_reply,
+            enforce_general_reply_confidentiality as _enforce_confidentiality,
+        )
+        reply = _enforce_confidentiality(_clean_reply(reply), sender_phone=phone)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[ec/phase5] confidentiality net failed: %s", exc)
+
+    if not reply or not reply.strip():
+        # Safe clarification — never fabricate figures.
+        reply = (
+            "এই মুহূর্তে নির্দিষ্ট বেতন/পেমেন্ট তথ্য যাচাই করে জানাতে পারছি না। "
+            "অনুগ্রহ করে অফিসে যোগা�োগ করুন।"
+        )
+
+    return reply, None
+
+
+# ── Phase 6 (2026-08-26): Short-context intent refinement ─────────────────────
+# For very short inbound texts (হ্যাঁ / না / ৩২ / চট্�গ্রাম / আগেই বলেছি /
+# ওটাই / "আগেরটার কী হলো?"-class follow-ups), the upstream intent
+# classifier often returns "greeting", "chitchat", or "unknown" — because
+# there's not enough surface signal in 1-3 chars to disambiguate. Without
+# refinement, those short replies either fall through to the keyword
+# scanner (potentially starting a new ec_trigger session) or get routed
+# without context.
+#
+# This helper reads the existing Sprint-3A conversation session for the
+# phone (if any) and the recent chat history. If there's an open session
+# awaiting an answer, the short reply is treated as that answer. Otherwise
+# the helper returns raw_intent unchanged — fail-open, no behavior change
+# for non-short messages or when no session exists.
+#
+# HARD GUARANTEES:
+#   - Read-only (one DB read + a small history peek).
+#   - NEVER calls create_transaction() / _upsert_ledger() / financial-write.
+#   - Falls closed to raw_intent on any DB error.
+#   - Never blocks. Always returns a string.
+#
+# Reuse (no new modules, no new flags):
+#   - modules.employee_conversation.get_conversation_session (already there)
+#   - modules.message_router.get_recent_history (already there)
+#
+# Scope: only affects intent dispatch. The actual reply still goes through
+# Phase 5's handle_employee_informational_query (for salary_query/payment_due)
+# or ec_handle_payment_request (for other intents), with the FULL
+# db_ctx/RAG/history/Tier-15 confidentiality scaffolding intact.
+_SHORT_INTENT_OVERRIDE = "confirmation"
+# Bangla digit codepoints U+09E6..U+09EF (০..�). Listed explicitly so
+# the set survives copy/paste through any encoding layer.
+_BN_DIGIT_CHARS = frozenset("০১২৩৪৫৬৭৮৯")
+_MAX_SHORT_LEN = 16  # covers হ্যাঁ / না / ৩২ / চট্টগ্রাম / ওটাই / আগেই বলেছি / সে�া হয়ে গেছে
+# (counted by Python len() = codepoints; Bangla combining marks inflate the count).
+
+
+def _is_short_reply(text: str) -> bool:
+    """True when text is a short reply that almost certainly needs prior
+    context to interpret (হ্যাঁ / না / ৩২ / চট্�গ্রাম / ওটাই etc.)"""
+    s = (text or "").strip()
+    if not s:
+        return False
+    if len(s) > _MAX_SHORT_LEN:
+        return False
+    # All-Bengali-digit strings (or digits + minor punctuation/whitespace)
+    # are short numeric answers.
+    stripped = s.rstrip("।.?!, ")
+    if stripped and all(c in _BN_DIGIT_CHARS for c in stripped):
+        return True
+    # Canonical short-reply words + "I already said" class.
+    short_words = {
+        "হ্যাঁ", "হ্যা", "না", "নেই",
+        "আগেই", "ওটাই", "ওইটা", "সেটাই",
+        "আগে", "আগেরটা", "আগেরটার",
+    }
+    # Strip trailing punctuation and check the core word.
+    core = s.rstrip("।.?! ,")
+    if core in short_words:
+        return True
+    # "I already said X" class — short Bangla sentence that begins with
+    # আগেই / ওটাই / সেটা and references prior content.
+    if any(core.startswith(p + " ") for p in ("আগেই", "ওটাই", "সেটা", "ওই", "আগের")):
+        return True
+    return False
+
+
+async def refine_short_intent(phone: str, text: str, raw_intent: str) -> str:
+    """If the inbound is a short reply and there's an open Sprint-3A session
+    awaiting an answer for this phone, override raw_intent with
+    "confirmation" so the existing conversational handler can interpret the
+    short reply in the context of the pending question.
+
+    Otherwise returns raw_intent unchanged. Pure read-only, no DB writes,
+    no behavior change for non-short messages or when no session exists.
+    """
+    if not _is_short_reply(text):
+        return raw_intent
+    try:
+        session = await get_conversation_session(phone)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        log.debug("[ec/phase6] session lookup failed (fail closed): %s", exc)
+        return raw_intent
+    if not session:
+        return raw_intent
+    # Session exists and short reply — treat as confirmation against the
+    # pending step. The downstream ec_handle_payment_request already has
+    # full session context + history to interpret the meaning.
+    if raw_intent in ("greeting", "chitchat", "unknown", ""):
+        return _SHORT_INTENT_OVERRIDE
+    return raw_intent

@@ -30,12 +30,16 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from app.config import get_settings
 from app.database import execute, fetch_one, fetch_all, fetch_val
 from shared.draft_reply import create_draft_reply
+from shared.sqlite_compat import has_column
+from shared.media_text import has_meaningful_text, is_media_placeholder
+from shared.system_message import is_automated_system_message
 from app.bridge import get_bridge1, get_bridge2, get_bridge3
 from modules.message_router import (
     process_message,
@@ -159,6 +163,96 @@ async def _set_cursor(bridge: str, ts: datetime):
         """,
         bridge, ts,
     )
+
+
+# ── Explicit pairing state machine ───────────────────────────────────────────
+# BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02 + owner amendment 2026-09-02:
+# a TIMESTAMP MUST NEVER AUTOMATICALLY AUTHORISE OUTBOUND SENDING. A freshly
+# (re)paired bridge moves through explicit, owner-advanced states — there is no
+# auto-expiry. Stored as the sanctioned runtime setting `<bridge>.pairing_state`
+# in fazle_runtime_settings (set only via the api-key-gated
+# POST /api/wa/bridge/{bridge}/pairing-state endpoint).
+PAIRING_UNPAIRED = "UNPAIRED"
+PAIRING_HISTORY_SYNC_QUARANTINE = "HISTORY_SYNC_QUARANTINE"
+PAIRING_LIVE_INBOUND_VERIFIED = "LIVE_INBOUND_VERIFIED"
+PAIRING_OUTBOUND_OWNER_APPROVED = "OUTBOUND_OWNER_APPROVED"
+PAIRING_STATES = (
+    PAIRING_UNPAIRED,
+    PAIRING_HISTORY_SYNC_QUARANTINE,
+    PAIRING_LIVE_INBOUND_VERIFIED,
+    PAIRING_OUTBOUND_OWNER_APPROVED,
+)
+# The ONLY state that authorises outbound.
+_PAIRING_STATE_ALLOWS_SEND = frozenset({PAIRING_OUTBOUND_OWNER_APPROVED})
+
+# FAIL-CLOSED bridges (owner directive 2026-09-02): for these, ANY ambiguity in
+# the pairing state — absent, empty, whitespace, malformed, unknown value, a
+# legacy ISO timestamp, settings storage unavailable, a read exception — MUST
+# hold outbound. Only the exact literal "OUTBOUND_OWNER_APPROVED" releases.
+# bridge1 / bridge2 are NOT in this set: they never entered the guarded-pairing
+# flow, so an unset state keeps their existing behaviour unchanged.
+_PAIRING_FAIL_CLOSED_BRIDGES = frozenset({"bridge3"})
+
+# Sentinel returned by _bridge_pairing_state() when the value could not be read
+# at all (storage down / exception). Distinct from "" (row simply absent) only
+# for logging; both hold a fail-closed bridge.
+_PAIRING_READ_FAILED = "\x00READ_FAILED"
+
+
+async def _bridge_pairing_state(bridge: str) -> str:
+    """Return the raw `<bridge>.pairing_state` string, "" if the row is absent,
+    or _PAIRING_READ_FAILED if the settings store could not be read.
+
+    This function does NOT decide policy — _bridge_outbound_held() does. It only
+    reports what storage says (or that storage failed). For a fail-closed bridge
+    every one of {"", unknown, malformed, timestamp, _PAIRING_READ_FAILED} holds.
+    """
+    try:
+        from modules.wa_chat_frontend import get_runtime_setting
+        # get_runtime_setting swallows its own errors and returns the default,
+        # so a returned default is indistinguishable from an absent row here —
+        # which is fine: a fail-closed bridge holds on either. We still guard
+        # this call for anything it might not catch (import error, etc.).
+        raw = await get_runtime_setting(f"{bridge}.pairing_state", "")
+        return (raw or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[pairing_state] %s.pairing_state unreadable (%s) — FAIL-CLOSED bridges hold",
+            bridge, exc,
+        )
+        return _PAIRING_READ_FAILED
+
+
+async def _bridge_outbound_held(bridge: str) -> tuple[bool, str]:
+    """(held, state_for_logging).
+
+    `held` True ⇒ this bridge is NON-sending: inbound is persisted but not
+    routed, no interactive auto-reply, no outbound enqueue, no queue dispatch,
+    no recovery-sweep live send. No timestamp is consulted anywhere — release
+    is only ever the explicit owner state change to OUTBOUND_OWNER_APPROVED.
+
+    * FAIL-CLOSED bridge (bridge3): held unless the stored value is EXACTLY
+      "OUTBOUND_OWNER_APPROVED". Absent / empty / malformed / unknown / legacy
+      timestamp / storage-unavailable / read-exception ⇒ held.
+    * Any other bridge (bridge1/bridge2): unset ⇒ NOT held (existing behaviour
+      preserved); a state that IS set holds unless it is OUTBOUND_OWNER_APPROVED.
+    """
+    state = await _bridge_pairing_state(bridge)
+
+    if bridge in _PAIRING_FAIL_CLOSED_BRIDGES:
+        held = state != PAIRING_OUTBOUND_OWNER_APPROVED
+        if state == _PAIRING_READ_FAILED:
+            label = "(read-failed→HELD)"
+        elif not state:
+            label = "(unset→HELD)"
+        else:
+            label = state
+        return (held, label)
+
+    # non-fail-closed bridges
+    if not state or state == _PAIRING_READ_FAILED:
+        return (False, "")
+    return (state not in _PAIRING_STATE_ALLOWS_SEND, state)
 
 
 async def _get_outgoing_cursor(bridge: str) -> datetime:
@@ -289,15 +383,52 @@ def _load_lid_map(whatsapp_db: str) -> dict[str, str]:
     return lid_map
 
 
+def _load_contact_names(whatsapp_db: str) -> dict[str, dict]:
+    """Load whatsmeow display-name hints (push/full/business) keyed by the
+    bare user-part of `their_jid`. Read-only, once per poll cycle — same
+    pattern as _load_lid_map. These are DISPLAY METADATA ONLY: a sender's
+    own chosen name, never identity authority. Missing table / logged-out
+    bridge → empty dict, and callers degrade gracefully."""
+    names: dict[str, dict] = {}
+    try:
+        con = sqlite3.connect(f"file:{whatsapp_db}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
+        rows = con.execute(
+            "SELECT their_jid, full_name, push_name, business_name FROM whatsmeow_contacts"
+        ).fetchall()
+        con.close()
+        for their_jid, full_name, push_name, business_name in rows:
+            key = str(their_jid or "").split(":")[0].split("@")[0]
+            if not key:
+                continue
+            names[key] = {
+                "full_name": (full_name or None),
+                "push_name": (push_name or None),
+                "business_name": (business_name or None),
+            }
+    except Exception as e:
+        log.debug(f"contact-name map load skipped ({whatsapp_db}): {e}")
+    return names
+
+
 def _fetch_new_messages(
     messages_db: str,
     whatsapp_db: str,
     since_ts: datetime,
+    approved_group_jids: tuple = (),
 ) -> tuple[list[dict], datetime]:
     """
     Fetch inbound personal messages newer than since_ts from SQLite.
     Returns (messages, max_ts_seen).
     Runs synchronously — call via run_in_executor.
+
+    approved_group_jids (Stage E3, 2026-08-28): the blanket "@g.us
+    excluded" rule (Owner directive 2026-04-27, see this module's own
+    docstring) still applies to every group EXCEPT the explicit JIDs in
+    this tuple -- sourced only from modules.group_identity.
+    list_approved_group_jids() (business_label IS NOT NULL), never a
+    literal hand-typed here. Empty tuple (the default, and every caller
+    except _poll_bridge's own live call site) reproduces the exact prior
+    behavior byte-for-byte -- no group ever gets through.
     """
     messages: list[dict] = []
     max_ts = since_ts
@@ -310,47 +441,87 @@ def _fetch_new_messages(
         con = sqlite3.connect(f"file:{messages_db}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
         con.row_factory = sqlite3.Row
 
+        # `processed_text` is a legacy in-house OCR/STT column that is NOT part
+        # of the stock bridge schema. A store created by the current bridge
+        # binary (e.g. bridge1 after a re-pair) lacks it, while older
+        # bridge2/bridge3 stores still have it. Detect it per-DB and degrade to
+        # NULL rather than throwing `no such column` on every poll. Read-only.
+        _has_processed_text = has_column(con, "messages", "processed_text")
+        _pt_select = "processed_text" if _has_processed_text else "NULL AS processed_text"
+        _pt_where = "OR processed_text IS NOT NULL" if _has_processed_text else ""
+
+        # `from_history_sync` (bridge binary 2026-09-02+): 1 for rows written by
+        # whatsmeow's history-sync backfill on a fresh device link, 0 for live
+        # deliveries. Historical/imported messages are preserved in messages.db
+        # for search but MUST NOT enter live business routing — see
+        # docs/BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02.md (a re-pair replayed
+        # ~2,444 old messages and one was auto-answered). Schema-tolerant: a
+        # store from an older bridge binary lacks the column, in which case the
+        # filter is omitted (byte-identical to prior behaviour).
+        _has_hist_flag = has_column(con, "messages", "from_history_sync")
+        _hist_where = "AND COALESCE(from_history_sync, 0) = 0" if _has_hist_flag else ""
+
         # Normalize cursor boundary to UTC so bridge-local timezone offsets
         # cannot cause false "older/newer" comparisons in SQLite filtering.
         ts_utc = since_ts.astimezone(timezone.utc).replace(microsecond=0)
         ts_iso = ts_utc.isoformat(sep=" ")
 
+        _query_params: dict = {"since": ts_iso}
+        _group_exception_sql = "0"  # SQLite: always-false placeholder when no group is approved
+        if approved_group_jids:
+            _placeholders = []
+            for i, jid in enumerate(approved_group_jids):
+                key = f"approved_jid_{i}"
+                _query_params[key] = jid
+                _placeholders.append(f":{key}")
+            _group_exception_sql = f"chat_jid IN ({', '.join(_placeholders)})"
+
         rows = con.execute(
-            """
-            SELECT id, chat_jid, sender, content, timestamp, media_type, processed_text,
+            f"""
+            SELECT id, chat_jid, sender, content, timestamp, media_type, {_pt_select},
                    filename, url
             FROM messages
             WHERE is_from_me = 0
               AND datetime(timestamp) > datetime(:since)
+              {_hist_where}
               AND chat_jid NOT LIKE '%@newsletter'
               AND chat_jid != 'status@broadcast'
-              AND chat_jid NOT LIKE '%@g.us'
+              AND (chat_jid NOT LIKE '%@g.us' OR {_group_exception_sql})
               AND (media_type IS NULL
                    OR media_type NOT IN ('reaction', 'receipt', 'revoke', 'deleted', 'protocol'))
               AND (
                 content IS NOT NULL
-                OR processed_text IS NOT NULL
+                {_pt_where}
                 OR ((media_type IS NOT NULL) AND (filename IS NOT NULL OR url IS NOT NULL))
               )
             ORDER BY datetime(timestamp) ASC
             LIMIT 50
             """,
-            {"since": ts_iso},
+            _query_params,
         ).fetchall()
 
         # v1.0.2: visibility on what we filter out (groups/newsletters/status)
+        # Stage E3: an approved group is genuinely persisted, not skipped
+        # -- excluded from the "groups" skip count so this metric stays
+        # accurate (same _group_exception_sql/_query_params as the main
+        # query above).
         try:
+            _hist_count_sql = (
+                "SUM(CASE WHEN COALESCE(from_history_sync, 0) = 1 THEN 1 ELSE 0 END) AS history_sync"
+                if _has_hist_flag else "0 AS history_sync"
+            )
             skipped_row = con.execute(
-                """
+                f"""
                 SELECT
-                  SUM(CASE WHEN chat_jid LIKE '%@g.us' THEN 1 ELSE 0 END) AS groups,
+                  SUM(CASE WHEN chat_jid LIKE '%@g.us' AND NOT ({_group_exception_sql}) THEN 1 ELSE 0 END) AS groups,
                   SUM(CASE WHEN chat_jid LIKE '%@newsletter' THEN 1 ELSE 0 END) AS newsletters,
-                  SUM(CASE WHEN chat_jid = 'status@broadcast' THEN 1 ELSE 0 END) AS status
+                  SUM(CASE WHEN chat_jid = 'status@broadcast' THEN 1 ELSE 0 END) AS status,
+                  {_hist_count_sql}
                 FROM messages
                 WHERE is_from_me = 0
                   AND datetime(timestamp) > datetime(:since)
                 """,
-                {"since": ts_iso},
+                _query_params,
             ).fetchone()
             if skipped_row:
                 from modules import observability as _obs
@@ -364,11 +535,25 @@ def _fetch_new_messages(
                 if skipped_row["status"]:
                     _obs.inc("messages_skipped_total", value=float(skipped_row["status"]),
                              labels={"reason": "status", "db": bn})
+                if skipped_row["history_sync"]:
+                    _obs.inc("messages_skipped_total", value=float(skipped_row["history_sync"]),
+                             labels={"reason": "history_sync", "db": bn})
+                    log.info(
+                        "[history_sync_guard] db=%s excluded %s history-sync row(s) from routing "
+                        "(preserved in messages.db, never routed)",
+                        messages_db, skipped_row["history_sync"],
+                    )
         except Exception as _sk_err:
             log.debug(f"skipped-count query failed: {_sk_err}")
         con.close()
 
         lid_map = _load_lid_map(whatsapp_db)
+        # whatsmeow display-name hints — only loaded when Phase-2 enrichment
+        # is on, so a disabled flag adds zero per-cycle cost.
+        _p2_on = os.getenv("PHASE2_IDENTITY_RESOLVER_ENABLED", "false").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        contact_names = _load_contact_names(whatsapp_db) if _p2_on else {}
 
         for row in rows:
             msg = dict(row)
@@ -420,6 +605,12 @@ def _fetch_new_messages(
 
             msg["phone"] = phone
             msg["text"] = text
+            if contact_names:
+                _hint = contact_names.get(sender_lid) or {}
+                if _hint:
+                    msg["full_name"] = _hint.get("full_name")
+                    msg["push_name"] = _hint.get("push_name")
+                    msg["business_name"] = _hint.get("business_name")
             messages.append(msg)
 
         if bridge_tag == "bridge1" and (rows or unresolved_lid or skipped_no_text):
@@ -758,6 +949,14 @@ async def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
 
     Checks (in order):
       0. Live DB flag phone_block.{phone} (set via /api/wa/contacts/{phone}/block)
+      0.5. Authoritative Owner-managed contact group
+            (modules/owner_contact_registry.is_owner_managed_contact) --
+            2026-08-24 Owner directive. Phone is the runtime key; the CSV is
+            the SOLE source (no legacy contact group is consulted here).
+            Returns True for any phone in selected_contacts_normalized_unique.csv
+            regardless of display name. Protected business workflows
+            (Escort order parser, Accountant cash extraction, Recruitment
+            funnel intake) are NOT affected -- they run upstream of this gate.
       1. Phone is in DRAFT_ALWAYS_PHONES explicit list
       2. Identity role matches DRAFT_ALWAYS_ROLES (e.g. accountant, vip_client)
       3. Display name contains a DRAFT_ALWAYS_NAMES substring
@@ -766,6 +965,15 @@ async def _is_draft_always(phone: str, role: str, display_name: str) -> bool:
     try:
         from modules.wa_chat_frontend import get_runtime_setting
         if await get_runtime_setting(f"phone_block.{phone}", "false") == "true":
+            return True
+    except Exception:
+        pass
+    # Owner-managed contact group CSV gate (2026-08-24). Fail-open
+    # (returns False) if registry unavailable -- per Owner directive
+    # section 12, NEVER silently fall back to another contact group.
+    try:
+        from modules.owner_contact_registry import is_owner_managed_contact
+        if is_owner_managed_contact(phone):
             return True
     except Exception:
         pass
@@ -813,16 +1021,38 @@ async def _poll_bridge(config: dict):
     cursor = await _get_cursor(bridge_name)
     log.info(f"[{bridge_name}] Starting from cursor: {cursor.isoformat()}")
 
-    _poll_iter = 0  # tracks iterations for periodic send-gate re-check
-    _gate_check_every = max(1, _SEND_GATE_CHECK_INTERVAL // POLL_INTERVAL)
+    # 2026-08-28 (send-gate timing fix): this used to be an iteration-count
+    # gate (_poll_iter % _gate_check_every == 0), which assumed a roughly
+    # fixed wall-clock time per iteration. That assumption breaks under
+    # this same loop's own adaptive backoff (BRIDGE_POLL_MIN_S=1.0 busy ->
+    # BRIDGE_POLL_MAX_S=30.0 idle): during a quiet stretch, reaching
+    # _gate_check_every (=60) iterations could take up to ~30 minutes of
+    # real time -- six times longer than the intended, commented "every
+    # 5 min" -- silently stretching the window a bridge's send gate could
+    # sit "off" (send_strict() turns it off after every real send; this
+    # periodic check is the only thing that turns it back on between
+    # sends). Root-caused live: Bridge2's /api/send-status sat
+    # allowed=false for 18+ minutes with no bridge/session issue at all.
+    # Fix: track elapsed wall-clock time via time.monotonic() instead of
+    # iteration count -- the 300s intended interval is now the actual
+    # interval, regardless of how the adaptive backoff has stretched this
+    # iteration's own sleep. Adaptive polling itself (_sleep_s below) is
+    # completely unchanged.
+    _last_gate_check = time.monotonic()
     _sleep_s = BRIDGE_POLL_MIN_S
 
     while True:
         try:
             _had_activity = False
             loop = asyncio.get_event_loop()
+            # Stage E3: local import to avoid a circular top-level import
+            # (modules.group_identity itself imports from this module) --
+            # same deferred-import convention already used throughout this
+            # file for modules.escort/modules.identity_brain/etc.
+            from modules.group_identity import list_approved_group_jids
+            _approved_group_jids = tuple(await list_approved_group_jids())
             messages, new_cursor = await loop.run_in_executor(
-                None, _fetch_new_messages, messages_db, whatsapp_db, cursor
+                None, _fetch_new_messages, messages_db, whatsapp_db, cursor, _approved_group_jids
             )
 
             if messages:
@@ -832,6 +1062,17 @@ async def _poll_bridge(config: dict):
             dedup_skipped = 0
             inbound_saved = 0
             unresolved_router_skipped = 0
+            group_read_index_saved = 0  # Stage E3: approved-group messages, persisted, never routed
+            media_unprocessed_skipped = 0  # bare [media:*] placeholder, no caption/OCR/STT — never routed
+            quarantine_persist_only = 0  # pairing-state hold: persisted, never routed
+            f6_system_msg_persist_only = 0  # automated OTP/system msg: persisted, never routed
+
+            # Pairing-state hold (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02, owner
+            # amendment): computed once per cycle. Held for every set
+            # `<bridge>.pairing_state` except OUTBOUND_OWNER_APPROVED — no
+            # timestamp, release is only ever an explicit owner action. While
+            # held, every inbound this cycle is persisted but not routed.
+            _held, _pair_state = await _bridge_outbound_held(bridge_name)
 
             for msg in messages:
                 msg_id: str = msg["id"]
@@ -844,125 +1085,227 @@ async def _poll_bridge(config: dict):
                     continue
 
                 _extracted_text = ""  # filled by media processors below; stored in extracted_text column
+                # 2026-08-25 recovery-pass (cf_W001 narrow mitigation): set
+                # True only when `text` below ends up being raw OCR/STT
+                # output that couldn't be classified as a known slip/
+                # document type (i.e. it falls through to general routing
+                # instead of being handled by its own dedicated, already-
+                # safe branch). See process_message()'s docstring.
+                _is_extracted_media = False
+                # True only when a bare "[media:*]" placeholder message had its
+                # file successfully fetched from the bridge via /api/download
+                # (BRIDGE_MEDIA_ACQUISITION_ENABLED). The extraction blocks
+                # below then run against the now-present file exactly as they
+                # would for a store that already had the media on disk.
+                _acquired = False
                 core_message_id = await _save_raw_core_copy(bridge_name, msg, phone, text)
 
-                # Bridge-side OCR may already populate processed_text. Previously
-                # release images with processed_text skipped the release workflow
-                # because the full OCR block only ran when text was empty.
-                if msg.get("media_type") == "image" and text:
-                    try:
-                        _processed_ocr_text = text
-                        from modules.ocr_processor import (
-                            classify_slip_type as _classify_slip_type,
-                            _extract_fields as _extract_ocr_fields,
-                            _compute_confidence as _compute_ocr_confidence,
+                if core_message_id is None:
+                    continue  # Persistence must succeed before any business work.
+                from modules.message_router import inbound_execution
+                async with inbound_execution(core_message_id, bridge_name, str(msg_id)) as execution:
+                    if execution is None:
+                        continue
+                    # Stage E3 (2026-08-28, controlled Office-group ingestion):
+                    # PERSISTENCE != AUTOMATION. This point is only ever
+                    # reached for a group JID present in _fetch_new_messages'
+                    # own approved-group allowlist -- the SQL query itself
+                    # still blanket-excludes every other @g.us chat (Owner
+                    # directive 2026-04-27, see this module's own docstring).
+                    # Re-checked here as a second, independent enforcement
+                    # point regardless -- same defense-in-depth pattern
+                    # modules.escort's trusted_group_jid exception already
+                    # established (SQL-level restriction + an explicit
+                    # code-level check that doesn't trust the SQL alone) --
+                    # so a future refactor of the SQL query can never silently
+                    # widen automation exposure to an unapproved group.
+                    # Deliberately stops HERE: no OCR, no identity detection,
+                    # no process_bridge_inbound() (routing/recruitment/
+                    # employee/customer automation, admin-command parsing,
+                    # Hermes relay, AI auto-reply) for ANY group message,
+                    # approved or not -- the raw copy is already persisted
+                    # with conversation_key/actor_type/direction/timestamp/
+                    # provider message ref (Stage D2/D1). intent_detected/
+                    # workflow_triggered are deliberately left NULL for group
+                    # messages this stage (Stage E4: "intent/domain only where
+                    # classifier semantics are valid" -- not yet judged valid
+                    # for group content, which can be very different in
+                    # character from a 1:1 conversation). Marks the queue row
+                    # to a terminal state so fazle_message_queue never sits
+                    # stuck at "processing" -- the exact incident class the
+                    # 2026-07-09..12 fix above (see that comment) closed for a
+                    # different cause; same discipline applied here.
+                    _group_chat_jid = str(msg.get("chat_jid") or "")
+                    if _group_chat_jid.endswith("@g.us"):
+                        group_read_index_saved += 1
+                        await _mark_core_queue_status(bridge_name, msg, "skipped", "group_read_index_only")
+                        continue
+
+                    # Pairing-state hold (BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02,
+                    # owner amendment): while `<bridge>.pairing_state` is anything
+                    # other than OUTBOUND_OWNER_APPROVED, PERSISTENCE != AUTOMATION.
+                    # The raw copy is already written (_save_raw_core_copy above);
+                    # we finalize the canonical row and the queue row to a terminal
+                    # state and stop HERE — before any identity lookup, media
+                    # extraction, downstream routing (recruitment / employee /
+                    # customer auto-reply / admin-command / Hermes relay), draft
+                    # creation or outbound enqueue. _mark_processed() dedups it so
+                    # it is never re-handled after the owner advances the state:
+                    # the live-session boundary is "messages that arrive AFTER the
+                    # explicit release", from real timestamps + the history-sync
+                    # flag — no timestamp ever auto-authorises sending. Mirrors the
+                    # @g.us and media_unprocessed skip discipline above / below.
+                    if _held:
+                        quarantine_persist_only += 1
+                        await _mark_processed(msg_id, bridge_name, phone)
+                        await _finalize_core_copy(
+                            core_message_id, bridge_name, msg, phone, text,
+                            msg_type=msg.get("media_type") or "text",
+                            status="skipped", error=f"bridge_pairing_hold:{_pair_state}",
                         )
-                        if _classify_slip_type(text) == "release_slip":
-                            _extracted_text = _processed_ocr_text
-                            fields = _extract_ocr_fields(text, "release_slip")
-                            conf_pct = _compute_ocr_confidence(text, fields)
-                            compat = {
-                                "slip_type": "release_slip",
-                                "employee_name": fields.get("employee_name"),
-                                "vessel": fields.get("vessel"),
-                                "date": fields.get("date"),
-                                "location": fields.get("location"),
-                                "amount": fields.get("amount"),
-                                "confidence_score": conf_pct,
-                                "raw_text": text,
-                            }
-                            from modules.escort_lifecycle import handle_ocr_release_slip
-                            draft_txt = await handle_ocr_release_slip(compat, source=bridge_name, phone=phone)
-                            if draft_txt:
-                                _admin_phone = (
-                                    _settings.admin_bridge2_number
-                                    or _settings.admin_bridge1_number
-                                    or ((_settings.admin_number_list or [""])[0])
-                                    or _settings.admin_meta_number
-                                )
-                                await _notify_admin_bridge({
-                                    "admin_phone": _admin_phone,
-                                    "text": f"📋 Release Slip (from {phone}):\n\n{draft_txt}",
-                                    "bridge": "bridge2",
-                                    "purpose": "release-slip-review",
-                                })
-                            text = "✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"
-                    except Exception as _pre_ocr_err:
-                        log.error(
-                            "[%s] processed_text release-slip handling error msg_id=%s: %s",
-                            bridge_name, msg_id, _pre_ocr_err,
+                        await _mark_core_queue_status(
+                            bridge_name, msg, "skipped", f"bridge_pairing_hold:{_pair_state}"
                         )
+                        log.info(
+                            "[%s] PAIRING_HOLD msg_id=%s phone=%s — persisted, not routed "
+                            "(pairing_state=%s)",
+                            bridge_name, msg_id, phone, _pair_state,
+                        )
+                        continue
 
-                # ── Phase 22: 2-step OCR for images without pre-processed text ─
-                if msg.get("media_type") == "image" and not text and msg.get("filename"):
-                    from modules.ocr_processor import classify_from_context
-                    store_dir = os.path.dirname(messages_db)
-                    file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
-                    try:
-                        # STEP 1: Lightweight context check (no OCR yet)
-                        ctx_rows = []
-                        try:
-                            # asyncio.to_thread() preferred over run_in_executor on
-                            # Python 3.9+ — see also _fetch_new_messages for the
-                            # older loop.run_in_executor pattern
-                            ctx_rows = await asyncio.to_thread(
-                                _fetch_image_context_rows, messages_db, msg["chat_jid"], msg["timestamp"]
-                            )
-                        except Exception as _ctx_err:
-                            log.debug(f"[{bridge_name}] context fetch error: {_ctx_err}")
-                        context_text = " ".join(r["content"] for r in ctx_rows)
+                    # F6 (owner amendment 2026-09-02): an automated OTP / login-code
+                    # / platform system notification is NEVER a job applicant or an
+                    # employee. An unknown sender on a recruitment-entry WhatsApp
+                    # number defaults into the recruitment funnel, so these become a
+                    # phantom candidate + session + auto-reply (the 2026-09-02
+                    # Bridge3 incident). Extended to bridge1/bridge2 (owner
+                    # decision 2026-09-02): Bridge1 becomes the Facebook
+                    # Click-to-WhatsApp recruitment number, so the same OTP magnet
+                    # now lands there too. Preserve the raw forensic row with full
+                    # provenance (already done by _save_raw_core_copy) but do NOT
+                    # let it reach identity resolution, recruitment/employee
+                    # routing, a recruitment session or wbom_candidates row, a
+                    # workflow-state write, or any reply. Deterministic, tight
+                    # allowlist (shared.system_message) — a miss falls through to
+                    # normal routing, a hit only SUPPRESSES. Meta is NOT included
+                    # (its own webhook path has its own guards).
+                    if (
+                        bridge_name in ("bridge1", "bridge2", "bridge3")
+                        and is_automated_system_message(text)
+                    ):
+                        f6_system_msg_persist_only += 1
+                        await _mark_processed(msg_id, bridge_name, phone)
+                        await _finalize_core_copy(
+                            core_message_id, bridge_name, msg, phone, text,
+                            msg_type=msg.get("media_type") or "text",
+                            status="skipped", error="automated_system_message",
+                        )
+                        await _mark_core_queue_status(
+                            bridge_name, msg, "skipped", "automated_system_message"
+                        )
+                        log.info(
+                            "[%s] SYSTEM_MSG_SUPPRESSED msg_id=%s phone=%s — automated "
+                            "OTP/system notification, persisted for forensics, not routed",
+                            bridge_name, msg_id, phone,
+                        )
+                        continue
 
-                        if classify_from_context(context_text):
-                            log.info("[IMG_CONTEXT_PASS] bridge=%s msg_id=%s filename=%s", bridge_name, msg_id, msg["filename"])
-                        else:
-                            log.info("[IMG_CONTEXT_FAIL_FALLBACK_CHECK] bridge=%s msg_id=%s filename=%s", bridge_name, msg_id, msg["filename"])
-                            eligible, reason = _is_lightweight_image_eligible_for_ocr(file_path, msg["filename"])
-                            if eligible:
-                                log.info("[IMG_ELIGIBLE_FOR_OCR] bridge=%s msg_id=%s reason=%s", bridge_name, msg_id, reason)
-                            else:
-                                log.info("[IMG_SKIPPED_NOT_ELIGIBLE] bridge=%s msg_id=%s reason=%s", bridge_name, msg_id, reason)
-                                await _finalize_core_copy(
-                                    core_message_id, bridge_name, msg, phone, text,
-                                    msg_type=msg.get("type") or "image",
-                                    status="skipped", error=f"image_not_eligible:{reason}",
+                    # Unreadable media: a bare "[media:<type>]" transport placeholder
+                    # (no caption/content, no bridge-side OCR/STT `processed_text`).
+                    # The current bridge binary does not deliver media bytes, so
+                    # core-side extraction cannot run either. The placeholder is NOT
+                    # sender text — never let it reach OCR/STT eligibility, the
+                    # intent classifier, RAG, the semantic gate, Hermes or reply
+                    # generation, and never fabricate a transcript. Preserve the
+                    # canonical record + media metadata, mark the queue row
+                    # terminal, and continue. (A real caption or a populated
+                    # legacy `processed_text` makes has_meaningful_text() True and
+                    # this branch is skipped — those route normally.) Group media
+                    # never reaches here — the @g.us guard above already handled it.
+                    if is_media_placeholder(text) and not has_meaningful_text(msg.get("processed_text")):
+                        # 2026-08-30 (BRIDGE_MEDIA_ACQUISITION_ENABLED, default OFF):
+                        # try to fetch the media file from THIS bridge's own
+                        # /api/download so the image / audio / document blocks below
+                        # can OCR/STT it. Any failure — flag off, unsupported type,
+                        # download error, circuit open, own-bridge / unresolved
+                        # sender — falls through to the unchanged media_unprocessed
+                        # skip (fail-closed: no routing, no reply, byte-identical to
+                        # the pre-acquisition behaviour). Group media never reaches
+                        # here — the @g.us guard above already handled it.
+                        _mtype = (msg.get("media_type") or "").lower()
+                        if (
+                            os.getenv("BRIDGE_MEDIA_ACQUISITION_ENABLED", "false").strip().lower()
+                            in ("true", "1", "yes")
+                            and msg.get("filename")
+                            and _mtype in ("audio", "ptt", "image", "document", "application")
+                            and not phone.startswith("unresolved:")
+                            and phone not in _own_bridge_numbers()
+                        ):
+                            try:
+                                _dl_budget = float(os.getenv("BRIDGE_MEDIA_DOWNLOAD_TIMEOUT_S", "45")) + 5
+                                _path = await asyncio.wait_for(
+                                    config["get_bridge"]().download_media(
+                                        str(msg["id"]), msg.get("chat_jid", "")
+                                    ),
+                                    timeout=_dl_budget,
                                 )
-                                continue  # Not a probable slip/document image — safe terminal skip
+                            except Exception as _dl_err:
+                                _path = None
+                                log.warning(
+                                    "[%s] media acquire error msg_id=%s: %s",
+                                    bridge_name, msg_id, _dl_err,
+                                )
+                            if _path and os.path.isfile(_path):
+                                _acquired = True
+                                log.info(
+                                    "[%s] MEDIA_ACQUIRED msg_id=%s type=%s path=%s",
+                                    bridge_name, msg_id, _mtype, _path,
+                                )
 
-                        # STEP 2: Full extraction via escort_slip_extractor (3-pass OCR + field parsing)
-                        log.info(f"[{bridge_name}] probable slip image, running full extraction: {file_path}")
-                        try:
-                            from modules.escort_slip_extractor import extract_escort_slip as _extract_slip
-                            ocr_result = await _extract_slip(file_path, source_label=bridge_name)
-                        except Exception as _ocr_err:
-                            log.error(f"[{bridge_name}] extraction error for {file_path}: {_ocr_err}")
+                        if not _acquired:
+                            media_unprocessed_skipped += 1
+                            await _mark_processed(msg_id, bridge_name, phone)
                             await _finalize_core_copy(
                                 core_message_id, bridge_name, msg, phone, text,
-                                msg_type=msg.get("type") or "image",
-                                status="failed", error=f"ocr_error:{_ocr_err}",
+                                msg_type=msg.get("media_type") or "media",
+                                status="skipped", error="media_unprocessed",
+                            )
+                            await _mark_core_queue_status(bridge_name, msg, "skipped", "media_unprocessed")
+                            log.info(
+                                "[%s] MEDIA_UNPROCESSED msg_id=%s type=%s phone=%s — placeholder only, not routed",
+                                bridge_name, msg_id, msg.get("media_type"), phone,
                             )
                             continue
+                        # else: file is now staged at <store_dir>/<chat_jid>/<filename>;
+                        # fall through so the existing image / audio / document
+                        # blocks below pick it up (each recomputes that same path).
 
-                        # completion_date present → supervisor stamped second date → duty-completion document
-                        is_release = ocr_result.get("completion_date") is not None
-                        doc_type = ocr_result.get("document_type", "unknown_document")
-                        conf_pct = int(ocr_result.get("confidence", 0) * 100)
-
-                        if is_release:
-                            # Translate EscortSlipResult → compat dict for handle_ocr_release_slip
-                            compat = {
-                                "slip_type": "release_slip",
-                                "employee_name": ocr_result.get("escort_name"),
-                                "vessel": ocr_result.get("lighter_vessel") or ocr_result.get("mother_vessel"),
-                                "date": ocr_result.get("completion_date"),
-                                "location": ocr_result.get("release_place"),
-                                "confidence_score": conf_pct,
-                                "raw_text": ocr_result.get("raw_ocr_text", ""),
-                                "master_mobile": ocr_result.get("master_mobile"),
-                                "start_date": ocr_result.get("start_date"),
-                            }
-                            _extracted_text = ocr_result.get("raw_ocr_text", "") or _extracted_text
-                            from modules.escort_lifecycle import handle_ocr_release_slip
-                            try:
+                    # Bridge-side OCR may already populate processed_text. Previously
+                    # release images with processed_text skipped the release workflow
+                    # because the full OCR block only ran when text was empty.
+                    if msg.get("media_type") == "image" and has_meaningful_text(text):
+                        try:
+                            _processed_ocr_text = text
+                            from modules.ocr_processor import (
+                                classify_slip_type as _classify_slip_type,
+                                _extract_fields as _extract_ocr_fields,
+                                _compute_confidence as _compute_ocr_confidence,
+                            )
+                            if _classify_slip_type(text) == "release_slip":
+                                _extracted_text = _processed_ocr_text
+                                fields = _extract_ocr_fields(text, "release_slip")
+                                conf_pct = _compute_ocr_confidence(text, fields)
+                                compat = {
+                                    "slip_type": "release_slip",
+                                    "employee_name": fields.get("employee_name"),
+                                    "vessel": fields.get("vessel"),
+                                    "date": fields.get("date"),
+                                    "location": fields.get("location"),
+                                    "amount": fields.get("amount"),
+                                    "confidence_score": conf_pct,
+                                    "raw_text": text,
+                                }
+                                from modules.escort_lifecycle import handle_ocr_release_slip
                                 draft_txt = await handle_ocr_release_slip(compat, source=bridge_name, phone=phone)
                                 if draft_txt:
                                     _admin_phone = (
@@ -977,296 +1320,442 @@ async def _poll_bridge(config: dict):
                                         "bridge": "bridge2",
                                         "purpose": "release-slip-review",
                                     })
-                                missing = ocr_result.get("missing_fields", [])
-                                if missing or conf_pct < 60:
-                                    escort_reply = (
-                                        "✅ আপনার রিলিজ স্লিপ পাওয়া গেছে।"
-                                        + (" কিছু তথ্য স্পষ্ট নয়।" if missing else "")
-                                        + " অ্যাডমিন যাচাই করছেন — অনুগ্রহ করে আপনার নাম ও আইডি নম্বর পাঠান।"
-                                    )
-                                else:
-                                    escort_reply = "✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"
-                                text = escort_reply
-                            except Exception as _rs_err:
-                                log.error(f"[{bridge_name}] release slip handling error: {_rs_err}")
-                                await _finalize_core_copy(
-                                    core_message_id, bridge_name, msg, phone, text,
-                                    msg_type=msg.get("type") or "image",
-                                    status="failed", error=f"release_slip_error:{_rs_err}",
-                                )
-                                continue
-                            # Fall through to normal routing to send escort_reply
+                                text = "✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"
+                        except Exception as _pre_ocr_err:
+                            log.error(
+                                "[%s] processed_text release-slip handling error msg_id=%s: %s",
+                                bridge_name, msg_id, _pre_ocr_err,
+                            )
 
-                        elif doc_type == "unknown_document" or conf_pct < 10:
-                            # If sender has active escort program, flag to admin — may be unclear release slip
+                    # ── Phase 22: 2-step OCR for images without pre-processed text ─
+                    if msg.get("media_type") == "image" and not has_meaningful_text(text) and msg.get("filename"):
+                        from modules.ocr_processor import classify_from_context
+                        store_dir = os.path.dirname(messages_db)
+                        file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
+                        try:
+                            # STEP 1: Lightweight context check (no OCR yet)
+                            ctx_rows = []
                             try:
-                                from modules.escort_lifecycle import check_active_program_for_phone
-                                has_program = await check_active_program_for_phone(phone)
-                                if has_program:
-                                    await _notify_admin_bridge({
-                                        "admin_phone": _settings.admin_bridge2_number,
-                                        "text": (
-                                            f"⚠️ অস্পষ্ট ছবি (OCR ব্যর্থ) from {phone}\n"
-                                            "এই নম্বরে সক্রিয় এস্কর্ট প্রোগ্রাম আছে — রিলিজ স্লিপ হতে পারে।\n"
-                                            "ম্যানুয়ালি যাচাই করুন অথবা এস্কর্টকে স্পষ্ট ছবি পাঠাতে বলুন।"
-                                        ),
-                                        "bridge": "bridge2",
-                                    })
-                                    text = "ছবিটি স্পষ্ট নয়। অনুগ্রহ করে ভালো আলোতে আবার ছবি তুলে পাঠান।"
+                                # asyncio.to_thread() preferred over run_in_executor on
+                                # Python 3.9+ — see also _fetch_new_messages for the
+                                # older loop.run_in_executor pattern
+                                ctx_rows = await asyncio.to_thread(
+                                    _fetch_image_context_rows, messages_db, msg["chat_jid"], msg["timestamp"]
+                                )
+                            except Exception as _ctx_err:
+                                log.debug(f"[{bridge_name}] context fetch error: {_ctx_err}")
+                            context_text = " ".join(r["content"] for r in ctx_rows)
+
+                            if classify_from_context(context_text):
+                                log.info("[IMG_CONTEXT_PASS] bridge=%s msg_id=%s filename=%s", bridge_name, msg_id, msg["filename"])
+                            else:
+                                log.info("[IMG_CONTEXT_FAIL_FALLBACK_CHECK] bridge=%s msg_id=%s filename=%s", bridge_name, msg_id, msg["filename"])
+                                eligible, reason = _is_lightweight_image_eligible_for_ocr(file_path, msg["filename"])
+                                if eligible:
+                                    log.info("[IMG_ELIGIBLE_FOR_OCR] bridge=%s msg_id=%s reason=%s", bridge_name, msg_id, reason)
                                 else:
+                                    log.info("[IMG_SKIPPED_NOT_ELIGIBLE] bridge=%s msg_id=%s reason=%s", bridge_name, msg_id, reason)
                                     await _finalize_core_copy(
                                         core_message_id, bridge_name, msg, phone, text,
                                         msg_type=msg.get("type") or "image",
-                                        status="skipped", error="unknown_image_no_active_program",
+                                        status="skipped", error=f"image_not_eligible:{reason}",
                                     )
-                                    continue  # Unknown image, no active program — skip
-                            except Exception:
+                                    continue  # Not a probable slip/document image — safe terminal skip
+
+                            # STEP 2: Full extraction via escort_slip_extractor (3-pass OCR + field parsing)
+                            log.info(f"[{bridge_name}] probable slip image, running full extraction: {file_path}")
+                            try:
+                                from modules.escort_slip_extractor import extract_escort_slip as _extract_slip
+                                ocr_result = await _extract_slip(file_path, source_label=bridge_name)
+                            except Exception as _ocr_err:
+                                log.error(f"[{bridge_name}] extraction error for {file_path}: {_ocr_err}")
                                 await _finalize_core_copy(
                                     core_message_id, bridge_name, msg, phone, text,
                                     msg_type=msg.get("type") or "image",
-                                    status="failed", error="unknown_image_active_program_check_failed",
+                                    status="failed", error=f"ocr_error:{_ocr_err}",
                                 )
                                 continue
 
-                        else:
-                            # escort slip (assignment, not release) — use extracted text for routing
-                            text = ocr_result.get("raw_ocr_text") or f"[image: {doc_type}]"
-                            _extracted_text = ocr_result.get("raw_ocr_text") or ""
-                    finally:
-                        await _mark_processed(msg_id, bridge_name, phone)
-                        log.info("[IMG_MARK_PROCESSED_FINAL] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
-                else:
-                    # Audio transcription for voice messages
-                    if msg.get("media_type") in ("audio", "ptt") and not text and msg.get("filename"):
-                        from modules.voice_processor import process_voice as _proc_voice
-                        store_dir = os.path.dirname(messages_db)
-                        file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
-                        try:
-                            voice_result = await _proc_voice(file_path)
-                            if voice_result["confident"]:
-                                text = voice_result["transcript"]
-                                _extracted_text = voice_result["transcript"]
-                                log.info("[AUDIO_TRANSCRIBED] bridge=%s msg_id=%s words=%d", bridge_name, msg_id, voice_result["word_count"])
-                            else:
-                                text = "[audio: unclear]"
-                                log.info("[AUDIO_LOW_CONFIDENCE] bridge=%s msg_id=%s transcript=%r", bridge_name, msg_id, voice_result["transcript"])
-                        except Exception as _audio_err:
-                            log.error("[AUDIO_ERR] bridge=%s msg_id=%s err=%s conf=%s",
-                                      bridge_name, msg_id, _audio_err,
-                                      getattr(_audio_err, "__class__", type(_audio_err)).__name__)
-                            # Prevent silent drop: save draft so admin knows STT failed
-                            await _save_draft(
-                                bridge_name, phone,
-                                f"[STT FAILED] ভয়েস বার্তা ট্রান্সক্রাইব করা যায়নি।\n"
-                                f"ফাইল: {os.path.basename(file_path)}\n"
-                                f"এরর: {str(_audio_err)[:120]}\n"
-                                "ব্যবহারকারীকে টেক্সট পাঠাতে বলুন অথবা ম্যানুয়ালি উত্তর দিন।",
-                                "stt_failed",
-                            )
-                            await _mark_processed(msg_id, bridge_name, phone)
-                            await _finalize_core_copy(
-                                core_message_id, bridge_name, msg, phone, text,
-                                msg_type=msg.get("type") or "audio",
-                                status="failed", error=f"stt_failed:{_audio_err}",
-                            )
-                            continue
-                    # ── Parts C+D: PDF/document pipeline ───────────────────
-                    elif (
-                        msg.get("media_type") in ("document", "application")
-                        or (msg.get("filename") or "").lower().endswith(".pdf")
-                    ) and not text and msg.get("filename"):
-                        from modules.ocr_processor import process_document as _proc_doc
-                        store_dir = os.path.dirname(messages_db)
-                        file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
-                        filename = msg.get("filename", "")
-                        _doc_ack_sent = False
-                        try:
-                            doc_result = await _proc_doc(file_path, filename)
-                            doc_type = doc_result.get("doc_type", "unknown")
-                            log.info(
-                                "[DOC_PROCESSED] bridge=%s msg_id=%s filename=%s "
-                                "doc_type=%s conf=%d",
-                                bridge_name, msg_id, filename, doc_type,
-                                doc_result.get("confidence_score", 0),
-                            )
-                            ack_reply = doc_result.get("reply", "")
-                            extracted = doc_result.get("extracted_text") or ""
-                            _extracted_text = extracted
-                            # Store extracted text as the routing text
-                            text = extracted[:300] or f"[document:{doc_type}:{filename}]"
+                            # completion_date present → supervisor stamped second date → duty-completion document
+                            is_release = ocr_result.get("completion_date") is not None
+                            doc_type = ocr_result.get("document_type", "unknown_document")
+                            conf_pct = int(ocr_result.get("confidence", 0) * 100)
 
-                            if doc_type != "unknown" and doc_result.get("auto_send_safe"):
-                                # Part H: candidate docs → auto-send acknowledgement
-                                # Bypasses AUTO_REPLY_ENABLED (fixed safe reply only)
-                                bridge_obj = config["get_bridge"]()
-                                sent = await bridge_obj.send(phone, ack_reply)
-                                if sent:
-                                    await _record_reply(phone)
-                                    _doc_ack_sent = True
-                                    log.info(
-                                        "[DOC_ACK_SENT] bridge=%s phone=%s doc_type=%s",
-                                        bridge_name, phone, doc_type,
+                            if is_release:
+                                # Translate EscortSlipResult → compat dict for handle_ocr_release_slip
+                                compat = {
+                                    "slip_type": "release_slip",
+                                    "employee_name": ocr_result.get("escort_name"),
+                                    "vessel": ocr_result.get("lighter_vessel") or ocr_result.get("mother_vessel"),
+                                    "date": ocr_result.get("completion_date"),
+                                    "location": ocr_result.get("release_place"),
+                                    "confidence_score": conf_pct,
+                                    "raw_text": ocr_result.get("raw_ocr_text", ""),
+                                    "master_mobile": ocr_result.get("master_mobile"),
+                                    "start_date": ocr_result.get("start_date"),
+                                }
+                                _extracted_text = ocr_result.get("raw_ocr_text", "") or _extracted_text
+                                from modules.escort_lifecycle import handle_ocr_release_slip
+                                try:
+                                    draft_txt = await handle_ocr_release_slip(compat, source=bridge_name, phone=phone)
+                                    if draft_txt:
+                                        _admin_phone = (
+                                            _settings.admin_bridge2_number
+                                            or _settings.admin_bridge1_number
+                                            or ((_settings.admin_number_list or [""])[0])
+                                            or _settings.admin_meta_number
+                                        )
+                                        await _notify_admin_bridge({
+                                            "admin_phone": _admin_phone,
+                                            "text": f"📋 Release Slip (from {phone}):\n\n{draft_txt}",
+                                            "bridge": "bridge2",
+                                            "purpose": "release-slip-review",
+                                        })
+                                    missing = ocr_result.get("missing_fields", [])
+                                    if missing or conf_pct < 60:
+                                        escort_reply = (
+                                            "✅ আপনার রিলিজ স্লিপ পাওয়া গেছে।"
+                                            + (" কিছু তথ্য স্পষ্ট নয়।" if missing else "")
+                                            + " অ্যাডমিন যাচাই করছেন — অনুগ্রহ করে আপনার নাম ও আইডি নম্বর পাঠান।"
+                                        )
+                                    else:
+                                        escort_reply = "✅ রিলিজ স্লিপ পাওয়া গেছে। অ্যাডমিন যাচাই করে পেমেন্ট অনুমোদন করবেন।"
+                                    text = escort_reply
+                                except Exception as _rs_err:
+                                    log.error(f"[{bridge_name}] release slip handling error: {_rs_err}")
+                                    await _finalize_core_copy(
+                                        core_message_id, bridge_name, msg, phone, text,
+                                        msg_type=msg.get("type") or "image",
+                                        status="failed", error=f"release_slip_error:{_rs_err}",
                                     )
-                                else:
-                                    log.warning("[DOC_ACK_FAIL] bridge=%s phone=%s", bridge_name, phone)
-                                    await _save_draft(bridge_name, phone, ack_reply, f"doc:{doc_type}")
+                                    continue
+                                # Fall through to normal routing to send escort_reply
+
+                            elif doc_type == "unknown_document" or conf_pct < 10:
+                                # If sender has active escort program, flag to admin — may be unclear release slip
+                                try:
+                                    from modules.escort_lifecycle import check_active_program_for_phone
+                                    has_program = await check_active_program_for_phone(phone)
+                                    if has_program:
+                                        await _notify_admin_bridge({
+                                            "admin_phone": _settings.admin_bridge2_number,
+                                            "text": (
+                                                f"⚠️ অস্পষ্ট ছবি (OCR ব্যর্থ) from {phone}\n"
+                                                "এই নম্বরে সক্রিয় এস্কর্ট প্রোগ্রাম আছে — রিলিজ স্লিপ হতে পারে।\n"
+                                                "ম্যানুয়ালি যাচাই করুন অথবা এস্কর্টকে স্পষ্ট ছবি পাঠাতে বলুন।"
+                                            ),
+                                            "bridge": "bridge2",
+                                        })
+                                        text = "ছবিটি স্পষ্ট নয়। অনুগ্রহ করে ভালো আলোতে আবার ছবি তুলে পাঠান।"
+                                    else:
+                                        await _finalize_core_copy(
+                                            core_message_id, bridge_name, msg, phone, text,
+                                            msg_type=msg.get("type") or "image",
+                                            status="skipped", error="unknown_image_no_active_program",
+                                        )
+                                        continue  # Unknown image, no active program — skip
+                                except Exception:
+                                    await _finalize_core_copy(
+                                        core_message_id, bridge_name, msg, phone, text,
+                                        msg_type=msg.get("type") or "image",
+                                        status="failed", error="unknown_image_active_program_check_failed",
+                                    )
+                                    continue
+
                             else:
-                                await _save_draft(bridge_name, phone, ack_reply,
-                                                  f"doc:{doc_type}" if doc_type != "unknown" else "doc:unknown")
-                        except Exception as _doc_err:
-                            log.error(
-                                "[DOC_ERR] bridge=%s msg_id=%s filename=%s err=%s",
-                                bridge_name, msg_id, filename, _doc_err,
-                            )
-                            await _save_draft(
-                                bridge_name, phone,
-                                f"[DOC FAILED] ডকুমেন্ট প্রসেস করা যায়নি।\n"
-                                f"ফাইল: {filename}\nএরর: {str(_doc_err)[:100]}",
-                                "doc_failed",
-                            )
+                                # escort slip (assignment, not release) — use extracted text for routing
+                                text = ocr_result.get("raw_ocr_text") or f"[image: {doc_type}]"
+                                _extracted_text = ocr_result.get("raw_ocr_text") or ""
+                                _is_extracted_media = True
+                        finally:
+                            await _mark_processed(msg_id, bridge_name, phone)
+                            log.info("[IMG_MARK_PROCESSED_FINAL] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
+                    else:
+                        # Audio transcription for voice messages
+                        if msg.get("media_type") in ("audio", "ptt") and not has_meaningful_text(text) and msg.get("filename"):
+                            from modules.voice_processor import process_voice as _proc_voice
+                            store_dir = os.path.dirname(messages_db)
+                            file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
+                            try:
+                                voice_result = await _proc_voice(file_path)
+                                if voice_result["confident"]:
+                                    text = voice_result["transcript"]
+                                    _extracted_text = voice_result["transcript"]
+                                    _is_extracted_media = True
+                                    log.info("[AUDIO_TRANSCRIBED] bridge=%s msg_id=%s words=%d", bridge_name, msg_id, voice_result["word_count"])
+                                else:
+                                    text = "[audio: unclear]"
+                                    log.info("[AUDIO_LOW_CONFIDENCE] bridge=%s msg_id=%s transcript=%r", bridge_name, msg_id, voice_result["transcript"])
+                            except Exception as _audio_err:
+                                log.error("[AUDIO_ERR] bridge=%s msg_id=%s err=%s conf=%s",
+                                          bridge_name, msg_id, _audio_err,
+                                          getattr(_audio_err, "__class__", type(_audio_err)).__name__)
+                                # Prevent silent drop: save draft so admin knows STT failed
+                                await _save_draft(
+                                    bridge_name, phone,
+                                    f"[STT FAILED] ভয়েস বার্তা ট্রান্সক্রাইব করা যায়নি।\n"
+                                    f"ফাইল: {os.path.basename(file_path)}\n"
+                                    f"এরর: {str(_audio_err)[:120]}\n"
+                                    "ব্যবহারকারীকে টেক্সট পাঠাতে বলুন অথবা ম্যানুয়ালি উত্তর দিন।",
+                                    "stt_failed",
+                                )
+                                await _mark_processed(msg_id, bridge_name, phone)
+                                await _finalize_core_copy(
+                                    core_message_id, bridge_name, msg, phone, text,
+                                    msg_type=msg.get("type") or "audio",
+                                    status="failed", error=f"stt_failed:{_audio_err}",
+                                )
+                                continue
+                        # ── Parts C+D: PDF/document pipeline ───────────────────
+                        elif (
+                            msg.get("media_type") in ("document", "application")
+                            or (msg.get("filename") or "").lower().endswith(".pdf")
+                        ) and not has_meaningful_text(text) and msg.get("filename"):
+                            from modules.ocr_processor import process_document as _proc_doc
+                            store_dir = os.path.dirname(messages_db)
+                            file_path = os.path.join(store_dir, msg.get("chat_jid", ""), msg["filename"])
+                            filename = msg.get("filename", "")
+                            _doc_ack_sent = False
+                            _doc_ack_blocked = False
+                            try:
+                                doc_result = await _proc_doc(file_path, filename)
+                                doc_type = doc_result.get("doc_type", "unknown")
+                                log.info(
+                                    "[DOC_PROCESSED] bridge=%s msg_id=%s filename=%s "
+                                    "doc_type=%s conf=%d",
+                                    bridge_name, msg_id, filename, doc_type,
+                                    doc_result.get("confidence_score", 0),
+                                )
+                                ack_reply = doc_result.get("reply", "")
+                                extracted = doc_result.get("extracted_text") or ""
+                                _extracted_text = extracted
+                                # Store extracted text as the routing text
+                                text = extracted[:300] or f"[document:{doc_type}:{filename}]"
+                                if not (doc_type != "unknown" and doc_result.get("auto_send_safe")):
+                                    # Not a cleanly-classified candidate document
+                                    # (falls through to general routing below,
+                                    # not auto-acked+continue) -- see
+                                    # process_message()'s is_extracted_media
+                                    # docstring, cf_W001.
+                                    _is_extracted_media = True
+
+                                if doc_type != "unknown" and doc_result.get("auto_send_safe"):
+                                    # Part H: candidate docs → auto-send acknowledgement
+                                    # Bypasses AUTO_REPLY_ENABLED (fixed safe reply only)
+                                    bridge_obj = config["get_bridge"]()
+                                    sent = await bridge_obj.send(phone, ack_reply)
+                                    if sent:
+                                        await _record_reply(phone)
+                                        _doc_ack_sent = True
+                                        log.info(
+                                            "[DOC_ACK_SENT] bridge=%s phone=%s doc_type=%s",
+                                            bridge_name, phone, doc_type,
+                                        )
+                                    else:
+                                        log.warning("[DOC_ACK_FAIL] bridge=%s phone=%s", bridge_name, phone)
+                                        await _save_draft(bridge_name, phone, ack_reply, f"doc:{doc_type}")
+                                        _doc_ack_blocked = True
+                                else:
+                                    await _save_draft(bridge_name, phone, ack_reply,
+                                                      f"doc:{doc_type}" if doc_type != "unknown" else "doc:unknown")
+                            except Exception as _doc_err:
+                                log.error(
+                                    "[DOC_ERR] bridge=%s msg_id=%s filename=%s err=%s",
+                                    bridge_name, msg_id, filename, _doc_err,
+                                )
+                                await _save_draft(
+                                    bridge_name, phone,
+                                    f"[DOC FAILED] ডকুমেন্ট প্রসেস করা যায়নি।\n"
+                                    f"ফাইল: {filename}\nএরর: {str(_doc_err)[:100]}",
+                                    "doc_failed",
+                                )
+                            await _mark_processed(msg_id, bridge_name, phone)
+                            log.info("[DOC_MARK_PROCESSED] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
+                            if _doc_ack_blocked:
+                                await _finalize_core_copy(
+                                    core_message_id, bridge_name, msg, phone, text,
+                                    msg_type=msg.get("type") or "document",
+                                    extracted_text=_extracted_text,
+                                    status="blocked", error="authorization_required",
+                                )
+                                continue
+                            if _doc_ack_sent:
+                                await _finalize_core_copy(
+                                    core_message_id, bridge_name, msg, phone, text,
+                                    msg_type=msg.get("type") or "document",
+                                    extracted_text=_extracted_text,
+                                    status="done",
+                                )
+                                continue
+                        # Mark non-image and already-normalized messages immediately as before.
                         await _mark_processed(msg_id, bridge_name, phone)
-                        log.info("[DOC_MARK_PROCESSED] bridge=%s msg_id=%s phone=%s", bridge_name, msg_id, phone)
-                        if _doc_ack_sent:
-                            await _finalize_core_copy(
-                                core_message_id, bridge_name, msg, phone, text,
-                                msg_type=msg.get("type") or "document",
-                                extracted_text=_extracted_text,
-                                status="done",
-                            )
-                            continue
-                    # Mark non-image and already-normalized messages immediately as before.
-                    await _mark_processed(msg_id, bridge_name, phone)
 
-                log.info(f"[{bridge_name}] from={phone} text={text[:80]!r}")
-
-                # Detect identity before routing (for logging).
-                #
-                # Wrapped (2026-08-04 -- closes a real incident, see
-                # knowledge_base/00_governance/management_decisions.md "55
-                # Stuck WhatsApp Messages"): _mark_processed() above already
-                # committed this message's bridge-side dedup marker, so
-                # before this fix, any unhandled exception in this window
-                # propagated past the entire per-message loop to
-                # _poll_bridge()'s single top-level `except Exception:
-                # log.exception(...)` -- leaving Postgres bookkeeping
-                # (wbom_whatsapp_messages.is_processed,
-                # fazle_message_queue.status) stuck at "processing" with
-                # attempts=0 forever, with no retry possible (the dedup
-                # marker permanently blocks re-fetch). This happened for
-                # real 2026-07-09..12 (identity_brain._lookup_contact() had
-                # wrong column names, fixed in 47a9c8e) and could recur for
-                # any different future cause in this same window. Now: any
-                # exception here finalizes the message to a terminal
-                # "failed" state (_finalize_core_copy already updates both
-                # tables and never itself raises) and skips routing for
-                # this message only -- the rest of the batch still
-                # processes normally.
-                try:
-                    from modules.identity_brain import detect_identity
-                    identity = await detect_identity(phone, text)
-                    id_role = identity["identity_role"]
-                    id_conf = identity["identity_confidence"]
-                    id_name = (identity.get("display_name") or "").strip()
-
-                    # Bridge3 Admin Recognition Channel (Owner decision,
-                    # 2026-08-04). Deliberately NOT implemented as a global
-                    # identity change (i.e. NOT re-adding bridge3 to
-                    # ADMIN_NUMBERS / identity_brain._check_admin_settings())
-                    # -- that broader mechanism was built earlier the same
-                    # day, caused a real ~28-minute cross-bridge message
-                    # loop (see management_decisions.md "INCIDENT: Live
-                    # Cross-Bridge Message Loop"), and was explicitly
-                    # reversed with the comment "ADMIN_BRIDGE3_NUMBER
-                    # intentionally removed; do not re-add without a fresh
-                    # Owner decision" (.env, identity_brain/__init__.py).
-                    # This is that fresh decision, but scoped narrower and
-                    # differently than what caused the incident: a LOCAL,
-                    # per-message override -- only a message physically
-                    # arriving ON bridge3, sent FROM bridge2's own number,
-                    # is treated as Admin for ITS OWN processing. bridge2
-                    # itself gains no new admin recognition of bridge3 (the
-                    # relationship is one-directional), and every other
-                    # bridge/sender combination is completely unaffected.
-                    # The existing LOOP_GUARD below (search
-                    # "cross-bridge bounce") independently still catches
-                    # and diverts-to-draft any admin-role reply whose
-                    # destination is another bridge's own number,
-                    # regardless of how id_role was determined -- that
-                    # safety net is unchanged by this addition.
-                    if _is_bridge3_admin_recognition(bridge_name, phone):
-                        log.info(
-                            "[bridge3] ADMIN_RECOGNITION: sender=%s matches bridge2's own "
-                            "number, arriving on bridge3 -- treating as Admin for this message",
-                            phone,
+                    # Acquired-media guard (2026-08-30): the file was fetched via
+                    # /api/download but no extractor produced usable text (STT not
+                    # confident, OCR / document extraction empty). The residual
+                    # `text` is a non-routable marker such as "[audio: unclear]" or
+                    # "[document:unknown:file.pdf]" — has_meaningful_text() is True
+                    # for those (they are not "[media:*]"), so without this they
+                    # would reach the intent classifier / RAG / Hermes. Fail-closed:
+                    # terminal skip, no reply. Only ever fires for a just-acquired
+                    # message; every pre-existing path has _acquired = False.
+                    if _acquired and not has_meaningful_text(_extracted_text) and (
+                        is_media_placeholder(text)
+                        or text.lstrip().startswith(("[audio:", "[document:", "[image:"))
+                    ):
+                        media_unprocessed_skipped += 1
+                        await _mark_processed(msg_id, bridge_name, phone)
+                        await _finalize_core_copy(
+                            core_message_id, bridge_name, msg, phone, text,
+                            msg_type=msg.get("media_type") or "media",
+                            status="skipped", error="media_extraction_empty",
                         )
-                        id_role = "admin"
-                        id_conf = 100  # identity_confidence is an int 0-100 scale, not 0.0-1.0
-                        id_name = id_name or "Admin"
+                        await _mark_core_queue_status(bridge_name, msg, "skipped", "media_extraction_empty")
+                        log.info(
+                            "[%s] MEDIA_EXTRACTION_EMPTY msg_id=%s type=%s — acquired but no usable text, not routed",
+                            bridge_name, msg_id, (msg.get("media_type") or "").lower(),
+                        )
+                        continue
 
-                    # Update the raw core copy with identity metadata + extracted fields.
-                    await _finalize_core_copy(
-                        core_message_id, bridge_name, msg, phone, text,
-                        identity_role=id_role, identity_confidence=id_conf,
-                        msg_type=msg.get("type") or "text",
-                        extracted_text=_extracted_text,
-                        status="processing",
-                    )
-                except Exception as _identity_err:
-                    log.error(
-                        "[%s] identity/finalize error msg_id=%s phone=%s: %s",
-                        bridge_name, msg_id, phone, _identity_err,
-                    )
-                    await _finalize_core_copy(
-                        core_message_id, bridge_name, msg, phone, text,
-                        msg_type=msg.get("type") or "text",
-                        status="failed", error=f"identity_or_finalize_error:{_identity_err}",
-                    )
-                    continue
-                inbound_saved += 1
-                try:
-                    from modules import observability as _obs
-                    _obs.inc("dm_messages_ingested_total",
-                             labels={"bridge": bridge_name})
-                except Exception:
-                    pass
+                    log.info(f"[{bridge_name}] from={phone} text={text[:80]!r}")
 
-                # v1.0.2: never run router/draft/reply on unresolved-LID messages
-                # (we still kept them in DB above for audit).
-                if phone.startswith("unresolved:"):
-                    unresolved_router_skipped += 1
-                    await _mark_core_queue_status(bridge_name, msg, "skipped", "unresolved_lid")
-                    continue
+                    # Detect identity before routing (for logging).
+                    #
+                    # Wrapped (2026-08-04 -- closes a real incident, see
+                    # knowledge_base/00_governance/management_decisions.md "55
+                    # Stuck WhatsApp Messages"): _mark_processed() above already
+                    # committed this message's bridge-side dedup marker, so
+                    # before this fix, any unhandled exception in this window
+                    # propagated past the entire per-message loop to
+                    # _poll_bridge()'s single top-level `except Exception:
+                    # log.exception(...)` -- leaving Postgres bookkeeping
+                    # (wbom_whatsapp_messages.is_processed,
+                    # fazle_message_queue.status) stuck at "processing" with
+                    # attempts=0 forever, with no retry possible (the dedup
+                    # marker permanently blocks re-fetch). This happened for
+                    # real 2026-07-09..12 (identity_brain._lookup_contact() had
+                    # wrong column names, fixed in 47a9c8e) and could recur for
+                    # any different future cause in this same window. Now: any
+                    # exception here finalizes the message to a terminal
+                    # "failed" state (_finalize_core_copy already updates both
+                    # tables and never itself raises) and skips routing for
+                    # this message only -- the rest of the batch still
+                    # processes normally.
+                    try:
+                        from modules.identity_brain import detect_identity
+                        identity = await detect_identity(phone, text)
+                        id_role = identity["identity_role"]
+                        id_conf = identity["identity_confidence"]
+                        id_name = (identity.get("display_name") or "").strip()
 
-                # 2026-07-21: identity-first routing — social_auto_reply's
-                # keyword-classifier/template engine is retired for WhatsApp
-                # DM traffic (bridge1/bridge2/meta). Every inbound message
-                # now goes through process_bridge_inbound() → process_message(),
-                # which itself dispatches Route A (KB/templates, existing
-                # roles) vs Route B (Ollama-only — escort/security_guard/
-                # candidate/unknown, see modules.route_b) by sender identity
-                # instead of by message content. social_auto_reply.
-                # ingest_social_event() is still used for Messenger DMs and
-                # Facebook Page comments (app/main.py _handle_messenger_message
-                # / _handle_fb_comment) — those are unaffected.
-                try:
-                    await process_bridge_inbound(
-                        bridge_name, phone, text,
-                        id_role=id_role, id_conf=id_conf, id_name=id_name,
-                        message_id=str(msg.get("id") or msg.get("message_id") or ""),
-                    )
-                    await _mark_core_queue_status(bridge_name, msg, "done")
-                except Exception as route_err:
-                    await _mark_core_queue_status(bridge_name, msg, "failed", f"routing_error:{route_err}")
-                    raise
+                        # Bridge3 Admin Recognition Channel (Owner decision,
+                        # 2026-08-04). Deliberately NOT implemented as a global
+                        # identity change (i.e. NOT re-adding bridge3 to
+                        # ADMIN_NUMBERS / identity_brain._check_admin_settings())
+                        # -- that broader mechanism was built earlier the same
+                        # day, caused a real ~28-minute cross-bridge message
+                        # loop (see management_decisions.md "INCIDENT: Live
+                        # Cross-Bridge Message Loop"), and was explicitly
+                        # reversed with the comment "ADMIN_BRIDGE3_NUMBER
+                        # intentionally removed; do not re-add without a fresh
+                        # Owner decision" (.env, identity_brain/__init__.py).
+                        # This is that fresh decision, but scoped narrower and
+                        # differently than what caused the incident: a LOCAL,
+                        # per-message override -- only a message physically
+                        # arriving ON bridge3, sent FROM bridge2's own number,
+                        # is treated as Admin for ITS OWN processing. bridge2
+                        # itself gains no new admin recognition of bridge3 (the
+                        # relationship is one-directional), and every other
+                        # bridge/sender combination is completely unaffected.
+                        # The existing LOOP_GUARD below (search
+                        # "cross-bridge bounce") independently still catches
+                        # and diverts-to-draft any admin-role reply whose
+                        # destination is another bridge's own number,
+                        # regardless of how id_role was determined -- that
+                        # safety net is unchanged by this addition.
+                        if _is_bridge3_admin_recognition(bridge_name, phone):
+                            log.info(
+                                "[bridge3] ADMIN_RECOGNITION: sender=%s matches bridge2's own "
+                                "number, arriving on bridge3 -- treating as Admin for this message",
+                                phone,
+                            )
+                            id_role = "admin"
+                            id_conf = 100  # identity_confidence is an int 0-100 scale, not 0.0-1.0
+                            id_name = id_name or "Admin"
 
-            if bridge_name == "bridge1":
+                        # Update the raw core copy with identity metadata + extracted fields.
+                        await _finalize_core_copy(
+                            core_message_id, bridge_name, msg, phone, text,
+                            identity_role=id_role, identity_confidence=id_conf,
+                            msg_type=msg.get("type") or "text",
+                            extracted_text=_extracted_text,
+                            status="processing",
+                        )
+                    except Exception as _identity_err:
+                        log.error(
+                            "[%s] identity/finalize error msg_id=%s phone=%s: %s",
+                            bridge_name, msg_id, phone, _identity_err,
+                        )
+                        await _finalize_core_copy(
+                            core_message_id, bridge_name, msg, phone, text,
+                            msg_type=msg.get("type") or "text",
+                            status="failed", error=f"identity_or_finalize_error:{_identity_err}",
+                        )
+                        continue
+                    inbound_saved += 1
+                    try:
+                        from modules import observability as _obs
+                        _obs.inc("dm_messages_ingested_total",
+                                 labels={"bridge": bridge_name})
+                    except Exception:
+                        pass
+
+                    # v1.0.2: never run router/draft/reply on unresolved-LID messages
+                    # (we still kept them in DB above for audit).
+                    if phone.startswith("unresolved:"):
+                        unresolved_router_skipped += 1
+                        await _mark_core_queue_status(bridge_name, msg, "skipped", "unresolved_lid")
+                        continue
+
+                    # 2026-07-21: identity-first routing — social_auto_reply's
+                    # keyword-classifier/template engine is retired for WhatsApp
+                    # DM traffic (bridge1/bridge2/meta). Every inbound message
+                    # now goes through process_bridge_inbound() → process_message(),
+                    # which itself dispatches Route A (KB/templates, existing
+                    # roles) vs Route B (Ollama-only — escort/security_guard/
+                    # candidate/unknown, see modules.route_b) by sender identity
+                    # instead of by message content. social_auto_reply.
+                    # ingest_social_event() is still used for Messenger DMs and
+                    # Facebook Page comments (app/main.py _handle_messenger_message
+                    # / _handle_fb_comment) — those are unaffected.
+                    try:
+                        await process_bridge_inbound(
+                            bridge_name, phone, text,
+                            id_role=id_role, id_conf=id_conf, id_name=id_name,
+                            message_id=str(msg.get("id") or msg.get("message_id") or ""),
+                            chat_jid=msg.get("chat_jid") or "",
+                            msg_timestamp=_parse_source_timestamp(msg.get("timestamp")),
+                            is_extracted_media=_is_extracted_media,
+                            core_message_id=core_message_id,
+                        )
+                        await _mark_core_queue_status(bridge_name, msg, "done")
+                    except Exception as route_err:
+                        await _mark_core_queue_status(bridge_name, msg, "failed", f"routing_error:{route_err}")
+                        raise
+
+            if bridge_name == "bridge1" or _held or quarantine_persist_only or f6_system_msg_persist_only:
                 log.info(
-                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d cursor_from=%s cursor_to=%s",
+                    "[GAP_DIAG] bridge=%s poll_summary fetched=%d dedup_skipped=%d inbound_saved=%d unresolved_router_skipped=%d group_read_index_saved=%d media_unprocessed_skipped=%d quarantine_persist_only=%d f6_system_msg_persist_only=%d pairing_state=%s cursor_from=%s cursor_to=%s",
                     bridge_name,
                     len(messages),
                     dedup_skipped,
                     inbound_saved,
                     unresolved_router_skipped,
+                    group_read_index_saved,
+                    media_unprocessed_skipped,
+                    quarantine_persist_only,
+                    f6_system_msg_persist_only,
+                    _pair_state or "-",
                     cursor.isoformat(),
                     new_cursor.isoformat(),
                 )
@@ -1310,7 +1799,12 @@ async def _poll_bridge(config: dict):
                 # Hermes self-relay (2026-08-12, Owner-directed): reuses the
                 # exact regex admin_directives.router's own inbound HERMES
                 # command uses, so the two paths recognize identical text.
-                from modules.admin_directives.router import process_admin_ai_command, _RE_HERMES
+                # process_admin_natural_query (2026-08-27 addition, see the
+                # unprefixed-fallback block below): the same unprefixed-text
+                # bypass genuinely-inbound messages already get.
+                from modules.admin_directives.router import (
+                    process_admin_ai_command, process_admin_natural_query, _RE_HERMES,
+                )
 
                 admin_number = (
                     _settings.bridge1_number if bridge_name == "bridge1"
@@ -1437,6 +1931,108 @@ async def _poll_bridge(config: dict):
                             )
                         except Exception as _go_err:
                             log.error(f"[{bridge_name}] group order error for msg {omsg_id}: {_go_err}")
+                        continue
+
+                    # Bridge2 self-chat natural-language Admin->Hermes fallback
+                    # (2026-08-27, Owner-directed): closes the gap where an
+                    # unprefixed Super Admin self-chat message -- one that
+                    # doesn't start with "hermes,"/"hermes:" -- fell through
+                    # every check above and was silently dropped. Mirrors,
+                    # for this is_from_me=1 self-chat scanner, the exact same
+                    # unprefixed-text bypass process_admin_natural_query()
+                    # already applies to genuinely-inbound (is_from_me=0)
+                    # messages on bridge1/bridge2 (see that function's own
+                    # docstring) -- this is the missing second call site for
+                    # the identical rule, not a new routing system.
+                    #
+                    # Scoped narrowly, in this order, so nothing else in
+                    # this loop can ever be reinterpreted as a Hermes turn:
+                    #   1. only reached once none of the deterministic
+                    #      operational patterns above matched (explicit
+                    #      "hermes," prefix, release confirmation, escort
+                    #      completion, group order) -- every one of those
+                    #      branches `continue`s before reaching here;
+                    #   2. bridge2 only, never bridge1 -- bridge1 is the HR
+                    #      number, not Super Admin, and has no self-chat
+                    #      ambiguity to begin with (see _handle_hermes_
+                    #      relay's docstring);
+                    #   3. never inside the Trusted Group -- a message
+                    #      posted into the shared dispatch group is not a
+                    #      private Admin<->Hermes conversation turn no
+                    #      matter who is_from_me it is; only the explicit
+                    #      prefix (checked unconditionally above) may reach
+                    #      Hermes from inside the group.
+                    #
+                    # Reuses process_admin_natural_query() completely
+                    # unchanged -- no new authorization logic here. Its own
+                    # identity check (sender_phone == settings.
+                    # admin_bridge2_number) and channel check (source_bridge
+                    # in _HERMES_CONTROL_CHANNELS) both trivially pass for
+                    # this call (sender is always admin_number == bridge2's
+                    # own admin number, source_bridge is always "bridge2"),
+                    # so it always delegates to _handle_hermes_relay() --
+                    # the exact same RBAC + cooldown + RUN-toolset + session
+                    # + approval-gate path the explicit-prefix branch above
+                    # already uses, never process_admin_natural_query()'s AI
+                    # console fallback. _handle_hermes_relay() returns ""
+                    # here (its immediate ack is intentionally empty, same
+                    # as the prefixed path) -- the real answer is delivered
+                    # moments later as its own outbound message via
+                    # _deliver_hermes_reply(), unchanged and unaffected by
+                    # this fallback.
+                    if bridge_name == "bridge2" and not is_trusted_group_msg:
+                        # 2026-08-28 (Stage B3 -- canonical-history
+                        # persistence): records this device-originated
+                        # Admin message, independent of and before the
+                        # command processing below. direction='outbound'
+                        # -- this is a genuine is_from_me=1 WhatsApp
+                        # transport-outbound message; Fazle Core consuming
+                        # it as an admin instruction is a business-purpose
+                        # classification (workflow_triggered=
+                        # "admin_instruction"), never a transport-direction
+                        # reinterpretation (Owner directive, Stage A
+                        # Correction 1). actor_type='human_device' -- typed
+                        # on the linked phone itself, not fazle-core
+                        # automation and not the real Hermes agent.
+                        # Idempotent via source_message_ref=omsg_id (the
+                        # same WhatsApp message id _mark_outgoing_processed()
+                        # already dedups command-processing on, above --
+                        # reused here only as a stable message_hash
+                        # reference, not a second command-dedup mechanism:
+                        # this INSERT can never itself execute anything, so
+                        # canonical persistence and command processing stay
+                        # independently idempotent). Best-effort, its own
+                        # try/except, never able to block or alter the
+                        # routing/execution below.
+                        try:
+                            await _save_message(
+                                bridge_name, admin_number, otext, "outbound",
+                                workflow="admin_instruction",
+                                actor_type="human_device",
+                                actor_id=admin_number,
+                                source_message_ref=omsg_id,
+                            )
+                        except Exception as _persist_exc:
+                            log.error(
+                                f"[{bridge_name}] self-chat canonical-history persist failed for msg {omsg_id}: {_persist_exc}"
+                            )
+
+                        log.info(f"[{bridge_name}] outgoing unprefixed self-chat → routing to Hermes natural-query, msg={omsg_id}")
+                        try:
+                            ack = await process_admin_natural_query(
+                                otext, sender_phone=admin_number, source_bridge=bridge_name,
+                            )
+                            if ack:
+                                from modules.outbound import enqueue as enqueue_outbound
+                                await enqueue_outbound(
+                                    admin_number, ack,
+                                    source_bridge=bridge_name,
+                                    purpose="hermes-self-relay-ack",
+                                    idempotency_key=f"hermes-self-relay-nl:{omsg_id}",
+                                )
+                        except Exception as _hermes_nl_err:
+                            log.error(f"[{bridge_name}] hermes natural-query self-relay error for msg {omsg_id}: {_hermes_nl_err}")
+                        continue
 
                 if new_out_cursor > out_cursor:
                     await _set_outgoing_cursor(bridge_name, new_out_cursor)
@@ -1466,8 +2062,11 @@ async def _poll_bridge(config: dict):
                 log.debug(f"[{bridge_name}] bridge_heartbeats write failed: {_hb2_err}")
 
             # Periodic send-gate re-enable (survives independent bridge restarts)
-            _poll_iter += 1
-            if _poll_iter % _gate_check_every == 0:
+            # -- elapsed wall-clock time, not iteration count; see the
+            # comment on _last_gate_check's initialization above.
+            _now_monotonic = time.monotonic()
+            if _now_monotonic - _last_gate_check >= _SEND_GATE_CHECK_INTERVAL:
+                _last_gate_check = _now_monotonic
                 try:
                     ok = await get_bridge().ensure_enabled()
                     if not ok:
@@ -1514,7 +2113,7 @@ async def start_pollers():
 
 def _build_admin_review_draft(
     *, sender_name: str, sender_mobile: str, sender_message: str,
-    ai_reply: str, draft_no: str = "(pending)",
+    ai_reply: str, draft_no: str = "(pending)", category: str = "",
 ) -> str:
     """Build the 5-part admin draft-review message.
 
@@ -1524,16 +2123,25 @@ def _build_admin_review_draft(
       3. Sender's Message
       4. AI Generated Reply
       5. Options: 1. Approved  2. Edit  3. Reject
-    """
+
+    category (Stage G7, 2026-08-28): optional sender category label
+    (Client/Office/Operations/Internal/...) -- an additive 6th line, only
+    rendered when a caller actually supplies one, so every existing
+    caller of this function (and _save_draft(), which never passes it)
+    produces byte-identical output to before this change. Derive the
+    value via modules.authority_lanes -- never invent a new taxonomy
+    here."""
     name_display = sender_name or "(unknown)"
     mobile_display = sender_mobile or "(unknown)"
     msg_display = (sender_message or "").strip() or "(empty)"
     reply_display = (ai_reply or "").strip() or "(no AI reply generated)"
+    category_line = f"Category: {category}\n" if category else ""
     return (
         f"📋 ADMIN REVIEW DRAFT\n"
         f"─────────────────\n"
         f"Sender: {name_display} | {mobile_display}\n"
         f"Draft No: {draft_no}\n"
+        f"{category_line}"
         f"─────────────────\n"
         f"Sender's Message:\n{msg_display}\n"
         f"─────────────────\n"
@@ -1550,6 +2158,8 @@ async def _save_draft(
     *,
     sender_name: str = "",
     sender_message: str = "",
+    category: str = "",
+    auto_notify_admin: bool = False,
 ):
     """Store a suppressed reply as a draft (safe mode).
 
@@ -1557,6 +2167,23 @@ async def _save_draft(
     text is enriched to the 5-part admin review format (Sender Name+Mobile,
     Draft No, Sender's Message, AI Reply, Options). The raw AI reply is still
     stored separately in meta for the approve/edit flow to send.
+
+    category (Stage G7, 2026-08-28): optional, passed straight through to
+    _build_admin_review_draft()'s own optional category param -- every
+    existing call site (none of which pass this) is unaffected.
+
+    auto_notify_admin (Stage G5.1, 2026-08-28): when True, actively pushes
+    the admin review card (modules.supervised_draft.notify_admin_of_pending_
+    draft) right after the draft transaction succeeds -- default False, so
+    every pre-existing call site (all 14+ of them) is completely unaffected;
+    only the DRAFT_ALWAYS_GATE call site below passes True, and only for
+    the Owner-supervised-draft lane (Client/Office-Internal). Never called
+    for a quality-rejected draft (those deliberately never reach the admin
+    pending list at all, per the B25 hotfix below). Wrapped in its own
+    try/except that can never make the draft itself disappear or raise --
+    matches the established Phase 5B trigger_admin_investigation()
+    discipline elsewhere in this codebase: a notification failure is
+    logged, never fatal to the underlying operation it's reporting on.
 
     B25 hotfix: passes through draft_quality gate first. Bad drafts are still
     persisted (for audit) but with status='rejected_quality'/'rejected_fallback'
@@ -1581,6 +2208,7 @@ async def _save_draft(
             sender_message=sender_message,
             ai_reply=reply_text if ok else "(AI generation failed/unavailable)",
             draft_no="__DRAFT_NO_PLACEHOLDER__",
+            category=category,
         )
         meta_ctx = json.dumps({
             "ai_reply_raw": reply_text or "",
@@ -1617,6 +2245,14 @@ async def _save_draft(
                     "rejected_fallback" if reason == "llm_fallback" else "rejected_quality",
                     draft_id,
                 )
+            elif auto_notify_admin:
+                try:
+                    from modules.supervised_draft import notify_admin_of_pending_draft
+                    notify_result = await notify_admin_of_pending_draft(draft_id, category)
+                    if not notify_result.get("ok"):
+                        log.warning("[G5.1] auto-notify failed draft_id=%s: %s", draft_id, notify_result.get("error"))
+                except Exception as _notify_err:
+                    log.warning("[G5.1] auto-notify raised draft_id=%s: %s", draft_id, _notify_err)
         return
 
     if not ok:
@@ -1652,6 +2288,93 @@ def _core_message_hash(source: str, source_message_ref: str) -> str:
     return hashlib.sha256(f"{source}|{source_message_ref}".encode("utf-8")).hexdigest()
 
 
+def _own_bridge_numbers() -> dict[str, str]:
+    """Map each of our own configured bridge numbers to the bridge name
+    that owns it. A genuine external customer/candidate can never have a
+    sender number equal to one of these -- these are our own business
+    WhatsApp numbers."""
+    return {
+        num: name
+        for num, name in (
+            (_settings.bridge1_number, "bridge1"),
+            (_settings.bridge2_number, "bridge2"),
+            (_settings.bridge3_number, "bridge3"),
+        )
+        if num
+    }
+
+
+def _classify_internal_echo(source: str, sender: str, text: str) -> tuple[Optional[str], Optional[str]]:
+    """2026-08-28 (Stage C7, generalizing B.5-2's narrower Hermes-only
+    version): a GENERAL internal-message attribution mechanism, not an
+    expanding list of message-text signatures -- see this function's own
+    live motivation below.
+
+    PRIMARY signal, pure provenance, zero content inspection: `sender` is
+    one of OUR OWN configured bridge numbers (see _own_bridge_numbers()),
+    but this message arrived on a DIFFERENT bridge's inbound (`source`).
+    That combination alone -- sender identity, never message text --
+    already proves fazle-core itself sent this content via some bridge,
+    and it bounced back as a genuine is_from_me=0 row on a different
+    bridge's own account. This one check covers every current AND future
+    internal notification type (Hermes admin-relay replies,
+    recruitment_recovery_sweep's digest, scripts/ai_console_monitor.sh's
+    health alert -- confirmed live, 2026-08-28: message_ids 19309/19314
+    were exactly this shape, sender=bridge1_number arriving on bridge2,
+    for a recovery-sweep digest and an AI Console alert respectively,
+    neither of which carries the "🤖 Hermes:" prefix) without ever adding
+    a new prefix rule for the next one. Returns actor_type='system' by
+    default here -- the most this signal alone can prove ("fazle-core's
+    own number sent this"), actor_id=the origin bridge name.
+
+    REFINEMENT, on top of (never instead of) the primary signal: when the
+    content ALSO carries the exact, stable "🤖 Hermes:" prefix
+    _deliver_hermes_reply's own outbound.enqueue() call always uses (the
+    same literal modules.message_router's own cross-bridge echo guard
+    checks), narrow the classification to the more precise
+    actor_type='hermes', actor_id='hermes-runner' -- this is the one case
+    where content genuinely adds provable information beyond sender
+    identity alone, not a substitute for it.
+
+    Returns (None, None) when this is not an internal echo at all --
+    caller falls through to its normal external_user classification."""
+    origin_bridge = _own_bridge_numbers().get(sender)
+    if not origin_bridge or origin_bridge == source:
+        return None, None
+    if text.lstrip().startswith("🤖 Hermes:"):
+        return "hermes", "hermes-runner"
+    return "system", origin_bridge
+
+
+def _is_cross_bridge_system_echo(source: str, sender: str, text: str) -> bool:
+    """True iff BOTH:
+      (1) `sender` is one of THIS installation's own configured bridge
+          numbers AND the message arrived on a DIFFERENT bridge's inbound
+          (_classify_internal_echo's pure-provenance signal — sender
+          identity only, never message text), AND
+      (2) the body is one of our own maintained system-notification
+          templates (_is_system_generated_notification /
+          SYSTEM_NOTIFICATION_TITLE_PREFIXES).
+
+    Requiring BOTH means a real external user is NEVER suppressed merely for
+    pasting text that begins "📋 ADMIN REVIEW DRAFT", and an own bridge
+    number is NEVER suppressed for ordinary human text.
+
+    Live motivation (2026-08-30): modules.supervised_draft enqueues the
+    "📋 ADMIN REVIEW DRAFT" review card to the primary admin number, which is
+    bridge2's own paired number, via bridge1. It bounced back onto bridge2 as
+    a genuine is_from_me=0 inbound from bridge1's number, was re-classified as
+    a brand-new admin message, and a SECOND, nested review card was rendered
+    (drafts #4514 -> #4515). LOOP_GUARD stopped it going further but only
+    after the nested draft existed. This guard consumes that echo before any
+    routing/draft.
+    """
+    echo_actor, _ = _classify_internal_echo(source, sender, text or "")
+    if not echo_actor:
+        return False
+    return _is_system_generated_notification(text or "")
+
+
 def _parse_source_timestamp(value) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -1664,8 +2387,124 @@ def _parse_source_timestamp(value) -> Optional[datetime]:
         return None
 
 
+def _storage_canonical_phone(phone: Optional[str]) -> Optional[str]:
+    try:
+        from modules.phone_normalizer import storage_canonical_phone
+        return storage_canonical_phone(phone)
+    except Exception:
+        # Never regress below the old behaviour on an unexpected import error.
+        return phone if phone and not str(phone).startswith(("unresolved:", "lid:")) else None
+
+
+def _storage_phone_last10(phone: Optional[str]) -> Optional[str]:
+    try:
+        from modules.phone_normalizer import storage_phone_last10
+        return storage_phone_last10(phone)
+    except Exception:
+        return None
+
+
+async def _phase2_enrich_raw_copy(
+    core_id: Optional[int],
+    source: str,
+    msg: dict,
+    phone: str,
+    raw_text: str,
+    chat_jid: str,
+    media_type: str,
+    source_ts,
+) -> None:
+    """Follow-up UPDATE that fills the migration-078 identity columns on a
+    raw core copy. Fully gated by PHASE2_IDENTITY_RESOLVER_ENABLED (default
+    OFF). Schema-tolerant (skips columns the DB lacks) and non-fatal — an
+    error here never affects the row that _save_raw_core_copy already wrote,
+    nor routing."""
+    if core_id is None:
+        return
+    try:
+        from modules.identity_resolver import (
+            is_phase2_identity_enabled,
+            resolve_inbound_identity,
+            available_columns,
+            SOURCE_UNKNOWN,
+        )
+        if not is_phase2_identity_enabled():
+            return
+
+        present = await available_columns("wbom_whatsapp_messages")
+        p2_cols = {
+            "sender_name_snapshot", "sender_name_source", "sender_name_confidence",
+            "canonical_message_key", "resolved_phone", "resolved_at",
+        }
+        if not (p2_cols & present):
+            return  # migration 078 not applied on this DB — nothing to do
+
+        sender_raw = str(msg.get("sender") or "")
+        is_lid_sender = str(phone or "").startswith("unresolved:") or sender_raw.endswith("@lid")
+        canonical = _storage_canonical_phone(phone)
+
+        ident = await resolve_inbound_identity(
+            platform=source,
+            sender_number=phone,
+            canonical_phone=canonical if not str(phone or "").startswith("unresolved:") else None,
+            sender_lid=phone if str(phone or "").startswith("unresolved:") else None,
+            chat_jid=chat_jid or None,
+            source_message_ref=str(msg.get("id") or msg.get("message_id") or "") or None,
+            source_timestamp=source_ts.isoformat() if source_ts else None,
+            message_type=media_type,
+            bridge_full_name=(msg.get("full_name") or msg.get("contact_full_name") or None),
+            bridge_push_name=(msg.get("push_name") or msg.get("contact_push_name") or None),
+            bridge_business_name=(msg.get("business_name") or msg.get("contact_business_name") or None),
+        )
+
+        # resolved_phone = the phone we resolved a LID *to* (only meaningful
+        # when the raw sender really was a LID and we got a usable number).
+        resolved_phone = canonical if (is_lid_sender and canonical) else None
+
+        updates: dict = {
+            "sender_name_snapshot": ident.get("sender_name_snapshot"),
+            "sender_name_source": (
+                ident.get("sender_name_source")
+                if ident.get("sender_name_source") not in (None, SOURCE_UNKNOWN) else None
+            ),
+            "sender_name_confidence": int(ident.get("sender_name_confidence") or 0) or None,
+            "canonical_message_key": ident.get("canonical_message_key"),
+            "resolved_phone": resolved_phone,
+            "resolved_at": "now()" if resolved_phone else None,
+        }
+        set_parts, args = [], []
+        i = 1
+        for col, val in updates.items():
+            if col not in present:
+                continue
+            if col == "resolved_at":
+                if val:
+                    set_parts.append(f"{col} = COALESCE({col}, NOW())")
+                continue
+            set_parts.append(f"{col} = COALESCE({col}, ${i + 1})")
+            args.append(val)
+            i += 1
+        if not set_parts:
+            return
+        await execute(
+            f"UPDATE wbom_whatsapp_messages SET {', '.join(set_parts)} WHERE message_id = $1",
+            core_id, *args,
+        )
+    except Exception as exc:
+        log.debug("[core_copy] Phase-2 enrich skipped (non-fatal) msg_id=%s: %s",
+                  msg.get("id"), exc)
+
+
 async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> Optional[int]:
-    """Persist a raw core-side copy before OCR/routing mutates the message."""
+    """Persist a raw core-side copy before OCR/routing mutates the message.
+
+    2026-09-01: `canonical_phone` / `phone_last10` are now run through
+    modules.phone_normalizer.storage_canonical_phone (BD -> 8801XXXXXXXXX,
+    foreign kept digits-only, LID sentinel -> NULL) instead of being stored
+    verbatim. When PHASE2_IDENTITY_RESOLVER_ENABLED is on, a best-effort
+    follow-up populates the migration-078 identity columns; that step can
+    never break or block the raw INSERT.
+    """
     msg_id = str(msg.get("id") or msg.get("message_id") or "")
     if not msg_id:
         return None
@@ -1673,7 +2512,19 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
     raw_text = (msg.get("content") or "").strip()
     if not raw_text:
         raw_text = f"[media:{media_type}]" if media_type != "text" else (text or "")
-    conv_key = f"{phone}:{source}" if phone else None
+    # Stage D2 (2026-08-28, forward-readiness only -- group ingestion
+    # itself is still blanket-excluded upstream, see _poll_bridge()'s SQL
+    # query and this module's own module docstring; that exclusion is a
+    # separate, larger decision Stage D was not asked to flip). A group
+    # conversation's identity is the GROUP (chat_jid), not whichever
+    # individual participant happens to post -- keying conversation_key
+    # off `phone` for a group message would silently fragment one group
+    # thread into one fake "conversation" per participant. If/when the
+    # upstream exclusion is ever lifted, this makes conversation_key
+    # correct from day one with no further change here.
+    _chat_jid = str(msg.get("chat_jid") or "")
+    _group_identity = _chat_jid if _chat_jid.endswith("@g.us") else phone
+    conv_key = f"{_group_identity}:{source}" if _group_identity else None
     receiver = _source_to_receiver(source)
     source_ts = _parse_source_timestamp(msg.get("timestamp"))
     msg_hash = _core_message_hash(source, msg_id)
@@ -1686,6 +2537,22 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
         "has_processed_text": bool(msg.get("processed_text")),
         "bridge_store_preserved": True,
     }
+    # 2026-08-28 (Stage B1/B4, generalized Stage C7): actor_type=
+    # 'external_user' for a genuine is_from_me=0 inbound message -- EXCEPT
+    # when _classify_internal_echo() proves (by sender-identity provenance,
+    # never message text alone) that this is fazle-core's own content
+    # bouncing back on a different bridge. Confirmed live in production,
+    # 2026-08-28: message_ids 19294/19297/19300/19305/19308 (Hermes-reply
+    # echoes) and separately 19309/19314 (a recovery-sweep digest and an
+    # AI Console alert echo -- neither carries the "🤖 Hermes:" prefix,
+    # which is exactly why the general provenance check exists, not a
+    # third hardcoded prefix). This does NOT change `direction` (still
+    # genuinely 'inbound' at the transport level, preserved) and does NOT
+    # suppress or delete the row -- it only corrects WHO produced the
+    # content.
+    _echo_actor_type, _echo_actor_id = _classify_internal_echo(source, phone, raw_text)
+    _actor_type = _echo_actor_type or "external_user"
+    _actor_id = _echo_actor_id
     try:
         row = await fetch_one(
             """
@@ -1694,22 +2561,26 @@ async def _save_raw_core_copy(source: str, msg: dict, phone: str, text: str) -> 
                  direction, platform, is_processed, contact_identifier,
                  receiver_number, conversation_key, source_message_ref,
                  source_timestamp, source_context, message_hash,
-                 canonical_phone, phone_last10, metadata_json)
+                 canonical_phone, phone_last10, metadata_json, actor_type, actor_id)
             VALUES ($1, $2, $3, $4, 'inbound', $5, false, $1,
-                    $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14::jsonb)
+                    $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14::jsonb, $15, $16)
             ON CONFLICT (message_hash) DO UPDATE SET
                  source_timestamp = COALESCE(wbom_whatsapp_messages.source_timestamp, EXCLUDED.source_timestamp),
-                 metadata_json = COALESCE(wbom_whatsapp_messages.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json
+                 metadata_json = EXCLUDED.metadata_json || COALESCE(wbom_whatsapp_messages.metadata_json, '{}'::jsonb)
             RETURNING message_id
             """,
             phone, phone, raw_text, media_type, source,
             receiver or None, conv_key, msg_id, source_ts,
             json.dumps(context, ensure_ascii=False), msg_hash,
-            phone if phone and not phone.startswith("unresolved:") else None,
-            re.sub(r"\D", "", phone or "")[-10:] if phone else None,
+            _storage_canonical_phone(phone),
+            _storage_phone_last10(phone),
             json.dumps(context, ensure_ascii=False),
+            _actor_type, _actor_id,
         )
         core_id = int(row["message_id"]) if row and row.get("message_id") is not None else None
+        # Phase-2 identity enrichment — best-effort, flag-gated, additive.
+        # Runs as a follow-up UPDATE so it can never break the raw INSERT above.
+        await _phase2_enrich_raw_copy(core_id, source, msg, phone, raw_text, _chat_jid, media_type, source_ts)
         try:
             await execute(
                 """
@@ -1750,6 +2621,13 @@ async def _finalize_core_copy(
     error: str = "",
 ) -> None:
     """Update the raw core copy after OCR/identity/routing context is known."""
+    from modules.message_router import inbound_reference, set_inbound_outcome, record_inbound_action
+    active = inbound_reference().get("core_message_id") == core_message_id and core_message_id is not None
+    if active and status != "processing":
+        set_inbound_outcome(status, error)
+    if active and workflow:
+        record_inbound_action("decision", workflow=workflow, intent=intent_detected,
+                              role=identity_role, action=status)
     msg_id = str(msg.get("id") or msg.get("message_id") or "")
     metadata = {
         "stage": "processed",
@@ -1767,19 +2645,20 @@ async def _finalize_core_copy(
                 UPDATE wbom_whatsapp_messages
                    SET message_body = $2,
                        message_type = $3,
-                       is_processed = true,
+                       is_processed = ($10::text <> 'processing'),
                        identity_role = $4,
                        identity_confidence = $5,
-                       workflow_triggered = $6,
-                       intent_detected = $7,
+                       workflow_triggered = COALESCE($6, workflow_triggered),
+                       intent_detected = COALESCE($7, intent_detected),
                        extracted_text = $8,
                        metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $9::jsonb
                  WHERE message_id = $1
+                   AND ($11::boolean OR NOT (COALESCE(metadata_json, '{}'::jsonb) ? 'provenance'))
                 """,
                 core_message_id, text, msg_type,
                 identity_role or None, identity_confidence or None,
                 workflow or None, intent_detected or None, extracted_text or None,
-                json.dumps(metadata, ensure_ascii=False),
+                json.dumps(metadata, ensure_ascii=False), status, active,
             )
         else:
             await _save_message(
@@ -1806,10 +2685,24 @@ async def _finalize_core_copy(
 
 
 async def _mark_core_queue_status(source: str, msg: dict, status: str, error: str = "") -> None:
+    from modules.message_router import set_inbound_outcome
+    if status in ("skipped", "failed"):
+        set_inbound_outcome(status, error)
     msg_id = str(msg.get("id") or msg.get("message_id") or "")
     if not msg_id:
         return
     try:
+        await execute(
+            """UPDATE wbom_whatsapp_messages SET
+                 is_processed=($2::text IN ('done','failed','skipped')),
+                 metadata_json=COALESCE(metadata_json, '{}'::jsonb) ||
+                   jsonb_build_object('status', $2::text, 'processing_error', $3::text,
+                     'provenance', jsonb_build_object('processing_outcome', $2::text,
+                       'processing_reason', $3::text, 'finished_at', NOW(), 'actions', '[]'::jsonb))
+               WHERE message_hash=$1
+                 AND NOT (COALESCE(metadata_json, '{}'::jsonb) ? 'provenance')""",
+            _core_message_hash(source, msg_id), status, error[:500],
+        )
         await execute(
             """
             UPDATE fazle_message_queue
@@ -1836,26 +2729,66 @@ async def _save_message(
     intent_detected: str = "",
     msg_type: str = "text",
     extracted_text: str = "",
-):
+    actor_type: str = "",
+    actor_id: str = "",
+    source_message_ref: str = "",
+) -> Optional[int]:
+    """actor_type/actor_id (2026-08-28, Stage B1/B4 -- canonical-history
+    attribution): who/what produced THIS row's content -- a different
+    concept from identity_role (the counterparty's business identity,
+    unchanged). Every existing caller of this function is fazle-core's
+    own automated reply-generation (the customer-reply and internal
+    "admin-hermes-reply" AI-console cascades, and
+    recruitment_recovery_sweep's reconciliation of confirmed-sent
+    automation replies) -- each already passes actor_type="automation"
+    at its own call site, known with certainty there, never guessed here.
+    Optional/blank so every pre-existing caller (and any future one that
+    doesn't yet know its actor) keeps working unchanged -- stored as NULL,
+    not a fabricated default.
+
+    source_message_ref (2026-08-28, Stage B2/B3): optional stable
+    reference (an outbound queue row id, a WhatsApp message id, ...) that,
+    when given, is hashed with the exact same _core_message_hash()
+    convention _save_raw_core_copy() already uses for inbound rows, and
+    the INSERT becomes ON CONFLICT (message_hash) DO NOTHING -- genuine
+    idempotency on retry, reusing the table's own pre-existing unique
+    index (uq_wbom_messages_hash) rather than inventing a second dedup
+    mechanism. Omitted (the default): message_hash is stored as NULL,
+    byte-identical to this function's behavior before this parameter
+    existed -- NULL is never equal to any other value under the unique
+    index's own semantics, so pre-existing callers that don't pass this
+    can never spuriously collide with each other or with a caller that
+    does. Returns the inserted row's message_id, or None if the row
+    already existed (a genuine retry-noop) or an error occurred."""
     _receiver = _source_to_receiver(source)
     _conv_key = f"{sender}:{source}" if sender else None
+    _msg_hash = (
+        _core_message_hash(f"outbound:{source}", source_message_ref)
+        if source_message_ref else None
+    )
     try:
-        await execute(
+        row = await fetch_one(
             """
             INSERT INTO wbom_whatsapp_messages
                 (sender_number, message_body, message_type, direction,
                  platform, is_processed, contact_identifier,
                  identity_role, identity_confidence, workflow_triggered,
-                 receiver_number, conversation_key, intent_detected, extracted_text)
-            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12)
+                 receiver_number, conversation_key, intent_detected, extracted_text,
+                 actor_type, actor_id, message_hash)
+            VALUES ($1, $2, $3, $4, $5, true, $1, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (message_hash) DO NOTHING
+            RETURNING message_id
             """,
             sender, text, msg_type, direction, source,
             identity_role or None, identity_confidence or None, workflow or None,
             _receiver or None, _conv_key,
             intent_detected or None, extracted_text or None,
+            actor_type or None, actor_id or None, _msg_hash,
         )
+        return int(row["message_id"]) if row else None
     except Exception as e:
         log.warning(f"Message save error: {e}")
+        return None
 
 
 def _source_to_receiver(source: str) -> str:
@@ -1944,6 +2877,52 @@ async def _alert_admin_safety_block(
 
 # ── Shared inbound processing pipeline ────────────────────────────────────────
 
+def _with_inbound_provenance(func):
+    from functools import wraps
+    from inspect import signature
+
+    @wraps(func)
+    async def traced(*args, **kwargs):
+        from modules.message_router import inbound_execution, record_inbound_action
+        bound = signature(func).bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        core_id = values["core_message_id"]
+        # Compatibility for internal callers without an archive ID. Channel
+        # entrypoints supply one; historical callers never fabricate a link.
+        if core_id is None:
+            return await func(*args, **kwargs)
+        async with inbound_execution(
+            core_id, values["bridge_name"], values["message_id"],
+            role=values["id_role"], confidence=values["id_conf"],
+        ) as execution:
+            if execution is None:
+                return
+            reason = ""
+            if values["chat_jid"].endswith("@g.us"):
+                reason = "unapproved_group"
+            elif values["phone"].startswith("unresolved:"):
+                reason = "unresolved_identity"
+            elif is_media_placeholder(values["text"]) and not values["is_extracted_media"]:
+                reason = "unsupported_media"
+            elif values["bridge_name"] in ("bridge1", "bridge2", "bridge3") and is_automated_system_message(values["text"]):
+                reason = "automated_system_message"
+            else:
+                from modules.outbound import _pairing_held
+                held, _ = await _pairing_held(values["bridge_name"])
+                if held:
+                    reason = "pairing_hold"
+            if reason:
+                execution["processing_outcome"] = "skipped"
+                record_inbound_action("suppression", reason=reason)
+                return
+            await func(*args, **kwargs)
+            if not execution["actions"]:
+                record_inbound_action("decision", action="no_outbound_work", workflow="")
+    return traced
+
+
+@_with_inbound_provenance
 async def process_bridge_inbound(
     bridge_name: str,
     phone: str,
@@ -1953,6 +2932,10 @@ async def process_bridge_inbound(
     id_conf: int = 0,
     id_name: str = "",
     message_id: str = "",
+    chat_jid: str = "",
+    msg_timestamp=None,
+    is_extracted_media: bool = False,
+    core_message_id: Optional[int] = None,
 ) -> None:
     """Unified bridge inbound processing pipeline.
 
@@ -1960,25 +2943,246 @@ async def process_bridge_inbound(
     inbound save and identity detection.  Contains all safety gates so both
     entry paths behave identically.
 
+    core_message_id: the wbom_whatsapp_messages row ID already returned by
+    the poller or webhook persistence for this exact message. Legacy callers
+    without this ID retain their previous behavior. The ID also scopes
+    finalization and durable draft/queue provenance. The genuine inbound intent
+    classify_intent() computes below can be written onto the SAME row the
+    raw text was already captured on -- "capture/persist first, classify
+    later," never a second copy of the message.
+
     Does NOT save the inbound message — callers must do that beforehand.
+
+    chat_jid / msg_timestamp (2026-08-25 recovery-pass wiring, optional):
+    when both are provided, enables shared.draft.should_generate_draft()'s
+    "admin already replied" guard right before the customer-facing send
+    decision below. That check existed in shared/draft.py but was never
+    called from any live send path (unit-tested only) -- callers that omit
+    these two kwargs get the prior behavior unchanged (check skipped, fail-
+    open). msg_timestamp should be the actual inbound message's timestamp
+    (tz-aware or naive-UTC datetime), not the current time.
+
+    is_extracted_media (2026-08-25 recovery-pass, narrow cf_W001
+    mitigation): threaded straight through to modules.message_router.
+    process_message() -- see that function's docstring for the full
+    rationale. True only when `text` is raw OCR/STT output that could not
+    be classified as a known slip/document type.
     """
+    # Defense in depth: a bare "[media:<type>]" transport placeholder is NOT
+    # sender text. _poll_bridge already intercepts these before routing;
+    # guard the webhook entry path (and any future caller) identically so the
+    # intent classifier / RAG / semantic gate / Hermes / reply generation
+    # never run on a placeholder and no transcript is ever fabricated.
+    # is_extracted_media=True means `text` is genuine OCR/STT output — route it.
+    if is_media_placeholder(text) and not is_extracted_media:
+        log.info(
+            "[%s] process_bridge_inbound: media placeholder from %s (%s) — not routed",
+            bridge_name, phone, text,
+        )
+        return
+
+    # ── Cross-bridge system-notification echo guard ──────────────────────────
+    # A notification THIS system generated (e.g. "📋 ADMIN REVIEW DRAFT",
+    # "⚠️ RELEASE REVIEW REQUIRED", a "⚠️ ALERT:" circuit-open message) and
+    # sent to an admin number that is another bridge's own paired number
+    # bounces back here as a genuine is_from_me=0 inbound from that other
+    # bridge's number. Without this guard it is re-classified as a brand-new
+    # admin message and a SECOND, nested review card is rendered (observed
+    # live 2026-08-30: drafts #4514 → #4515). Requires BOTH pure provenance
+    # (sender is one of our own bridge numbers, arriving on a different
+    # bridge) AND a recognized own system-notification prefix — so a real
+    # external user is never suppressed for merely pasting such text, and an
+    # own-bridge number is never suppressed for ordinary human text. The
+    # existing "🤖 Hermes:" cross-bridge guard in modules.message_router is
+    # unaffected ("🤖 Hermes:" is not a SYSTEM_NOTIFICATION_TITLE_PREFIXES
+    # entry, so this guard leaves those echoes to it).
+    if _is_cross_bridge_system_echo(bridge_name, phone, text):
+        from modules.message_router import set_inbound_outcome, record_inbound_action
+        set_inbound_outcome("skipped", "cross_bridge_system_echo")
+        record_inbound_action("suppression", reason="cross_bridge_system_echo")
+        log.info(
+            "[%s] CROSS_BRIDGE_SYSTEM_ECHO: own system notification re-ingested "
+            "from %s (msg_id=%s) — consumed, not routed, no draft",
+            bridge_name, phone, message_id or "(none)",
+        )
+        return
+
+    # ── Deterministic owner→accountant payment-message relay ──────────────────
+    # NARROW, deterministic, LLM-free (modules.payment_relay). If — and only
+    # if — this message arrived on bridge2 (the Owner / Super Admin account
+    # 8801880446111; NOT bridge1/bridge3) AND the ACTUAL transport sender
+    # (`phone`, the canonical inbound sender, never a phone number inside the
+    # body) is the Owner's payment number AND the body has the Owner's
+    # established cash-payment shape, forward the ORIGINAL body verbatim to
+    # the accountant via bridge2, then STOP: no
+    # intent classification, no recruitment funnel, no Hermes, no reply, and
+    # no direct fpe_cash_transactions / employee-ledger write here. The
+    # existing Fazle Payroll Engine workers pick the relayed accountant-side
+    # (is_from_me=1) message up independently and unchanged. Gated by
+    # PAYMENT_RELAY_ENABLED (default off) — returns None (this block is a
+    # no-op) until the flag is set.
+    try:
+        from modules.payment_relay import maybe_relay_owner_payment
+        _relay_result = await maybe_relay_owner_payment(
+            bridge_name=bridge_name, sender=phone, body=text, message_id=message_id,
+        )
+    except Exception as _relay_exc:  # noqa: BLE001
+        # maybe_relay_owner_payment() is written never to raise, but if it
+        # somehow does, a message inside the PROTECTED financial-relay scope
+        # must still be HELD and STOPped — never silently handed to generic
+        # routing / Office-Internal / recruitment / admin-review / Hermes /
+        # LLM (Owner directive 2026-08-30 part A).
+        _protected = False
+        try:
+            from modules.payment_relay import is_protected_payment_candidate
+            _protected = is_protected_payment_candidate(bridge_name, phone, text)
+        except Exception:  # noqa: BLE001
+            _protected = False
+        if _protected:
+            log.error(
+                "[%s] payment_relay gate errored on a PROTECTED payment message "
+                "msg_id=%s — HELD and STOPPED (not routed): %s",
+                bridge_name, message_id or "(none)", _relay_exc,
+            )
+            return
+        log.error(
+            "[%s] payment_relay gate errored (message outside protected scope — "
+            "continuing normal routing): %s",
+            bridge_name, _relay_exc,
+        )
+        _relay_result = None
+    if _relay_result is not None:
+        log.info(
+            "[%s] payment_relay claimed inbound msg_id=%s status=%s relayed=%s dest=%s "
+            "outbound_bridge=%s — routing stopped here",
+            bridge_name, message_id or "(none)", _relay_result.get("status"),
+            _relay_result.get("relayed"), _relay_result.get("dest_number"),
+            _relay_result.get("outbound_bridge"),
+        )
+        return
+
+    # 0. Recruitment eligibility + best-effort funnel entry (2026-08-21,
+    # Owner Correction 1 / regression case ...1609): this used to be step 3,
+    # AFTER the cooldown early-return below. A candidate's SECOND message
+    # (e.g. an explicit "আমি কাজ করতে চাই" arriving less than
+    # REPLY_COOLDOWN=60s after their first) never reached recruitment_
+    # eligibility() at all — the cooldown `return` at old step 1 exited the
+    # whole function first, so no fazle_recruitment_sessions/wbom_candidates
+    # row was ever opened for them, only a silent DEBUG log line. Live-
+    # confirmed 2026-08-21: sender 8801966011609's "আমি কাজ করতে চাই"
+    # (received 1s after their first message, well inside the cooldown
+    # window) produced zero reply and zero lead — this is the generic bug
+    # behind that case, not specific to that phone number.
+    #
+    # Fix: compute recruitment eligibility unconditionally, and — mirroring
+    # route_recruitment_message()'s own existing best-effort session-open
+    # pattern for a new, high-confidence job inquiry (explicit trigger or
+    # entity-layer detector) — open the funnel here too when cooldown is
+    # about to suppress the reply that would otherwise have done it. This
+    # never touches the reply/send path: cooldown still fully governs
+    # whether anything is actually sent, exactly as before. If cooldown
+    # does NOT block, step 3 below still runs its own (idempotent, cheap)
+    # eligibility check for msg_intent/draft-gate purposes as it always did.
+    msg_intent = classify_intent(text)
+    # 2026-08-28 (Stage B5 -- genuine inbound intent persistence): snapshot
+    # classify_intent()'s own raw output (e.g. "salary_query",
+    # "escort_duty", "complaint" -- see modules.intent.INTENT_KEYWORDS)
+    # BEFORE the recruitment-eligibility override two lines below can
+    # coarsen it to "recruitment". msg_intent itself is left completely
+    # unchanged for every existing downstream use (workflow_triggered
+    # tagging, draft-gate logic, etc.) -- this snapshot is a read-only
+    # side observation, never fed back into routing/reply logic. This is
+    # the actual, already-computed inbound intent the workflow_triggered
+    # column has never carried (that column reflects the coarser
+    # domain/workflow OUTCOME on the reply, not this).
+    _raw_inbound_intent = msg_intent
+    recruit_decision = await recruitment_eligibility(
+        phone, text, role=id_role, intent=msg_intent, source=bridge_name,
+    )
+    if recruit_decision["eligible"]:
+        msg_intent = "recruitment"
+    if core_message_id is not None and _raw_inbound_intent:
+        try:
+            await execute(
+                "UPDATE wbom_whatsapp_messages SET intent_detected = $1 "
+                "WHERE message_id = $2 AND intent_detected IS NULL",
+                _raw_inbound_intent, core_message_id,
+            )
+        except Exception as _intent_persist_exc:
+            log.warning(
+                "[%s] intent_detected persist failed for message_id=%s: %s",
+                bridge_name, core_message_id, _intent_persist_exc,
+            )
+
     # 1. Cooldown
-    if not await _can_reply(phone):
+    _cooldown_blocked = not await _can_reply(phone)
+    if _cooldown_blocked and recruit_decision.get("active_session"):
+        # 2026-08-25 (P0 production incident): an active recruitment intake
+        # session is a direct, expected answer to a question THIS system
+        # just asked (e.g. "আপনার বয়স কত বছর?" -> "32") -- not spam risk,
+        # so it must not be silently dropped by the same 60s cooldown that
+        # exists to stop flooding a human with unsolicited replies. Live-
+        # confirmed against real bridge3 candidates: every checked case
+        # replied 13-50s after the question (well inside REPLY_COOLDOWN),
+        # and the candidate's answer was dropped entirely -- no field
+        # saved, no step advance, no reply ever sent for that turn, which
+        # then caused the exact same question to be re-asked on their next
+        # message (the "asks the same question repeatedly" / "no reply
+        # after a valid age" symptom). Scoped narrowly to
+        # active_session=True (an existing fazle_recruitment_sessions row
+        # already open for this phone) -- every other cooldown-blocked
+        # message (no session yet, or a non-recruitment sender) keeps the
+        # exact prior behavior below unchanged.
+        log.info(
+            "[%s] cooldown would have blocked %s but an active recruitment "
+            "session is a direct answer, not spam -- proceeding to full "
+            "processing instead of dropping it",
+            bridge_name, phone,
+        )
+    elif _cooldown_blocked:
+        from modules.message_router import record_inbound_action
+        record_inbound_action("suppression", reason="reply_cooldown")
         log.debug("[%s] cooldown active for %s", bridge_name, phone)
+        if (
+            recruit_decision.get("eligible")
+            and recruit_decision.get("autosend")
+        ):
+            try:
+                from modules.recruitment_flow import intake_message
+                # 2026-08-21: force-pass intake_message()'s own narrower
+                # gate -- reaching this line already required recruit_
+                # decision["eligible"] and ["autosend"] to be True, i.e.
+                # recruitment_eligibility() already made the authoritative
+                # call (possibly via bridge3's dedicated-channel rule or
+                # the detector layers, neither of which intake_message()'s
+                # bare-keyword gate recognizes on its own). See the
+                # identical fix + full rationale in
+                # modules.recruitment_flow.route_recruitment_message().
+                await intake_message(
+                    phone, text, bridge_name, role=id_role, message_id=message_id or None,
+                    trigger_text="চাকরি",
+                )
+                log.info(
+                    "[%s] cooldown suppressed reply but opened recruitment funnel for %s "
+                    "(explicit job-interest, reply=%s)",
+                    bridge_name, phone, recruit_decision.get("reason"),
+                )
+            except Exception as e:
+                log.debug("[recruit] best-effort cooldown-path session-open failed phone=%s: %s", phone, e)
         return
 
     # 2. Keyword flood
     if _check_keyword_flood(phone, text):
+        from modules.message_router import set_inbound_outcome, record_inbound_action
+        set_inbound_outcome("skipped", "keyword_flood")
+        record_inbound_action("suppression", reason="keyword_flood")
         log.warning("[KW_FLOOD] suppressed reply bridge=%s phone=%s", bridge_name, phone)
         return
 
-    # 3. Intent classification (router re-classifies internally; this copy drives draft gates)
-    msg_intent = classify_intent(text)
-    recruit_decision = await recruitment_eligibility(
-        phone, text, role=id_role, intent=msg_intent,
-    )
-    if recruit_decision["eligible"]:
-        msg_intent = "recruitment"
+    # 3. Intent classification / recruitment eligibility already computed at
+    # step 0 above (kept as one step there so both cooldown-blocked and
+    # normal paths see the identical decision; msg_intent/recruit_decision
+    # are reused here unchanged, not recomputed).
 
     # 4. Prompt injection defense
     _inj = _detect_prompt_injection(text)
@@ -1997,22 +3201,61 @@ async def process_bridge_inbound(
         return
 
     # 5. Full routing
-    reply, admin_note = await process_message(phone, text, bridge_name, message_id=message_id or None)
+    reply, admin_note = await process_message(
+        phone, text, bridge_name, message_id=message_id or None,
+        is_extracted_media=is_extracted_media,
+    )
 
-    # Write intent back to the most recent inbound row for this sender+source
-    if msg_intent:
+    # 5b. Conversation-policy SHADOW (Owner Phase 3, 2026-08-30) — compute what
+    # the topic-managed policy WOULD do this turn and LOG it beside the actual
+    # live outcome. Never changes the live reply. Flag-gated OFF by default
+    # (CONVERSATION_POLICY_SHADOW_ENABLED); fully swallowed on any error.
+    if os.getenv("CONVERSATION_POLICY_SHADOW_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            from modules.conversation_policy import (
+                compute_shadow_topic_decision, log_shadow_decision,
+            )
+            _active_topic = _active_status = None
+            _info_given: dict = {}
+            try:
+                from modules.conversation_memory import get_open_thread
+                for _dom in ("recruitment", "escort", "general"):
+                    _th = await get_open_thread(
+                        bridge_id=bridge_name, counterparty_phone=phone, business_domain=_dom,
+                    )
+                    if _th:
+                        _active_topic = _th.get("business_intent") or _th.get("business_domain")
+                        _active_status = _th.get("state")
+                        _info_given = _th.get("fields") or {}
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+            _decision = compute_shadow_topic_decision(
+                text=text, role=id_role,
+                active_topic=_active_topic, topic_status=_active_status,
+                information_given=_info_given,
+            )
+            _live_summary = (
+                "admin_note" if admin_note else
+                ("reply:" + (reply[:60] if reply else "none")) if reply is not None else "none"
+            )
+            log_shadow_decision(
+                bridge=bridge_name, sender=phone, message_id=message_id or None,
+                decision=_decision, live_action_summary=_live_summary,
+            )
+        except Exception as _cp_exc:  # noqa: BLE001
+            log.debug("[CONV_POLICY_SHADOW] skipped: %s", _cp_exc)
+
+    # Exact inbound ID only. Historical calls without an ID remain unknown.
+    if msg_intent and core_message_id is not None:
         try:
             await execute(
                 """
                 UPDATE wbom_whatsapp_messages
-                SET intent_detected = $1
-                WHERE id = (
-                    SELECT id FROM wbom_whatsapp_messages
-                    WHERE sender_number = $2 AND platform = $3 AND direction = 'inbound'
-                    ORDER BY id DESC LIMIT 1
-                )
+                SET intent_detected = COALESCE(intent_detected, $1)
+                WHERE message_id = $2
                 """,
-                msg_intent, phone, bridge_name,
+                msg_intent, core_message_id,
             )
         except Exception as _e:
             log.debug("[intent_writeback] %s: %s", phone, _e)
@@ -2085,7 +3328,7 @@ async def process_bridge_inbound(
                     await _record_reply(phone)
                     await _save_message(bridge_name, phone, reply, "outbound",
                                         identity_role=id_role, identity_confidence=id_conf,
-                                        workflow=msg_intent)
+                                        workflow=msg_intent, actor_type="automation")
                     log.info(
                         "[%s] Admin-Hermes reply sent directly (customer safety "
                         "cascade bypassed for admin role) to %s qid=%s",
@@ -2094,6 +3337,33 @@ async def process_bridge_inbound(
                 else:
                     log.warning("[%s] Admin-Hermes reply enqueue failed/deduped for %s", bridge_name, phone)
         else:
+            # 2026-08-25 recovery-pass wiring: "admin already manually
+            # replied to this thread" guard (shared.draft.should_generate_
+            # draft() -- previously dead code, unit-tested but never called
+            # from any live send path; see recovery-2026-08-25 branch).
+            # Runs before the entire customer-facing safety cascade below:
+            # if a human admin has already answered this chat on WhatsApp
+            # since this inbound came in, there is nothing for Hermes to
+            # add and no draft should be created either. Fail-open by
+            # design (see should_generate_draft docstring) and a no-op
+            # unless the caller supplied both chat_jid and msg_timestamp.
+            if chat_jid and msg_timestamp is not None:
+                try:
+                    from shared.draft import should_generate_draft
+                    if not await should_generate_draft(chat_jid, msg_timestamp):
+                        log.info(
+                            "[%s] MANUAL_REPLY_GUARD: admin already replied to %s "
+                            "(chat_jid=%s) — skipping auto-reply/draft",
+                            bridge_name, phone, chat_jid,
+                        )
+                        return
+                except Exception as _mrg_err:
+                    log.debug(
+                        "[%s] should_generate_draft check failed phone=%s: %s — "
+                        "proceeding (fail-open)",
+                        bridge_name, phone, _mrg_err,
+                    )
+
             # P17-FIX-2: recruit_gate — recruitment intake bypasses SAFE MODE
             # Role-based auto-reply: read live from DB (via wa_chat_frontend) so the UI toggle takes effect immediately.
             _recruit_gate = False
@@ -2168,8 +3438,29 @@ async def process_bridge_inbound(
 
                 if draft_gate:
                     log.info("[DRAFT-GATE] %s name=%r role=%s → draft", phone, id_name, id_role)
+                    # Stage G5.1 (2026-08-28): auto-notify admin only for the
+                    # Owner-supervised-draft lane (Client/Office-Internal) --
+                    # resolve_authority_lane() classifies purely from id_role
+                    # (never message text), matching every other lane
+                    # decision in this codebase. Every other reason a
+                    # message lands in DRAFT_ALWAYS (accountant, risk-level
+                    # gate, complaint phrase, loop detection) is left
+                    # exactly as before -- silent draft, no active push --
+                    # unless it also happens to be a Client/Office role.
+                    from modules.authority_lanes import resolve_authority_lane, LaneContext, OWNER_SUPERVISED_DRAFT
+                    _lane_decision = resolve_authority_lane(LaneContext(identity_role=id_role or "unknown"))
+                    _g51_category = ""
+                    if _lane_decision.lane == OWNER_SUPERVISED_DRAFT and id_role in (
+                        "vip_client", "security_service_client", "client_escort_buyer", "escort_client", "repeat_client",
+                    ):
+                        _g51_category = "Client"
+                    elif _lane_decision.lane == OWNER_SUPERVISED_DRAFT and id_role in (
+                        "internal_coordinator", "internal_operation", "employee_internal",
+                    ):
+                        _g51_category = "Office/Internal"
                     await _save_draft(bridge_name, phone, reply, msg_intent,
-                                      sender_name=id_name, sender_message=text)
+                                      sender_name=id_name, sender_message=text,
+                                      category=_g51_category, auto_notify_admin=bool(_g51_category))
                 else:
                     # STEP 7: loop detection
                     if _check_loop_detect(phone):
@@ -2193,11 +3484,29 @@ async def process_bridge_inbound(
                         return
 
                     # Length/structure guard
+                    # 2026-08-24 (Owner BREAK_GLASS_APPROVED for temporary live
+                    # Hermes Recruitment/Employee conversational authority):
+                    # skip STRUCT guard for legitimate recruitment/employee
+                    # conversational replies. Salary breakdowns, office
+                    # address responses, and multi-section duty/role
+                    # explanations naturally exceed 400 chars and use
+                    # markdown structure; the STRUCT guard diverts them to
+                    # drafts and admin alerts but the production draft queue
+                    # is not consumed by the Hermes live Recruitment/Employee
+                    # path -- so legit replies got stuck. Other safety
+                    # layers (POISON filter above, AI_SAFE_MODE below,
+                    # DRAFT_ALWAYS, contact-risk, loop detection,
+                    # financial-intent draft gate) remain fully operational
+                    # for non-Recruitment/non-Employee contexts. Protected
+                    # flows (payroll, attendance, escort, admin alerts) are
+                    # not touched because this only relaxes a length/format
+                    # heuristic, never any write path or authorization gate.
                     _reply_len = len(reply)
                     _has_table = reply.count(" | ") >= 2 or ":---" in reply
                     _is_long = _reply_len > 400
                     _has_headings = reply.count("\n#") >= 2
-                    if _is_long or _has_table or _has_headings:
+                    _is_recruitment_employee = msg_intent in ("recruitment", "employee_inquiry")
+                    if (not _is_recruitment_employee) and (_is_long or _has_table or _has_headings):
                         _block_reason = f"STRUCT:len={_reply_len},table={_has_table},headings={_has_headings}"
                         log.warning(
                             "[OUTBOUND_LENGTH_GUARD] bridge=%s phone=%s len=%d table=%s headings=%s",
@@ -2248,7 +3557,7 @@ async def process_bridge_inbound(
                         await _record_reply(phone)
                         await _save_message(bridge_name, phone, reply, "outbound",
                                             identity_role=id_role, identity_confidence=id_conf,
-                                            workflow=msg_intent)
+                                            workflow=msg_intent, actor_type="automation")
                         log.info("[%s] Queued reply to %s qid=%s", bridge_name, phone, qid)
                     else:
                         log.warning("[%s] Reply enqueue failed/deduped for %s", bridge_name, phone)

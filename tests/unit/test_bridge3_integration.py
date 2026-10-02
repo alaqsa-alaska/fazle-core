@@ -204,6 +204,16 @@ async def test_outbound_dispatch_bridge3_fixed():
     over the HR number instead of the Admin's own bridge3 device).
     """
     from modules import outbound
+    from modules.identity_role_authorization import AuthorizationDecision
+    from modules.outbound_authorization import issue_transport_authorization
+
+    authorization = issue_transport_authorization(AuthorizationDecision(
+        allowed=True,
+        reason_code="allowed",
+        authorization_version=7,
+        manual_review_required=False,
+        restriction_category=None,
+    ))
 
     mock_b3 = AsyncMock()
     mock_b3.breaker = MagicMock()
@@ -217,9 +227,16 @@ async def test_outbound_dispatch_bridge3_fixed():
     with patch("app.bridge.get_bridge3", return_value=mock_b3), \
          patch("app.bridge.get_bridge1", return_value=mock_b1), \
          patch("app.bridge.get_bridge2", return_value=AsyncMock()):
-        result = await outbound._send_with_channel("bridge3", "8801805529211", "answer for Admin")
+        with pytest.raises(PermissionError, match="transport authorization required"):
+            await outbound._send_with_channel("bridge3", "8801805529211", "answer for Admin")
+        mock_b3.send_strict.assert_not_awaited()
+        result = await outbound._send_with_channel(
+            "bridge3", "8801805529211", "answer for Admin", authorization=authorization,
+        )
 
-    mock_b3.send_strict.assert_awaited_once_with("8801805529211", "answer for Admin")
+    mock_b3.send_strict.assert_awaited_once_with(
+        "8801805529211", "answer for Admin", authorization=authorization,
+    )
     mock_b1.send_strict.assert_not_called()
     assert result == "bridge3:8801805529211"
 
@@ -227,6 +244,16 @@ async def test_outbound_dispatch_bridge3_fixed():
 @pytest.mark.asyncio
 async def test_outbound_dispatch_bridge1_bridge2_unchanged():
     from modules import outbound
+    from modules.identity_role_authorization import AuthorizationDecision
+    from modules.outbound_authorization import issue_transport_authorization
+
+    authorization = issue_transport_authorization(AuthorizationDecision(
+        allowed=True,
+        reason_code="allowed",
+        authorization_version=7,
+        manual_review_required=False,
+        restriction_category=None,
+    ))
 
     for source_bridge, expected_attr in (("bridge1", "get_bridge1"), ("bridge2", "get_bridge2")):
         mock_client = AsyncMock()
@@ -237,9 +264,13 @@ async def test_outbound_dispatch_bridge1_bridge2_unchanged():
 
         with patch(f"app.bridge.{expected_attr}", return_value=mock_client), \
              patch("app.bridge.get_bridge3", return_value=AsyncMock()):
-            result = await outbound._send_with_channel(source_bridge, "8801000000000", "hello")
+            result = await outbound._send_with_channel(
+                source_bridge, "8801000000000", "hello", authorization=authorization,
+            )
 
-        mock_client.send_strict.assert_awaited_once()
+        mock_client.send_strict.assert_awaited_once_with(
+            "8801000000000", "hello", authorization=authorization,
+        )
         assert result == f"{source_bridge}:8801000000000"
 
 

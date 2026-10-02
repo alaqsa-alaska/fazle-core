@@ -1,8 +1,20 @@
-# Recruitment Source of Truth — AUTHORITATIVE
+STATUS: HISTORICAL EVIDENCE ONLY (2026-09-26)
+Active Recruitment context is selected from the two canonical documents in
+knowledge_base/05_workflows/recruitment_workflow.md and
+knowledge_base/01_employee_knowledge/recruitment_policy.md, then resolved
+through knowledge_base/00_governance/recruitment_fact_authority.json.
+This file remains for provenance and compatibility, not candidate policy.
 
-এই ফাইলটি শুধু চাকরিপ্রার্থী ও নিয়োগ-সংক্রান্ত WhatsApp উত্তরের জন্য।
-অন্য কোনো KB, database context, conversation memory, employee record বা resource থেকে
-recruitment factual answer নেওয়া যাবে না।
+# Recruitment Source Evidence Archive — NOT ACTIVE POLICY
+
+এই ফাইলটি পুরোনো Recruitment route-এর provenance ও evidence archive।
+এখানে থাকা তথ্যের কিছু অংশ owner-approved principle-এর evidence এবং কিছু অংশ
+historical বা conflicting operational text। এটি একক candidate-facing authority নয়।
+Candidate-facing উত্তর শুধু দুইটি canonical Recruitment document এবং
+knowledge_base/00_governance/recruitment_fact_authority.json-এর approved facts
+থেকে তৈরি হবে।
+এই archive-এ থাকা পুরোনো ১০:০০–১৭:০০/শুক্রবার সংক্রান্ত wording বা অন্য
+conflicting value register-এর current_approved fact-কে override করে না।
 
 ## উত্তর দেওয়ার সীমা
 
@@ -16,7 +28,7 @@ recruitment factual answer নেওয়া যাবে না।
 
 - অফিস সময়: সকাল ১০টা থেকে বিকাল ৫টা।
 - শুক্রবার অফিস বন্ধ থাকতে পারে। আসার আগে যোগাযোগ করে নিশ্চিত করতে হবে।
-- অফিস ঠিকানা: আগ্রপাড়া, Victoria Gate #1, Khokoner Building, AK Khan Mor, Chittagong।
+- অফিস ঠিকানা: আগ্রাপাড়া, Victoria Gate #1, Khokoner Building, AK Khan Mor, Chittagong। (পুরনো বানান আগ্রপাড়া একই স্থান বোঝায়)
 - সর্বশেষ ও একমাত্র recruitment WhatsApp/যোগাযোগ নম্বর: 01958-122300।
 - পুরোনো বা অন্য কোনো যোগাযোগ নম্বর recruitment reply-তে ব্যবহার করবে না।
 
@@ -43,6 +55,11 @@ recruitment factual answer নেওয়া যাবে না।
 - অভিজ্ঞ প্রার্থীদের অগ্রাধিকার দেওয়া হবে।
 - গার্মেন্টস, সিকিউরিটি, সুপারভাইজরি, পরিবহন, লজিস্টিকস, জাহাজ বা বন্দর-সংক্রান্ত অভিজ্ঞতা মূল্যবান।
 - ভালো কাজ ও যোগ্যতা অনুযায়ী পদোন্নতির সুযোগ আছে।
+- গুরুত্বপূর্ণ (2026-08-21): প্রার্থীর শিক্ষাগত যোগ্যতা (যেমন HSC) থেকে নিজে থেকে অনুমান করে
+  কোনো নির্দিষ্ট পদে (যেমন Assistant Supervisor) তাকে "যোগ্য" বলে দেবে না -- এখানে যা লেখা আছে
+  তার বাইরে কোনো পদের জন্য আলাদা শিক্ষাগত যোগ্যতার নিয়ম নেই, শুধু Operation Officer পদে স্নাতক
+  ডিগ্রি প্রয়োজন এটুকুই নির্দিষ্ট করা আছে। অন্য কোনো পদে নির্দিষ্ট যোগ্যতা জিজ্ঞাসা করলে বলবে:
+  "নির্দিষ্ট পদে আপনার যোগ্যতা প্রযোজ্য কিনা তা অফিসে সরাসরি যাচাই করে জানানো হবে।"
 
 ## আবেদন ও যোগদান
 
@@ -55,12 +72,19 @@ recruitment factual answer নেওয়া যাবে না।
 ## ভর্তি ফি / ডিপোজিট প্রশ্নের বাধ্যতামূলক উত্তরনীতি
 
 শুধু ভর্তি ফি / জয়েনিং ফি সরাসরি জিজ্ঞেস করলে এই সঠিক উত্তর দাও:
-"জয়েনিং ফি ৳৩,৫০০ — এটি ৬ মাস পর ফেরত দেওয়া হয়।
-যোগদানের সময় কমপক্ষে ৳১,০০০ + ৳৩৩০ ফর্ম ফি দিতে হবে।
-বাকি টাকা মাসে ৳৫০০ করে বেতন থেকে কাটা হয়।"
+"চাকরির জন্য কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না।
 
-কখনো বলবে না "কোনো ভর্তি ফি নেই" বা "সম্পূর্ণ বিনামূল্যে" — এটি ভুল।
-ফি সম্পর্কে প্রশ্ন না করলে নিজে থেকে এই তথ্য বলবে না।
+যদিও প্রসেসিং ফি, জয়েনিং ফি ইত্যাদি অন্যান্য প্রতিষ্ঠানের মত আমাদের এখানেও আছে।
+তবুও আমরা অগ্রীম গ্রহনের পরিবর্তে মাসিক বেতনের সাথে অর্থ্যাৎ বেতন থেকে কিস্তিতে
+কাটার ব্যবস্থা রেখেছি।
+
+আর্থিক সমস্যার বিষয়ে আলোচনা করা যায়। টাকা নেই - এজন্য কারো চাকরিতে জয়েন
+বাঁধা হবে না।
+প্রতিষ্ঠানের নির্দিষ্ট মানি-রিসিট বা টাকা জমা দেয়ার রশিদ ছাড়া কেউ টাকা চাইলে
+তা প্রতারণা — সরাসরি অফিসে যাচাই করুন বা কল দিন 01958-122300 নাম্বারে।"
+
+উপরের canonical টেক্সটে কোনো নির্দিষ্ট টাকার অঙ্ক নেই -- নিজে থেকে কোনো অঙ্ক
+বানিয়ে বলবে না। ফি সম্পর্কে প্রশ্ন না করলে নিজে থেকে এই তথ্য বলবে না।
 
 ## Operation Officer
 
@@ -84,7 +108,7 @@ recruitment factual answer নেওয়া যাবে না।
 
 ## Escort / Survey Scout
 
-- Mother Vessel ও Lighter Vessel-এ দায়িত্ব থাকতে পারে।
+- মাদার-ভেসেল ও লাইটার-ভেসেলে দায়িত্ব থাকতে পারে। (Mother Vessel / Lighter Vessel)
 - Cargo Monitoring, Seal Verification, Tally Count এবং Loading/Unloading Monitoring করতে হয়।
 - Release Point Monitoring, Ship Stay এবং River Route Escort দায়িত্ব থাকতে পারে।
 - training period: ৪৫ দিন।
@@ -96,6 +120,45 @@ recruitment factual answer নেওয়া যাবে না।
 - salary, থাকা-খাওয়া ও অন্যান্য সুবিধা job responsibility এবং duty type অনুযায়ী পরিবর্তিত হয়।
 - duty type হতে পারে Ship Stay, Day Duty অথবা Night Duty।
 - operation অনুযায়ী থাকা-খাওয়া ও সুবিধার ব্যবস্থা ভিন্ন হতে পারে।
+
+## দায়িত্বশীল/সুপারভাইজরি পদ — অভিজ্ঞতা যাচাই ও প্রশিক্ষণ (Owner directive, 2026-08-27)
+
+Security Supervisor, Assistant Supervisor, Ghat Supervisor, Ghat In-Charge,
+Operation Officer, Security In-Charge এবং একই ধরনের অন্য দায়িত্বশীল/
+সুপারভাইজরি পদের ক্ষেত্রে শুধু সাধারণ "কত বছরের অভিজ্ঞতা" উত্তর যথেষ্ট নয় —
+প্রার্থীর ঠিক এই ধরনের দায়িত্বশীল কাজে প্রাসঙ্গিক অভিজ্ঞতা আছে কিনা তা আলাদাভাবে
+জিজ্ঞাসা করতে হবে (কোন প্রতিষ্ঠানে, কত বছর, সম্ভব হলে reference contact)।
+প্রার্থীর নিজের দাবি শুধু claimed/unverified তথ্য হিসেবে গণ্য হবে যতক্ষণ না
+অফিস তা যাচাই করে — কোনো দাবিকে নিজে থেকে "verified"/"যাচাই হয়ে গেছে" বলা
+যাবে না।
+
+প্রাসঙ্গিক অভিজ্ঞতা না থাকলে সরাসরি প্রত্যাখ্যান নয় — দায়িত্বশীল পদে অন্যদের
+সঠিক নির্দেশনা দেওয়ার আগে কাজটি নিজে বোঝা জরুরি, তাই practical
+learning/training-এর মাধ্যমে প্রস্তুত করা হয়।
+
+প্রশিক্ষণ/প্রস্তুতির সময়কাল নির্দিষ্ট গ্যারান্টিকৃত ৪৫ দিন নয় — পরিবর্তনশীল:
+- কিছু প্রার্থীর জন্য প্রায় ৪৫–৯০ দিন যথেষ্ট হতে পারে।
+- কিছু প্রার্থীর প্রায় ৩–৬ মাস প্রয়োজন হতে পারে।
+- সক্ষম প্রার্থী আরও দ্রুত প্রস্তুত হতে পারে।
+- প্রস্তুতি নির্ভর করে বাস্তব দক্ষতা, শেখার গতি, আন্তরিকতা/মনোযোগ, উপস্থিতি ও
+  অহেতুক absence, শৃঙ্খলা, ম্যানেজমেন্টের নির্দেশনা মেনে চলা, এবং দাবিকৃত
+  দক্ষতা বাস্তব কাজের সাথে মেলে কিনা তার উপর।
+- নির্দিষ্ট দিন সংখ্যার পর দায়িত্বশীল পদে পদোন্নতির প্রতিশ্রুতি দেওয়া যাবে না —
+  মূলনীতি হলো প্রস্তুতি/দক্ষতা, শুধু সময় অতিবাহিত হওয়া নয়।
+
+Operation Officer পদের প্রার্থীকে মাঠ পর্যায়ের কাজ বোঝা প্রয়োজন, যাতে অফিস
+থেকে সঠিকভাবে নির্দেশনা দিতে ও সমন্বয় করতে পারে — Escort/Survey Escort-এর
+কাজ, মাদার-ভেসেল ও লাইটার-ভেসেল অপারেশন, cargo loading/unloading, survey,
+sealing, tally/counting, scale-related কাজ, cargo monitoring এবং মাঠ
+পর্যায়ের personnel coordination। মাঠের কাজ না বুঝলে মাঠ পর্যায়ের staff-কে
+নির্ভরযোগ্যভাবে নির্দেশনা দেওয়া বা সমন্বয় করা সম্ভব না — এটাই কারণ, এটা
+প্রার্থীকে স্বাভাবিকভাবে ব্যাখ্যা করা যায়।
+
+Ghat Supervisor/Ghat In-Charge পদের প্রার্থীর জন্য প্রাসঙ্গিক ব্যবহারিক
+জ্ঞান: unloading-point অপারেশন, ট্রাক নম্বর/গাড়ি চলাচল, scale slip,
+tally/counting, labour/cargo movement, ঘাটের কাজ সমন্বয় ও তদারকি। Ghat
+Supervisor সাধারণত ঘাটের কাজ তদারকি/সমন্বয় করে; Ghat In-Charge দায়িত্ব
+অনুযায়ী একাধিক বা বৃহত্তর ঘাট-কার্যক্রম নজরদারি করতে পারে।
 
 ## আগ্রহী প্রার্থী — তথ্য সংগ্রহের ক্রম
 

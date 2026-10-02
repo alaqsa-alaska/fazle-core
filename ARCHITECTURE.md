@@ -182,8 +182,8 @@ print('GitHub Models:', gm['status'], gm.get('error',''))
 
 **Endpoint confirmed working:**
 ```bash
-curl "https://fazle.iamazim.com/webhook/meta?hub.mode=subscribe&hub.challenge=TEST&hub.verify_token=fazle_core_webhook_2026"
-# Returns: TEST  (HTTP 200)
+curl "https://fazle.iamazim.com/webhook/meta?hub.mode=subscribe&hub.challenge=TEST&hub.verify_token=${META_VERIFY_TOKEN}"
+# Returns: TEST  (HTTP 200)  — export META_VERIFY_TOKEN from /home/azim/core/.env first
 ```
 
 **Credentials (from `/home/azim/core/.env` and `app/config.py:838-847`):**

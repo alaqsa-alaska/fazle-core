@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # trigger get_settings() during collection, before the override_env fixture runs.
 # Set safe defaults here so collection never fails with ValidationError.
 _early_test_db_pass = os.getenv("TEST_DB_PASSWORD", "changeme-set-TEST_DB_PASSWORD")
-os.environ.setdefault("DATABASE_URL", os.getenv("TEST_DATABASE_URL", f"postgresql://postgres:{_early_test_db_pass}@172.20.0.6:5432/fazle_test"))
+os.environ.setdefault("DATABASE_URL", os.getenv("TEST_DATABASE_URL", f"postgresql://postgres:{_early_test_db_pass}@127.0.0.1:5433/fazle_test"))
 os.environ.setdefault("INTERNAL_API_KEY", "test-internal-key-fixture-only")
 os.environ.setdefault("AUTO_REPLY_ENABLED", "false")
 os.environ.setdefault("RECRUITMENT_AUTOREPLY_ENABLED", "false")
@@ -38,6 +38,25 @@ os.environ.setdefault("META_APP_SECRET", "test_app_secret")
 os.environ.setdefault("ACCOUNTANT_PHONE", "")
 os.environ.setdefault("ESCORT_CLIENT_PHONES", "")
 os.environ.setdefault("SOCIAL_AUTO_REPLY_SINGLE_ENGINE", "false")
+
+# app.main calls app.logging_setup.setup_logging() at MODULE level on import
+# (line ~68) — it attaches a RotatingFileHandler to the ROOT logger pointed
+# at logs/fazle-core.log by default. Since most test files import app.main
+# (directly or transitively) during collection, that handler stays attached
+# for the entire pytest process and EVERY log.info() call anywhere in the
+# app — including these tests' own fixture data ("db down", "write failed",
+# recipient=8801711111111, etc.) — was landing in the SAME file the live
+# fazle-core.service writes to (confirmed live, 2026-08-27: a pytest run
+# produced [META_EVENT] lines in logs/fazle-core.log seconds after running).
+# setup_logging() already reads FAZLE_LOG_DIR as its override point for
+# exactly this kind of redirection — point it at a throwaway temp directory
+# before any import can trigger setup_logging(), so tests physically cannot
+# write into the production log file. Owner directive (2026-08-27, Meta
+# Messenger/Instagram integration, Section 1): "Ensure tests do not write
+# fixture noise into the production log file."
+if "FAZLE_LOG_DIR" not in os.environ:
+    import tempfile
+    os.environ["FAZLE_LOG_DIR"] = tempfile.mkdtemp(prefix="fazle-test-logs-")
 
 import asyncpg
 import pytest
@@ -142,6 +161,59 @@ def _setup_test_schema(override_env):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _BASE_SCHEMA_SQL = """
+-- Recruitment candidate tables — pre-date db/migrations/ (production tables
+-- since before the numbered migration era; no CREATE TABLE anywhere in the
+-- repo until this stub). Column set + CHECK constraints mirror the live
+-- `postgres` DB as captured 2026-08-29. `post_intake_status` (migration
+-- 072) and `linked_employee_id` (migration 077) are deliberately NOT here
+-- so those migrations actually apply against this schema in tests.
+CREATE TABLE IF NOT EXISTS wbom_candidates (
+    candidate_id        BIGSERIAL PRIMARY KEY,
+    phone               VARCHAR(20) NOT NULL,
+    full_name           VARCHAR(100),
+    age                 INTEGER,
+    area                VARCHAR(100),
+    job_preference      VARCHAR(50),
+    experience_years    INTEGER,
+    available_join_date DATE,
+    funnel_stage        VARCHAR(30) NOT NULL DEFAULT 'new'
+        CHECK (funnel_stage IN ('new','collecting','scored','assigned','contacted','interviewed','hired','rejected','dropped')),
+    collection_step     VARCHAR(30) DEFAULT 'name',
+    score               INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 100),
+    score_bucket        VARCHAR(10) NOT NULL DEFAULT 'cold' CHECK (score_bucket IN ('hot','warm','cold')),
+    assigned_recruiter  VARCHAR(80),
+    assigned_at         TIMESTAMPTZ,
+    last_contact_at     TIMESTAMPTZ,
+    next_follow_up_at   TIMESTAMPTZ,
+    source              VARCHAR(30) DEFAULT 'whatsapp',
+    source_message      TEXT,
+    notes               TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_phone ON wbom_candidates(phone);
+
+CREATE TABLE IF NOT EXISTS wbom_candidate_conversations (
+    conv_id       BIGSERIAL PRIMARY KEY,
+    candidate_id  BIGINT NOT NULL REFERENCES wbom_candidates(candidate_id) ON DELETE CASCADE,
+    step          VARCHAR(30) NOT NULL,
+    direction     VARCHAR(10) NOT NULL DEFAULT 'inbound',
+    message_text  TEXT NOT NULL,
+    collected_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    source_bridge TEXT,
+    message_id    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_conv_candidate ON wbom_candidate_conversations(candidate_id);
+
+CREATE TABLE IF NOT EXISTS wbom_recruitment_reminders (
+    reminder_id  BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT NOT NULL REFERENCES wbom_candidates(candidate_id) ON DELETE CASCADE,
+    due_at       TIMESTAMPTZ NOT NULL,
+    reason       VARCHAR(100) NOT NULL,
+    status       VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','dismissed')),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- WBOM core tables (pre-date all migrations)
 CREATE TABLE IF NOT EXISTS wbom_employees (
     employee_id   SERIAL PRIMARY KEY,
@@ -864,8 +936,8 @@ def _validate_test_db_url(url: str) -> str:
 # If not set, construct from safe components: Docker host + fazle_test DB.
 # The password may be provided via TEST_DB_PASSWORD env var (CI-friendly).
 # NEVER read the full production DATABASE_URL from .env files.
-_TEST_DB_HOST = os.getenv("TEST_DB_HOST", "172.20.0.6")
-_TEST_DB_PORT = os.getenv("TEST_DB_PORT", "5432")
+_TEST_DB_HOST = os.getenv("TEST_DB_HOST", "127.0.0.1")
+_TEST_DB_PORT = os.getenv("TEST_DB_PORT", "5433")
 _TEST_DB_USER = os.getenv("TEST_DB_USER", "postgres")
 _TEST_DB_PASS = os.getenv("TEST_DB_PASSWORD", "changeme-set-TEST_DB_PASSWORD")
 _TEST_DB_NAME = "fazle_test"  # hardcoded — never overridable
@@ -925,6 +997,10 @@ async def _truncate_all_tables(conn: asyncpg.Connection) -> None:
         await conn.execute(f"TRUNCATE TABLE {safe_names} RESTART IDENTITY CASCADE")
     except Exception:
         pass  # non-fatal — some tables may have FK cycles
+    # TRUNCATE ... CASCADE can clear referenced seed tables indirectly, even
+    # when fazle_roles itself is excluded from the generated table list.
+    # Restore the small immutable RBAC role catalog before the next test.
+    await conn.execute(_SEED_SQL)
 
 
 @pytest_asyncio.fixture
@@ -997,6 +1073,85 @@ async def client(test_db_pool) -> AsyncGenerator[AsyncClient, None]:
         await _od.stop()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _disable_shadow_logger_real_writes(request):
+    """Restart-gate/test-infrastructure investigation (2026-08-27, Owner
+    directive): modules.hermes_kernel.shadow_logger.log_decision()/
+    log_event() are fired via bare asyncio.create_task() from modules.
+    message_router's _hk_fire() closure -- true fire-and-forget,
+    uncaptured, unawaited by the caller -- at dozens of call sites inside
+    process_message(). With HERMES_DECISION_AUDIT_ENABLED=true /
+    HERMES_EVENT_LOG_ENABLED=true in .env (the real, unchanged production
+    setting), ANY test that exercises process_message() -- even one that
+    mocks everything else and has nothing to do with shadow logging --
+    silently schedules a REAL, unawaited DB write against the test
+    database as an uncontrolled side effect. If the test function returns
+    (and pytest-asyncio's function-scoped event loop starts tearing down)
+    before that task gets a scheduling turn to finish, it is abandoned
+    mid-flight. Under momentary CPU/event-loop contention on this shared
+    VPS (real production traffic — fazle-core.service, hermes-runner,
+    ollama — runs on the same machine and was confirmed actively
+    processing real customer messages during reproduction), the abandoned
+    task's turn can be delayed past pytest's fixed 30s test timeout,
+    which pytest then attributes to whichever test happened to be running
+    at that moment. This reproduces the observed pattern exactly:
+    intermittent, only in longer/bundled gate runs (never in a fast
+    isolated rerun of the same suite), a DIFFERENT specific test each
+    time, always the same "Task-was-destroyed... _sock_write_done"
+    signature. Confirmed via live pg_stat_activity monitoring (before,
+    during, and after both an isolated run and a full check4+check4b
+    run) that this is NOT a Postgres connection leak, pool exhaustion, or
+    lock/transaction contention — connection count never exceeded 2 the
+    entire time.
+
+    Fix: make these fire-and-forget calls true no-ops for every test
+    EXCEPT tests/unit/test_hermes_kernel_shadow_logger.py itself (which
+    explicitly exercises their real enable/resolve/write behavior with
+    its own mocks/invalidate_flag_cache() calls) -- closing off this
+    entire class of flakiness at its actual source. Zero change to
+    modules/hermes_kernel/shadow_logger.py, modules/message_router/
+    __init__.py, or any real .env flag -- this is a pure test-isolation
+    fix, same category as _reset_admin_command_dedup_cache below."""
+    if request.module.__name__.endswith("test_hermes_kernel_shadow_logger"):
+        yield
+        return
+    with patch("modules.hermes_kernel.shadow_logger.log_decision", new=AsyncMock()), \
+         patch("modules.hermes_kernel.shadow_logger.log_event", new=AsyncMock()):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _default_bridge3_pairing_state_released(request):
+    """BRIDGE3_FIRST_REPAIR_INCIDENT_2026-09-02: modules.bridge_poller now
+    FAIL-CLOSES bridge3 whenever `bridge3.pairing_state` is not exactly
+    `OUTBOUND_OWNER_APPROVED` — an unset key holds all bridge3 routing and
+    refuses every bridge3 outbound enqueue/dispatch. The isolated test DB's
+    `fazle_runtime_settings` starts empty, so without this fixture every
+    pre-existing test that enqueues or routes via bridge3 (idempotency,
+    lifecycle, recruitment, admin-isolation ...) would suddenly see a held
+    bridge. Default the lookup to `OUTBOUND_OWNER_APPROVED` for
+    `*.pairing_state` keys so those tests keep exercising normal behaviour;
+    everything else passes through to the real get_runtime_setting.
+
+    Opt-out: the two suites that assert the real fail-closed / state-machine
+    logic patch get_runtime_setting themselves and must not be wrapped."""
+    mod = request.module.__name__
+    if mod.endswith(("test_bridge_poller_history_sync_quarantine",
+                     "test_outbound_pairing_hold")):
+        yield
+        return
+    import modules.wa_chat_frontend as _wf
+    _real = _wf.get_runtime_setting
+
+    async def _patched(key, default="false"):
+        if isinstance(key, str) and key.endswith(".pairing_state"):
+            return "OUTBOUND_OWNER_APPROVED"
+        return await _real(key, default)
+
+    with patch.object(_wf, "get_runtime_setting", new=_patched):
+        yield
 
 
 @pytest.fixture(autouse=True)

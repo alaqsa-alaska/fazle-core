@@ -13,7 +13,7 @@ Sources indexed:
   2. Active rows of fazle_knowledge_base (key, reply_text)
 
 Public API (all async, safe to call from FastAPI handlers):
-  • await build_index()              → (re)build the in-memory index
+  • await build_index(sync_qdrant=True) → (re)build BM25 and optionally sync Qdrant
   • await ensure_index()             → build if not yet built
   • await search(q, k=5, min_score=0.0, role="candidate") → list[dict]
   • await stats()                    → diagnostics dict
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import os
@@ -33,6 +34,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from app.database import fetch_all
+from modules.recruitment_authority import (
+    candidate_evidence_safe,
+    facts_for_evidence,
+)
 
 log = logging.getLogger("fazle.rag")
 
@@ -198,6 +203,22 @@ _CATEGORY_ROLE_MAP: dict[str, frozenset[str]] = {
 _DEFAULT_ALLOWED: frozenset[str] = frozenset({
     "candidate", "employee", "supervisor", "accountant", "admin", "developer"
 })
+# Resource files explicitly marked as employee/operational or historical
+# evidence are not candidate policy. Candidate Recruitment context comes from
+# the two canonical documents through shared.reply_policy.
+_RESTRICTED_RESOURCE_ROLES: dict[str, frozenset[str]] = {
+    "file:ops/recruitment_source_of_truth.txt": frozenset({"admin", "developer"}),
+    "file:ops/master_recruitment_employee_information.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/employee_policy_rules_joining_form.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/attendance_rules.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/food_expense_policy.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/joining_fee_policy.txt": frozenset({"admin", "developer"}),
+    "file:ops/probation_and_training.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/release_workflow.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+    "file:ops/salary_structure.txt": frozenset({"employee", "supervisor", "accountant", "admin", "developer"}),
+    "file:ops/selected_contacts_normalized_unique.csv": frozenset({"admin", "developer"}),
+    "file:ops/transport_allowances.txt": frozenset({"employee", "supervisor", "admin", "developer"}),
+}
 # ── END Phase 3 constants ──────────────────────────────────────────────────────
 
 # Module-level singletons — None until first lazy call.
@@ -563,7 +584,9 @@ def _load_resource_files() -> list[tuple[str, str, str, bool, frozenset[str]]]:
             if not text.strip():
                 continue
             title = name.rsplit(".", 1)[0]
-            out.append((f"file:{rel_prefix}{name}", title, text, True, _DEFAULT_ALLOWED))
+            source_id = f"file:{rel_prefix}{name}"
+            allowed_roles = _RESTRICTED_RESOURCE_ROLES.get(source_id, _DEFAULT_ALLOWED)
+            out.append((source_id, title, text, True, allowed_roles))
 
     _scan_dir(RESOURCES_DIR, "", 0)
     return out
@@ -663,7 +686,7 @@ def _chunk_point_id(chunk: dict[str, Any]) -> str:
     return str(_uuid.uuid5(_uuid.NAMESPACE_DNS, f"{chunk['source']}:{chunk['chunk_idx']}"))
 
 
-async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
+async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Build the Qdrant vector index from BM25-verified safe chunks.
 
@@ -684,20 +707,27 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
     holding _IDX.lock for the full ~15-36 min duration):
       1. Validate input; ensure collection exists (create-if-missing, never drop)
       2. Compute each chunk's point_id + content_hash
-      3. Batched-retrieve existing points' content_hash by ID; anything whose
-         hash still matches needs no re-encoding — skip it entirely
+      3. Batched-retrieve existing points' content_hash and authority metadata.
+         Matching content with stale metadata gets a payload-only update;
+         only matching content and metadata is skipped.
       4. Load encoder + encode ONLY the new/changed chunks
       5. Upsert only those points (in batches of _QDRANT_UPSERT_BATCH)
-      6. Delete any existing point whose ID is no longer in the current
+      6. Refresh authority metadata on unchanged points (in batches of
+         _QDRANT_UPSERT_BATCH)
+      7. Delete any existing point whose ID is no longer in the current
          corpus (source removed/renamed) — keeps the collection exactly in
          sync with the corpus without ever dropping it wholesale
-      7. Log completion metrics
+      8. Log completion metrics
     """
     if not safe_chunks:
         log.info("[HYBRID] no safe chunks available — Qdrant build skipped")
-        return
+        return {"status": "skipped", "reason": "no_safe_chunks"}
 
     async with _QDRANT_BUILD_LOCK:
+        encoded_count = 0
+        metadata_updated_count = 0
+        skipped_count = 0
+        stale_deleted = 0
         t_start: float = time.monotonic()
         log.info("[HYBRID] Build started — chunks=%d", len(safe_chunks))
 
@@ -713,31 +743,38 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
             ]
             current_ids = [pid for _, pid, _ in current]
 
-            # ── Step 2: Batched-retrieve existing hashes, diff, skip unchanged ──
-            def _retrieve_hashes_sync() -> dict[str, str]:
-                existing: dict[str, str] = {}
+            # ── Step 2: Retrieve content and required authority metadata ──────
+            def _retrieve_existing_sync() -> dict[str, dict[str, Any]]:
+                existing: dict[str, dict[str, Any]] = {}
                 for i in range(0, len(current_ids), _QDRANT_UPSERT_BATCH):
                     batch_ids = current_ids[i : i + _QDRANT_UPSERT_BATCH]
                     for pt in client.retrieve(
                         collection_name=QDRANT_COLLECTION_NAME,
                         ids=batch_ids,
-                        with_payload=["content_hash"],
+                        with_payload=["content_hash", "candidate_safe", "fact_authority"],
                         with_vectors=False,
                     ):
-                        h = (pt.payload or {}).get("content_hash")
-                        if h:
-                            existing[str(pt.id)] = h
+                        existing[str(pt.id)] = dict(pt.payload or {})
                 return existing
 
-            existing_hashes = await loop.run_in_executor(_encoding_executor, _retrieve_hashes_sync)
+            existing_payloads = await loop.run_in_executor(_encoding_executor, _retrieve_existing_sync)
             to_encode = [
                 (chunk, pid, chash) for chunk, pid, chash in current
-                if existing_hashes.get(pid) != chash
+                if existing_payloads.get(pid, {}).get("content_hash") != chash
             ]
-            skipped_count = len(current) - len(to_encode)
+            metadata_only = [
+                (chunk, pid) for chunk, pid, chash in current
+                if existing_payloads.get(pid, {}).get("content_hash") == chash
+                and (
+                    type(existing_payloads[pid].get("candidate_safe")) is not bool
+                    or existing_payloads[pid].get("candidate_safe") != bool(chunk.get("candidate_safe", True))
+                    or existing_payloads[pid].get("fact_authority") != chunk.get("fact_authority", [])
+                )
+            ]
+            skipped_count = len(current) - len(to_encode) - len(metadata_only)
             log.info(
-                "[HYBRID] Diff complete — total=%d unchanged_skipped=%d to_encode=%d",
-                len(current), skipped_count, len(to_encode),
+                "[HYBRID] Diff complete — total=%d unchanged_skipped=%d metadata_refresh=%d to_encode=%d",
+                len(current), skipped_count, len(metadata_only), len(to_encode),
             )
 
             if not to_encode:
@@ -781,13 +818,16 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
                             "chunk_idx":         chunk["chunk_idx"],
                             "text":              chunk["text"],
                             "safe_for_customer": True,
+                            "candidate_safe": chunk.get("candidate_safe", True),
                             "source_kind":       chunk["source"].split(":", 1)[0],
                             "indexed_at":        indexed_at,
                             "allowed_roles":     sorted(chunk.get("allowed_roles", _DEFAULT_ALLOWED)),
+                            "fact_authority":    chunk.get("fact_authority", []),
                             "content_hash":      content_hash,
                         },
                     ))
                 total_points: int = len(points)
+                encoded_count = total_points
                 del vectors
 
                 t_upsert_start: float = time.monotonic()
@@ -803,7 +843,35 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
                 )
                 del points
 
-            # ── Step 4: Delete points whose source chunk no longer exists ───────
+            # ── Step 4: Refresh metadata without re-encoding unchanged points ──
+            if metadata_only:
+                metadata_groups: dict[tuple[bool, str], list[str]] = {}
+                for chunk, point_id in metadata_only:
+                    authority = chunk.get("fact_authority", [])
+                    group_key = (
+                        bool(chunk.get("candidate_safe", True)),
+                        json.dumps(authority, ensure_ascii=False, sort_keys=True),
+                    )
+                    metadata_groups.setdefault(group_key, []).append(point_id)
+                for (candidate_safe, authority_json), point_ids in metadata_groups.items():
+                    payload = {
+                        "candidate_safe": candidate_safe,
+                        "fact_authority": json.loads(authority_json),
+                    }
+                    for i in range(0, len(point_ids), _QDRANT_UPSERT_BATCH):
+                        batch_ids = point_ids[i : i + _QDRANT_UPSERT_BATCH]
+                        client.set_payload(
+                            collection_name=QDRANT_COLLECTION_NAME,
+                            payload=payload,
+                            points=batch_ids,
+                        )
+                        metadata_updated_count += len(batch_ids)
+                log.info(
+                    "[HYBRID] Metadata refresh completed — points=%d",
+                    metadata_updated_count,
+                )
+
+            # ── Step 5: Delete points whose source chunk no longer exists ──────
             def _cleanup_stale_sync() -> int:
                 current_id_set = set(current_ids)
                 stale_ids: list[str] = []
@@ -840,20 +908,45 @@ async def _build_qdrant_index(safe_chunks: list[dict[str, Any]]) -> None:
             if to_encode:
                 await _seed_embedding_cache()
 
+            return {
+                "status": "ok",
+                "total_chunks": len(current),
+                "encoded": encoded_count,
+                "metadata_updated": metadata_updated_count,
+                "skipped": skipped_count,
+                "stale_removed": stale_deleted,
+            }
+
         except Exception as exc:
-            # Hybrid failure is non-fatal. BM25 is already committed.
+            # Hybrid failure is non-fatal to BM25, but explicit to callers so
+            # the operator can preserve evidence and retry safely.
             log.error(
                 "[HYBRID] FAILED — BM25 index still active and serving requests. "
                 "error_type=%s error=%s",
                 type(exc).__name__,
                 exc,
             )
+            return {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "encoded": encoded_count,
+                "metadata_updated": metadata_updated_count,
+                "skipped": skipped_count,
+                "stale_removed": stale_deleted,
+            }
 
 # ── END HYBRID RAG Milestone 2: Vector Index Build Path ───────────────────────
 
 # ── Build ──────────────────────────────────────────────────────────────────────
-async def build_index() -> dict[str, Any]:
+async def build_index(*, sync_qdrant: bool = True) -> dict[str, Any]:
     """(Re)build the in-memory RAG index. Safe under concurrency.
+
+    ``sync_qdrant`` controls only the optional hybrid vector-index mutation.
+    BM25 construction always runs. Existing callers retain the historical
+    behavior because the default is True; the application startup task passes
+    the explicit RAG_STARTUP_QDRANT_SYNC_ENABLED setting. Retrieval-triggered
+    lazy construction uses ``False`` so retrieval itself never mutates Qdrant.
 
     2026-07-13: the slow Qdrant embedding pass (_build_qdrant_index) now
     runs AFTER _IDX.lock is released, not inside it — it doesn't touch
@@ -880,6 +973,8 @@ async def build_index() -> dict[str, Any]:
                     continue
                 # PATCH 2 + STEP 1: Unsafe chunks are PURGED from the index entirely.
                 # They are counted for logging but never stored — unsafe_docs=0 guaranteed.
+                authority_facts = facts_for_evidence(source_id, chunk, include_all=True)
+                candidate_safe = candidate_evidence_safe(source_id, chunk, title, [fact.as_marker() for fact in authority_facts])
                 chunk_safe = source_safe and _is_chunk_safe(chunk)
                 if not chunk_safe:
                     unsafe_count += 1
@@ -897,6 +992,8 @@ async def build_index() -> dict[str, Any]:
                     "len": len(tokens),
                     "safe_for_customer": True,       # guaranteed: unsafe chunks never stored
                     "allowed_roles": allowed_roles,  # Phase 3: role-aware visibility
+                    "fact_authority": [fact.as_marker() for fact in authority_facts],
+                    "candidate_safe": candidate_safe,
                 })
                 safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
 
@@ -921,14 +1018,17 @@ async def build_index() -> dict[str, Any]:
     # Hybrid vector build only if the flag is enabled — outside _IDX.lock,
     # so it no longer blocks rag.search() for its full duration. If Hybrid
     # fails, BM25 serves requests normally.
-    if HYBRID_SEARCH_ENABLED:
-        await _build_qdrant_index(safe_chunks)
+    if HYBRID_SEARCH_ENABLED and sync_qdrant:
+        stats_result["qdrant"] = await _build_qdrant_index(safe_chunks)
     return stats_result
 
 
 async def ensure_index() -> None:
     if _IDX.built_at is None:
-        await build_index()
+        # Retrieval may need BM25 before the background startup build has
+        # completed. Build the local index, but keep Qdrant mutation owned by
+        # explicit startup/scheduled/manual build callers.
+        await build_index(sync_qdrant=False)
 
 
 def is_rebuilding() -> bool:
@@ -971,7 +1071,7 @@ def _bm25_score(q_tokens: list[str], doc: dict[str, Any], n_docs: int) -> float:
 
 # ── HYBRID RAG — Milestone 3: Search Helpers ──────────────────────────────────
 
-async def _vector_search(query: str, k: int) -> list[dict[str, Any]]:
+async def _vector_search(query: str, k: int, role: str = "candidate") -> list[dict[str, Any]]:
     """
     Encode query (with LRU cache) and search Qdrant for nearest neighbours.
 
@@ -1027,12 +1127,20 @@ async def _vector_search(query: str, k: int) -> list[dict[str, Any]]:
             # (set by _build_qdrant_index CONTRACT), but we re-verify defensively.
             if not payload.get("safe_for_customer", False):
                 continue
+            if role == "candidate" and not candidate_evidence_safe(
+                payload.get("source", ""),
+                payload.get("text", ""),
+                payload.get("title", ""),
+                payload.get("fact_authority", []),
+            ):
+                continue
             results.append({
                 "source":       payload.get("source", ""),
                 "title":        payload.get("title", ""),
                 "chunk_idx":    payload.get("chunk_idx", 0),
                 "text":         payload.get("text", ""),
                 "vector_score": h.score,
+                "fact_authority": payload.get("fact_authority", []),
             })
         return results
 
@@ -1117,6 +1225,7 @@ def _rrf_fuse(
                 "tokens":            [],   # internal BM25 field — not used in output
                 "len":               0,
                 "safe_for_customer": True,
+                "fact_authority":    vhit.get("fact_authority", []),
             }
 
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
@@ -1129,8 +1238,19 @@ def _rrf_fuse(
             "title":     doc["title"],
             "chunk_idx": doc["chunk_idx"],
             "text":      doc["text"],
+            "fact_authority": doc.get("fact_authority", []),
         })
     return out
+
+
+def _candidate_authority_safe(document: dict[str, Any]) -> bool:
+    """Candidate retrieval may expose only explicitly approved evidence."""
+    return candidate_evidence_safe(
+        document.get("source", ""),
+        document.get("text", ""),
+        document.get("title", ""),
+        document.get("fact_authority", []),
+    )
 
 
 async def _hybrid_search(
@@ -1160,13 +1280,15 @@ async def _hybrid_search(
             continue
         if role not in d.get("allowed_roles", _DEFAULT_ALLOWED):  # Phase 3: role filter
             continue
+        if role == "candidate" and not _candidate_authority_safe(d):
+            continue
         s = _bm25_score(q_tokens, d, n_docs)
         if s > 0.0:  # exclude zero-score docs; include all positive scorers
             bm25_candidates.append((s, d))
     bm25_candidates.sort(key=lambda x: x[0], reverse=True)
 
     # Vector search with visibility filter applied inside _vector_search
-    vector_hits = await _vector_search(query, k=_candidates)
+    vector_hits = await _vector_search(query, k=_candidates, role=role)
 
     # Phase 3: role-filter vector hits using BM25 index as source of truth for allowed_roles.
     # (Qdrant payload now stores allowed_roles on new indexes; cross-reference handles old ones.)
@@ -1174,6 +1296,7 @@ async def _hybrid_search(
         (d["source"], d["chunk_idx"])
         for d in _IDX.docs
         if role in d.get("allowed_roles", _DEFAULT_ALLOWED)
+        and (role != "candidate" or _candidate_authority_safe(d))
     }
     vector_hits = [
         h for h in vector_hits
@@ -1231,6 +1354,8 @@ async def search(
             # Phase 3: role filter — skip chunks the caller's tier cannot access
             if _effective_role not in d.get("allowed_roles", _DEFAULT_ALLOWED):
                 continue
+            if _effective_role == "candidate" and not _candidate_authority_safe(d):
+                continue
             s = _bm25_score(q_tokens, d, n_docs)
             if s > min_score:
                 scored.append((s, d))
@@ -1243,8 +1368,18 @@ async def search(
                 "title": d["title"],
                 "chunk_idx": d["chunk_idx"],
                 "text": d["text"],
+                "fact_authority": d.get("fact_authority", []),
             })
         _bm25_cache_put(_cache_key, out)
+    for result in out:
+        if not result.get("fact_authority"):
+            result["fact_authority"] = [
+                fact.as_marker() for fact in facts_for_evidence(result.get("source", ""), result.get("text", ""))
+            ]
+        if result.get("fact_authority"):
+            result["authority_statuses"] = sorted({
+                record.get("status", "unverified") for record in result["fact_authority"]
+            })
     # ── END HYBRID RAG Milestone 3 ─────────────────────────────────────────────
 
     # PATCH 7: source traceability — log every search with top hit details
@@ -1288,7 +1423,9 @@ async def answer(q: str, k: int = 3, min_score: float = 1.0, role: str = "candid
     citations = []
     for i, h in enumerate(hits, 1):
         parts.append(f"[{i}] {h['text']}")
-        citations.append({"n": i, "source": h["source"], "title": h["title"], "score": h["score"]})
+        citations.append({"n": i, "source": h["source"], "title": h["title"], "score": h["score"],
+                          "fact_authority": h.get("fact_authority", []),
+                          "authority_statuses": h.get("authority_statuses", [])})
     return {
         "answer": "\n\n".join(parts),
         "citations": citations,
@@ -1390,6 +1527,10 @@ async def rebuild_index() -> dict[str, Any]:
                 tokens = _tokenize(chunk)
                 if not tokens:
                     continue
+                authority_facts = facts_for_evidence(source_id, chunk, include_all=True)
+                candidate_safe = candidate_evidence_safe(
+                    source_id, chunk, title, [fact.as_marker() for fact in authority_facts]
+                )
                 chunk_safe = source_safe and _is_chunk_safe(chunk)
                 if not chunk_safe:
                     unsafe_count += 1
@@ -1407,6 +1548,8 @@ async def rebuild_index() -> dict[str, Any]:
                     "len": len(tokens),
                     "safe_for_customer": True,
                     "allowed_roles": allowed_roles,
+                    "fact_authority": [fact.as_marker() for fact in authority_facts],
+                    "candidate_safe": candidate_safe,
                 })
                 safe_chunks.append(_IDX.docs[-1])  # same dict ref — zero copy overhead
         for d in _IDX.docs:
@@ -1429,7 +1572,7 @@ async def rebuild_index() -> dict[str, Any]:
     # so it no longer blocks rag.search() for its full duration. If Hybrid
     # fails, BM25 serves requests normally.
     if HYBRID_SEARCH_ENABLED:
-        await _build_qdrant_index(safe_chunks)
+        stats_result["qdrant"] = await _build_qdrant_index(safe_chunks)
     return stats_result
 
 

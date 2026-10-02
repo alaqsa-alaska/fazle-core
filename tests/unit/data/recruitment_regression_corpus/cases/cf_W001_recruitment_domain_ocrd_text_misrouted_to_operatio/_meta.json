@@ -1,0 +1,14 @@
+{
+  "_schema": "recruitment-regression-case-meta/v1",
+  "case_id": "cf_W001",
+  "thread_phone_masked": "880127ebf60",
+  "is_admin_thread": false,
+  "actual_outcome_notes": {
+    "domain": "attendance (legacy replied with attendance bot template)",
+    "turn_type": "classified as payment_due by intent engine (first-match-wins on OCR text containing 'টাকা'/'জাহাজ'/'ডিউটি'/'পেমেন্ট')",
+    "should_advance_intake": "False (recruitment side rejected at recruitment_eligibility:919-921 short-circuit)",
+    "outbound_text_seen": "আপনার রিকোয়েস্ট পেয়েছি 🙏 যাচাইয়ের জন্য আপনার **Employee ID** বা **নাম** লিখুন।",
+    "rule_that_failed": "intent in OPERATIONAL_INTENTS short-circuit; legacy single-domain dispatch"
+  },
+  "privacy_notes": "Real candidate phone numbers are salted-hash masked (see _meta/corpus_meta.json#mask_algorithm). Admin phone numbers are prefixed 'admin_' and salted-hash masked. Inbound message text and AI outbound message text are PRESERVED VERBATIM because typos, bilingual mixing, and punctuation are part of the failure-bearing signal."
+}

@@ -144,11 +144,21 @@ class TestEmployeeMatching:
             "status": "active",
         }
 
+        def _has(args, phone):
+            """The resolver now looks up by a list of phone-format variants."""
+            if not args:
+                return False
+            a = args[0]
+            return phone in a if isinstance(a, (list, tuple)) else a == phone
+
         async def fetch_one_side_effect(query, *args, **kwargs):
-            if "employee_id_phone = $1" in query:
-                return correct_employee if args and args[0] == "01805668850" else None
-            if "primary_phone = $1" in query:
-                return wrong_employee_by_payout_phone if args and args[0] == "01773055387" else None
+            # step 1 combines id-phone + primary-phone into one ANY() query
+            if "employee_id_phone = ANY" in query or "primary_phone = ANY" in query:
+                if _has(args, "01805668850"):
+                    return correct_employee
+                if _has(args, "01773055387"):
+                    return wrong_employee_by_payout_phone
+                return None
             return None
 
         with patch("modules.fazle_payroll_engine.employee.fetch_one", new=AsyncMock(side_effect=fetch_one_side_effect)), \

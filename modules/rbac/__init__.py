@@ -65,6 +65,10 @@ COMMAND_ROLE: dict[str, str] = {
     "schedule_run":        "admin",
     "backup_now":          "admin",
     "user_list":           "admin",
+    # Step 4 — latest-approved Recruitment authority control plane
+    "recruitment_authority_read": "viewer",
+    "recruitment_authority_write": "admin",
+    "recruitment_authority_approve": "admin",
     # superadmin
     "user_add":            "superadmin",
     "user_role":           "superadmin",
@@ -95,6 +99,30 @@ COMMAND_ROLE: dict[str, str] = {
     "task_read":           "viewer",
     "task_write":          "operator",
     "task_approve":        "superadmin",
+    # Stage H5-H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE trusted-admin
+    # WhatsApp commands -- same tier as _require_admin_role (the existing
+    # HTTP-route guard on operator_approve/operator_reject/reverse_txn in
+    # modules.fazle_payroll_engine.routes) for approve/reject. REVERSE is
+    # deliberately one tier higher (superadmin, same as user_add/
+    # user_role/user_remove/hermes_relay/send_whatsapp_message) -- H8's
+    # own framing ("highest risk... NO standing autonomous reverse") is
+    # the closest match to those existing superadmin-only, real-external-
+    # effect commands, not the ordinary admin tier.
+    "cash_approve":        "admin",
+    "cash_reject":         "admin",
+    "cash_reverse":        "superadmin",
+    # Stage I5 (2026-08-29): read-only inspection -- same tier as the
+    # other read-only cash/report commands (report_cash="viewer"), not
+    # the mutation tier.
+    "cash_details":        "viewer",
+    # Exact inbound provenance recovery; metadata/queue finalization only.
+    "inbound_recovery":    "admin",
+    # Stage J7 (2026-08-29): same tier as the existing task_approve
+    # (superadmin) for authorizing a proposal's execution; reject/details
+    # mirror cash_reject/cash_details' own tiers.
+    "proposal_approve":    "superadmin",
+    "proposal_reject":     "admin",
+    "proposal_details":    "viewer",
 }
 
 DEFAULT_REQUIRED_ROLE = "admin"  # unknown cmd defaults to admin
@@ -309,6 +337,25 @@ async def record_audit(
         (args[:4000] if args else None),
         allowed, required_role, denied_reason,
         (result_summary[:4000] if result_summary else None),
+    )
+    return int(rid)
+
+
+async def record_audit_conn(
+    conn: Any, *, channel: str, command: str,
+    actor_phone: Optional[str] = None, actor_admin: Optional[dict] = None,
+    args: Optional[str] = None, allowed: bool, required_role: Optional[str] = None,
+    denied_reason: Optional[str] = None, result_summary: Optional[str] = None,
+) -> int:
+    """Write an audit event on a caller-owned transaction connection."""
+    label = (actor_admin or {}).get("name") or actor_phone or "unknown"
+    aid = (actor_admin or {}).get("id")
+    rid = await conn.fetchval(
+        "INSERT INTO fazle_admin_audit (actor_phone, actor_user_id, actor_label, "
+        "channel, command, args, allowed, required_role, denied_reason, result_summary) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
+        actor_phone, aid, label, channel, command, (args[:4000] if args else None),
+        allowed, required_role, denied_reason, (result_summary[:4000] if result_summary else None),
     )
     return int(rid)
 

@@ -29,6 +29,32 @@ from app.config import get_settings
 
 log = logging.getLogger("fazle.admin_cmd")
 
+# ── Stage G6.15 (2026-08-28): read-only Admin command help surface ──────────
+# Single source of truth -- was previously only reachable as the
+# "command not understood" fallback (still is, unchanged); now ALSO
+# reachable explicitly via a bare "HELP" command. Only ever lists commands
+# genuinely implemented below in this same file -- never advertises
+# something unimplemented. Never exposes internal RBAC role names/config.
+_HELP_TEXT = (
+    "ব্যবহার:\n"
+    "  APPROVE <id>            — ড্রাফট পাঠান\n"
+    "  APPROVE <id> <id> ...   — একসাথে একাধিক\n"
+    "  REJECT <id>             — বাতিল\n"
+    "  EDIT <id> <নতুন বার্তা>\n"
+    "  PAID <id> <amount> <method>\n"
+    "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
+    "Cash transaction review (Stage H):\n"
+    "  PROPOSAL DETAILS <id>           — inspect only, no mutation\n"
+    "  PROPOSAL APPROVE <id>           — one approval = one execution, no second APPROVE needed\n"
+    "  PROPOSAL REJECT <id> [reason]   — rejects the proposal only, business record untouched\n"
+    "  CASH DETAILS <txn-ref>          — inspect only, no mutation\n"
+    "  CASH APPROVE <txn-ref>\n"
+    "  CASH REJECT <txn-ref> <reason>   — rejects the REVIEW SUBMISSION only;\n"
+    "                                      the transaction itself stays pending\n"
+    "  CASH REVERSE <txn-ref> <reason>   — final transactions only, always requires a reason\n\n"
+    "বাংলা সংখ্যাও কাজ করে: APPROVE ১৬৫"
+)
+
 # ── Bengali digit normalisation (Batch 25) ─────────────────────────────────────
 # Allow admins to type APPROVE ১৬৫. Map Bangla digits to ASCII before regex.
 _BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
@@ -184,6 +210,33 @@ _REVERSE_RE = re.compile(r"^reverse\s+\d+.*$", re.IGNORECASE)
 # ADJUST <draft_id> <amount> <method>
 _ADJUST_RE = re.compile(r"^adjust\s+\d+.*$", re.IGNORECASE)
 
+# ── Stage H6/H7/H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE ──────────────
+# Distinct from the bare (pre-existing, never-wired) REVERSE/ADJUST above --
+# those match a plain fpe_payment_drafts-style numeric id with no "CASH"
+# prefix and are dead code (recognized by is_admin_command() but never
+# classified/dispatched); left untouched, out of this stage's scope. These
+# operate on modules.financial_operations, resolving a txn-ref (or numeric
+# id) against the ALREADY-CREATED fpe_cash_transactions row, not a draft.
+_CASH_APPROVE_RE = re.compile(r"^cash\s+approve\s+(\S+)\s*$", re.IGNORECASE)
+_CASH_REJECT_RE  = re.compile(r"^cash\s+reject\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_CASH_REVERSE_RE = re.compile(r"^cash\s+reverse\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+# Stage I5 (2026-08-29): read-only inspection, checked as its own
+# pattern (not folded into _CASH_APPROVE_RE) so "CASH DETAILS ..." never
+# accidentally matches a mutating command.
+_CASH_DETAILS_RE = re.compile(r"^cash\s+details\s+(\S+)\s*$", re.IGNORECASE)
+# Stage J7 (2026-08-29): business-proposal commands are deliberately
+# namespaced under "PROPOSAL ..." rather than overloading bare APPROVE/
+# REJECT -- APPROVE <id> already targets fazle_draft_replies exclusively
+# (see the dispatch chain below); a draft and a proposal can share the
+# same numeric id (both do right now: draft ids and proposal ids 29/30/
+# 31 are independent sequences), so a single shared "APPROVE <id>"
+# surface would need collision detection this stage did not judge safe
+# to build blind. This prefix makes resolution deterministic by
+# construction -- no guessing which table an id belongs to.
+_PROPOSAL_APPROVE_RE = re.compile(r"^proposal\s+approve\s+(\d+)\s*$", re.IGNORECASE)
+_PROPOSAL_REJECT_RE  = re.compile(r"^proposal\s+reject\s+(\d+)(?:\s+(.+))?\s*$", re.IGNORECASE | re.DOTALL)
+_PROPOSAL_DETAILS_RE = re.compile(r"^proposal\s+details\s+(\d+)\s*$", re.IGNORECASE)
+
 
 def is_report_command(text: str) -> bool:
     """Narrow subset of is_admin_command() — matches ONLY the report_*
@@ -231,7 +284,13 @@ def is_admin_command(text: str) -> bool:
         # Sprint-3B
         _APPROVED_RE.match(t) or _DREDIT_RE.match(t) or _DREJECT_RE.match(t) or
         # Step 5 (2026-08-01) escort confirmation review
-        _ESCORT_REVIEW_RE.match(t)
+        _ESCORT_REVIEW_RE.match(t) or
+        # Stage H6/H7/H8 (2026-08-28)
+        _CASH_APPROVE_RE.match(t) or _CASH_REJECT_RE.match(t) or _CASH_REVERSE_RE.match(t) or
+        # Stage I5 (2026-08-29)
+        _CASH_DETAILS_RE.match(t) or
+        # Stage J7 (2026-08-29)
+        _PROPOSAL_APPROVE_RE.match(t) or _PROPOSAL_REJECT_RE.match(t) or _PROPOSAL_DETAILS_RE.match(t)
     )
 
 
@@ -269,9 +328,19 @@ def _classify_command(t: str) -> Optional[str]:
         (_APPROVED_RE, "paid"),
         (_DREDIT_RE, "edit"),
         (_DREJECT_RE, "reject"),
-        # Step 5 (2026-08-01) — same RBAC tier as escortconfirm (admin
+                # Step 5 (2026-08-01) — same RBAC tier as escortconfirm (admin
         # managing escort assignments)
         (_ESCORT_REVIEW_RE, "escortconfirm"),
+        # Stage H6/H7/H8 (2026-08-28) — CASH APPROVE/REJECT/REVERSE
+        (_CASH_APPROVE_RE, "cash_approve"),
+        (_CASH_REJECT_RE, "cash_reject"),
+        (_CASH_REVERSE_RE, "cash_reverse"),
+        # Stage I5 (2026-08-29) — CASH DETAILS (read-only)
+        (_CASH_DETAILS_RE, "cash_details"),
+        # Stage J7 (2026-08-29) — PROPOSAL APPROVE/REJECT/DETAILS
+        (_PROPOSAL_APPROVE_RE, "proposal_approve"),
+        (_PROPOSAL_REJECT_RE, "proposal_reject"),
+        (_PROPOSAL_DETAILS_RE, "proposal_details"),
     )
     for rx, name in pairs:
         if rx.match(t):
@@ -287,6 +356,11 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
     """
     # B25: normalise Bengali digits + dedup duplicate sends within TTL window
     t = text.strip().translate(_BN_DIGITS)
+
+    # Stage G6.15: explicit, read-only HELP -- no RBAC command classification,
+    # no mutation, no dedup tracking (asking for help twice must always work).
+    if t.strip().upper() == "HELP":
+        return _HELP_TEXT
 
     if _dedup_seen(t, admin_phone):
         try:
@@ -411,6 +485,37 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
         draft_id = int(m.group(1))
         reason   = m.group(2).strip() if m.group(2) else None
         return await _cmd_dreject(draft_id, admin_phone, reason)
+
+    # ── Stage I5 (2026-08-29): CASH DETAILS (read-only) ─────────────────────
+    m = _CASH_DETAILS_RE.match(t)
+    if m:
+        return await _cmd_cash_details(m.group(1))
+
+    # ── Stage J7 (2026-08-29): PROPOSAL APPROVE/REJECT/DETAILS ──────────────
+    m = _PROPOSAL_DETAILS_RE.match(t)
+    if m:
+        return await _cmd_proposal_details(int(m.group(1)))
+
+    m = _PROPOSAL_APPROVE_RE.match(t)
+    if m:
+        return await _cmd_proposal_approve(int(m.group(1)), admin_phone)
+
+    m = _PROPOSAL_REJECT_RE.match(t)
+    if m:
+        return await _cmd_proposal_reject(int(m.group(1)), (m.group(2) or "").strip() or None, admin_phone)
+
+    # ── Stage H6/H7/H8 (2026-08-28): CASH APPROVE/REJECT/REVERSE ────────────
+    m = _CASH_APPROVE_RE.match(t)
+    if m:
+        return await _cmd_cash_approve(m.group(1), admin_phone)
+
+    m = _CASH_REJECT_RE.match(t)
+    if m:
+        return await _cmd_cash_reject(m.group(1), m.group(2).strip(), admin_phone)
+
+    m = _CASH_REVERSE_RE.match(t)
+    if m:
+        return await _cmd_cash_reverse(m.group(1), m.group(2).strip(), admin_phone)
 
     if _STATUS_RE.match(t):
         return await _cmd_status()
@@ -550,17 +655,7 @@ async def process_admin_command(text: str, admin_phone: str) -> str:
     if m:
         return await _cmd_user_apikey(m.group(1), admin_phone)
 
-    return (
-        "❌ কমান্ড বুঝিনি।\n\n"
-        "ব্যবহার:\n"
-        "  APPROVE <id>            — ড্রাফট পাঠান\n"
-        "  APPROVE <id> <id> ...   — একসাথে একাধিক\n"
-        "  REJECT <id>             — বাতিল\n"
-        "  EDIT <id> <নতুন বার্তা>\n"
-        "  PAID <id> <amount> <method>\n"
-        "  STATUS / DRAFTS         — পেন্ডিং তালিকা\n\n"
-        "বাংলা সংখ্যাও কাজ করে: APPROVE ১৬৫"
-    )
+    return "❌ কমান্ড বুঝিনি।\n\n" + _HELP_TEXT
 
 
 # ── Multi-ID helpers (Batch 25, H5) ─────────────────────────────────────────────
@@ -624,7 +719,7 @@ async def _cmd_reject_many(ids: list[int], admin_phone: str) -> str:
 
 async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
     """
-    Approve a draft reply — mark approved then SEND to recipient immediately.
+    Approve a draft reply and submit it to the existing outbound queue.
     Admin approval IS the decision to send, regardless of AUTO_REPLY_ENABLED.
     """
     try:
@@ -659,7 +754,9 @@ async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
 
         # Mark approved first
         await execute(
-            "UPDATE fazle_draft_replies SET status='approved', admin_phone=$1, approved_at=NOW() WHERE id=$2",
+            "UPDATE fazle_draft_replies SET status='approved', admin_phone=$1, approved_at=NOW(), "
+            "meta=COALESCE(meta, '{}'::jsonb) || '{\"submission_protocol\": 1}'::jsonb "
+            "WHERE id=$2 AND (status IN ('pending','edited') OR status IS NULL)",
             admin_phone, draft_id,
         )
 
@@ -667,17 +764,14 @@ async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
         sent = False
         error_text = ""
         try:
-            from app.bridge import get_bridge1, get_bridge2
-            bridge = get_bridge1() if source in ("bridge1", "meta") else get_bridge2()
-            # Bridge expects JID format for non-meta sends
-            jid = recipient if "@" in recipient else f"{recipient}@s.whatsapp.net"
-            sent = await bridge.send(jid, reply_text)
+            from shared.draft_reply import submit_approved_draft
+            qid = await submit_approved_draft(
+                dict(row), body=reply_text, purpose="admin_approve",
+                source_bridge="bridge1" if source in ("bridge1", "meta") else "bridge2",
+            )
+            sent = qid is not None
             if sent:
-                await execute(
-                    "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                    draft_id,
-                )
-                log.info(f"[admin_cmd] Draft #{draft_id} sent to {recipient} via {source}")
+                log.info("Draft #%s approved; queued as %s", draft_id, qid)
             else:
                 error_text = "Bridge send returned false"
                 await execute(
@@ -695,7 +789,7 @@ async def _cmd_approve(draft_id: int, admin_phone: str) -> str:
         preview = reply_text[:200] if reply_text else ""
         if sent:
             return (
-                f"✅ Draft #{draft_id} অনুমোদিত ও পাঠানো হয়েছে।\n\n"
+                f"✅ Draft #{draft_id} অনুমোদিত; পাঠানোর জন্য কিউতে রাখা হয়েছে।\n\n"
                 f"প্রাপক: {recipient}\n"
                 f"বার্তা:\n{preview}"
             )
@@ -751,8 +845,14 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         recipient = row.get("recipient", "")
         source = row.get("source", "bridge1")
 
+        if row.get("status") not in ("pending", None, "edited"):
+            return f"⚠️ Draft #{draft_id} ইতিমধ্যে {row.get('status', 'processed')}।"
+
         await execute(
-            "UPDATE fazle_draft_replies SET reply_text=$1, status='edited', admin_phone=$2 WHERE id=$3",
+            "UPDATE fazle_draft_replies SET reply_text=$1, status='edited', admin_phone=$2, "
+            "meta=COALESCE(meta, '{}'::jsonb) || '{\"submission_protocol\": 1}'::jsonb "
+            "WHERE id=$3 AND (status IN ('pending','edited') OR status IS NULL) "
+            "AND NOT (COALESCE(meta, '{}'::jsonb) ? 'outbound_queue_id')",
             new_text, admin_phone, draft_id,
         )
 
@@ -771,16 +871,15 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         sent = False
         error_text = ""
         try:
-            from app.bridge import get_bridge1, get_bridge2
-            bridge = get_bridge1() if source in ("bridge1", "meta") else get_bridge2()
-            jid = recipient if "@" in recipient else f"{recipient}@s.whatsapp.net"
-            sent = await bridge.send(jid, new_text)
+            from shared.draft_reply import submit_approved_draft
+            qid = await submit_approved_draft(
+                dict(row), body=new_text, purpose="admin_edit",
+                source_bridge="bridge1" if source in ("bridge1", "meta") else "bridge2",
+            )
+            sent = qid is not None
             if sent:
-                await execute(
-                    "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                    draft_id,
-                )
-                log.info(f"[admin_cmd] Edited draft #{draft_id} sent to {recipient} via {source}")
+                log.info("Edited draft #%s queued as %s", draft_id, qid)
+                log.info(f"[admin_cmd] Edited draft #{draft_id} queued for {recipient} via {source}")
             else:
                 error_text = "Bridge send returned false"
                 await execute(
@@ -798,7 +897,7 @@ async def _cmd_edit(draft_id: int, new_text: str, admin_phone: str) -> str:
         preview = new_text[:200] if new_text else ""
         if sent:
             return (
-                f"✏️ Draft #{draft_id} আপডেট করে পাঠানো হয়েছে।\n\n"
+                f"✏️ Draft #{draft_id} আপডেট হয়েছে; পাঠানোর জন্য কিউতে রাখা হয়েছে।\n\n"
                 f"প্রাপক: {recipient}\n"
                 f"বার্তা:\n{preview}"
             )
@@ -994,6 +1093,134 @@ async def _cmd_dreject(
         return f"❌ ত্রুটি: {e}"
 
 
+async def _cmd_cash_details(ref: str) -> str:
+    """Stage I5 -- CASH DETAILS <txn-ref>. READ-ONLY: never mutates
+    anything, the preferred way for an Owner to inspect a transaction
+    before deciding APPROVE/REJECT/REVERSE."""
+    from modules.financial_operations import cash_details, format_cash_result
+    try:
+        result = await cash_details(ref)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH DETAILS error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    if not result.get("ok"):
+        return format_cash_result("details", result)
+    return result["card"]
+
+
+async def _cmd_proposal_details(proposal_id: int) -> str:
+    """Stage J7 -- PROPOSAL DETAILS <id>. Read-only."""
+    try:
+        from modules.hermes_tasks import get_action
+        action = await get_action(proposal_id)
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL DETAILS error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    if not action:
+        return f"❌ Proposal #{proposal_id} not found"
+    return (
+        f"PROPOSAL {proposal_id} — {action.get('domain')}\n"
+        f"Reference: {action.get('business_reference')}\n"
+        f"Status: {action.get('status')}\n"
+        f"Summary: {action.get('summary')}\n"
+        f"Expected effect: {action.get('expected_effect')}"
+    )
+
+
+async def _cmd_proposal_approve(proposal_id: int, admin_phone: str) -> str:
+    """Stage J2/J7 -- PROPOSAL APPROVE <id>. One Owner approval = one
+    execution: this single command both authorizes (approve_action(),
+    the existing hermes_tasks gate) AND immediately triggers revalidated
+    execution (execute_approved_business_action(), Stage H15/H16 +
+    Stage J's proposed_operation contract) -- never a second APPROVE/
+    CASH APPROVE required for the same declared operation. If execution
+    is refused (stale state, unsupported operation, or the proposal is
+    genuinely review-only with no proposed_operation), that is reported
+    plainly -- the approval itself still stands (recorded), only the
+    subsequent execution attempt failed."""
+    from modules.hermes_tasks import approve_action, TaskError
+    from modules.business_action_execution import execute_approved_business_action, StaleProposalError, BusinessExecutionError
+
+    try:
+        await approve_action(proposal_id, admin_phone)
+    except TaskError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL APPROVE error: {e}")
+        return f"❌ ত্রুটি: {e}"
+
+    try:
+        result = await execute_approved_business_action(proposal_id, executor=admin_phone)
+    except StaleProposalError as e:
+        return f"✅ Proposal {proposal_id} approved, but execution was refused: {e}"
+    except BusinessExecutionError as e:
+        return f"✅ Proposal {proposal_id} approved (review-only or not execution-enabled): {e}"
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL APPROVE execution error: {e}")
+        return f"✅ Proposal {proposal_id} approved, but execution raised an error: {e}"
+
+    if result["result"].get("no_op"):
+        return f"✅ Proposal {proposal_id} approved and acknowledged (review-only, no business mutation)."
+    return f"✅ Proposal {proposal_id} approved and executed — {result['result']}"
+
+
+async def _cmd_proposal_reject(proposal_id: int, reason: str, admin_phone: str) -> str:
+    """Stage J7/J26 -- PROPOSAL REJECT <id> [reason]. Rejects the
+    Hermes proposal only -- never touches the underlying business
+    object (structurally proven: reject_action() never references any
+    business domain table)."""
+    from modules.hermes_tasks import reject_action, TaskError
+    try:
+        await reject_action(proposal_id, admin_phone, reason)
+    except TaskError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        log.error(f"[admin_cmd] PROPOSAL REJECT error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return f"🚫 Proposal {proposal_id} rejected. The underlying business record is untouched."
+
+
+async def _cmd_cash_approve(ref: str, admin_phone: str) -> str:
+    """Stage H6 -- CASH APPROVE <txn-ref>. Thin wrapper: RBAC already
+    passed (this function is only reached after process_admin_command's
+    cash_approve RBAC gate above), delegates the actual resolve/validate/
+    execute work entirely to modules.financial_operations (the one
+    authoritative adapter -- never duplicated here)."""
+    from modules.financial_operations import cash_approve, format_cash_result
+    try:
+        result = await cash_approve(ref, admin_phone)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH APPROVE error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return format_cash_result("approve", result)
+
+
+async def _cmd_cash_reject(ref: str, reason: str, admin_phone: str) -> str:
+    """Stage H7 -- CASH REJECT <txn-ref> <reason>."""
+    from modules.financial_operations import cash_reject, format_cash_result
+    try:
+        result = await cash_reject(ref, reason, admin_phone)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH REJECT error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return format_cash_result("reject", result)
+
+
+async def _cmd_cash_reverse(ref: str, reason: str, admin_phone: str) -> str:
+    """Stage H8 (highest risk) -- CASH REVERSE <txn-ref> <reason>. NO
+    standing autonomous reverse: this is only ever invoked from an
+    explicit, this-transaction-specific admin command with a reason --
+    there is no scheduled job, no auto-trigger, nothing else in this repo
+    that calls modules.financial_operations.cash_reverse()."""
+    from modules.financial_operations import cash_reverse, format_cash_result
+    try:
+        result = await cash_reverse(ref, reason, admin_phone)
+    except Exception as e:
+        log.error(f"[admin_cmd] CASH REVERSE error: {e}")
+        return f"❌ ত্রুটি: {e}"
+    return format_cash_result("reverse", result)
+
+
 async def _cmd_paid(
     draft_id: int, amount: float, method: str, admin_phone: str, draft_type: str
 ) -> tuple[str, Optional[str]]:
@@ -1166,24 +1393,36 @@ async def _cmd_escort_confirm(
 
 
 async def _cmd_status() -> str:
-    """Return pending drafts count."""
+    """Stage I20: STATUS now answers "what needs my approval?" across the
+    whole business, not just drafts -- reuses modules.reports.
+    build_owner_overview(), itself built entirely from
+    _b_business_communication_summary()'s already-computed data (no
+    second reporting engine, no new queries). Falls back to the old
+    drafts-only view if the overview builder itself fails, so STATUS
+    never goes fully silent on an unrelated report-layer error."""
     try:
-        draft_count = await fetch_val(
-            "SELECT COUNT(*) FROM fazle_draft_replies WHERE COALESCE(status,'pending') = 'pending'"
-        )
-        pay_count = await fetch_val(
-            "SELECT COUNT(*) FROM fazle_payment_drafts WHERE status='pending'"
-        )
-        rows = await fetch_all(
-            "SELECT id, recipient, intent, LEFT(reply_text,60) AS preview FROM fazle_draft_replies "
-            "WHERE COALESCE(status,'pending') = 'pending' ORDER BY created_at DESC LIMIT 5"
-        )
-        lines = [f"📊 পেন্ডিং ড্রাফট: {draft_count} | পেমেন্ট ড্রাফট: {pay_count}\n"]
-        for r in rows:
-            lines.append(f"#{r['id']} [{r.get('intent','?')}] → {r.get('recipient','?')}: {r.get('preview','')!r}")
-        return "\n".join(lines)
+        from modules.reports import build_owner_overview, render_owner_overview
+        overview = await build_owner_overview(hours=24)
+        return render_owner_overview(overview)
     except Exception as e:
-        return f"❌ স্ট্যাটাস লোড ব্যর্থ: {e}"
+        log.error(f"[admin_cmd] STATUS overview failed, falling back to drafts-only: {e}")
+        try:
+            draft_count = await fetch_val(
+                "SELECT COUNT(*) FROM fazle_draft_replies WHERE COALESCE(status,'pending') = 'pending'"
+            )
+            pay_count = await fetch_val(
+                "SELECT COUNT(*) FROM fazle_payment_drafts WHERE status='pending'"
+            )
+            rows = await fetch_all(
+                "SELECT id, recipient, intent, LEFT(reply_text,60) AS preview FROM fazle_draft_replies "
+                "WHERE COALESCE(status,'pending') = 'pending' ORDER BY created_at DESC LIMIT 5"
+            )
+            lines = [f"📊 পেন্ডিং ড্রাফট: {draft_count} | পেমেন্ট ড্রাফট: {pay_count}\n"]
+            for r in rows:
+                lines.append(f"#{r['id']} [{r.get('intent','?')}] → {r.get('recipient','?')}: {r.get('preview','')!r}")
+            return "\n".join(lines)
+        except Exception as e2:
+            return f"❌ স্ট্যাটাস লোড ব্যর্থ: {e2}"
 
 
 async def _send_attendance_confirmation(result: dict, source: str) -> None:

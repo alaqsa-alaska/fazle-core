@@ -72,7 +72,7 @@ escort/AI code-path tracing, and known strengths/weaknesses/roadmap), see
 | Runtime | Python, FastAPI, uvicorn, asyncpg |
 | Database | PostgreSQL plus WhatsApp bridge SQLite stores |
 | Queue/cache | Redis-backed helpers plus PostgreSQL queues |
-| Local AI | Ollama, default model `qwen3:8b` |
+| Local AI | Ollama, configured primary model `hermes3:3b` |
 | Branch in this checkout | `main` |
 | Last README review | 2026-07-13 |
 
@@ -86,7 +86,7 @@ escort/AI code-path tracing, and known strengths/weaknesses/roadmap), see
 | PostgreSQL (`ai-postgres` container) | `5432` | Shared with `fazle-agent` and `open-webui`; resolved via `DATABASE_URL_TEMPLATE` + `generate_runtime_services_env.sh` |
 | Qdrant (vector search) | `6333`/`6334` | `fazle_rag_chunks` collection |
 | Redis | `6379` | `ai-redis` container |
-| Ollama (local LLM) | `11434` | Models: `phi4-mini` (default), `qwen3:8b`, plus cloud-proxied `kimi`/`glm`/`minimax` models |
+| Ollama (local LLM) | `11434` | Models: `hermes3:3b` (configured primary), `phi4-mini:latest` (installed alternative), plus embedding/cloud-proxied models |
 
 ### RBAC Role Hierarchy
 

@@ -1,0 +1,14 @@
+{"ts": "2026-08-23T05:25:42Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "Hello"}
+{"ts": "2026-08-23T05:26:26Z", "role": "ai_outbound", "actor": "ai_recruitment", "speaker_phone": "880126078c4", "text": "নমস্কার, আমি ফজলে -- Al-Rifa'i Integrated Services-এর নিয়োগ সহকারী। আপনি কি চাকরিতে আগ্রহী? আপনার নামটা জানতে পারি?"}
+{"ts": "2026-08-23T05:26:26Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "Hello! Can I get more info on this?"}
+{"ts": "2026-08-23T05:28:41Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "মোঃশাহা আলম"}
+{"ts": "2026-08-23T05:29:26Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "20 বছর"}
+{"ts": "2026-08-23T05:35:03Z", "role": "ai_outbound", "actor": "ai_recruitment", "speaker_phone": "880126078c4", "text": "সাধারণ বয়সসীমা ১৮–৫৫ বছর। দয়া করে সঠিক বয়স লিখুন (যেমন: 25)"}
+{"ts": "2026-08-23T05:36:18Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "21 বছর"}
+{"ts": "2026-08-23T05:36:29Z", "role": "ai_outbound", "actor": "ai_recruitment", "speaker_phone": "880126078c4", "text": "আপনি কোন জেলায় থাকেন? (বর্তমান ঠিকানা)"}
+{"ts": "2026-08-23T05:37:18Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "গাইবান্ধা জেলা"}
+{"ts": "2026-08-23T05:38:32Z", "role": "ai_outbound", "actor": "ai_recruitment", "speaker_phone": "880126078c4", "text": "আপনি কোন পদে কাজ করতে চান? ১. Escort ২. Survey Scout (জাহাজে) ৩. Security Guard ৪. Security Supervisor ৫. Asst Supervisor ৬. Operation Officer ৭. Security In-Charge ৮. Marketing Officer"}
+{"ts": "2026-08-23T05:46:55Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "৬ operation officer"}
+{"ts": "2026-08-23T05:41:44Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "সার্টিফিকেট লাগবে না"}
+{"ts": "2026-08-23T05:50:50Z", "role": "ai_outbound", "actor": "ai_recruitment", "speaker_phone": "880126078c4", "text": "আপনার কনফার্মেশনের জন্য: আপনার মোবাইল নম্বর কত?"}
+{"ts": "2026-08-23T05:50:13Z", "role": "candidate_inbound", "actor": "candidate", "speaker_phone": "880126078c4", "text": "আর না হলে ৭ নাম্বার হলে হবে সিকিউরিটি ইনচাজ"}

@@ -53,31 +53,31 @@ DEFAULT_PROVIDER_CHAIN = ["ollama", "groq", "github_models"]
 MODEL_ROUTING_POLICY: dict[TaskClass, RoutingPolicy] = {
     TaskClass.RUNTIME: RoutingPolicy(
         task_class=TaskClass.RUNTIME,
-        model="phi4-mini",
+        model="hermes3:3b",
         provider_chain=DEFAULT_PROVIDER_CHAIN,
         reason="runtime_tasks_prioritize_fast_local_inference",
     ),
     TaskClass.BUSINESS: RoutingPolicy(
         task_class=TaskClass.BUSINESS,
-        model="qwen3:8b",
+        model="hermes3:3b",
         provider_chain=DEFAULT_PROVIDER_CHAIN,
         reason="business_tasks_need_balanced_context_reasoning",
     ),
     TaskClass.MEMORY: RoutingPolicy(
         task_class=TaskClass.MEMORY,
-        model="phi4-mini",
+        model="hermes3:3b",
         provider_chain=DEFAULT_PROVIDER_CHAIN,
         reason="memory_tasks_are_lightweight_lookup_or_summarization",
     ),
     TaskClass.GENERAL: RoutingPolicy(
         task_class=TaskClass.GENERAL,
-        model="phi4-mini",
+        model="hermes3:3b",
         provider_chain=DEFAULT_PROVIDER_CHAIN,
         reason="general_default_local_preference",
     ),
     TaskClass.DEEP_REASONING: RoutingPolicy(
         task_class=TaskClass.DEEP_REASONING,
-        model="qwen3:8b",
+        model="hermes3:3b",
         provider_chain=DEFAULT_PROVIDER_CHAIN,
         reason="deep_reasoning_prefers_larger_local_model",
     ),

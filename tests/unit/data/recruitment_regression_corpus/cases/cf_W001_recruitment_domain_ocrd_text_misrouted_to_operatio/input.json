@@ -1,0 +1,15 @@
+{
+  "_schema": "recruitment-regression-case-input/v1",
+  "case_id": "cf_W001",
+  "thread_phone_masked": "880127ebf60",
+  "inbound_step_at_turn": null,
+  "session_fields_at_turn": {
+    "name": null,
+    "age": null,
+    "area": null,
+    "job_preference": null,
+    "experience": null,
+    "phone_confirm": null
+  },
+  "inbound_message": "Here's the extracted text from your handwritten image, organized for clarity: ... Recruitment Conversations ... Office address, company name, contact number, training facility for deposit, etc. ✅ The text has been fully extracted and structured into clear sections. Would you like me to now format this into a structured table ..."
+}

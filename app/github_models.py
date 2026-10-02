@@ -349,6 +349,16 @@ async def generate_chat_reply(
 _ENDPOINT_CONFIRMED_DEAD = True
 
 
+def is_endpoint_confirmed_dead() -> bool:
+    """Importable accessor for the confirmed-dead-endpoint state above, so
+    other call sites (2026-08-23: app/llm.py's classify_intent_llm()) can
+    gate their own live network call on the same single source of truth
+    instead of duplicating the boolean or re-deriving it. Kept as a plain
+    function (not a re-exported constant) so a future fix that makes this
+    state dynamic again only needs to change it in one place."""
+    return _ENDPOINT_CONFIRMED_DEAD
+
+
 async def check_health() -> dict:
     """Verify GitHub Models token and endpoint are reachable."""
     settings = get_settings()

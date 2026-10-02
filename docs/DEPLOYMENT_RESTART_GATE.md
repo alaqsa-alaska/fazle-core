@@ -1,6 +1,6 @@
 # Deployment / Restart Gate — Design
 
-**Status:** IMPLEMENTED as a manual script — `scripts/restart_gate.sh` (all 9 checks below) — as of 2026-07-12. **Not** wired into `ExecStartPre=` (Owner decision 2026-07-12: manual-only for now, to avoid a script bug hard-blocking every future restart before it's proven itself over real use). Run it by hand, or by an AI agent under explicit instruction, before requesting a restart:
+**Status:** IMPLEMENTED as a manual script — `scripts/restart_gate.sh` (all checks below; 5b added 2026-09-01) — as of 2026-07-12. **Not** wired into `ExecStartPre=` (Owner decision 2026-07-12: manual-only for now, to avoid a script bug hard-blocking every future restart before it's proven itself over real use). Run it by hand, or by an AI agent under explicit instruction, before requesting a restart:
 ```
 scripts/restart_gate.sh --check-only   # checks 1-7 only
 scripts/restart_gate.sh --restart      # checks 1-7, then (if PASS) restarts fazle-core.service and runs checks 8-9
@@ -14,7 +14,7 @@ Supporting files created alongside it: `db/.restart_gate_manifest` (check 1), `d
 
 ---
 
-## The 9 checks
+## The 10 checks (5b added 2026-09-01)
 
 ### 1. Working-tree cleanliness or approved dirty-file manifest
 - Maintain a file, `db/.restart_gate_manifest` (plain text, one path per line, comment lines start with `#`), listing every path that is *currently* expected to be dirty (e.g. the REL-2026-07-W1 in-flight files).
@@ -39,8 +39,13 @@ Supporting files created alongside it: `db/.restart_gate_manifest` (check 1), `d
 - Gate logic: diff the `db/migrations/` directory listing against the inventory doc's file list; block on any `.sql` file not mentioned there.
 - This directly prevents a repeat of the 2026-07-08 finding (4 migration files sitting untracked and undocumented).
 
+### 5b. Migrations actually applied to the live DB (read-only)
+- **Added 2026-09-01.** Check 5 proves every migration *file* is documented; it does **not** prove those migrations have run against the database the service will load. Deploying code that assumes a not-yet-applied column/index is a real failure mode (the Phase-2 identity work depends on migration `078`).
+- Gate logic: one read-only `SELECT name FROM schema_migrations` against `DATABASE_URL` (resolved from `/home/azim/secure-env-backup/runtime-services.env`, falling back to `.env`); diff against `db/migrations/*.sql`. **Block** if any migration file is missing from `schema_migrations`. No DDL, no apply — a block means "run `DATABASE_URL=... python db/migrate.py` first".
+- If `DATABASE_URL` can't be resolved or the DB can't be reached, this **warns** (does not block) and asks for a manual check, so a credential/network hiccup never hard-blocks a restart.
+
 ### 6. Current `.env` critical flags acknowledged
-- Maintain a short list of safety-critical flags (`AUTO_REPLY_ENABLED`, `RECRUITMENT_AUTOREPLY_ENABLED`, `SOCIAL_AUTO_REPLY_SINGLE_ENGINE`, `AI_SAFE_MODE`, `INTERNAL_NOTIFICATIONS_ENABLED`) and their last-acknowledged values (`db/.env_flags_acknowledged`, key=value pairs).
+- Maintain a short list of safety-critical flags (`OUTBOUND_ENABLED`, `AUTO_REPLY_ENABLED`, `RECRUITMENT_AUTOREPLY_ENABLED`, `SOCIAL_AUTO_REPLY_SINGLE_ENGINE`, `AI_SAFE_MODE`, `INTERNAL_NOTIFICATIONS_ENABLED`) and their last-acknowledged values (`db/.env_flags_acknowledged`, key=value pairs).
 - Gate logic: read current `.env` values for these keys; if any differs from the acknowledged file, **warn, don't hard-block** (an intentional flag change is a valid reason to restart) — but require the operator to explicitly re-run with an `--ack-flags` step that updates the acknowledged file, so a flag change can never be silently unnoticed the way `AUTO_REPLY_ENABLED` was (see the 2026-07-08/09 KB reconciliation).
 
 ### 7. DB backup freshness
@@ -51,8 +56,14 @@ Supporting files created alongside it: `db/.restart_gate_manifest` (check 1), `d
 - Hit `/health` (and, with the internal key, `/health/deep`) on the *currently running* process before touching it. If it's already unhealthy, restarting might be the right call anyway, but the gate should record the before-state so a post-restart comparison is possible (see check 9) — don't block on this one, just capture it.
 
 ### 9. Service health after restart
-- After `systemctl restart fazle-core.service`, poll `/health` (with backoff, e.g. every 2s up to 30s) until it returns 200, or declare the restart failed.
-- If `/health/deep` was healthy before and is unhealthy after, this is a strong signal to roll back (see `RECOVERY.md`'s existing git-tag/tar-snapshot rollback procedure) rather than leave a broken restart running.
+- **Revised 2026-08-27** (restart-gate false-negative investigation — the original "poll `/health` until it returns exactly 200" design below produced a real false negative on a Stage-A Meta-integration restart: the app was reachable and answering the whole 30s window with a valid, well-formed `503` — `app/main.py`'s `health()` route returns 503 only when `status=="critical"`, `200` for `ok`/`degraded` — but the old check treated any non-200 identically to "connection refused", reporting `RESTART: FAILED` for a deploy that had in fact succeeded and was merely surfacing real, ambient host cpu/disk load).
+- Logic now lives in `scripts/restart_gate_readiness.py` (independently unit-tested — `tests/unit/test_restart_gate_readiness.py`), invoked by `restart_gate.sh`'s Check 9. It distinguishes:
+  1. **process/service failed to start** — `systemctl show -p ActiveState` reports `failed`, or `NRestarts` increases mid-poll (crash-loop under the unit's `Restart=always`) → immediate FAIL.
+  2. **startup exception** — a `Traceback (most recent call last):` appears in the NEW portion of `logs/fazle-core-error.log` (byte-offset-tracked from just before the restart) → immediate FAIL, traceback excerpt included in the report.
+  3. **HTTP endpoint reachable, valid health payload, any status code** — the readiness signal is uvicorn's own `Application startup complete.` line in that same error log (per the ASGI lifespan spec, uvicorn does not accept connections before this fires — an already-existing, zero-production-code-change proof of "fully started"). Bounded wait: `RESTART_GATE_MAX_STARTUP_WAIT_S` (default 60s; observed actual lifespan-startup duration across 4 historical restarts was consistently 9-15s, so this is ~4-6x margin, not an arbitrary long sleep).
+  4. **`ok`/`degraded`/`critical` with only ambient probes (cpu/disk/mem) flagged** — treated as ready (these reflect shared-host load, not this deploy; a restart can't fix them and the gate shouldn't block a deploy on them) — reported as a non-blocking caveat, never silently dropped.
+  5. **a CORE application probe** (db, bridge1_db/2/3, bridge_poller_b1/2/3, outbound, ollama, qdrant) **degraded/critical** — bounded re-check (`RESTART_GATE_MAX_CORE_SETTLE_S`, default 30s) in case it's a transient warm-up (e.g. DB pool); if it clears, ready; if not, FAIL naming the exact probe(s) and values — this is the one case that legitimately should still block, since it's this deploy's own dependency, not ambient noise.
+- If a CORE probe was healthy before and unhealthy after (state 5 above exhausts its window), this is a strong signal to roll back (see `RECOVERY.md`'s existing git-tag/tar-snapshot rollback procedure) rather than leave a broken restart running.
 
 ---
 

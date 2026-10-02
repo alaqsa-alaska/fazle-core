@@ -18,8 +18,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Literal, Optional
 from uuid import UUID, uuid4
+
+
+# Domain literals are intentionally narrow — only the two conversational
+# targets Task 13 is authorized to handle, plus the explicit fall-through
+# value. Protected business-action domains (escort/payroll/cash/admin/
+# attendance/accountant) are NOT in this enum because they never pass
+# through the conversational semantic gate; high-confidence business-
+# action consumers claim them earlier and run on their deterministic
+# handlers unchanged.
+SemanticDomain = Literal["recruitment_conversation", "employee_conversation", "no_match"]
+
+
+@dataclass
+class SemanticDecision:
+    """Structured semantic interpretation of an inbound WhatsApp message.
+
+    Produced exclusively by hermes_dispatch.semantic_gate() and consumed by
+    message_router.process_message() as the routing authority between
+    Recruitment and Employee conversational handlers. All other WhatsApp
+    traffic falls through as `no_match` to the existing deterministic
+    router. Identity, keywords, and recruitment_detector are EVIDENCE
+    passed into the gate; they do not select the domain on their own.
+    """
+    domain: SemanticDomain = "no_match"
+    subject: str = ""
+    intent: str = ""
+    entities: Dict[str, Any] = field(default_factory=dict)
+    requested_action: Optional[str] = None
+    confidence: float = 0.0
+    identity_reference: Dict[str, Any] = field(default_factory=dict)
+    rationale: str = ""
 
 
 @dataclass
@@ -71,6 +102,7 @@ class DecisionRecord:
                                     # (see modules.message_router.process_message's
                                     # own message_id param) -- 2026-08-19
     trust_evaluation: Optional[TrustEvaluation] = None
+    semantic_decision: Optional[SemanticDecision] = None
 
 
 @dataclass

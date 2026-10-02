@@ -34,6 +34,22 @@ source_bridge is the caller-trusted value message_router already resolves
 from which poller/webhook ingested the message, never taken from message
 text.
 
+2026-09-29 (Admin Canary qualification): the Hermes relay gained a FOURTH,
+ADDITIVE gate -- canonical Identity-Role authorization via
+modules.admin_hermes_authorization, which resolves the real identity and
+role from wbom_identity_links / fazle_identity_subjects /
+fazle_identity_role_assignments / fazle_outbound_holds and evaluates them
+through the single existing decision function
+(modules.outbound_authorization.capture_authorization_snapshot ->
+modules.identity_role_authorization.evaluate). The three gates above are
+untouched and still run first, so this can only narrow access: neither
+"source_bridge == bridge2" nor "this is the admin phone number" is
+sufficient on its own, and a revoked canonical role, revoked identity,
+ambiguous link, or placed hold now actually stops the relay. The same
+change routed the relay's inference through the canonical knowledge path
+(_build_hermes_knowledge_context -> the existing BUS-008 adapter ->
+modules.rag), which previously never applied to this path at all.
+
 process_admin_ai_command() never raises to its caller -- every branch is
 exception-guarded and returns a user-facing Bangla string on failure,
 per the B25(H4) design constraint that WhatsApp admin free text must
@@ -53,6 +69,7 @@ import httpx
 from app.config import get_settings
 from modules import outbound, rbac
 from modules.admin_directives import revoke_directive, save_directive
+from modules.admin_hermes_authorization import resolve_relay_authorization
 from modules.ai_console.orchestrator import orchestrate_console_request
 from modules.wa_chat_frontend import get_runtime_setting, set_runtime_setting
 from shared.draft_reply import create_draft_reply
@@ -77,14 +94,23 @@ _AI_COOLDOWN_SECONDS = 5.0
 
 # ── Rate limiter + in-flight tracking (Hermes relay only) ───────────────────
 # A real Hermes turn spawns a real subprocess with real LLM/tool cost and can
-# take up to hermes-runner's own ~170s budget -- far longer than this
-# codebase's MESSAGE_ROUTE_TIMEOUT (30s default), so it must run as a
-# fire-and-forget background task (see _handle_hermes_relay), not be awaited
-# inline. A longer cooldown than the AI-console query above is deliberate:
-# this gates a much more expensive, real-compute operation, one bridge2
-# Super Admin at a time.
+# take up to hermes-runner's own budget (300s as of 2026-08-14, raised from
+# 150s for opencode_dispatch headroom -- see hermes-runner/server.py's own
+# timeout-chain comment and HANDOFF_P2_TIMEOUT_FIX_2026-08-14.md) -- far
+# longer than this codebase's MESSAGE_ROUTE_TIMEOUT (30s default), so it
+# must run as a fire-and-forget background task (see _handle_hermes_relay),
+# not be awaited inline. A longer cooldown than the AI-console query above
+# is deliberate: this gates a much more expensive, real-compute operation,
+# one bridge2 Super Admin at a time.
 _hermes_cooldown: dict[str, float] = {}
 _HERMES_COOLDOWN_SECONDS = 15.0
+
+# Lifecycle-closure GAP 3 (2026-08-29): batch-invitation two-step confirm.
+# {admin_phone: ((count, office_date), monotonic_ts)} — a bare instruction
+# previews and stores the pending (count,date); the same instruction (or an
+# explicit "নিশ্চিত"/"confirm"/"পাঠাও") within the window actually sends.
+_invite_confirm_pending: dict[str, tuple] = {}
+_INVITE_CONFIRM_WINDOW_S = 300.0
 # Keeps a strong reference to in-flight background tasks so they aren't
 # garbage-collected mid-flight (a well-known asyncio footgun for
 # fire-and-forget create_task() calls) -- discarded via the done-callback.
@@ -391,9 +417,106 @@ async def _handle_send(raw_phone: str, message_text: str, sender_phone: str) -> 
 _HERMES_NOT_CONFIGURED_MSG = "⚠️ Hermes relay কনফিগার করা নেই (HERMES_RUNNER_SECRET সেট করা হয়নি)।"
 
 
+# ── Canonical knowledge context (Admin Canary qualification, 2026-09-29) ─────
+# The Hermes relay used to hand hermes-runner nothing but the Admin's raw
+# question, so the relay answered with whatever the model already believed
+# about this company -- no Fazle-Core knowledge, no provenance, and no way for
+# a later auditor to tell a grounded answer from a plausible invention. The
+# AI-console path has had canonical knowledge retrieval the whole time
+# (``orchestrate_console_request`` -> BUS-008 -> ``build_knowledge_result`` ->
+# ``modules.rag.search``); the relay simply never used it. These helpers route
+# the relay through that same existing adapter, so there is exactly one RAG
+# implementation and one indexing/authority model in this codebase.
+_KNOWLEDGE_RESULT_LIMIT = 5
+_MAX_CONTEXT_CHARS = 4000
+
+
+async def _build_hermes_knowledge_context(request_text: str) -> tuple[str, dict]:
+    """Return (context_block, evidence) for one relay turn.
+
+    Reuses ``build_knowledge_result`` -- the canonical BUS-008 knowledge
+    adapter already wired into the AI console -- so retrieval, role filtering
+    and fact-authority markers are the existing ones, not a second RAG path.
+
+    Fails soft on retrieval *errors* (the relay still runs, with an explicit
+    "no authoritative context found" marker, because a knowledge-store outage
+    must not silently become a security decision), but never fabricates: when
+    nothing is found, the evidence says ``found=False`` and the context block
+    says so too. No hard-coded company answers exist anywhere in this path --
+    every fact in the injected block came out of ``modules.rag`` at call time.
+    """
+    from modules.ai_console.live_adapters import build_knowledge_result
+
+    evidence = {
+        "retrieval_attempted": True,
+        "context_found": False,
+        "source": None,
+        "provenance": [],
+        "context_injected": False,
+        "retriever": "modules.ai_console.live_adapters.build_knowledge_result",
+        "underlying_index": "modules.rag.search",
+        "access_role": "admin",
+        "status": "failed",
+    }
+    try:
+        envelope = await build_knowledge_result(request_text, limit=_KNOWLEDGE_RESULT_LIMIT)
+    except Exception as exc:  # noqa: BLE001 -- retrieval failure is not authorization
+        log.error("[admin_ai_router] knowledge retrieval raised for relay: %s", exc)
+        evidence["status"] = "failed"
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        return ("", evidence)
+
+    evidence["status"] = envelope.status
+    evidence["source"] = envelope.source
+    evidence["tool_id"] = envelope.tool_id
+    evidence["confidence"] = envelope.confidence
+    evidence["traceability"] = list(envelope.traceability)
+    rows = list((envelope.data or {}).get("rows") or [])
+    if not rows:
+        return ("", evidence)
+
+    lines: list[str] = []
+    provenance: list[dict] = []
+    for index, row in enumerate(rows, start=1):
+        source = str(row.get("source") or "")
+        title = str(row.get("title") or "")
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        provenance.append({
+            "n": index,
+            "source": source,
+            "title": title,
+            "chunk_idx": row.get("chunk_idx"),
+            "score": row.get("score"),
+            "fact_authority": row.get("fact_authority"),
+        })
+        lines.append(f"[{index}] ({source} / {title}) {text}")
+
+    if not lines:
+        return ("", evidence)
+
+    evidence["context_found"] = True
+    evidence["provenance"] = provenance
+    evidence["hits"] = len(lines)
+
+    block = (
+        "\n\n".join([
+            "ফাজল-কোর অনুমোদিত জ্ঞানভান্ডার থেকে প্রাপ্ত প্রাসঙ্গিক তথ্য "
+            "(Fazle-Core authoritative knowledge — answer ONLY from this, and say "
+            "so explicitly if it does not contain the answer):",
+            "\n\n".join(lines),
+        ])
+    )[:_MAX_CONTEXT_CHARS]
+    evidence["context_injected"] = True
+    evidence["context_chars"] = len(block)
+    return (block, evidence)
+
+
 async def _call_hermes_readonly(
     request_text: str, *, log_label: str, readonly_key: str | None = None,
     hermes_session_id: str | None = None, force_read_only: bool = True,
+    relay_conversation_key: str | None = None, relay_identity_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Shared core of the hermes-runner call -- extracted (2026-08-04,
     Phase 5B) so both the WhatsApp-triggered relay (_deliver_hermes_reply)
@@ -443,8 +566,29 @@ async def _call_hermes_readonly(
     mode is currently persisted in its own current_mode.txt -- the EXACT
     same value the interactive web UI already uses. This does not add a
     new elevation mechanism: BUILD/RUN is still only ever granted via the
-    existing, unmodified `/api/hermes/mode` web endpoint (admin JWT,
-    chat.iamazim.com), with its existing TTL/auto-revert. All three
+    existing `/api/hermes/mode` web endpoint (admin JWT via assistant-
+    platform's requireAdmin middleware, chat.iamazim.com -> a thin proxy
+    to hermes-runner's own Bearer-secret-gated POST /mode) or a direct
+    call to that same hermes-runner endpoint.
+
+    STALE-DOCSTRING CORRECTIONS (2026-08-25, verified against current
+    code, not assumed):
+    (1) "existing TTL/auto-revert" is no longer universally true --
+    hermes-runner's write_mode_state() gained an explicit `permanent`
+    parameter (2026-08-25 Owner decision) that sets expires_at=None for
+    BUILD/RUN with no auto-revert; current_mode.txt is a permanent RUN
+    grant as of this writing. The web UI's /mode proxy (assistant-
+    platform/backend/src/routes/hermes.js) does NOT yet forward this
+    `permanent` flag -- only a direct hermes-runner API call can request
+    it today; the web toggle still only sends mode/ttl_seconds/scope.
+    (2) Since a 2026-08-20 hermes-runner change, any call with
+    readonly_key=="readonly:whatsapp_relay" (i.e. every _deliver_hermes_
+    reply call, this function) unconditionally receives the RUN toolset
+    (file/code_execution/terminal) regardless of what mode is currently
+    persisted/reported -- the "inherits whatever mode is persisted"
+    description above is therefore incomplete for this specific caller;
+    the reported `mode` in logs can say READ while the actual toolset
+    granted is RUN-level. All three
     pre-existing gates on reaching this call at all -- RBAC superadmin,
     exact admin_bridge2_number identity, and source_bridge in
     _HERMES_CONTROL_CHANNELS (see _handle_hermes_relay) -- are completely
@@ -458,7 +602,15 @@ async def _call_hermes_readonly(
     rule against inventing a parallel mechanism where one already exists."""
     settings = get_settings()
     try:
-        async with httpx.AsyncClient(timeout=175.0) as client:
+        # 175.0 -> 330.0 on 2026-08-14: must stay above hermes-runner's own
+        # HERMES_RUN_TIMEOUT (300s as of the same date, raised for
+        # opencode_dispatch headroom) with real margin, same as this
+        # chain's other members -- see hermes-runner/server.py's timeout-
+        # chain comment and HANDOFF_P2_TIMEOUT_FIX_2026-08-14.md. This is
+        # a separate, direct-to-127.0.0.1:8093 call (no nginx hop) from
+        # assistant-platform's own hermes.js/nginx chain -- both had to be
+        # raised independently in lockstep with hermes-runner.
+        async with httpx.AsyncClient(timeout=330.0) as client:
             resp = await client.post(
                 f"{settings.hermes_runner_url}/run",
                 headers={"Authorization": f"Bearer {settings.hermes_runner_secret}"},
@@ -467,6 +619,19 @@ async def _call_hermes_readonly(
                     "read_only": force_read_only,
                     **({"readonly_key": readonly_key} if readonly_key else {}),
                     **({"hermes_session_id": hermes_session_id} if hermes_session_id else {}),
+                    # 2029-09-30 (Owner: the Admin<->Hermes relay and the
+                    # customer/employee conversation are never one authority).
+                    # This carries WHICH authorized conversation is speaking, so
+                    # anything Hermes proposes during this turn is attributable
+                    # to it. hermes-runner passes it into the hermes subprocess
+                    # environment, which is why the model cannot forge or
+                    # relabel it: it is ambient process context, not a tool
+                    # argument. A customer conversation never sets this, so
+                    # drafts it produces are never grantable by an Admin "yes".
+                    **({"relay_conversation_key": relay_conversation_key}
+                       if relay_conversation_key else {}),
+                    **({"relay_identity_id": relay_identity_id}
+                       if relay_identity_id else {}),
                 },
             )
         try:
@@ -494,21 +659,40 @@ async def _call_hermes_readonly(
         return "⚠️ Hermes-এর সাথে যোগাযোগ করা যায়নি।", None
 
 
-async def _deliver_hermes_reply(request_text: str, sender_phone: str, source_bridge: str = "bridge2") -> None:
+async def _deliver_hermes_reply(
+    request_text: str,
+    sender_phone: str,
+    source_bridge: str = "bridge2",
+    *,
+    relay_conversation_key: str | None = None,
+    relay_identity_id: str | None = None,
+) -> None:
     """Background task: makes the actual (potentially ~170s) call to
     hermes-runner and delivers the result as a separate outbound WhatsApp
     message. Never awaited inline by _handle_hermes_relay -- see that
     function's docstring for why (MESSAGE_ROUTE_TIMEOUT).
 
-    source_bridge (Owner-directed, 2026-08-12, bridge1 Hermes Control
-    Channel): which bridge the REPLY goes out on -- always the same bridge
-    the triggering request arrived on (see _handle_hermes_relay's call
-    site), never a hardcoded literal, so a bridge2 self-chat request keeps
-    replying via bridge2 exactly as before, and a bridge1 request replies
-    via bridge1. Defaults to "bridge2" so every other/older call site's
-    behavior is unchanged byte-for-byte. Also the key (together with
-    sender_phone) for conversation continuity below -- bridge1 and bridge2
-    self-chat are two independent Hermes conversation threads.
+    source_bridge (Owner-directed, 2026-08-27, Admin<->Hermes topology
+    unification -- supersedes the 2026-08-12 symmetric-reply behavior):
+    which bridge the REPLY goes out on. _handle_hermes_relay's call site
+    now always passes "bridge1" here, regardless of whether the Admin's
+    request arrived via bridge1 or bridge2 -- the intended flow is
+    Admin -> Bridge2 (or Bridge1) -> Hermes -> Bridge1 -> Admin, never a
+    reply landing back inside a bridge2 self-chat thread. A bridge1-sent
+    reply lands as a new inbound message on bridge2 (the Admin's own
+    number is the recipient) -- this is exactly the shape modules.
+    message_router.process_message()'s cross-bridge echo guard (2026-08-12)
+    already recognizes and silently ignores, so it now also correctly
+    absorbs replies to what used to be bridge2-originated requests, not
+    just bridge1-originated ones. Defaults to "bridge2" so every other/
+    older call site's behavior is unchanged byte-for-byte -- only
+    _handle_hermes_relay's call passes the literal "bridge1" explicitly.
+    Also the key (together with sender_phone) for conversation continuity
+    below -- as a direct consequence, a bridge1-arriving request and a
+    bridge2-arriving request now resume the SAME Hermes conversation
+    thread (both key off "bridge1"), not two independent ones as before
+    2026-08-27 -- an intended simplification to one unified control
+    channel, not an accidental side effect.
 
     Conversation continuity (2026-08-13): looks up any still-fresh session
     for this (source_bridge, sender_phone) pair and asks hermes-runner to
@@ -531,21 +715,81 @@ async def _deliver_hermes_reply(request_text: str, sender_phone: str, source_bri
     else:
         resume_session_id = _get_active_hermes_session(source_bridge, sender_phone)
 
+    # Canonical knowledge grounding (Admin Canary qualification, 2026-09-29).
+    # Built here, at the point the message actually leaves for inference, so
+    # BOTH entry points into this relay (the explicit "hermes," command and
+    # the bare-text control-channel bypass in process_admin_natural_query) are
+    # grounded -- neither can reach Hermes ungrounded. Retrieval runs against
+    # the existing modules.rag index through the existing BUS-008 adapter.
+    knowledge_block, knowledge_evidence = await _build_hermes_knowledge_context(request_text)
+    # Metadata only, never retrieved text: enough to prove retrieval happened,
+    # what was found, and its provenance, without copying document content
+    # into the log. Same convention as the mode/session line below.
+    log.info(
+        "[admin_ai_router] hermes relay knowledge: attempted=%s found=%s status=%s "
+        "source=%s hits=%s injected=%s provenance=%s",
+        knowledge_evidence.get("retrieval_attempted"),
+        knowledge_evidence.get("context_found"),
+        knowledge_evidence.get("status"),
+        knowledge_evidence.get("source"),
+        knowledge_evidence.get("hits", 0),
+        knowledge_evidence.get("context_injected"),
+        [p.get("source") for p in knowledge_evidence.get("provenance", [])],
+    )
+    inference_text = f"{request_text}{knowledge_block}" if knowledge_block else request_text
+
     reply_text, new_session_id = await _call_hermes_readonly(
-        request_text, log_label=f"hermes relay for {sender_phone}", readonly_key="readonly:whatsapp_relay",
+        inference_text, log_label=f"hermes relay for {sender_phone}", readonly_key="readonly:whatsapp_relay",
         hermes_session_id=resume_session_id, force_read_only=False,
+        # 2026-09-30: which authorized conversation is speaking. Supplied by
+        # the caller, which already ran resolve_relay_authorization -- this
+        # function must not re-decide identity. When absent (non-relay callers
+        # and tests), no conversation is declared, so anything Hermes proposes
+        # in that turn is not attributable to an Admin conversation and cannot
+        # be authorized by an Admin "yes".
+        relay_conversation_key=relay_conversation_key,
+        relay_identity_id=relay_identity_id,
     )
     _remember_hermes_session(source_bridge, sender_phone, new_session_id)
 
+    _delivered_body = f"🤖 Hermes:\n{reply_text}"
+    _qid = None
     try:
-        await outbound.enqueue(
+        _qid = await outbound.enqueue(
             sender_phone,
-            f"🤖 Hermes:\n{reply_text}",
+            _delivered_body,
             source_bridge=source_bridge,
             purpose="hermes_relay_reply",
         )
     except Exception as exc:
         log.error("[admin_ai_router] hermes relay reply enqueue failed for %s: %s", sender_phone, exc)
+
+    # 2026-08-28 (Stage B2 -- canonical-history persistence): a separate,
+    # best-effort step from the delivery above, never able to affect it --
+    # this only records what was already (successfully) queued into the
+    # canonical wbom_whatsapp_messages table; fazle_outbound_queue remains
+    # the sole delivery authority, this is history, not a second queue.
+    # Skipped when _qid is None (enqueue failed, or outbound.enqueue()'s
+    # own idempotency_key dedup already absorbed a genuine retry) --
+    # nothing new was actually queued in that case, so there is nothing
+    # new to record. source_message_ref=f"hermes_relay_reply:{_qid}" makes
+    # this idempotent on any future retry of this same delivered row via
+    # the same _core_message_hash/ON CONFLICT mechanism
+    # _save_raw_core_copy() already uses for inbound.
+    if _qid:
+        try:
+            from modules.bridge_poller import _save_message
+            await _save_message(
+                source_bridge, sender_phone, _delivered_body, "outbound",
+                workflow="hermes_relay_reply",
+                actor_type="hermes", actor_id="hermes-runner",
+                source_message_ref=f"hermes_relay_reply:{_qid}",
+            )
+        except Exception as _persist_exc:
+            log.error(
+                "[admin_ai_router] hermes relay reply canonical-history persist failed for %s: %s",
+                sender_phone, _persist_exc,
+            )
 
 
 # ── Phase 5B (2026-08-04): proactive alert-triggered investigation ──────────
@@ -646,19 +890,217 @@ async def trigger_admin_investigation(job_name: str, alert_context: str) -> None
         log.error("[phase5b_trigger] job=%s event=report_send_failed error=%s", job_name, exc)
 
 
+# ── Recruitment policy-conflict escalation (Owner directive, 2026-08-27) ────
+# "Reuse existing architecture" post-intake implementation pass, item G:
+# when modules.recruitment_flow detects a candidate question that touches a
+# materially conflicting recruitment policy area (today: the joining-fee
+# contradiction found in Phase A verification — some live sources say no
+# mandatory upfront payment, at least one says a mandatory non-refundable
+# fee), Hermes must not guess; ask the Owner/Admin via the existing admin
+# WhatsApp channel and let their reply become an authoritative directive
+# through the existing modules.admin_directives mutation mechanism
+# (remember_business_rule), same as any other Tier C write.
+#
+# Deliberately modeled on trigger_admin_investigation() immediately below —
+# same config gates (fail-closed kill switch, hermes_runner_secret,
+# admin_bridge2_number), same never-raises contract — but two real
+# differences:
+#   1. Cooldown is per subject_key (a genuinely different policy question
+#      must be able to escalate independently), not per job_name.
+#   2. The composed question is delivered through _call_hermes_readonly()
+#      AND the resulting hermes_session_id is remembered via
+#      _remember_hermes_session() — trigger_admin_investigation() discards
+#      its session_id (each investigation is a one-shot, stateless turn).
+#      Here the Admin's own natural WhatsApp reply must land as a RESUMED
+#      turn of the SAME conversation (via the existing Bridge1/Bridge2
+#      Hermes Control Channel continuity in _get_active_hermes_session /
+#      _handle_hermes_relay), so Hermes has the question's own context
+#      (including which subject_type/subject_key to use) when it decides
+#      whether to call remember_business_rule. That resumed reply is a
+#      live, human-initiated turn like any other Admin WhatsApp message —
+#      force_read_only=False, real RUN-mode capability, same RBAC/channel
+#      gates as every other _handle_hermes_relay call — this function
+#      itself only ever composes/sends the QUESTION (force_read_only=True,
+#      via _call_hermes_readonly's default), never writes a directive.
+#
+# Default-DISABLED via settings.recruitment_policy_escalation_enabled — a
+# SEPARATE flag from hermes_alert_investigation_enabled (see that setting's
+# own updated comment in app/config.py for why) — must be explicitly opted
+# into via .env before this fires in production for the first time.
+_policy_clarification_cooldown: dict[str, float] = {}
+
+
+async def trigger_recruitment_policy_clarification(
+    *, subject_type: str, subject_key: str, conflict_summary: str,
+) -> None:
+    """Fires a one-shot, read-only-originated Hermes turn that composes and
+    sends a policy-clarification question to the canonical Super Admin
+    (bridge2), remembering the session so the Admin's own reply resumes it.
+    Fail-closed: any missing config, empty input, an already-active
+    directive on this exact subject, or a per-subject_key cooldown hit
+    means no send, with a logged reason — never a silent no-op, never
+    raises. Callers (modules.recruitment_flow) must treat this as
+    best-effort and never let it block or delay the candidate's own reply."""
+    settings = get_settings()
+
+    if not subject_key or not (conflict_summary or "").strip():
+        log.warning(
+            "[recruitment_policy_escalation] event=skipped reason=empty_context subject_key=%s",
+            subject_key or "unknown",
+        )
+        return
+
+    if not settings.recruitment_policy_escalation_enabled:
+        log.info("[recruitment_policy_escalation] event=skipped reason=feature_disabled subject_key=%s", subject_key)
+        return
+
+    if not settings.hermes_runner_secret:
+        log.warning("[recruitment_policy_escalation] event=skipped reason=hermes_not_configured subject_key=%s", subject_key)
+        return
+
+    bridge2_number = settings.admin_bridge2_number or ""
+    if not bridge2_number:
+        log.warning("[recruitment_policy_escalation] event=skipped reason=bridge2_not_configured subject_key=%s", subject_key)
+        return
+
+    # Avoid re-escalating a question the Owner has already answered — the
+    # SAME check modules.recruitment_flow._resolve_fee_policy_reply()
+    # already makes before calling this function, repeated here so this
+    # function is safe to call from any future caller directly too.
+    try:
+        from modules.admin_directives import list_directives
+        existing = await list_directives(subject_key=subject_key, status="active", limit=1)
+        if existing:
+            log.info("[recruitment_policy_escalation] event=skipped reason=already_resolved subject_key=%s", subject_key)
+            return
+    except Exception as exc:
+        log.warning("[recruitment_policy_escalation] directive check failed, proceeding: %s", exc)
+
+    now = time.monotonic()
+    cooldown_s = max(int(settings.hermes_alert_investigation_cooldown_seconds or 3600), 60)
+    last = _policy_clarification_cooldown.get(subject_key, 0.0)
+    if now - last < cooldown_s:
+        log.info(
+            "[recruitment_policy_escalation] event=skipped reason=cooldown subject_key=%s remaining_s=%d",
+            subject_key, int(cooldown_s - (now - last)),
+        )
+        return
+    _policy_clarification_cooldown[subject_key] = now
+
+    log.info("[recruitment_policy_escalation] event=triggered subject_type=%s subject_key=%s", subject_type, subject_key)
+
+    request_text = (
+        "একজন recruitment candidate সদ্য একটি প্রশ্ন করেছে যেখানে বর্তমান recruitment "
+        f"policy তথ্যসূত্রের মধ্যে দ্বন্দ্ব পাওয়া গেছে (subject_type={subject_type}, "
+        f"subject_key={subject_key}).\n\n"
+        f"দ্বন্দ্ব: {conflict_summary}\n\n"
+        "Boss, বর্তমানে কোন নীতিটি সঠিক/কার্যকর তা সংক্ষেপে জানান। আপনার উত্তরটি "
+        f"remember_business_rule(subject_type=\"{subject_type}\", subject_key=\"{subject_key}\", "
+        "directive_text=<আপনার উত্তর>, confirm=true) দিয়ে save করে দেব, যাতে ভবিষ্যতে একই "
+        "প্রশ্নের জন্য candidate-দের এই উত্তরটিই দেওয়া হয়। ততক্ষণ candidate-কে একটি safe, "
+        "non-committal উত্তর দেওয়া হচ্ছে — কোনো অনুমানভিত্তিক তথ্য দেওয়া হচ্ছে না।"
+    )
+    reply_text, session_id = await _call_hermes_readonly(
+        request_text,
+        log_label=f"recruitment policy clarification subject={subject_key}",
+        readonly_key=f"readonly:policy:{subject_key}",
+    )
+    _remember_hermes_session("bridge2", bridge2_number, session_id)
+    log.info("[recruitment_policy_escalation] subject_key=%s event=question_composed", subject_key)
+
+    try:
+        await outbound.enqueue(
+            bridge2_number,
+            f"🔔 Recruitment policy clarification needed ({subject_key}):\n{reply_text}",
+            source_bridge="bridge2",
+            purpose="recruitment_policy_clarification",
+            idempotency_key=f"policyclarify-{subject_key}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        )
+        log.info("[recruitment_policy_escalation] subject_key=%s event=question_sent", subject_key)
+    except Exception as exc:
+        log.error("[recruitment_policy_escalation] subject_key=%s event=send_failed error=%s", subject_key, exc)
+
+
+# ── Candidate reference-review notification (Owner directive, 2026-08-27) ──
+# Responsible/supervisory-role experience-verification pass, item G's
+# sibling: once modules.recruitment_flow captures enough of a candidate's
+# claimed previous employer/duration (see _upsert_experience_claim /
+# _experience_claim_resolved there), notify the canonical Super Admin so a
+# human can actually contact the reference. Reuses the exact same
+# outbound.enqueue -> bridge2 primitive as trigger_admin_investigation()
+# and trigger_recruitment_policy_clarification() above — NOT a new sender.
+# Two deliberate differences from those two siblings:
+#   1. No Hermes composition step (_call_hermes_readonly) and no
+#      _remember_hermes_session — the notification is a deterministic
+#      dump of already-structured claim data, and the Admin's own reply
+#      doesn't need to resume as an authoritative-directive-writing Hermes
+#      turn the way a policy answer does. Skipping that round-trip also
+#      avoids adding a second hermes-runner call to an already latency-
+#      sensitive path (see Phase A recovery's live timeout observations).
+#   2. No cooldown dict: this is a one-shot-per-candidate event, not a
+#      periodic alert, so a stable (no-timestamp) idempotency_key on
+#      outbound.enqueue's existing ON CONFLICT DO NOTHING dedup is the
+#      only gate needed — it fires at most once per candidate_id even if
+#      called again on a later turn.
+# Never marks anything "verified" — this only ever forwards claimed/
+# unverified data for a human to check, per Owner's explicit instruction.
+async def trigger_candidate_reference_review(
+    *, candidate_id: int, phone: str, claim: dict,
+) -> None:
+    """Notify the canonical Super Admin (bridge2) that a responsible-role
+    candidate has supplied enough reference detail to be worth checking.
+    Fail-closed: missing bridge2 config means no send, logged reason —
+    never a silent no-op, never raises."""
+    bridge2_number = get_settings().admin_bridge2_number or ""
+    if not bridge2_number:
+        log.warning(
+            "[candidate_reference_review] event=skipped reason=bridge2_not_configured candidate=%s",
+            candidate_id,
+        )
+        return
+
+    lines = [
+        f"📋 Candidate reference review needed (candidate_id={candidate_id}, phone={phone}):",
+        f"দাবিকৃত পদ: {claim.get('claimed_role') or '—'}",
+        f"প্রতিষ্ঠান: {claim.get('claimed_company') or '—'}",
+        f"সময়কাল: {claim.get('claimed_duration') or '—'}",
+    ]
+    if claim.get("reference_name"):
+        lines.append(f"Reference name: {claim['reference_name']}")
+    if claim.get("reference_phone"):
+        lines.append(f"Reference phone: {claim['reference_phone']}")
+    lines.append("Status: unverified (claimed only) — অনুগ্রহ করে যাচাই করুন।")
+
+    try:
+        await outbound.enqueue(
+            bridge2_number,
+            "\n".join(lines),
+            source_bridge="bridge2",
+            purpose="candidate_reference_review",
+            idempotency_key=f"candref-{candidate_id}",
+        )
+        log.info("[candidate_reference_review] candidate=%s event=notification_sent", candidate_id)
+    except Exception as exc:
+        log.error("[candidate_reference_review] candidate=%s event=send_failed error=%s", candidate_id, exc)
+
+
 async def _handle_hermes_relay(request_text: str, sender_phone: str, source_bridge: str = "") -> str:
     """Phase 4 (2026-08-04): relays an admin's WhatsApp request to the real
     Hermes (assistant-platform's BUILD/RUN-capable agent).
 
     UPDATED, Full-authority Phase 1 (2026-08-13, Owner-approved): the
-    delivered reply (_deliver_hermes_reply, see its own docstring) now
-    inherits whatever READ/BUILD/RUN mode is currently persisted for
-    Hermes -- it is no longer unconditionally hard-locked to READ. Mode is
-    still ONLY ever elevated via the existing, unmodified
-    `/api/hermes/mode` web endpoint (admin JWT, chat.iamazim.com); nothing
-    in this WhatsApp relay path can elevate mode itself. When mode is at
-    its fail-closed default (READ), a relayed message behaves exactly as
-    before -- investigate and report only. Nothing about the three gates
+    delivered reply (_deliver_hermes_reply, see its own docstring for the
+    2026-08-25 corrections -- permanent-mode grants now exist, and since
+    2026-08-20 this caller unconditionally gets the RUN toolset regardless
+    of reported mode) now inherits whatever READ/BUILD/RUN mode is
+    currently persisted for Hermes -- it is no longer unconditionally
+    hard-locked to READ. Mode is still ONLY ever elevated via the existing
+    `/api/hermes/mode` web endpoint (admin JWT, chat.iamazim.com) or a
+    direct hermes-runner API call; nothing in this WhatsApp relay path can
+    elevate mode itself. When mode is at its fail-closed default (READ),
+    a relayed message's *reported* mode still says READ -- see
+    _deliver_hermes_reply's docstring for why that no longer means
+    investigate-only for this specific caller. Nothing about the three gates
     below changed.
 
     Gated on three INDEPENDENT checks, all required: RBAC role (superadmin,
@@ -670,21 +1112,30 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
     _authorize's RBAC-only verdict).
 
     _HERMES_CONTROL_CHANNELS (Owner-directed, 2026-08-12, bridge1 Hermes
-    Control Channel): widened from "bridge2" only to {"bridge2", "bridge1"}
-    -- bridge1 is a NEW dedicated Admin<->Hermes channel (the Admin
-    messages bridge1's own number directly, a genuine is_from_me=0 inbound
-    message, no self-chat ambiguity), alongside the original bridge2
-    self-chat mechanism, not a replacement for it. The identity check
-    below (wrong_identity) is untouched -- widening the channel set never
-    widens WHO is admitted, only which bridge their message may arrive on.
-    bridge3 and any other value remain denied, unchanged. A reply to a
-    bridge1-arriving request is delivered back out via bridge1 (see
-    _deliver_hermes_reply's source_bridge parameter) -- this deliberately
-    lands as a new inbound message on bridge2 (the Admin's own number is
-    the recipient), which is why modules.message_router.process_message()
-    has its own matching cross-bridge echo guard (2026-08-12) recognizing
-    and silently ignoring exactly that reply shape arriving back on
-    bridge2, so it's never mistaken for a new admin request.
+    Control Channel): {"bridge2", "bridge1"} -- both remain valid channels
+    for the Admin's REQUEST to arrive on (bridge1 is a dedicated
+    Admin<->Hermes channel, the Admin messages bridge1's own number
+    directly, a genuine is_from_me=0 inbound message, no self-chat
+    ambiguity; bridge2 is the original self-chat mechanism). The identity
+    check below (wrong_identity) is untouched -- this set only decides
+    which bridge the Admin's message may arrive ON, never who is
+    admitted. bridge3 and any other value remain denied, unchanged.
+
+    REPLY channel (Owner-directed, 2026-08-27, topology unification --
+    supersedes the 2026-08-12 symmetric-reply behavior): regardless of
+    which of the two channels above the request arrived on, the reply is
+    now always delivered back out via bridge1 (_deliver_hermes_reply is
+    always called with source_bridge="bridge1" below) -- the intended
+    flow is Admin -> Bridge2 (or Bridge1) -> Hermes -> Bridge1 -> Admin,
+    never a reply landing back inside a bridge2 self-chat thread. This
+    deliberately lands as a new inbound message on bridge2 (the Admin's
+    own number is the recipient), which is why modules.message_router.
+    process_message() has its own matching cross-bridge echo guard
+    (2026-08-12) recognizing and silently ignoring exactly that reply
+    shape arriving back on bridge2, so it's never mistaken for a new
+    admin request -- that guard already covered the bridge1-request case
+    and needed no change to also cover the bridge2-request case, since it
+    matches on content-signature, not on why the reply was generated.
 
     source_bridge (S6, 2026-08-08): phone-identity alone is not a channel
     check -- it would (mis)trust an admin_bridge2_number-matching sender
@@ -726,13 +1177,180 @@ async def _handle_hermes_relay(request_text: str, sender_phone: str, source_brid
     if not settings.hermes_runner_secret:
         return _HERMES_NOT_CONFIGURED_MSG
 
+    # Canonical Identity-Role gate (Admin Canary qualification, 2026-09-29).
+    # Strictly ADDITIVE to the three gates above -- they already ran and were
+    # already required, and this one can only narrow access further. It is
+    # the first time this relay consults the canonical identity/role control
+    # plane (wbom_identity_links / fazle_identity_subjects /
+    # fazle_identity_role_assignments / fazle_outbound_holds) rather than only
+    # a settings number plus a channel membership test, so a revoked role, a
+    # revoked identity, a hold, an ambiguous link, or a missing enrollment now
+    # actually stops the relay. Fails closed on every path, including any
+    # lookup error. Never inferred from a phone number, a display name, or a
+    # legacy scalar role.
+    relay_auth = await resolve_relay_authorization(
+        sender_phone=sender_phone,
+        source_bridge=source_bridge,
+    )
+    if not relay_auth.allowed:
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command="hermes_relay", actor_phone=sender_phone,
+                actor_admin=admin, allowed=False,
+                denied_reason=(
+                    "canonical identity/role authorization denied "
+                    f"(reason={relay_auth.reason_code}, identity={relay_auth.identity_id or 'none'}, "
+                    f"detail={relay_auth.detail})"
+                ),
+            )
+        except Exception:
+            log.error(
+                "[admin_ai_router] record_audit failed for hermes_relay canonical-authz denial, phone=%s",
+                sender_phone,
+            )
+        log.warning(
+            "[admin_ai_router] hermes_relay denied by canonical authorization: reason=%s identity=%s bridge=%s",
+            relay_auth.reason_code, relay_auth.identity_id or "none", source_bridge,
+        )
+        return _DENIAL_MSG
+
+    # 2026-09-30 (Owner decision: Bridge2 -> Bridge1 is the trusted
+    # Admin<->Hermes control conversation; Hermes is meant to act on the
+    # Admin's requests, but must not be the one deciding it may).
+    #
+    # An authenticated Admin message IS the authorization for the action it
+    # confirms. It is recorded here, against the concrete drafts Hermes has
+    # proposed and is still awaiting a decision on -- scoped, expiring, and
+    # single-use (modules.admin_hermes_action_grant). Hermes then carries the
+    # conversation forward with its normal tools; it can read the grant but
+    # can never create one, because this line only runs after the canonical
+    # authorization above allowed the Admin, and the grant lives in a column
+    # Hermes has no tool to write.
+    #
+    # This mirrors the existing admin_direct_execution precedent below, where
+    # a direct instruction on this same trusted channel is itself the
+    # authorization. It is deliberately NOT parsed out of the message text:
+    # free-text intent detection is exactly the ambiguity that let a model
+    # talk its way past a gate. The evidence is "a verified Admin spoke in
+    # this conversation", and the scope is "the pending proposal in front of
+    # us".
+    from modules.admin_hermes_action_grant import authorize_pending_hermes_drafts
+    from app.database import db_conn
+
+    # Bounded: this write is an authorization ledger, not part of the relay's
+    # critical path. If the pool is saturated it must degrade to "no grant
+    # issued" rather than hang the Admin's message -- an ungranted proposal
+    # simply cannot be approved, which is the safe direction. It can never
+    # degrade to a grant existing without the ledger row, since the row is the
+    # grant. Never raise, never block indefinitely.
+    grant_deadline_s = float(settings.hermes_admin_grant_timeout_seconds)
+    try:
+        async with asyncio.timeout(grant_deadline_s):
+            async with db_conn() as grant_conn:
+                granted_drafts = await authorize_pending_hermes_drafts(
+                    grant_conn,
+                    conversation_key=relay_auth.conversation_key,
+                    identity_id=relay_auth.identity_id or "",
+                    role_names=tuple(relay_auth.role_names or ()),
+                )
+        if granted_drafts:
+            log.info(
+                "[admin_ai_router] Admin identity=%s authorized %d pending hermes draft(s) "
+                "in conversation=%s (drafts=%s)",
+                relay_auth.identity_id, len(granted_drafts),
+                relay_auth.conversation_key, granted_drafts,
+            )
+    except Exception:
+        # Never break the conversation on bookkeeping. A missing grant simply
+        # fails closed later at approval time.
+        log.error(
+            "[admin_ai_router] could not stamp Admin action grant for conversation=%s",
+            relay_auth.conversation_key, exc_info=True,
+        )
+
+    # Stage H12 (2026-08-28): a deterministic, non-Ollama/non-Hermes
+    # employee-creation instruction on this exact trusted channel is
+    # intercepted BEFORE the Hermes dispatch below -- the direct
+    # instruction IS the authorization (modules.admin_direct_execution's
+    # own docstring), so this must not go through the AI relay at all.
+    # A non-match (parse_employee_creation_instruction returns None)
+    # falls straight through to the unchanged Hermes relay path -- every
+    # other Hermes control-channel message is completely unaffected.
+    from modules.admin_direct_execution import (
+        parse_employee_creation_instruction as _parse_emp_create,
+        execute_trusted_employee_creation as _exec_emp_create,
+        format_employee_create_card as _fmt_emp_create,
+    )
+    if _parse_emp_create(request_text):
+        emp_result = await _exec_emp_create(request_text, sender_phone, source_bridge, dry_run=False)
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command="employee_create", actor_phone=sender_phone,
+                actor_admin=admin, allowed=emp_result.get("ok", False),
+                denied_reason=None if emp_result.get("ok") else emp_result.get("error"),
+            )
+        except Exception:
+            log.error("[admin_ai_router] record_audit failed for employee_create, phone=%s", sender_phone)
+        return _fmt_emp_create(emp_result)
+
+    # Lifecycle-closure GAP 3 (2026-08-29): a deterministic batch-invitation
+    # instruction ("রেডি লোকদের প্রথম ৫ জনকে ৫ সেপ্টেম্বর অফিসে আসতে বলো") on
+    # this exact trusted channel is the authorization — one instruction,
+    # no per-message approval. Two-step: a bare instruction previews
+    # (dry_run) and asks for confirmation; the SAME instruction repeated
+    # within the confirm window (or one containing "নিশ্চিত"/"confirm"/
+    # "পাঠাও") actually sends. A non-match falls straight through to the
+    # Hermes relay — every other message is unaffected.
+    from modules.admin_direct_execution import (
+        parse_invite_batch_instruction as _parse_invite,
+        execute_trusted_invite_batch as _exec_invite,
+        format_invite_batch_card as _fmt_invite,
+    )
+    _invite_parsed = _parse_invite(request_text)
+    if _invite_parsed is not None:
+        _confirm = bool(re.search(r"নিশ্চিত|confirm|পাঠা(ও|ন)|হ্যাঁ পাঠাও", request_text, re.IGNORECASE))
+        _pending = _invite_confirm_pending.get(sender_phone)
+        _now_m = time.monotonic()
+        _do_send = False
+        if not _invite_parsed.get("needs_clarification"):
+            _key = (_invite_parsed["count"], _invite_parsed["office_date"])
+            if _confirm or (_pending and _pending[0] == _key and _now_m - _pending[1] < _INVITE_CONFIRM_WINDOW_S):
+                _do_send = True
+            else:
+                _invite_confirm_pending[sender_phone] = (_key, _now_m)
+        inv_result = await _exec_invite(request_text, sender_phone, source_bridge, dry_run=not _do_send)
+        if _do_send:
+            _invite_confirm_pending.pop(sender_phone, None)
+        try:
+            await rbac.record_audit(
+                channel="whatsapp", command="recruitment_invite_batch", actor_phone=sender_phone,
+                actor_admin=admin, allowed=inv_result.get("ok", False),
+                denied_reason=None if inv_result.get("ok") else inv_result.get("error"),
+            )
+        except Exception:
+            log.error("[admin_ai_router] record_audit failed for recruitment_invite_batch, phone=%s", sender_phone)
+        return _fmt_invite(inv_result)
+
     now = time.monotonic()
     last = _hermes_cooldown.get(sender_phone, 0.0)
     if now - last < _HERMES_COOLDOWN_SECONDS:
         return "⏳ একটু অপেক্ষা করুন। Hermes ইতিমধ্যে একটি অনুরোধ প্রক্রিয়া করছে।"
     _hermes_cooldown[sender_phone] = now
 
-    task = asyncio.create_task(_deliver_hermes_reply(request_text, sender_phone, source_bridge))
+    # Owner directive (2026-08-27, Admin<->Hermes topology unification):
+    # always reply via bridge1, regardless of which control channel
+    # (bridge1 or bridge2) the request itself arrived on -- see this
+    # function's own docstring ("REPLY channel") and _deliver_hermes_
+    # reply's docstring for the full rationale and the pre-existing echo
+    # guard that already safely absorbs the resulting bridge1->bridge2
+    # landing pattern.
+    task = asyncio.create_task(
+        _deliver_hermes_reply(
+            request_text, sender_phone, "bridge1",
+            relay_conversation_key=relay_auth.conversation_key,
+            relay_identity_id=relay_auth.identity_id,
+        )
+    )
     _hermes_relay_tasks.add(task)
     task.add_done_callback(_hermes_relay_tasks.discard)
 

@@ -104,7 +104,7 @@ class TestIdentityWindowExceptionHandling:
         # -- is_processed is hardcoded true in the UPDATE's SET clause itself
         # (not a bound param), so assert on the metadata_json param instead,
         # which carries status.
-        metadata_json_param = wbom_update_calls[0].args[-1]
+        metadata_json_param = wbom_update_calls[0].args[9]
         assert json.loads(metadata_json_param)["status"] == "failed"
 
         queue_update_calls = [
@@ -319,4 +319,4 @@ class TestOrphanMessageFailureInjection:
         # message 2's finalize call in the real code uses status="processing"
         # (routing hasn't run in this isolated test), but is_processed is
         # unconditionally set true by _finalize_core_copy regardless of status.
-        assert w2 is True
+        assert w2 is False  # Identity resolved; routing has not completed yet.

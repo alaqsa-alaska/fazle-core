@@ -116,6 +116,93 @@ async def list_directives(
     return [dict(r) for r in rows]
 
 
+async def find_conflicting_directive(
+    subject_type: Optional[str], subject_key: Optional[str], directive_text: str,
+) -> Optional[dict]:
+    """Phase 3, 2026-08-25 recovery pass ("general Owner business-rule
+    mutation architecture"): conflict-detection helper for the write path.
+
+    Returns the existing ACTIVE directive row that shares the same
+    (subject_type, subject_key) as a proposed new one, if its text
+    materially differs (case/whitespace-insensitive compare) -- i.e. a
+    genuine content conflict, not just a re-statement of the same rule.
+    Returns None if there's no active directive on this exact subject, or
+    if one exists but says essentially the same thing (safe to no-op).
+
+    Deliberately a separate function, not a parameter on save_directive():
+    save_directive() has 4 existing call sites (router.py x2, app/main.py,
+    ai_console/live_adapters.py) and changing its signature/return shape
+    would need auditing every one (see this repo's own standing rule
+    against converting a function's contract without a repo-wide grep).
+    Callers that want conflict-checking call this BEFORE save_directive();
+    callers that don't (e.g. the existing REMEMBER/FORGET WhatsApp path)
+    are completely unaffected.
+
+    Deliberately exact-key matching only (no semantic/fuzzy similarity) --
+    matching this session's "minimum required change" principle. A
+    directive on a materially related but differently-keyed subject
+    (e.g. "recruitment_minimum_age" vs "escort_minimum_age") is not
+    flagged; that would need embedding-based similarity, out of scope
+    here."""
+    if not subject_type or not subject_key:
+        return None
+    rows = await fetch_all(
+        """SELECT * FROM fazle_admin_directives
+           WHERE status='active' AND subject_type=$1 AND subject_key=$2
+           ORDER BY created_at DESC""",
+        subject_type, subject_key,
+    )
+    new_norm = " ".join((directive_text or "").strip().lower().split())
+    for row in rows:
+        existing_norm = " ".join((row["directive_text"] or "").strip().lower().split())
+        if existing_norm != new_norm:
+            return dict(row)
+    return None
+
+
+async def get_active_directives_context(*, limit: int = 50) -> str:
+    """Phase 3, 2026-08-25 recovery pass: format every currently-active
+    Owner directive as a single context block, for UNCONDITIONAL inclusion
+    (not RAG-dependent retrieval) in customer/employee answer generation.
+
+    This is the fix for a real, verified gap: before this, an Owner
+    directive was only ever visible to the tiny number of hardcoded call
+    sites that explicitly `list_directives(subject_key=<one exact known
+    key>)` (recruitment_minimum_age, office_numbers) -- a directive
+    written on any other subject_key was silently invisible to every
+    live customer/employee answer path, and fazle_admin_directives was
+    never indexed into the generic RAG layer either. Rather than relying
+    on RAG recall (this codebase's own comments elsewhere document that
+    mechanism as unreliable for surfacing a single source's content) or
+    building a bespoke per-topic read site for every possible subject,
+    this simply includes ALL active directives every time -- Owner
+    directives are expected to stay a small, curated set (not a large
+    corpus), so unconditional inclusion is cheap and far more reliable
+    than retrieval. Callers should label this block as taking precedence
+    over older static source-of-truth content when they conflict, since
+    a directive is by definition the most recent explicit Owner
+    instruction. Fails closed to "" on any error; never raises."""
+    try:
+        rows = await list_directives(status="active", limit=limit)
+    except Exception as exc:
+        log.warning("[admin_directives] get_active_directives_context failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+    lines = []
+    for row in rows:
+        subject = f"{row.get('subject_type') or '?'}/{row.get('subject_key') or '?'}"
+        text = (row.get("directive_text") or "").strip()
+        if not text:
+            continue
+        set_date = row.get("created_at")
+        set_date_str = set_date.strftime("%Y-%m-%d") if set_date else "?"
+        lines.append(f"- [{subject}, set {set_date_str}] {text}")
+    if not lines:
+        return ""
+    return "সাম্প্রতিক Owner নির্দেশনা (এগুলো পুরনো তথ্যের চেয়ে অগ্রাধিকার পাবে):\n" + "\n".join(lines)
+
+
 async def revoke_directive(directive_id: int, *, revoked_by_phone: str) -> bool:
     """Soft-revoke a directive. Returns False if the id doesn't exist or is
     already revoked (idempotent no-op), True if this call revoked it."""

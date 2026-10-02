@@ -15,9 +15,10 @@ Target chat JIDs (owner → accountant, historical payment data):
   Bridge2: owner=8801880446111 → accountant=8801844836824@s.whatsapp.net
   Bridge1: Can be configured via FPE_SYNC_CHAT_JIDS setting
 
-SQLite paths (same as bridge_poller BRIDGE_CONFIGS):
-  Bridge1: /home/azim/whatsapp1/store/messages.db
-  Bridge2: /home/azim/whatsapp2/store/messages.db
+SQLite paths: resolved from central settings (app/config.py, .env-overridable)
+via _bridge_configs() — the same authoritative stores bridge_poller uses. Never
+hardcoded here (a bridge re-pair / store move is picked up from BRIDGE*_DB_PATH
+in .env with no code change).
 """
 from __future__ import annotations
 
@@ -29,31 +30,43 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import get_settings
+from shared.sqlite_compat import processed_text_column
 from .checkpoint import get_checkpoint, update_checkpoint, touch_checkpoint
 from .ingestion import ingest_message
 from .models import IngestionRequest
 
 log = logging.getLogger("fazle.fpe.hsync")
-_settings = get_settings()
 
-# Bridge configurations (matches bridge_poller.BRIDGE_CONFIGS)
-_BRIDGE_CONFIGS = [
-    {
-        "name": "bridge1",
-        "source_number": _settings.admin_bridge1_number,
-        "messages_db": "/home/azim/whatsapp1/store/messages.db",
-        "whatsapp_db": "/home/azim/whatsapp1/store/whatsapp.db",
-        # When all_dms=True, enumerate ALL individual DM chat JIDs from SQLite
-        # instead of relying solely on FPE_SYNC_CHAT_JIDS.  Controlled by
-        # env var BRIDGE1_INGEST_ALL_DMS=true.
-    },
-    {
-        "name": "bridge2",
-        "source_number": _settings.admin_bridge2_number,
-        "messages_db": "/home/azim/whatsapp2/store/messages.db",
-        "whatsapp_db": "/home/azim/whatsapp2/store/whatsapp.db",
-    },
-]
+
+def _bridge_configs() -> list[dict]:
+    """FPE sync targets, resolved fresh from central settings on every call
+    (``app/config.py``, overridable via ``.env``) — never a hardcoded store
+    path. Mirrors ``modules.bridge_poller.BRIDGE_CONFIGS`` so historical_sync /
+    gap_scan always read the same authoritative bridge stores as the live
+    poller (a re-pair or store move only has to be reflected in ``.env``).
+
+    bridge3 is intentionally not an FPE sync target (recruitment-only number,
+    no payroll/cash traffic).
+
+    all_dms: with ``BRIDGE1_INGEST_ALL_DMS=true`` bridge1 enumerates ALL
+    individual DM chat JIDs from SQLite instead of relying solely on
+    ``FPE_SYNC_CHAT_JIDS``.
+    """
+    s = get_settings()
+    return [
+        {
+            "name": "bridge1",
+            "source_number": s.admin_bridge1_number,
+            "messages_db": s.bridge1_db_path,
+            "whatsapp_db": s.bridge1_whatsapp_db_path,
+        },
+        {
+            "name": "bridge2",
+            "source_number": s.admin_bridge2_number,
+            "messages_db": s.bridge2_db_path,
+            "whatsapp_db": s.bridge2_whatsapp_db_path,
+        },
+    ]
 
 BATCH_SIZE = 200      # rows per SQLite fetch
 SYNC_INTERVAL = int(os.getenv("FPE_HSYNC_INTERVAL_S", "15"))  # seconds between full sync passes
@@ -85,7 +98,7 @@ async def run_historical_sync_once(chat_jids: Optional[list[str]] = None) -> dic
         return {}
 
     results = {}
-    for bridge in _BRIDGE_CONFIGS:
+    for bridge in _bridge_configs():
         if not target_jids:
             continue
         count = await _sync_bridge(bridge, target_jids)
@@ -264,12 +277,17 @@ def _fetch_messages_sync(
         )
         con.row_factory = sqlite3.Row
 
+        # `processed_text` is a legacy in-house column absent from the stock
+        # bridge schema — degrade to NULL for stores that lack it (see
+        # shared.sqlite_compat). Read-only.
+        _pt = processed_text_column(con)
+
         if since_ts:
             ts_str = since_ts.isoformat()
             raw_rows = con.execute(
-                """
+                f"""
                 SELECT id, chat_jid, sender, content, timestamp,
-                       is_from_me, media_type, processed_text
+                       is_from_me, media_type, {_pt}
                 FROM messages
                 WHERE chat_jid = ?
                   AND datetime(timestamp) > datetime(?)
@@ -281,9 +299,9 @@ def _fetch_messages_sync(
         else:
             # Full backfill from beginning
             raw_rows = con.execute(
-                """
+                f"""
                 SELECT id, chat_jid, sender, content, timestamp,
-                       is_from_me, media_type, processed_text
+                       is_from_me, media_type, {_pt}
                 FROM messages
                 WHERE chat_jid = ?
                 ORDER BY datetime(timestamp) ASC

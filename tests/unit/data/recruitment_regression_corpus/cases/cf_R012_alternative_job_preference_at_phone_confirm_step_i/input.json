@@ -1,0 +1,15 @@
+{
+  "_schema": "recruitment-regression-case-input/v1",
+  "case_id": "cf_R012",
+  "thread_phone_masked": "880126078c4",
+  "inbound_step_at_turn": "phone_confirm",
+  "session_fields_at_turn": {
+    "name": "Mohd Shaha Alam",
+    "age": 21,
+    "area": "Gaibandha",
+    "job_preference": "Operation Officer (supplied earlier as '৬ operation officer')",
+    "experience": 0,
+    "phone_confirm": null
+  },
+  "inbound_message": "আর না হলে ৭ নাম্বার হলে হবে সিকিউরিটি ইনচাজ"
+}

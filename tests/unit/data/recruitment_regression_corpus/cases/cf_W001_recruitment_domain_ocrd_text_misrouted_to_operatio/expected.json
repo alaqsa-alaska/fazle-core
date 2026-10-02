@@ -1,0 +1,23 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_W001",
+  "source_case_type": "D",
+  "expected_domain": "multi_domain (recruitment-system architecture discussion; not a candidate application)",
+  "expected_turn_type": "unrelated / multi_domain (architecture content, not a candidate application)",
+  "expected_intake_step_before": null,
+  "expected_intake_fields_proposed": {},
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {},
+  "expected_should_advance_intake": false,
+  "expected_intake_step_after": null,
+  "expected_questions": [],
+  "expected_should_answer_question": false,
+  "expected_needs_clarification": false,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": false,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "do NOT route to payment/attendance/slip/client_order/leave; do NOT fabricate that the sender is an employee needing ID lookup; defer to office or HR channel",
+  "phase_that_must_close_this": "D",
+  "reason_evidence": "EXPECTED: detect that OCR text discusses recruitment-system architecture (not a candidate application); route-off-recruitment with a safe pointer to office (e.g. 'আপনার প্রশ্নটি recruitment-system-এর design বিষয়ে -- architecture আলোচনায় পারদর্শী নই। অফিস: 01958-122300।'). Must NOT be hijacked to attendance/payment_due."
+}

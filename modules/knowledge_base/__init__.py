@@ -12,9 +12,126 @@ import logging
 import re
 from typing import Optional
 
+from modules.recruitment_authority import (
+    facts_for_evidence,
+    facts_for_recruitment_question,
+    load_recruitment_authority,
+)
 from app.database import fetch_one, fetch_all
 
 log = logging.getLogger("fazle.knowledge_base")
+
+_RECRUITMENT_SAFE_FALLBACK = "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+
+_RECRUITMENT_LOOKUP_KEYS: dict[str, frozenset[str]] = {
+    "office": frozenset({
+        "office.address.current", "office.hours_and_friday", "office.contact.current",
+    }),
+    "eligibility": frozenset({"recruitment.eligibility"}),
+    "documents": frozenset({"recruitment.required_documents"}),
+    "training": frozenset({"training.duration"}),
+    "probation": frozenset({"probation.duration"}),
+    "duty": frozenset({"duty.conditions"}),
+    "salary": frozenset({"salary.by_role", "salary.escort_survey_post_training"}),
+    "fee": frozenset({
+        "recruitment.fee.existence", "recruitment.advance_fee_payment_requirement",
+        "recruitment.early_departure_fee_adjustment", "fee.amounts",
+        "fee.deduction_refund_schedule",
+    }),
+    "positions": frozenset({"recruitment.roles.available", "recruitment.vacancies.current"}),
+}
+
+
+def _recruitment_lookup_facts(text: str, intent: Optional[str]) -> tuple:
+    """Select only authority facts relevant to this legacy lookup."""
+    lowered = (text or "").casefold()
+    if any(marker in lowered for marker in (
+        "employee salary", "কর্মীর বেতন", "ব্যাংক একাউন্ট", "bank account",
+        "vessel name", "ship name", "lc number", "bl number",
+    )):
+        return ()
+
+    focus = ""
+    if re.search(r"\boffice\b", lowered) or any(token in lowered for token in (
+        "অফিস", "ঠিকানা", "address", "location", "যোগাযোগ", "contact",
+        "phone", "whatsapp", "শুক্রবার", "friday", "খোলা",
+    )):
+        focus = "office"
+    elif any(token in lowered for token in (
+        "কাগজ", "document", "nid", "জন্ম নিবন্ধন", "ছবি", "সার্টিফিকেট",
+        "certificate", "cv",
+    )):
+        focus = "documents"
+    elif any(token in lowered for token in (
+        "বেতন", "salary", "মাসিক", "মাসে কত", "কত পাব",
+    )):
+        focus = "salary"
+    elif any(token in lowered for token in (
+        "ফি", "fee", "জামানত", "deposit", "joining", "প্রসেসিং", "ট্রেনিং ফি",
+        "টাকা লাগবে",
+    )):
+        focus = "fee"
+    elif any(token in lowered for token in ("প্রশিক্ষণ", "training", "ট্রেনিং")):
+        focus = "training"
+    elif any(token in lowered for token in ("প্রবেশন", "probation", "trial")):
+        focus = "probation"
+    elif any(token in lowered for token in ("ডিউটি", "duty", "shift", "শিফট")):
+        focus = "duty"
+    elif any(token in lowered for token in (
+        "vacancy", "আসন", "লোক নিচ্ছেন", "পদ", "position",
+    )):
+        focus = "positions"
+    elif any(token in lowered for token in (
+        "বয়স", "বয়স", "age", "যোগ্যতা", "শিক্ষা", "অভিজ্ঞতা", "fitness",
+    )):
+        focus = "eligibility"
+
+    facts = facts_for_recruitment_question(text, focus=focus)
+    if not focus:
+        return facts
+
+    by_key = {fact.key: fact for fact in load_recruitment_authority()}
+    selected = {
+        key: by_key[key]
+        for key in _RECRUITMENT_LOOKUP_KEYS[focus]
+        if key in by_key
+    }
+
+    # Keep the narrow Escort/Survey conflict open without blocking approved
+    # Operation Officer or Guard salary facts.
+    if focus == "salary" and not any(token in lowered for token in (
+        "escort", "এস্কর্ট", "survey", "সার্ভে", "scout", "স্কাউট",
+    )):
+        selected.pop("salary.escort_survey_post_training", None)
+
+    # The exact refund/deduction calendar is unresolved unless asked for.
+    if focus == "fee" and not any(token in lowered for token in (
+        "refund", "ফেরত", "কিস্তি", "deduction", "কেটে",
+    )):
+        selected.pop("fee.deduction_refund_schedule", None)
+
+    return tuple(selected.values())
+
+
+def _authority_reply_or_safe_fallback(text: str, intent: Optional[str]) -> Optional[str]:
+    """Return approved register text, or fail closed before legacy lookup."""
+    lowered = (text or "").casefold()
+    if any(marker in lowered for marker in (
+        "employee salary", "কর্মীর বেতন", "ব্যাংক একাউন্ট", "bank account",
+        "vessel name", "ship name", "lc number", "bl number",
+    )):
+        return _RECRUITMENT_SAFE_FALLBACK
+
+    facts = _recruitment_lookup_facts(text, intent)
+    from modules.recruitment_flow import is_recruitment_trigger
+
+    is_recruitment = intent == "recruitment" or is_recruitment_trigger(text)
+    if not facts:
+        return None if is_recruitment else ""
+    if any(not fact.answerable for fact in facts):
+        return _RECRUITMENT_SAFE_FALLBACK
+    return "\n".join(fact.value for fact in facts if fact.value)
+
 
 # ── Hardcoded fallback templates ───────────────────────────────────────────────
 # Each entry: (trigger_keywords, reply_text)
@@ -216,6 +333,24 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
     Returns None if nothing matches — caller should use LLM.
     """
     text_lower = text.lower().strip()
+    # K3.1: authority must win before the legacy DB FAQ or hardcoded fallback.
+    # An empty string means this was not a Recruitment-domain question; None
+    # means it was Recruitment-shaped but had no deterministic authority text.
+    authority_reply = _authority_reply_or_safe_fallback(text, intent)
+    if authority_reply != "":
+        return authority_reply
+    # Retain the existing office fast path as a final compatibility guard;
+    # the authority-first branch above handles current address, hours, and contact.
+    if intent == "office_location":
+        from modules.recruitment_authority import facts_for_recruitment_question
+        for fact in facts_for_recruitment_question(text, focus="office"):
+            if fact.key == "office.address.current" and fact.answerable:
+                return f"অফিসের ঠিকানা: {fact.value}"
+        return None
+    # Recruitment answers use the canonical document/authority path. The
+    # legacy exact/fallback corpus must not become a second policy engine.
+    if intent == "recruitment":
+        return None
 
     # CV / recruitment content detection: long messages from job applicants contain
     # "ঠিকানা", "address" as data fields, not as questions.  Skip short ambiguous
@@ -229,7 +364,7 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
     # 1. Try DB
     try:
         rows = await fetch_all(
-            "SELECT key, trigger_keywords, reply_text FROM fazle_knowledge_base WHERE is_active = true",
+            "SELECT key, category, trigger_keywords, reply_text FROM fazle_knowledge_base WHERE is_active = true",
         )
         for row in rows:
             keywords = row.get("trigger_keywords") or []
@@ -237,6 +372,11 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
                 if _should_skip(kw):
                     continue
                 if kw.lower() in text_lower:
+                    if (row.get("category") or "").lower() == "recruitment" and facts_for_evidence(
+                        f"kb:{row['key']}", row.get("reply_text") or ""
+                    ):
+                        log.info("[KB] authority-aware fallback required: key=%s", row["key"])
+                        continue
                     log.info(f"[KB] DB match: key={row['key']} kw={kw!r}")
                     return row["reply_text"]
     except Exception as e:
@@ -248,6 +388,8 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
             if _should_skip(kw):
                 continue
             if kw.lower() in text_lower:
+                if facts_for_evidence("fallback:recruitment", reply):
+                    continue
                 log.info(f"[KB] fallback match: kw={kw!r}")
                 return reply
 
@@ -291,23 +433,4 @@ async def get_reply(text: str, intent: Optional[str] = None) -> Optional[str]:
 
 
 async def get_recruitment_reply(text: str) -> Optional[str]:
-    """Shortcut: match only recruitment-category KB entries."""
-    text_lower = text.lower().strip()
-    try:
-        rows = await fetch_all(
-            "SELECT trigger_keywords, reply_text FROM fazle_knowledge_base "
-            "WHERE is_active = true AND category = 'recruitment'",
-        )
-        for row in rows:
-            for kw in (row.get("trigger_keywords") or []):
-                if kw.lower() in text_lower:
-                    return row["reply_text"]
-    except Exception as _e:
-        from app.error_log import record_error
-        await record_error("knowledge_base.recruitment_lookup", _e)
-    # Fallback subset
-    for keywords, reply in _FALLBACK:
-        for kw in keywords:
-            if kw.lower() in text_lower:
-                return reply
     return None

@@ -7,7 +7,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import field_validator, Field
 import re
 
 
@@ -20,13 +20,13 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "phi4-mini:latest"
+    ollama_model: str = "hermes3:3b"
     # Task-tier model routing (falls back to ollama_model when empty)
-    ollama_runtime_model: str = "phi4-mini"
-    ollama_business_model: str = "qwen3:8b"
-    ollama_memory_model: str = "phi4-mini"
-    ollama_general_model: str = "phi4-mini"
-    ollama_deep_reasoning_model: str = "qwen3:8b"
+    ollama_runtime_model: str = "hermes3:3b"
+    ollama_business_model: str = "hermes3:3b"
+    ollama_memory_model: str = "hermes3:3b"
+    ollama_general_model: str = "hermes3:3b"
+    ollama_deep_reasoning_model: str = "hermes3:3b"
     # Safe bounded concurrency for local inference paths
     ollama_infer_concurrency: int = 1
     ollama_chat_concurrency: int = 1
@@ -60,8 +60,24 @@ class Settings(BaseSettings):
     # Groq fallback provider (free tier: 14,400 req/day, 30 RPM)
     # Used after Ollama and before GitHub Models.
     # Get key at: https://console.groq.com/keys
+    # 2026-08-23: llama-3.1-8b-instant was retired by Groq (live 404
+    # model_not_found on every call, confirmed via production logs) and
+    # replaced with allam-2-7b — verified available on this account's
+    # /openai/v1/models listing and live-tested against the existing
+    # classify_intent_llm() call shape (max_tokens=10, temperature 0.0-0.1,
+    # single-word category reply, no reasoning-token preamble) across
+    # English and Bengali sample messages, 8/8 correct, ~110ms latency.
     groq_api_key: str = ""
-    groq_model_name: str = "llama-3.1-8b-instant"
+    groq_model_name: str = "allam-2-7b"
+
+    # MiniMax (2026-08-22, Phase 2A isolated — NOT wired into llm.py chain yet).
+    # Reuses the AsyncOpenAI client pattern from groq_provider.py. Real
+    # base_url and model name must be supplied via .env before any caller can
+    # invoke the provider; defaults intentionally empty so a misconfigured
+    # deployment fails closed (see minimax_provider._make_client).
+    minimax_api_key: str = ""
+    minimax_base_url: str = ""
+    minimax_model_name: str = Field("", alias="MINIMAX_MODEL")
 
     # OmniRoute (2026-08-05, Owner decision: new provider order for AI
     # generation/polish — OmniRoute → Groq → local Ollama/Hermes → Kimi).
@@ -75,6 +91,18 @@ class Settings(BaseSettings):
     omniroute_api_key: str = ""
     omniroute_model_name: str = "auto"
 
+    # 9Router (Phase 3D development-only, not activated in production).
+    # Core issues exactly one gateway request; gateway-internal retry/account
+    # rotation is controlled by the upstream 9Router runtime. The single-
+    # upstream-attempt guarantee must be verified before any Core 9Router
+    # route may be used for customer-facing workloads.
+    nine_router_url: str = "http://127.0.0.1:20129/v1"
+    nine_router_private_url: str = ""
+    nine_router_data_path: str = "/home/azim/9router/data/db/data.sqlite"
+    nine_router_version: str = "0.5.75"
+    nine_router_credential_ref: str = "nine_router_core_api_key"
+    nine_router_single_upstream_guaranteed: bool = False
+
     # Kimi (2026-08-05): reached through the existing local Ollama client
     # (app/ollama.py), not a separate HTTP provider — Ollama's own cloud-
     # model proxy already has kimi-k2.6:cloud etc. provisioned on this
@@ -87,6 +115,18 @@ class Settings(BaseSettings):
     bridge1_number: str = ""
     bridge1_label: str = "HR"
 
+    # Phase 3B route-policy controls. Defaults preserve the existing static
+    # policy and keep database-backed route selection inactive.
+    unified_ai_routing_enabled: bool = False
+    unified_ai_routing_shadow_mode: bool = False
+    unified_ai_routing_policy_source: str = "bootstrap"
+    system_secret_master_key: str = ""
+    ai_policy_runner_bearer: str = ""
+    ai_policy_observer_bearer: str = ""
+    unified_ai_routing_workloads: str = (
+        "conversational_reply,recruitment_reply,recruitment_decision,"
+        "simple_intent_classification"
+    )
     bridge2_url: str = "http://localhost:8081"
     bridge2_number: str = ""
     bridge2_label: str = "OPS"
@@ -141,6 +181,14 @@ class Settings(BaseSettings):
     debug: bool = False
     internal_api_key: str = ""
     ai_console_chat_enabled: bool = False
+
+    # RAG startup control: BM25 is always built by the startup task, while
+    # Qdrant synchronization can be disabled independently. The default is
+    # False so an unset RAG_STARTUP_QDRANT_SYNC_ENABLED leaves Qdrant untouched
+    # at startup. Set it to true only when startup synchronization is intended;
+    # hybrid vector retrieval remains enabled, and the scheduled rag_rebuild
+    # job keeps its existing build_index() behavior.
+    rag_startup_qdrant_sync_enabled: bool = False
 
     @field_validator("debug", mode="before")
     @classmethod
@@ -209,6 +257,14 @@ class Settings(BaseSettings):
     hermes_runner_url: str = "http://127.0.0.1:8093"
     hermes_runner_secret: str = ""
 
+    # 2026-09-30: how long the hermes relay may spend writing Admin
+    # authorization grants (modules.admin_hermes_action_grant) before giving
+    # up and serving the message with no grant issued. Bounded on purpose --
+    # the grant ledger must never be able to stall an Admin's own message. The
+    # failure direction is safe: no grant means a proposed draft cannot be
+    # approved, which is strictly worse for the Admin, not better.
+    hermes_admin_grant_timeout_seconds: float = 5.0
+
     # Hermes customer-dispatch Phase 1 (2026-08-12, Minimal Modification
     # Plan). A SEPARATE credential from hermes_runner_secret above --
     # deliberately not reused -- so a customer-facing call can never be
@@ -232,6 +288,20 @@ class Settings(BaseSettings):
     # already has.
     hermes_alert_investigation_enabled: bool = False
     hermes_alert_investigation_cooldown_seconds: int = 3600
+
+    # Post-intake recruitment policy-conflict escalation (Owner directive,
+    # 2026-08-27, "Reuse existing architecture" implementation pass).
+    # Mirrors hermes_alert_investigation_enabled's own default-DISABLED
+    # kill-switch shape (deliberately a SEPARATE flag, not a repurposing of
+    # that one -- the trust boundary is the same [proactive, unattended
+    # Hermes-initiated message to the Owner], but the purpose differs
+    # [alert investigation vs recruitment policy clarification], and Owner
+    # should be able to enable this independently after reviewing the
+    # feature). Gates modules.admin_directives.router.
+    # trigger_recruitment_policy_clarification() -- see that function's own
+    # docstring. Must be explicitly opted into via .env before it fires in
+    # production for the first time; code deployment alone never enables it.
+    recruitment_policy_escalation_enabled: bool = False
 
     # Escort order configuration
     # Comma-separated phone numbers that are authorised to send escort client orders.
@@ -270,6 +340,93 @@ class Settings(BaseSettings):
     # Example: "bridge1,bridge2,meta"
     escort_trusted_sources: str = "bridge1,bridge2,meta"
 
+    # ── Recruitment reply-quality improvements (2026-08-23) ─────────────────
+    # When True, route_recruitment_message() answers the candidate's
+    # informational question FIRST (from KB/Hermes) and then naturally
+    # continues intake with the next collection field — instead of
+    # unconditionally advancing intake first (which was ignoring real
+    # candidate questions). Default OFF for staged rollout; turn ON only
+    # after regression tests pass. See RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md.
+    recruitment_answer_first_enabled: bool = False
+
+    # When True, _recruitment_reply_matches_source() uses normalized
+    # comparison (Bangla↔ASCII digits, stripped punctuation, hyphenated
+    # vs non-hyphenated phones) instead of strict substring matching.
+    # Equivalent formatting of APPROVED facts validates; invented numbers
+    # and places are still rejected. Default OFF for staged rollout.
+    # See RECRUITMENT_REPLY_QUALITY_IMPLEMENTATION_PLAN_2026-08-23.md.
+    recruitment_factcheck_normalized: bool = False
+
+    # When True, emit structured [recruitment_turn] log lines with
+    # thread_id, collection_step, question_detected, intake_fields_extracted,
+    # reply_path, fact_check_pass -- for reproducible audits. No PII;
+    # phone numbers are SHA-hashed. Default ON (logging has no behavioral
+    # impact).
+    recruitment_structured_logging_enabled: bool = True
+
+    # --- Phase C v2 (2026-08-23) flags ---
+    # All default OFF. Activated only after the 14-case Phase A corpus
+    # replay passes (Owner directive correction 1: implementation ->
+    # unit tests -> 14-case offline regression -> shadow -> live shadow ->
+    # Owner review -> authoritative activation).
+    #
+    # recruitment_turn_decision_v2_enabled: when ON, the recruitment_flow
+    # shadow path computes a RecruitmentTurnDecision via the
+    # modules.recruitment_turn_decision.decide() layer, logs it, and
+    # exposes semantic_domain/multi_domain_review_required/reason_codes
+    # for downstream Phase D consumers. The legacy classify_turn_intent
+    # path remains byte-identical and authoritative when this is OFF.
+    recruitment_turn_decision_v2_enabled: bool = False
+
+    # recruitment_respect_manual_reply: when ON, the manual-reply dedup
+    # gate may silence a candidate answer when historical actor provenance
+    # is sufficiently explicit (provenance_confidence >= 0.70). Default
+    # OFF until Owner has audited 50 sample historical labels.
+    recruitment_respect_manual_reply: bool = False
+
+    # recruitment_actor_provenance_writeback: when ON, every new outbound
+    # message has its meta_json['actor_type'] populated at creation time.
+    # Default OFF until Owner has reviewed 50 sample labels.
+    recruitment_actor_provenance_writeback: bool = False
+    # --- end Phase C v2 flags ---
+
+    # --- WS1 real-LLM wiring flag (2026-08-25) ---
+    # Independent gate from recruitment_turn_decision_v2_enabled above.
+    # When recruitment_turn_decision_v2_enabled AND
+    # recruitment_turn_decision_v2_real_llm are BOTH True, the
+    # recruitment_flow + message_router V2 decide() calls stop falling
+    # through to recruitment_turn_decision.decide._default_no_llm() and
+    # instead use a real provider-chain call (OmniRoute -> Groq -> local
+    # Ollama/Hermes -> Kimi, same chain as app/llm.generate_reply()).
+    # Either flag alone leaves the previous behavior byte-identical.
+    # Default OFF -- kept separate so it can be turned on (and off)
+    # without touching the v2-enabled gate that already controls routing.
+    # Bounded by the per-call attempt trace recorded in
+    # app/llm.decision_call(); never silently retries; provider failures
+    # resolve to the same AMBIGUOUS fallback decide() already returns,
+    # preserving all current fall-through semantics.
+    recruitment_turn_decision_v2_real_llm: bool = False
+    # Hard cap on a single decision-call's wall-clock budget. The
+    # decide() helper's flag-enabled branch respects this by passing
+    # timeout=settings.recruitment_decision_call_timeout_seconds when
+    # constructing the LLM call. Default 12s -- well under the typical
+    # inbound SLA budget.
+    recruitment_decision_call_timeout_seconds: float = 12.0
+
+    # recruitment_turn_decision_v2_direct_provider_fallback: when ON,
+    # the llm_bridge for recruitment_turn_decision.decide() is allowed
+    # to call app/llm.decision_call()'s OmniRoute -> Groq -> Ollama ->
+    # Kimi chain directly after Hermes returns None (Hermes not
+    # configured OR Hermes failed/empty/timeout). Default OFF so a
+    # production customer semantic-decision never silently bypasses
+    # Hermes merely because Hermes timed out. When OFF, decide() falls
+    # back to its existing _default_no_llm -> AMBIGUOUS path the moment
+    # Hermes is unreachable, preserving byte-identical current routing.
+    # Tests/dev/shadow experiments can flip this on explicitly; the
+    # production .env must keep it OFF.
+    recruitment_turn_decision_v2_direct_provider_fallback: bool = False
+    # --- end WS1 real-LLM wiring flag ---
+
     # 2026-07-22: the one WhatsApp group whose ADMIN OUTBOUND messages (via
     # bridge2 only) are a trusted source of escort orders/confirmations --
     # "Al-Aqsa Escort Program Group", resolved from bridge2's own messages.db
@@ -285,7 +442,27 @@ class Settings(BaseSettings):
     # Contacts matching any of these criteria are ALWAYS drafted (never auto-sent)
     # even when AUTO_REPLY_ENABLED=true.
     # Roles: identity_role strings (e.g. accountant, vip_client)
-    draft_always_roles: str = "accountant,client_escort_buyer,vip_client,repeat_client"
+    #
+    # Stage G5.1 (2026-08-28) real gap found and fixed: internal_coordinator,
+    # internal_operation, employee_internal (Office/Internal, Stage G6's
+    # supervised-draft lane) and security_service_client (Client, Stage G5)
+    # were NOT in this list -- confirmed live in canonical history
+    # (wbom_whatsapp_messages) that internal_coordinator-classified senders
+    # had received 25 real autonomous AI-generated outbound replies
+    # (workflow_triggered values like 'greeting'/'office_location'/'join' --
+    # the exact vocabulary the automated pipeline stamps on its own
+    # AI-fallback replies), because these 4 roles fall through
+    # modules.message_router's employee/_ESCORT_ROLES/ROUTE_B_ROLES checks
+    # straight to the generic KB/AI-fallback branch, and were not in this
+    # gate either. escort_client/client_escort_buyer/vip_client/
+    # repeat_client are unaffected -- those are already routed away from
+    # autonomous reply entirely via the separate, dedicated
+    # handle_escort_client_message() (_ESCORT_ROLES in message_router)
+    # regardless of this setting.
+    draft_always_roles: str = (
+        "accountant,client_escort_buyer,vip_client,repeat_client,"
+        "internal_coordinator,internal_operation,employee_internal,security_service_client"
+    )
     # Phones: explicit E.164 phone numbers (without +)
     draft_always_phones: str = ""
     # Names: case-insensitive display name substrings
@@ -425,11 +602,15 @@ class Settings(BaseSettings):
                     result[phone] = level
         return result
 
-    class Config:
+    model_config = {
         # Prefer repo-local `.env` by default (production path is /home/azim/core/.env).
         # BaseSettings still reads from real environment variables if provided by systemd/Docker.
-        env_file = str(Path(__file__).resolve().parents[1] / ".env")
-        extra = "ignore"
+        "env_file": str(Path(__file__).resolve().parents[1] / ".env"),
+        "extra": "ignore",
+        # Allow both field name and env-var alias to construct/validate Settings.
+        # Required by MINIMAX_MODEL env-var alias used by minimax_provider.
+        "populate_by_name": True,
+    }
 
 
 @lru_cache
@@ -439,7 +620,7 @@ def get_settings() -> Settings:
 
 def update_repo_env_value(key: str, value: str) -> None:
     """Update one key in the repo-local `.env` file and clear cached settings."""
-    env_path = Path(Settings.Config.env_file)
+    env_path = Path(Settings.model_config.get("env_file") or "")
     text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
     new_line = f"{key}={value}"

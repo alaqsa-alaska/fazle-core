@@ -1,9 +1,10 @@
 -- Batch 11 — seed recruitment KB rows so admins can edit triggers/replies
--- without touching code. Idempotent (delete + insert by key).
+-- without touching code. Idempotent (insert by key).
 
 BEGIN;
 
-DELETE FROM fazle_knowledge_base WHERE category = 'recruitment' AND key LIKE 'b11_%';
+-- K3.2 leaves legacy rows as inactive historical records. Do not delete them
+-- or overwrite/reactivate them when this seed is rerun.
 
 INSERT INTO fazle_knowledge_base
     (category, key, value, language, trigger_keywords, reply_text, is_active)
@@ -83,7 +84,8 @@ VALUES
  'bn',
  ARRAY['সালাম','আস্সালামু','hello','হ্যালো','menu','মেনু','start'],
  E'ওয়ালাইকুম আস্সালাম 🙏\n\nআমি ফজলে — আল-আকসা সিকিউরিটি সার্ভিসের ডিজিটাল সহকারী।\n\nকীভাবে সাহায্য করতে পারি?\n1️⃣ চাকরি সম্পর্কে জানতে\n2️⃣ অফিসের ঠিকানা\n3️⃣ বেতন সম্পর্কে\n4️⃣ ডিউটি/পেমেন্ট\n\nযেকোনো প্রশ্ন করুন 👇',
- true);
+ true)
+ON CONFLICT (key) DO NOTHING;
 
 COMMIT;
 

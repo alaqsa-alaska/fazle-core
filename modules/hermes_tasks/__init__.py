@@ -82,6 +82,11 @@ ACTION_TYPES = frozenset({
     # from 'dispatch_assignment' -- creating a new duty/program is a
     # different decision than assigning an employee to an existing one.
     "escort_program_creation",
+    # 2026-08-28, migration 076 (Stage F2/F3): Business Inbox proposed
+    # actions -- Class B (draft/propose, no mutation) only. Must be kept
+    # in sync with the hermes_action_approvals_action_type_check CHECK
+    # constraint added in the same migration.
+    "business_reply_draft", "business_record_review",
 })
 ACTION_RISKS = frozenset({"low", "medium", "high", "critical"})
 
@@ -331,7 +336,28 @@ async def propose_action(
     command: Optional[str] = None, risk: str = "medium",
     expected_effect: Optional[str] = None, rollback_plan: Optional[str] = None,
     requested_by: str = "earth",
+    *,
+    domain: Optional[str] = None,
+    business_reference: Optional[str] = None,
+    evidence_refs: Optional[list[dict]] = None,
+    idempotency_key: Optional[str] = None,
 ) -> int:
+    """domain/business_reference/evidence_refs/idempotency_key (Stage F2,
+    2026-08-28, migration 076): optional, additive params for Business
+    Inbox proposals -- every pre-existing caller (code/infra actions)
+    passes none of these and gets byte-identical behavior to before this
+    change. evidence_refs is a small list of {"type": ..., "value": ...}
+    references into canonical/business records -- never a message body.
+
+    idempotency_key, when given, is checked against the partial unique
+    index (migration 076: unique while status IN pending/approved/
+    executed) BEFORE inserting -- if a live proposal already exists for
+    this exact key, its existing id is returned instead of creating a
+    duplicate (Stage F7: retry/duplicate delivery/repeated Hermes run/
+    restart/duplicated cross-bridge observation must never double-propose
+    the same real-world event). A rejected or expired prior proposal does
+    NOT block a fresh one for the same key -- matches how a human would
+    want to re-raise something previously turned down."""
     if action_type not in ACTION_TYPES:
         raise TaskError(f"action_type must be one of {sorted(ACTION_TYPES)}, got {action_type!r}")
     if risk not in ACTION_RISKS:
@@ -339,14 +365,29 @@ async def propose_action(
     if not summary or not summary.strip():
         raise TaskError("summary must not be empty")
 
+    if idempotency_key:
+        existing = await fetch_one(
+            "SELECT id FROM hermes_action_approvals WHERE idempotency_key = $1 "
+            "AND status IN ('pending', 'approved', 'executed')",
+            idempotency_key,
+        )
+        if existing:
+            log.info("[hermes_tasks] propose_action: idempotency_key=%s already live as action #%d, not duplicating",
+                      idempotency_key, existing["id"])
+            return int(existing["id"])
+
     action_id = await fetch_val(
         """INSERT INTO hermes_action_approvals
                (task_id, action_type, summary, files_changed, diff, command,
-                risk, expected_effect, rollback_plan, requested_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                risk, expected_effect, rollback_plan, requested_by,
+                domain, business_reference, evidence_refs, idempotency_key)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
            RETURNING id""",
         task_id, action_type, summary.strip(), files_changed, diff, command,
         risk, expected_effect, rollback_plan, requested_by,
+        domain, business_reference,
+        json.dumps(evidence_refs, default=str) if evidence_refs is not None else None,
+        idempotency_key,
     )
     action_id = int(action_id)
     if task_id is not None:
@@ -409,6 +450,7 @@ async def authorize_action(
 
 async def list_actions(
     status: Optional[str] = "pending", task_id: Optional[int] = None, action_type: Optional[str] = None,
+    *, domain: Optional[str] = None,
 ) -> list[dict]:
     """General-purpose action listing. Default status='pending' preserves
     get_pending_actions()'s original behavior; status='approved' +
@@ -428,6 +470,9 @@ async def list_actions(
     if action_type:
         params.append(action_type)
         clauses.append(f"action_type = ${len(params)}")
+    if domain:
+        params.append(domain)
+        clauses.append(f"domain = ${len(params)}")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = await fetch_all(f"SELECT * FROM hermes_action_approvals {where} ORDER BY created_at DESC", *params)
     return [dict(r) for r in rows]
@@ -520,6 +565,58 @@ async def is_action_approved(action_id: int, expected_action_type: Optional[str]
     if expected_action_type and row["action_type"] != expected_action_type:
         return False
     return True
+
+
+async def is_action_type_authorized(action_type: str) -> dict:
+    """Is there a CURRENT, UNEXPIRED approval of ``action_type`` right now?
+
+    Added 2026-09-29 (Admin Canary capability-boundary audit) because
+    ``list_actions(status='approved')`` is a *discovery* helper that, by its
+    own documented contract, "Does NOT filter out expired rows here --
+    callers that need an authorization decision should use
+    is_action_approved(action_id) ... which does enforce expiry". The Hermes
+    ``task_action_policy`` plugin was calling the discovery helper directly
+    as if it were an authorization decision, so every expired approval row
+    ever left behind permanently satisfied the gate for SERVICE_MUTATION /
+    DATABASE_MUTATION / DEPLOYMENT. Live evidence at the time: 9 approved
+    rows, all expired in Aug 2026, so ``systemctl restart``, ``git push`` and
+    ``psql ... INSERT`` were all passing the "enforcement layer".
+
+    This function is the canonical, expiry-aware answer to the question, and
+    it is built ON the existing ``is_action_approved`` rather than
+    re-implementing expiry here. It is read-only for already-approved rows
+    (the lazy 'pending' -> 'expired' flip inside is_action_approved can
+    never trigger, because candidates are pre-filtered to
+    status='approved').
+
+    Returns the ids that currently authorize, plus the ids that did not and
+    why, so the caller can log something truthful. ``command`` is returned so
+    a caller that wants target binding can match the exact command rather
+    than settling for action-type-level consent.
+    """
+    if action_type not in ACTION_TYPES:
+        raise TaskError(f"action_type must be one of {sorted(ACTION_TYPES)}, got {action_type!r}")
+
+    candidates = await list_actions("approved", None, action_type)
+    valid: list[dict] = []
+    rejected: list[dict] = []
+    for action in candidates:
+        action_id = action.get("id")
+        if await is_action_approved(action_id, action_type):
+            valid.append(action)
+        else:
+            rejected.append({
+                "id": action_id,
+                "status": action.get("status"),
+                "expires_at": action.get("expires_at"),
+            })
+    return {
+        "action_type": action_type,
+        "authorized": bool(valid),
+        "action_ids": [a.get("id") for a in valid],
+        "commands": [a.get("command") for a in valid if a.get("command")],
+        "rejected": rejected,
+    }
 
 
 async def record_execution_result(

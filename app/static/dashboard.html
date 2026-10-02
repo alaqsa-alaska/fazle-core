@@ -86,6 +86,7 @@ small.dim{color:var(--muted);font-size:11px}
   <a href="/unmatched-confirmations">Unmatched Confirmations</a>
   <a href="/drafts">Drafts</a>
   <a href="/kb">KB</a>
+  <a href="/admin/knowledge/recruitment">Recruitment Authority</a>
   <a href="/open-chat">Open Chat</a>
   <a href="/wa-chat">WA Chat</a>
   <a href="/wbom-create-link">WBOM Create Link</a>
@@ -97,6 +98,7 @@ small.dim{color:var(--muted);font-size:11px}
   <button data-tab="drafts">Drafts</button>
   <button data-tab="reports">Reports</button>
   <button data-tab="users">Users (B19)</button>
+  <button data-tab="identity-role">Identity–Role</button>
   <button data-tab="audit">Audit</button>
   <button data-tab="backups">Backups</button>
   <button data-tab="scheduler">Scheduler</button>
@@ -173,6 +175,35 @@ small.dim{color:var(--muted);font-size:11px}
         </select>
         <button class="btn" onclick="addUser()">Add</button>
       </div>
+    </div>
+  </section>
+
+  <!-- IDENTITY–ROLE -->
+  <section id="tab-identity-role" class="tab">
+    <div class="card">
+      <h2>Identity–Role control</h2>
+      <p class="muted">Backend permissions apply independently. Display names are evidence only; this view never sends or releases queued messages.</p>
+      <div class="row"><input id="irSearch" placeholder="Search verified/display name"><button class="btn" onclick="searchIdentityRole()">Search</button></div>
+      <div id="irSearchBox" class="muted">No search performed.</div>
+    </div>
+    <div class="card">
+      <h2>Selected identity</h2><div id="irDetail" class="muted">Select an identity above.</div>
+    </div>
+    <div class="card">
+      <h3>Metadata correction</h3>
+      <div class="row"><input id="irDisplayName" placeholder="Approved display name"><input id="irVerifiedName" placeholder="Verified name"><input id="irReason" placeholder="Required reason" style="flex:1"><button class="btn" onclick="correctIdentityRole()">Save correction</button></div>
+    </div>
+    <div class="card">
+      <h3>Identifier link</h3>
+      <div class="row"><input id="irIdentifierPlatform" value="whatsapp" placeholder="Platform"><input id="irIdentifierValue" placeholder="JID/mobile/Meta ID"><input id="irIdentifierType" value="whatsapp_jid" placeholder="Identifier type"><input id="irIdentifierEvidence" placeholder="Evidence source"><input id="irIdentifierReason" placeholder="Required reason" style="flex:1"><button class="btn" onclick="linkIdentityIdentifier()">Add link</button></div>
+    </div>
+    <div class="card">
+      <h3>Assign role</h3>
+      <div class="row"><input id="irRole" placeholder="Role"><input id="irDomain" placeholder="Business domain"><input id="irScopeType" value="global" placeholder="Scope type"><input id="irScopeKey" placeholder="Scope key"><input id="irRoleReason" placeholder="Required reason" style="flex:1"><button class="btn" onclick="assignIdentityRole()">Assign</button></div>
+    </div>
+    <div class="card">
+      <h3>Place hold</h3>
+      <div class="row"><select id="irHoldType"><option value="identity">Identity hold</option><option value="conversation">Conversation hold</option></select><input id="irConversationKey" placeholder="Canonical conversation key (conversation only)"><input id="irHoldReason" placeholder="Required reason" style="flex:1"><button class="btn danger" onclick="placeIdentityHold()">Place hold</button></div>
     </div>
   </section>
 
@@ -489,6 +520,32 @@ async function disableUser(phone){
   catch(e){ toast("ERROR: "+e.message, 4000); }
 }
 
+let selectedIdentityRole = null;
+function renderIdentityRoleDetail(d){
+  selectedIdentityRole=d.subject.identity_id;
+  const s=d.subject;
+  const links=(d.identifiers||[]).map(x=>`<li>${escapeHtml(x.identifier_type||x.platform)} ${escapeHtml(x.identifier_preview)} — ${escapeHtml(x.verification_state||"unknown")} ${x.active?"":"(revoked)"} ${x.active&&x.verification_state!=="verified"?`<button class="btn sm" onclick="verifyIdentityLink(${x.identity_link_id})">Verify</button>`:""} ${x.active?`<button class="btn sm danger" onclick="revokeIdentityLink(${x.identity_link_id})">Revoke</button>`:""}</li>`).join("")||"<li>none</li>";
+  const roles=(d.roles||[]).map(x=>`<li>${escapeHtml(x.role_name)} / ${escapeHtml(x.business_domain)} / ${escapeHtml(x.scope_type)}${x.scope_key?"="+escapeHtml(x.scope_key):""} — ${x.active?"active":"revoked"} ${x.active?`<button class="btn sm danger" onclick="revokeIdentityRole(${x.assignment_id})">Revoke</button>`:""}</li>`).join("")||"<li>none</li>";
+  const holds=(d.holds||[]).map(x=>`<li>${escapeHtml(x.target_type)}${x.conversation_key?" / "+escapeHtml(x.conversation_key):""} — ${x.active?pill("ACTIVE","err"):pill("released","ok")} — ${escapeHtml(x.reason)} ${x.active?`<button class="btn sm" onclick="releaseIdentityHold(${x.hold_id}, '${encodeURIComponent(x.conversation_key||"")}')">Release hold</button>`:""}</li>`).join("")||"<li>none</li>";
+  const conversations=(d.conversations||[]).map(x=>`<li>#${x.id} ${escapeHtml(x.bridge_id)} / ${escapeHtml(x.business_domain)} — ${escapeHtml(x.state)} — ${escapeHtml(x.updated_at||"")}</li>`).join("")||"<li>none</li>";
+  const legacyBlocks=(d.legacy_phone_blocks||[]).map(x=>`<li>link #${x.identity_link_id}: ${x.active?pill("BLOCKED","err"):pill("not blocked","ok")}</li>`).join("")||"<li>no verified mobile block record</li>";
+  const history=(d.audit||[]).map(x=>`<li><small>${escapeHtml(x.created_at||"")} — ${escapeHtml(x.command||"")} — ${escapeHtml(x.actor_label||"unknown")}</small></li>`).join("")||"<li>none</li>";
+  document.getElementById("irDetail").innerHTML=`<p><b>#${s.identity_id}</b> ${escapeHtml(s.identity_kind)} — ${escapeHtml(s.display_name||"(no display name)")} — auth v${s.authorization_version}</p><p>Verification: ${escapeHtml(s.verification_state)}; lifecycle: ${escapeHtml(s.lifecycle_state)}</p><p>Identifiers</p><ul>${links}</ul><p>Roles and history</p><ul>${roles}</ul><p>Effective holds</p><ul>${holds}</ul><p>Relevant conversations</p><ul>${conversations}</ul><p>Legacy phone-block status</p><ul>${legacyBlocks}</ul><p>Identity–Role audit history</p><ul>${history}</ul><p class="muted">${escapeHtml(d.legacy_phone_block)}</p>`;
+  document.getElementById("irDisplayName").value=s.display_name||""; document.getElementById("irVerifiedName").value=s.verified_name||"";
+}
+async function loadIdentityRole(){ if(!selectedIdentityRole) return; try{ const [d,c,a]=await Promise.all([api("/admin/identity-role/"+selectedIdentityRole),api("/admin/identity-role/"+selectedIdentityRole+"/conversations"),api("/admin/identity-role/"+selectedIdentityRole+"/audit")]); d.conversations=c.items||[]; d.audit=a.items||[]; renderIdentityRoleDetail(d); }catch(e){ document.getElementById("irDetail").innerHTML=`<div class="pill err">${escapeHtml(e.message)}</div>`; } }
+async function searchIdentityRole(){ try{ const q=document.getElementById("irSearch").value; const r=await api("/admin/identity-role/search?q="+encodeURIComponent(q)); const rows=r.items||[]; document.getElementById("irSearchBox").innerHTML=rows.length?`<table><tr><th>ID</th><th>Kind</th><th>Name</th><th>Verification</th><th>Auth version</th><th></th></tr>${rows.map(x=>`<tr><td>${x.identity_id}</td><td>${escapeHtml(x.identity_kind)}</td><td>${escapeHtml(x.display_name||x.verified_name||"—")}</td><td>${escapeHtml(x.verification_state)}</td><td>${x.authorization_version}</td><td><button class="btn sm" onclick="selectIdentityRole(${x.identity_id})">Inspect</button></td></tr>`).join("")}</table>`:"No identities found."; }catch(e){ document.getElementById("irSearchBox").innerHTML=`<div class="pill err">${escapeHtml(e.message)}</div>`; } }
+async function selectIdentityRole(id){ selectedIdentityRole=id; await loadIdentityRole(); }
+function irReason(id){ const v=document.getElementById(id).value.trim(); if(!v){toast("reason required"); return null;} return v; }
+async function correctIdentityRole(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/metadata`,{method:"POST",body:{display_name:document.getElementById("irDisplayName").value,verified_name:document.getElementById("irVerifiedName").value,reason}});toast("✓ correction audited");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function linkIdentityIdentifier(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irIdentifierReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/identifiers`,{method:"POST",body:{action:"link",platform:document.getElementById("irIdentifierPlatform").value,platform_user_id:document.getElementById("irIdentifierValue").value,identifier_type:document.getElementById("irIdentifierType").value,evidence_source:document.getElementById("irIdentifierEvidence").value,reason}});toast("✓ link added and audited");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function assignIdentityRole(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irRoleReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/roles`,{method:"POST",body:{role_name:document.getElementById("irRole").value,business_domain:document.getElementById("irDomain").value,scope_type:document.getElementById("irScopeType").value,scope_key:document.getElementById("irScopeKey").value,reason}});toast("✓ role assigned");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function placeIdentityHold(){ if(!selectedIdentityRole)return toast("select an identity"); const reason=irReason("irHoldReason"); if(!reason)return; try{await api(`/admin/identity-role/${selectedIdentityRole}/holds`,{method:"POST",body:{target_type:document.getElementById("irHoldType").value,conversation_key:document.getElementById("irConversationKey").value,reason}});toast("✓ hold placed; no dispatch");loadIdentityRole();}catch(e){toast(e.message,4000);} }
+async function verifyIdentityLink(id){const reason=prompt("Reason for verification:");if(!reason)return;try{await api(`/admin/identity-role/${selectedIdentityRole}/identifiers`,{method:"POST",body:{action:"verify",identity_link_id:id,reason}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+async function revokeIdentityLink(id){const reason=prompt("Reason for revocation:");if(!reason)return;try{await api(`/admin/identity-role/${selectedIdentityRole}/identifiers`,{method:"POST",body:{action:"revoke",identity_link_id:id,reason}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+async function revokeIdentityRole(id){const reason=prompt("Reason for role revocation:");if(!reason)return;try{await api(`/admin/identity-role/${selectedIdentityRole}/roles/${id}/revoke`,{method:"POST",body:{reason}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+async function releaseIdentityHold(id, encodedKey){const reason=prompt("Reason for hold release (does not send):");if(!reason)return;const conversation_key=encodedKey?decodeURIComponent(encodedKey):undefined;try{await api(`/admin/identity-role/${selectedIdentityRole}/holds/${id}/release`,{method:"POST",body:{reason,conversation_key}});loadIdentityRole();}catch(e){toast(e.message,4000);}}
+
 async function loadAudit(){
   const cmd = document.getElementById("auditCmd").value.trim();
   const limit = document.getElementById("auditLimit").value || 50;
@@ -746,6 +803,7 @@ function loadTab(tab){
   else if(tab==="drafts") loadDrafts();
   else if(tab==="reports"){ loadReportsList(); }
   else if(tab==="users") loadUsers();
+  else if(tab==="identity-role") loadIdentityRole();
   else if(tab==="audit") loadAudit();
   else if(tab==="backups") loadBackups();
   else if(tab==="scheduler") loadScheduler();

@@ -44,6 +44,7 @@ from modules.payment_workflow import create_escort_payment_draft, finalize_payme
 from modules.message_router import process_message, get_primary_admin
 from modules.health_monitor import check_system_health as c1b_health_check
 from modules import outbound as outbound_queue
+from modules.outbound_authorization import is_transport_authorized
 from modules import scheduler as fazle_scheduler
 from shared.queue import record_heartbeat
 from modules.fazle_payroll_engine import start_fpe, stop_fpe
@@ -63,7 +64,12 @@ from modules.social_auto_reply import ingest_social_event, start_social_auto_rep
 from modules.social_auto_reply.routes import router as social_auto_reply_router
 from modules.contact_roles.routes import router as contact_roles_router
 from modules.preflight_guard.routes import router as preflight_guard_router
+from modules.ai_route_registry import router as ai_route_registry_router
+from modules.system_secret_store import router as system_secret_store_router
+from modules.business_read_service import router as business_read_service_router
 from modules.preflight_guard import load_feature_flags_from_db
+from modules.recruitment_authority_admin import router as recruitment_authority_admin_router
+from modules.identity_role_admin import router as identity_role_admin_router
 
 setup_logging()
 log = logging.getLogger("fazle.app")
@@ -321,8 +327,6 @@ async def lifespan(app: FastAPI):
         log.warning(f"[ollama_daemon] startup failed (non-fatal): {e}")
     # Validate Groq API key at startup
     try:
-        from config import get_settings
-        settings = get_settings()
         if not settings.groq_api_key or not str(settings.groq_api_key).strip():
             log.error("[groq] Groq API key not configured - Groq services will not work")
         else:
@@ -332,8 +336,13 @@ async def lifespan(app: FastAPI):
     # Batch 21 — build RAG index in background (non-fatal)
     try:
         from modules import rag
-        asyncio.create_task(rag.build_index())
-        log.info("[rag] index build scheduled")
+        asyncio.create_task(
+            rag.build_index(sync_qdrant=settings.rag_startup_qdrant_sync_enabled)
+        )
+        log.info(
+            "[rag] index build scheduled (startup_qdrant_sync=%s)",
+            settings.rag_startup_qdrant_sync_enabled,
+        )
     except Exception as e:
         log.warning(f"[rag] startup build failed to schedule: {e}")
     # FPE — Fazle Payroll Engine (start after DB is ready)
@@ -492,6 +501,13 @@ app.include_router(hermes_tasks_router)       # /api/tasks/*, /api/actions/* —
 app.include_router(social_auto_reply_router)  # /api/social/* — restored 2026-07-08, was imported but never mounted
 # NEW: preflight_guard routes - Phase 1 FG4
 app.include_router(preflight_guard_router)
+# Phase 3B administrative route registry and encrypted secret APIs. The
+# feature remains default-off; static/bootstrap routing remains authoritative.
+app.include_router(ai_route_registry_router)
+app.include_router(system_secret_store_router)
+app.include_router(recruitment_authority_admin_router)
+app.include_router(identity_role_admin_router)
+app.include_router(business_read_service_router)
 from modules.wa_chat_frontend import router as wa_chat_router, ensure_wa_chat_tables
 app.include_router(wa_chat_router)
 
@@ -685,6 +701,15 @@ async def _probe_outbound() -> dict:
         pend = await outbound_queue.pending_count()
         dlq = await outbound_queue.dlq_count()
         actionable_dlq = await outbound_queue.actionable_dlq_count()
+        if not outbound_queue._outbound_enabled():
+            return {
+                "status": "ok",
+                "processing": "paused",
+                "maintenance_mode": True,
+                "pending": pend,
+                "dlq": dlq,
+                "actionable_dlq": actionable_dlq,
+            }
         status = "ok"
         if pend > 0:
             status = "degraded"
@@ -808,7 +833,7 @@ async def _build_health(deep: bool = False) -> dict:
     # store -- it was simply never added to this aggregate view when it was
     # brought online. No new probe mechanism; this reuses the exact same
     # _probe_heartbeat/_probe_file_age helpers bridge1/bridge2 already use.
-    db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p, hb3_p = await asyncio.gather(
+    db_p, ollama_p, qdrant_p, ob_p, hb1_p, hb2_p, hb3_p, sched_p = await asyncio.gather(
         _probe_db(),
         _safe_ollama(),
         _probe_qdrant(),
@@ -816,12 +841,37 @@ async def _build_health(deep: bool = False) -> dict:
         _probe_heartbeat("bridge_poller:bridge1"),
         _probe_heartbeat("bridge_poller:bridge2"),
         _probe_heartbeat("bridge_poller:bridge3"),
+        # Stage G6.11/G6.12 (2026-08-28): the watchdog-of-watchdog signal --
+        # reuses the SAME _probe_heartbeat() helper and the scheduler's own
+        # PRE-EXISTING heartbeat write (modules.scheduler._heartbeat_scheduler(),
+        # called from _run_wrapped() after every single job run -- no new
+        # write path). 600s (10 min) threshold: the fastest-firing jobs
+        # (lock_cleanup, bridge_watchdog) already run every 5 min under
+        # normal operation, so a 10-min-stale heartbeat means the scheduler
+        # loop itself has genuinely stopped ticking, not just "waiting for
+        # its next slower job". This ALSO closes G6.12 "does an independent
+        # host-level mechanism already watch fazle-core" -- scripts/
+        # ai_console_monitor.sh (an independent host crontab job, every
+        # 5 min) already checks this exact /health endpoint; adding this
+        # probe here means that existing, separate, already-running check
+        # automatically starts covering scheduler liveness too, with zero
+        # changes to that script.
+        _probe_heartbeat("scheduler", stale_after_s=600),
         return_exceptions=False,
     )
     llm_p = await _safe_llm() if deep else {"status": "skipped", "reason": "deep health only"}
-    bridge1_db = _probe_file_age("/home/azim/whatsapp1/store/messages.db", "bridge1")
-    bridge2_db = _probe_file_age("/home/azim/whatsapp2/store/messages.db", "bridge2")
-    bridge3_db = _probe_file_age("/home/azim/whatsapp3/store/messages.db", "bridge3")
+    # 2026-08-28 (health-probe path fix): these three used to be hardcoded
+    # literal paths, independent of settings.bridge{1,2,3}_db_path -- the
+    # config Bridge1's own poller already reads (see modules.bridge_poller,
+    # which logs its real "SQLite path=..." on every start). That divergence
+    # meant a config-only path correction (P1, Bridge1 store-path mismatch)
+    # fixed the actual poller but left this dashboard probe silently still
+    # reporting the old, wrong file's staleness. Reading the same settings
+    # object as the poller closes that gap without a second, competing path
+    # literal to keep in sync by hand.
+    bridge1_db = _probe_file_age(settings.bridge1_db_path, "bridge1")
+    bridge2_db = _probe_file_age(settings.bridge2_db_path, "bridge2")
+    bridge3_db = _probe_file_age(settings.bridge3_db_path, "bridge3")
     # SQLite mtime is activity, not liveness. A fresh poller heartbeat proves
     # the quiet bridge is healthy while preserving the age as diagnostics.
     if hb1_p.get("status") == "ok" and bridge1_db.get("status") == "degraded":
@@ -846,6 +896,7 @@ async def _build_health(deep: bool = False) -> dict:
         "bridge_poller_b2": hb2_p,
         "bridge_poller_b3": hb3_p,
         "outbound": ob_p,
+        "scheduler": sched_p,
         "disk": disk_p,
         "mem": mem_p,
         "cpu": cpu_p,
@@ -1192,12 +1243,13 @@ async def whatsapp_messages_lookup(
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
+        candidates = _METADATA_COLUMNS + _CONTENT_COLUMNS + ("classification",)
+        present = await _existing_columns("wbom_whatsapp_messages", candidates)
+        selected = ["metadata_json->'provenance' AS provenance" if c == "metadata_json" else c
+                    for c in candidates if c in present]
         rows = await fetch_all(
             f"""
-            SELECT message_id, sender_number, canonical_phone, platform, direction,
-                   message_type, is_processed, status, received_at, processed_at,
-                   identity_role, identity_confidence, intent_detected,
-                   classification, workflow_triggered, message_body, extracted_text
+            SELECT {", ".join(selected) or "message_id"}
               FROM wbom_whatsapp_messages
               {where_clause}
              ORDER BY received_at DESC
@@ -1205,10 +1257,793 @@ async def whatsapp_messages_lookup(
             """,
             *params,
         )
-        return {"filters_applied": bool(conditions), "count": len(rows), "messages": [dict(r) for r in rows], "ts": time.time()}
+        from modules.outbound import attach_message_provenance
+        return {"filters_applied": bool(conditions), "count": len(rows), "messages": await attach_message_provenance(rows), "ts": time.time()}
     except Exception as exc:
         log.warning("[whatsapp] /api/whatsapp/messages/lookup error: %s", exc)
         return {"count": 0, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+# ── Stage C (2026-08-28): filtered conversation retrieval ───────────────────
+# Objective: stop treating get_recent_messages(limit=N)-style raw dumps as
+# the normal way Hermes investigates conversations -- filtering/bounding
+# happens in SQL, before message bodies are ever returned, not after.
+# Extends this same canonical table/endpoint family (wbom_whatsapp_messages,
+# /api/whatsapp/messages/*) rather than a new framework/service.
+
+@app.post("/admin/inbound/{message_id}/reconcile", dependencies=[Depends(require_command("inbound_recovery"))])
+async def reconcile_inbound_message(message_id: int):
+    """Finalize one stranded inbound provenance row without replaying it."""
+    from modules.message_router import reconcile_stranded_inbound
+    return await reconcile_stranded_inbound(message_id)
+
+_METADATA_COLUMNS = (
+    "message_id", "direction", "platform", "sender_number", "canonical_phone",
+    "conversation_key", "actor_type", "actor_id", "identity_role",
+    "identity_confidence", "intent_detected", "workflow_triggered",
+    "message_type", "is_processed", "status", "received_at", "processed_at",
+    "source_message_ref", "metadata_json",
+)
+_CONTENT_COLUMNS = ("message_body", "extracted_text")
+
+
+def _encode_cursor(received_at, message_id: int) -> str:
+    import base64
+    raw = f"{received_at.isoformat()}|{message_id}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _decode_cursor(cursor: str):
+    import base64
+    from datetime import datetime as _dt
+    raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+    ts_str, mid_str = raw.rsplit("|", 1)
+    return _dt.fromisoformat(ts_str), int(mid_str)
+
+
+def _parse_time_filter(value: str, param_name: str):
+    """Parse a start_time/end_time query filter into a timezone-aware
+    datetime object. asyncpg requires an actual datetime.datetime
+    instance for a timestamptz bound parameter -- an explicit
+    ::timestamptz cast on the SQL side does NOT make it accept a raw
+    Python str (confirmed live: 'expected a datetime.date or
+    datetime.datetime instance, got str'). Same ISO-parse + Z-suffix +
+    UTC-default convention as modules.bridge_poller._parse_source_timestamp,
+    reused here for consistency rather than inventing a second one."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        ts = _dt.fromisoformat(str(value).replace("Z", "+00:00"))
+        return ts if ts.tzinfo else ts.replace(tzinfo=_tz.utc)
+    except Exception as exc:
+        raise ValueError(f"invalid {param_name}: {value!r}") from exc
+
+
+@app.get("/api/whatsapp/messages/query", dependencies=[Depends(require_api_key)])
+async def whatsapp_messages_query(
+    start_time: str = "",
+    end_time: str = "",
+    platform: str = "",
+    conversation_key: str = "",
+    direction: str = "",
+    actor_type: str = "",
+    actor_id: str = "",
+    identity_role: str = "",
+    intent_detected: str = "",
+    workflow_triggered: str = "",
+    phone: str = "",
+    message_body_contains: str = "",
+    include_body: bool = False,
+    limit: int = 20,
+    cursor: str = "",
+):
+    """General bounded, filtered retrieval over canonical
+    wbom_whatsapp_messages -- the Stage C answer to "don't dump 300 raw
+    messages and make Hermes discard 250 of them". All filters are bound
+    query parameters (no arbitrary SQL, same contract as the sibling
+    /lookup endpoint above). Deterministic pagination via
+    (received_at DESC, message_id DESC) with an opaque cursor -- stable
+    across pages, no duplicate/skipped rows even when timestamps collide.
+
+    include_body=False (the default): returns ONLY metadata columns --
+    message_id, direction, platform, conversation_key, actor_type,
+    actor_id, identity_role, intent_detected, workflow_triggered,
+    timestamps -- never message_body/extracted_text. This is the
+    metadata-first "which conversations need attention?" stage; pass
+    include_body=True only once specific rows/conversations have already
+    been selected from a first metadata-only call (or use
+    /api/whatsapp/messages/conversation for one conversation's full
+    chronological history instead).
+
+    A response reaching `limit` sets has_more=true -- callers must never
+    treat that as "analysis complete"; either page further via
+    next_cursor or narrow the filters."""
+    try:
+        limit = min(max(int(limit or 20), 1), 50)  # conservative default+ceiling, smaller than /lookup's 100
+        conditions = []
+        params: list = []
+
+        if start_time:
+            params.append(_parse_time_filter(start_time, "start_time"))
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        if end_time:
+            params.append(_parse_time_filter(end_time, "end_time"))
+            conditions.append(f"received_at <= ${len(params)}::timestamptz")
+        if platform:
+            params.append(platform)
+            conditions.append(f"platform = ${len(params)}")
+        if conversation_key:
+            params.append(conversation_key)
+            conditions.append(f"conversation_key = ${len(params)}")
+        if direction:
+            params.append(direction)
+            conditions.append(f"direction = ${len(params)}")
+        if actor_type:
+            params.append(actor_type)
+            conditions.append(f"actor_type = ${len(params)}")
+        if actor_id:
+            params.append(actor_id)
+            conditions.append(f"actor_id = ${len(params)}")
+        if identity_role:
+            params.append(identity_role)
+            conditions.append(f"identity_role = ${len(params)}")
+        if intent_detected:
+            params.append(intent_detected)
+            conditions.append(f"intent_detected = ${len(params)}")
+        if workflow_triggered:
+            params.append(workflow_triggered)
+            conditions.append(f"workflow_triggered = ${len(params)}")
+        if phone:
+            # Exact-phone lookup — match the canonical/sender/resolved columns
+            # against every normalized variant, with a last-10-digit fallback
+            # for rows whose canonical_phone was never populated.
+            try:
+                from modules.number_identity import normalize_phone as _pv, phone_last10 as _p10
+                _variants = _pv(phone) or [phone.strip()]
+                _last10 = _p10(phone)
+            except Exception:
+                _variants, _last10 = [phone.strip()], "".join(ch for ch in phone if ch.isdigit())[-10:]
+            params.append(_variants)
+            _vp = len(params)
+            if _last10:
+                params.append(_last10)
+                conditions.append(
+                    f"(canonical_phone = ANY(${_vp}) OR resolved_phone = ANY(${_vp}) "
+                    f"OR sender_number = ANY(${_vp}) OR phone_last10 = ${len(params)})"
+                )
+            else:
+                conditions.append(
+                    f"(canonical_phone = ANY(${_vp}) OR resolved_phone = ANY(${_vp}) "
+                    f"OR sender_number = ANY(${_vp}))"
+                )
+        if message_body_contains:
+            params.append(f"%{message_body_contains}%")
+            conditions.append(f"message_body ILIKE ${len(params)}")
+
+        if cursor:
+            try:
+                cur_ts, cur_id = _decode_cursor(cursor)
+            except Exception:
+                return {"count": 0, "messages": [], "error": "invalid cursor", "ts": time.time()}
+            params.append(cur_ts)
+            params.append(cur_id)
+            conditions.append(f"(received_at, message_id) < (${len(params)-1}::timestamptz, ${len(params)})")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        columns = _METADATA_COLUMNS + (_CONTENT_COLUMNS if include_body else ())
+        # Schema-tolerance: an older DB (or the test schema) may lack an
+        # optional column such as `status` — select only what actually exists
+        # rather than 500 on `column "..." does not exist`.
+        _present = await _existing_columns("wbom_whatsapp_messages", columns)
+        columns = tuple(c for c in columns if c in _present) or ("message_id",)
+        columns = tuple("metadata_json->'provenance' AS provenance" if c == "metadata_json" else c for c in columns)
+        # Fetch one extra row to determine has_more without a second COUNT query.
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        rows = await fetch_all(
+            f"""
+            SELECT {", ".join(columns)}
+              FROM wbom_whatsapp_messages
+              {where_clause}
+             ORDER BY received_at DESC, message_id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        next_cursor = _encode_cursor(page[-1]["received_at"], page[-1]["message_id"]) if has_more and page else None
+        return {
+            "filters_applied": bool(conditions),
+            "count": len(page),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "include_body": include_body,
+            "messages": [dict(r) for r in page],
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/messages/query error: %s", exc)
+        return {"count": 0, "has_more": False, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+@app.get("/api/whatsapp/messages/conversation", dependencies=[Depends(require_api_key)])
+async def whatsapp_conversation_history(
+    conversation_key: str,
+    start_time: str = "",
+    end_time: str = "",
+    limit: int = 50,
+    cursor: str = "",
+):
+    """Stage C5: chronological (oldest-first within each page; pages
+    themselves walk newest-to-oldest via the cursor, same convention as
+    /query above) inbound+outbound history for ONE conversation, always
+    including message content -- this is the deliberate "stage 2" of
+    Stage C4's two-stage model: call /query (metadata-only) first to
+    discover which conversation_key needs attention, then call this
+    endpoint for that one conversation's actual history. Never touches
+    or duplicates raw storage -- reads the same canonical table, same
+    columns, message_body remains authoritative there.
+
+    conversation_key is required -- this endpoint deliberately cannot
+    scan across conversations; use /query for that."""
+    try:
+        if not conversation_key:
+            return {"count": 0, "messages": [], "error": "conversation_key is required", "ts": time.time()}
+        limit = min(max(int(limit or 50), 1), 100)
+        conditions = ["conversation_key = $1"]
+        params: list = [conversation_key]
+
+        if start_time:
+            params.append(_parse_time_filter(start_time, "start_time"))
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        if end_time:
+            params.append(_parse_time_filter(end_time, "end_time"))
+            conditions.append(f"received_at <= ${len(params)}::timestamptz")
+        if cursor:
+            try:
+                cur_ts, cur_id = _decode_cursor(cursor)
+            except Exception:
+                return {"count": 0, "messages": [], "error": "invalid cursor", "ts": time.time()}
+            params.append(cur_ts)
+            params.append(cur_id)
+            conditions.append(f"(received_at, message_id) < (${len(params)-1}::timestamptz, ${len(params)})")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}"
+        columns = _METADATA_COLUMNS + _CONTENT_COLUMNS
+        present = await _existing_columns("wbom_whatsapp_messages", columns)
+        columns = tuple(c for c in columns if c in present)
+        columns = tuple("metadata_json->'provenance' AS provenance" if c == "metadata_json" else c for c in columns)
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        rows = await fetch_all(
+            f"""
+            SELECT {", ".join(columns)}
+              FROM wbom_whatsapp_messages
+              {where_clause}
+             ORDER BY received_at DESC, message_id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        next_cursor = _encode_cursor(page[-1]["received_at"], page[-1]["message_id"]) if has_more and page else None
+        # Newest-first fetch (for stable cursor pagination), but a
+        # conversation's own history reads naturally oldest-first --
+        # reverse just this page before returning.
+        chronological = list(reversed(page))
+        from modules.outbound import attach_message_provenance
+        return {
+            "conversation_key": conversation_key,
+            "count": len(chronological),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "messages": await attach_message_provenance(chronological),
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/messages/conversation error: %s", exc)
+        return {"count": 0, "has_more": False, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+_ATTENTION_DOMAIN_LABELS = {
+    "recruitment": "recruitment",
+    "escort": "escort_duty",
+    "attendance": "attendance",
+    "cash": "payment_due",
+}
+
+
+@app.get("/api/whatsapp/conversations/attention", dependencies=[Depends(require_api_key)])
+async def whatsapp_conversations_attention(
+    domain: str = "",
+    requires_action: Optional[bool] = None,
+    start_time: str = "",
+    limit: int = 20,
+    cursor: str = "",
+):
+    """Stage D8: "which conversations need company/admin attention" --
+    built only after Stage D3-D7 established which domains have
+    deterministic, authoritative state to derive that from (see
+    modules.conversation_state). Metadata-first, server-side, bounded,
+    paginated -- same cursor convention as Stage C's /query and
+    /conversation. Never returns message_body.
+
+    Two-step implementation, disclosed here rather than hidden: (1) a
+    bounded SQL query finds each matching conversation's LATEST message
+    (DISTINCT ON conversation_key); (2) for that bounded page only, the
+    phones involved are batch-looked-up against wbom_candidates
+    (recruitment) and wbom_escort_programs (escort) -- the actual
+    authoritative business records -- and mapped to state/next_actor/
+    requires_action via modules.conversation_state. Nothing is stored or
+    duplicated; this is a read-time join over existing records, per Stage
+    D5's explicit preference for a derived query over a new mutable
+    status column.
+
+    domain: "recruitment" | "escort" | "" (both, plus any other
+    conversation -- those get state="unclear" since no other domain has a
+    wired authoritative state source yet, see
+    modules.conversation_state.STRUCTURED_STATE_SOURCE_CANDIDATES).
+
+    requires_action filter is applied AFTER the page is fetched and
+    states are resolved (it depends on a join /query's WHERE clause can't
+    express against two different business tables in one bounded scan).
+    This means a page can legitimately return fewer than `limit` rows, or
+    even zero, while has_more is still true -- exactly the Stage C
+    principle carried over: has_more=true means MORE RESULTS AVAILABLE,
+    not analysis complete; keep paging via next_cursor."""
+    try:
+        limit = min(max(int(limit or 20), 1), 50)
+        conditions = ["conversation_key IS NOT NULL"]
+        params: list = []
+
+        if domain:
+            label = _ATTENTION_DOMAIN_LABELS.get(domain, domain)
+            params.append(label)
+            conditions.append(f"(workflow_triggered = ${len(params)} OR intent_detected = ${len(params)})")
+        if start_time:
+            params.append(_parse_time_filter(start_time, "start_time"))
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        if cursor:
+            try:
+                cur_ts, cur_id = _decode_cursor(cursor)
+            except Exception:
+                return {"count": 0, "messages": [], "error": "invalid cursor", "ts": time.time()}
+            params.append(cur_ts)
+            params.append(cur_id)
+            cursor_condition = f"(last_message_at, message_id) < (${len(params)-1}::timestamptz, ${len(params)})"
+        else:
+            cursor_condition = None
+
+        where_clause = f"WHERE {' AND '.join(conditions)}"
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        outer_where = f"WHERE {cursor_condition}" if cursor_condition else ""
+        rows = await fetch_all(
+            f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (conversation_key)
+                    conversation_key, platform, canonical_phone, sender_number,
+                    direction, actor_type, intent_detected, workflow_triggered,
+                    received_at AS last_message_at, message_id
+                  FROM wbom_whatsapp_messages
+                  {where_clause}
+                 ORDER BY conversation_key, received_at DESC, message_id DESC
+            ) latest
+            {outer_where}
+            ORDER BY last_message_at DESC, message_id DESC
+            LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+
+        # Batch-resolve state for this bounded page only.
+        from modules.conversation_state import (
+            resolve_recruitment_state, resolve_escort_state,
+            resolve_attendance_state, resolve_cash_state, UNKNOWN_STATE,
+        )
+        from modules.number_identity import canonical_phone as _canon_phone
+
+        # Real bug found during Stage D10 live verification, fixed here:
+        # canonical_phone is only ever populated by the INBOUND writer
+        # (_save_raw_core_copy) -- the outbound writer (_save_message)
+        # never sets it (confirmed live: message_id 18851, an outbound
+        # recruitment reply, has canonical_phone=NULL even though
+        # sender_number='8801784396009' is present). Since this endpoint
+        # picks each conversation's LATEST message -- routinely an
+        # outbound reply -- relying on canonical_phone alone silently
+        # dropped real candidates (e.g. post_intake_status='agreed') to
+        # "unclear" purely because their most recent message happened to
+        # be outbound. sender_number is populated on every row
+        # regardless of direction; normalize it the same way the
+        # inbound writer already does (modules.number_identity.
+        # canonical_phone, the same function that populates the column
+        # in the first place) as a fallback.
+        def _resolved_phone(row: dict) -> Optional[str]:
+            return row["canonical_phone"] or (_canon_phone(row["sender_number"]) or None if row["sender_number"] else None)
+
+        phones = sorted({p for r in page if (p := _resolved_phone(r))})
+        candidate_status: dict = {}
+        escort_status: dict = {}
+        attendance_status: dict = {}
+        cash_status: dict = {}
+        # Each lookup only runs when the current domain filter could
+        # actually need it (or no filter is given) -- fpe_cash_transactions
+        # in particular is a large table (~4.4k rows across 3 UNIONed phone
+        # columns); no need to scan it for a domain="recruitment" call.
+        _need = domain or ""
+        if phones:
+            if _need in ("", "recruitment"):
+                cand_rows = await fetch_all(
+                    "SELECT phone, post_intake_status FROM wbom_candidates WHERE phone = ANY($1::text[])",
+                    phones,
+                )
+                candidate_status = {r["phone"]: r["post_intake_status"] for r in cand_rows}
+
+            if _need in ("", "escort"):
+                esc_rows = await fetch_all(
+                    """
+                    SELECT DISTINCT ON (phone) phone, status FROM (
+                        SELECT master_mobile AS phone, status, program_id FROM wbom_escort_programs
+                         WHERE master_mobile IS NOT NULL AND master_mobile != ''
+                        UNION ALL
+                        SELECT escort_mobile AS phone, status, program_id FROM wbom_escort_programs
+                         WHERE escort_mobile IS NOT NULL AND escort_mobile != ''
+                    ) both_sides
+                    ORDER BY phone, program_id DESC
+                    """
+                )
+                for r in esc_rows:
+                    norm = _canon_phone(r["phone"])
+                    if norm:
+                        escort_status[norm] = r["status"]
+
+            if _need in ("", "attendance"):
+                # Stage E6: wbom_attendance has no phone column -- links
+                # via employee_id only. Reuses the same authoritative
+                # phone->employee resolution already live in production
+                # (modules.identity_brain._lookup_attendance_identity):
+                # wbom_employees.employee_mobile, latest attendance row
+                # per employee.
+                att_rows = await fetch_all(
+                    """
+                    SELECT DISTINCT ON (phone) phone, approved_at FROM (
+                        SELECT e.employee_mobile AS phone, a.approved_at, a.attendance_id
+                          FROM wbom_employees e
+                          JOIN wbom_attendance a ON a.employee_id = e.employee_id
+                         WHERE e.employee_mobile IS NOT NULL AND e.employee_mobile != ''
+                    ) both_sides
+                    ORDER BY phone, attendance_id DESC
+                    """
+                )
+                for r in att_rows:
+                    norm = _canon_phone(r["phone"])
+                    if norm:
+                        attendance_status[norm] = r["approved_at"]
+
+            if _need in ("", "cash"):
+                # Stage E7: fpe_cash_transactions has direct phone columns
+                # in the same canonical BD format -- normalized the same
+                # way. transaction_status is the genuine, dominant,
+                # already-live state field (live distribution:
+                # final=4390, pending=27, reversed=1).
+                cash_rows = await fetch_all(
+                    """
+                    SELECT DISTINCT ON (phone) phone, transaction_status FROM (
+                        SELECT employee_phone AS phone, transaction_status, id FROM fpe_cash_transactions
+                         WHERE employee_phone IS NOT NULL AND employee_phone != ''
+                        UNION ALL
+                        SELECT employee_id_phone AS phone, transaction_status, id FROM fpe_cash_transactions
+                         WHERE employee_id_phone IS NOT NULL AND employee_id_phone != ''
+                        UNION ALL
+                        SELECT payout_phone AS phone, transaction_status, id FROM fpe_cash_transactions
+                         WHERE payout_phone IS NOT NULL AND payout_phone != ''
+                    ) both_sides
+                    ORDER BY phone, id DESC
+                    """
+                )
+                for r in cash_rows:
+                    norm = _canon_phone(r["phone"])
+                    if norm:
+                        cash_status[norm] = r["transaction_status"]
+
+        results = []
+        for r in page:
+            phone = _resolved_phone(r)
+            row_domain = None
+            if r["workflow_triggered"] == "recruitment" or r["intent_detected"] == "recruitment":
+                row_domain = "recruitment"
+            elif r["workflow_triggered"] == "escort_duty" or r["intent_detected"] == "escort_duty":
+                row_domain = "escort"
+            elif r["workflow_triggered"] == "attendance" or r["intent_detected"] == "attendance":
+                row_domain = "attendance"
+            elif r["workflow_triggered"] == "payment_due" or r["intent_detected"] == "payment_due":
+                row_domain = "cash"
+
+            if row_domain == "recruitment" and phone in candidate_status:
+                state = resolve_recruitment_state(candidate_status[phone])
+            elif row_domain == "escort" and phone in escort_status:
+                state = resolve_escort_state(escort_status[phone])
+            elif row_domain == "attendance" and phone in attendance_status:
+                state = resolve_attendance_state(attendance_status[phone])
+            elif row_domain == "cash" and phone in cash_status:
+                state = resolve_cash_state(cash_status[phone])
+            else:
+                state = dict(UNKNOWN_STATE)
+
+            if requires_action is not None and state["requires_action"] != requires_action:
+                continue
+
+            results.append({
+                "conversation_key": r["conversation_key"],
+                "platform": r["platform"],
+                "canonical_phone": phone,
+                "domain": row_domain,
+                "last_intent": r["intent_detected"] or r["workflow_triggered"],
+                "current_state": state["state"],
+                "next_actor": state["next_actor"],
+                "requires_action": state["requires_action"],
+                "state_source": state["state_source"],
+                "last_message_at": r["last_message_at"],
+                "last_actor_type": r["actor_type"],
+            })
+
+        next_cursor = (
+            _encode_cursor(page[-1]["last_message_at"], page[-1]["message_id"])
+            if has_more and page else None
+        )
+        return {
+            "domain_filter": domain or None,
+            "requires_action_filter": requires_action,
+            "returned": len(results),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "conversations": results,
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/conversations/attention error: %s", exc)
+        return {"returned": 0, "has_more": False, "conversations": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+@app.get("/api/whatsapp/office-group/activity", dependencies=[Depends(require_api_key)])
+async def office_group_activity(start_time: str = "", limit: int = 20, include_body: bool = False):
+    """Stage F4/F9 (2026-08-28): retrieve/summarize the approved
+    Office-group's recent activity -- READ/INDEX ONLY, exactly as Stage E3
+    established. This endpoint never proposes or executes anything; it is
+    the READ half of "Office group -> retrieve -> summarize/analyze -> NO
+    action execution".
+
+    Approved group(s) are discovered from wbom_group_identities
+    (business_label IS NOT NULL) -- never a hardcoded JID -- and merged
+    across every source_bridge that has observed each one (the same group
+    can carry a different conversation_key per bridge, see Stage E1/E4).
+    Metadata-first by default (include_body=False), same
+    _METADATA_COLUMNS/_CONTENT_COLUMNS and <=50 cap as /query and
+    /conversations/attention -- Stage E9's "preserve metadata-first
+    behavior" carried forward unchanged."""
+    try:
+        limit = min(max(int(limit or 20), 1), 50)
+        approved = await fetch_all(
+            "SELECT DISTINCT group_jid, source_bridge FROM wbom_group_identities WHERE business_label IS NOT NULL"
+        )
+        if not approved:
+            return {"returned": 0, "has_more": False, "messages": [], "groups": [], "ts": time.time()}
+        conv_keys = [f"{r['group_jid']}:{r['source_bridge']}" for r in approved]
+
+        conditions = ["conversation_key = ANY($1::text[])"]
+        params: list = [conv_keys]
+        if start_time:
+            params.append(_parse_time_filter(start_time, "start_time"))
+            conditions.append(f"received_at >= ${len(params)}::timestamptz")
+        columns = _METADATA_COLUMNS + (_CONTENT_COLUMNS if include_body else ())
+        fetch_limit = limit + 1
+        params.append(fetch_limit)
+        rows = await fetch_all(
+            f"""
+            SELECT {", ".join(columns)}
+              FROM wbom_whatsapp_messages
+             WHERE {' AND '.join(conditions)}
+             ORDER BY received_at DESC, message_id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        return {
+            "groups": sorted({r["group_jid"] for r in approved}),
+            "returned": len(page),
+            "has_more": has_more,
+            "include_body": include_body,
+            "messages": [dict(r) for r in page],
+            "ts": time.time(),
+        }
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/office-group/activity error: %s", exc)
+        return {"returned": 0, "has_more": False, "messages": [], "error": str(exc)[:200], "ts": time.time()}
+
+
+@app.get("/api/outbound/status", dependencies=[Depends(require_api_key)])
+async def get_outbound_status(queue_id: int | None = None, recipient: str = "", limit: int = 10):
+    """Real delivery-status lookup for one or more fazle_outbound_queue rows
+    (2026-08-21, urgent bridge3 recruitment-reply recovery pass, Task 5).
+
+    Root cause this closes: send_whatsapp_message's underlying POST /admin/
+    send-whatsapp returns {"ok": true} the instant a message is QUEUED, not
+    when it's actually delivered -- outbound.enqueue()/sweep_once() send
+    asynchronously in the background, with real retries and DLQ transitions
+    happening after that response is already sent. Confirmed live: Hermes
+    reported "Sent. Done." for a message whose actual queue row shows
+    status='failed' (later moved to 'dlq'), because it treated queue-
+    acceptance as delivery confirmation.
+
+    Pass queue_id for one specific row (the id returned by send-whatsapp),
+    or recipient for the most recent rows to that phone (useful when the
+    queue_id wasn't captured). status is one of: pending, sending, sent,
+    failed, dlq -- pending/sending are still in flight (not yet resolved
+    either way); sent means transport acceptance only. Recipient delivery
+    requires an actual provider receipt. Failed rows may retry; dlq does not."""
+    if not queue_id and not recipient:
+        return {"error": "queue_id or recipient is required", "items": [], "ts": time.time()}
+    limit = max(1, min(limit, 50))
+    conditions = []
+    params: list = []
+    if queue_id is not None:
+        params.append(queue_id)
+        conditions.append(f"id = ${len(params)}")
+    if recipient:
+        params.append(recipient)
+        conditions.append(f"recipient = ${len(params)}")
+    where_clause = " OR ".join(conditions)
+    params.append(limit)
+    rows = await fetch_all(
+        f"""
+        SELECT id, recipient, source_bridge, purpose, status, attempts,
+               max_attempts, last_error, created_at, sent_at, updated_at, meta_json, external_id
+          FROM fazle_outbound_queue
+         WHERE {where_clause}
+         ORDER BY created_at DESC
+         LIMIT ${len(params)}
+        """,
+        *params,
+    )
+    items = [dict(r) for r in rows]
+    from modules.outbound import delivery_details
+    for item in items:
+        item.update(delivery_details(item))
+    return {"items": items, "count": len(items), "ts": time.time()}
+
+
+@app.get("/api/recruitment/interested-candidates", dependencies=[Depends(require_api_key)])
+async def recruitment_interested_candidates(start: str, end: str = ""):
+    """Exhaustive, date-range job-interest search (2026-08-21, Owner
+    Correction 2 / regression case ...1609). Answers "who messaged about a
+    job between X and Y" without relying on get_recent_messages(limit=N)'s
+    silent truncation, and without a per-bridge cap: wbom_whatsapp_messages
+    is the single unified inbound store across every ingest path this
+    system has (bridge1, bridge2, bridge3, meta/WhatsApp Cloud, and the
+    legacy 'whatsapp' platform value -- verified live, 2026-08-21: all 5
+    coexist in this one table, there is no separate per-bridge or archived
+    store to also query). No LIMIT is applied to the underlying scan within
+    the requested window -- every inbound row in range is evaluated, not a
+    sample.
+
+    Job-interest detection reuses modules.recruitment_flow.
+    is_recruitment_trigger() -- the exact same function recruitment_
+    eligibility() itself uses to decide "explicit_recruitment" -- so this
+    tool's notion of "job interest" can never silently diverge from what
+    the live funnel actually treats as one.
+
+    start/end: ISO 8601 date or datetime (e.g. "2026-08-20" or
+    "2026-08-20T00:00:00Z"). end defaults to now if omitted. Bounded to a
+    92-day window (about one quarter) to keep this a safe, boundable scan
+    rather than an unbounded full-table one.
+    """
+    from datetime import datetime, timezone
+    from modules.recruitment_flow import is_recruitment_trigger
+
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00")) if end else datetime.now(timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        return {"error": f"invalid start/end date: {exc}", "candidates": [], "ts": time.time()}
+
+    if end_dt <= start_dt:
+        return {"error": "end must be after start", "candidates": [], "ts": time.time()}
+    if (end_dt - start_dt).days > 92:
+        return {"error": "window too wide — max 92 days, narrow the range", "candidates": [], "ts": time.time()}
+
+    try:
+        rows = await fetch_all(
+            """
+            SELECT canonical_phone, sender_number, platform, received_at, message_body
+              FROM wbom_whatsapp_messages
+             WHERE direction = 'inbound'
+               AND received_at >= $1 AND received_at < $2
+             ORDER BY received_at ASC
+            """,
+            start_dt, end_dt,
+        )
+    except Exception as exc:
+        log.warning("[recruitment] /api/recruitment/interested-candidates scan error: %s", exc)
+        return {"error": str(exc)[:200], "candidates": [], "ts": time.time()}
+
+    unresolved_identity_count = 0
+    by_phone: dict[str, dict] = {}
+    for r in rows:
+        phone = r["canonical_phone"] or r["sender_number"]
+        if not phone:
+            continue
+        if str(phone).startswith("unresolved:"):
+            unresolved_identity_count += 1
+        text = r["message_body"] or ""
+        if not is_recruitment_trigger(text):
+            continue
+        bucket = by_phone.setdefault(phone, {
+            "phone": phone,
+            "sources": set(),
+            "first_message_at": r["received_at"],
+            "last_message_at": r["received_at"],
+            "job_interest_evidence": text[:300],
+            "message_count": 0,
+        })
+        bucket["sources"].add(r["platform"])
+        bucket["last_message_at"] = r["received_at"]
+        bucket["message_count"] += 1
+
+    candidates = []
+    for phone, bucket in by_phone.items():
+        lead = await fetch_one(
+            """
+            SELECT c.candidate_id, c.full_name, c.job_preference, c.area,
+                   c.funnel_stage, c.age, c.experience_years,
+                   s.id AS session_id, s.collection_step
+              FROM wbom_candidates c
+              LEFT JOIN fazle_recruitment_sessions s ON s.phone = c.phone
+             WHERE c.phone = $1
+            """,
+            phone,
+        )
+        missing = []
+        for field in ("full_name", "age", "area", "job_preference", "experience_years"):
+            if not (lead and lead.get(field)):
+                missing.append(field)
+        candidates.append({
+            "phone": bucket["phone"],
+            "sources": sorted(bucket["sources"]),
+            "first_message_at": bucket["first_message_at"].isoformat(),
+            "last_message_at": bucket["last_message_at"].isoformat(),
+            "message_count": bucket["message_count"],
+            "job_interest_evidence": bucket["job_interest_evidence"],
+            "lead_id": lead["candidate_id"] if lead else None,
+            "session_id": lead["session_id"] if lead else None,
+            "position_interest": lead["job_preference"] if lead else None,
+            "known_qualification": None,  # not a tracked field yet — see report
+            "known_location": lead["area"] if lead else None,
+            "missing_information": missing if lead else [
+                "full_name", "age", "area", "job_preference", "experience_years",
+            ],
+            "conversation_status": (lead["funnel_stage"] if lead else "no_lead_yet"),
+        })
+
+    candidates.sort(key=lambda c: c["last_message_at"], reverse=True)
+    return {
+        "completeness": "exhaustive_within_requested_window",
+        "window": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+        "sources_covered": ["bridge1", "bridge2", "bridge3", "meta", "whatsapp"],
+        "inbound_messages_scanned": len(rows),
+        "unresolved_identity_messages_in_window": unresolved_identity_count,
+        "count": len(candidates),
+        "candidates": candidates,
+        "ts": time.time(),
+    }
 
 
 # ── 2026-08-18 — Identity/Intent resolution, exposed for Hermes ──────────────
@@ -1249,6 +2084,102 @@ async def api_verify_employee_claim(
         claimed_name=claimed_name or None, claimed_role=claimed_role or None,
         sender_phone=sender_phone or None, employee_id=employee_id,
     )
+
+
+@app.get("/api/identity/search-by-name", dependencies=[Depends(require_api_key)])
+async def api_search_identity_by_name(name: str, limit: int = 10):
+    """Name -> candidate phone number(s). Searches the trusted identity
+    tables ONLY (wbom_employees / wbom_contacts[platform='whatsapp'] /
+    fazle_contact_roles / fpe_employees), dedup'd by phone.
+
+    Contract (never guesses on a name alone):
+      * 0 candidates -> {"resolved": null, "ambiguous": false, "candidates": []}
+      * exactly 1    -> {"resolved": "<8801…>", "ambiguous": false, ...}
+      * 2+           -> {"resolved": null, "ambiguous": true, "candidates": [...]}
+    The caller must disambiguate a `ambiguous: true` result (e.g. ask which
+    person) before acting — do not pick one arbitrarily."""
+    from modules.identity_resolver import search_identity_by_name
+    try:
+        limit = min(max(int(limit or 10), 1), 25)
+    except (TypeError, ValueError):
+        limit = 10
+    candidates = await search_identity_by_name(name, limit=limit)
+    distinct_phones = [c.get("phone") for c in candidates if c.get("phone")]
+    resolved = distinct_phones[0] if len(distinct_phones) == 1 else None
+    return {
+        "query": name,
+        "candidate_count": len(candidates),
+        "resolved": resolved,
+        "ambiguous": len(distinct_phones) > 1,
+        "candidates": candidates,
+        "ts": time.time(),
+    }
+
+
+@app.get("/api/whatsapp/contact/summary", dependencies=[Depends(require_api_key)])
+async def api_whatsapp_contact_summary(phone: str, recent_limit: int = 5):
+    """One bounded call: identity + role + platforms observed + first/last
+    seen + per-platform message counts + the last few messages (source and
+    direction preserved on every row). The 'give me everything about this
+    number' summary. Read-only."""
+    from modules.identity_brain import detect_identity
+    try:
+        recent_limit = min(max(int(recent_limit or 5), 1), 20)
+    except (TypeError, ValueError):
+        recent_limit = 5
+    try:
+        from modules.number_identity import normalize_phone as _pv, phone_last10 as _p10
+        variants = _pv(phone) or [phone.strip()]
+        last10 = _p10(phone)
+    except Exception:
+        variants, last10 = [phone.strip()], "".join(ch for ch in phone if ch.isdigit())[-10:]
+
+    _match = ("(canonical_phone = ANY($1) OR resolved_phone = ANY($1) "
+              "OR sender_number = ANY($1)" + (" OR phone_last10 = $2)" if last10 else ")"))
+    args: list = [variants] + ([last10] if last10 else [])
+
+    identity = await detect_identity(phone)
+    identity = {k: v for k, v in identity.items() if k not in ("bkash_number", "basic_salary")}
+
+    try:
+        by_platform = await fetch_all(
+            f"""SELECT platform, direction, count(*) AS n,
+                       min(received_at) AS first_seen, max(received_at) AS last_seen
+                  FROM wbom_whatsapp_messages
+                 WHERE {_match}
+                 GROUP BY platform, direction
+                 ORDER BY platform, direction""",
+            *args,
+        )
+        recent = await fetch_all(
+            f"""SELECT message_id, platform, direction, received_at, message_type,
+                       identity_role, intent_detected, workflow_triggered,
+                       LEFT(COALESCE(message_body, ''), 240) AS message_body
+                  FROM wbom_whatsapp_messages
+                 WHERE {_match}
+                 ORDER BY received_at DESC, message_id DESC
+                 LIMIT {recent_limit + 1}""",
+            *args,
+        )
+    except Exception as exc:
+        log.warning("[whatsapp] /api/whatsapp/contact/summary error: %s", exc)
+        return {"phone": phone, "identity": identity, "error": str(exc)[:200], "ts": time.time()}
+
+    platforms = sorted({r["platform"] for r in by_platform if r["platform"]})
+    first_seen = min((r["first_seen"] for r in by_platform if r["first_seen"]), default=None)
+    last_seen = max((r["last_seen"] for r in by_platform if r["last_seen"]), default=None)
+    return {
+        "phone": phone,
+        "phone_variants": variants,
+        "identity": identity,
+        "platforms": platforms,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "count_by_platform": [dict(r) for r in by_platform],
+        "recent_messages": [dict(r) for r in recent[:recent_limit]],
+        "more_messages_exist": len(recent) > recent_limit,
+        "ts": time.time(),
+    }
 
 
 @app.get("/api/intent/classify", dependencies=[Depends(require_api_key)])
@@ -1540,6 +2471,27 @@ async def get_state_version_endpoint():
     return {"version": v, "ts": time.time()}
 
 
+def _meta_log_event(event: str, **fields: Any) -> None:
+    """Structured observability event for the Meta webhook / unified-
+    dispatch path (Owner directive, 2026-08-27, Section 1). Matches this
+    file's existing bracketed-tag logging convention (see [META]/
+    [MESSENGER]/[INSTAGRAM] elsewhere in this file) with one added,
+    grep-able discriminator: event=<name> always comes first, so
+    `grep "event=meta_outbound_failed"` finds every occurrence regardless
+    of which channel triggered it.
+
+    Callers pass only specific, already-known-safe identifiers (channel,
+    external message/event id, page/IG account id, queue id, status,
+    block/fallback reason) -- NEVER access tokens, the App Secret, the
+    Verify Token, Authorization headers, or raw payload bodies. Nothing
+    here reads request headers or settings.meta_app_secret/meta_verify_
+    token/fb_page_access_token/meta_api_token, by construction, so there
+    is no way for a careless call site to leak one through this helper."""
+    parts = [f"event={event}"]
+    parts += [f"{k}={v}" for k, v in fields.items() if v not in (None, "")]
+    log.info("[META_EVENT] " + " ".join(parts))
+
+
 # ── Meta Webhook Verification (GET) ───────────────────────────────────────────
 @app.get("/webhook/meta")
 async def meta_verify(request: Request):
@@ -1549,6 +2501,7 @@ async def meta_verify(request: Request):
     challenge = params.get("hub.challenge")
     if mode == "subscribe" and token == settings.meta_verify_token:
         log.info("Meta webhook verified")
+        _meta_log_event("meta_webhook_verified", mode=mode)
         return Response(content=challenge, media_type="text/plain")
     raise HTTPException(status_code=403, detail="Verification failed")
 
@@ -1558,6 +2511,7 @@ async def meta_verify(request: Request):
 async def meta_webhook(request: Request):
     """Receive Meta events: WhatsApp Cloud API, Facebook Messenger, and Page comments."""
     body_bytes = await request.body()
+    _meta_log_event("meta_webhook_received", bytes=len(body_bytes))
 
     # Verify signature
     sig = request.headers.get("X-Hub-Signature-256", "")
@@ -1568,8 +2522,10 @@ async def meta_webhook(request: Request):
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(sig, expected):
+            _meta_log_event("meta_webhook_invalid_signature", reason="mismatch")
             raise HTTPException(status_code=403, detail="Invalid signature")
     elif settings.meta_webhook_signature_enforcement:
+        _meta_log_event("meta_webhook_invalid_signature", reason="missing_signature_enforced")
         raise HTTPException(status_code=403, detail="Missing Meta webhook signature")
     else:
         log.warning("[WEBHOOK_AUTH_AUDIT] unsigned Meta webhook accepted; enforcement disabled")
@@ -1579,10 +2535,34 @@ async def meta_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Bad JSON")
 
+    # Owner directive (2026-08-27, Meta Messenger/Instagram integration):
+    # Instagram Messaging webhook events arrive with payload["object"] ==
+    # "instagram" and use the SAME entry[].messaging[] shape as Facebook
+    # Messenger (payload["object"] == "page") -- sender.id/recipient.id/
+    # message.mid/message.text/is_echo are field-compatible (confirmed
+    # against Meta's current Instagram Messaging Platform docs, 2026-08-27
+    # -- not assumed from stale examples). Before this fix, the loop below
+    # routed EVERY entry's messaging[] into _handle_messenger_message()
+    # unconditionally, with no object-type check at all -- meaning once an
+    # Instagram webhook subscription is added, Instagram DMs would have
+    # been silently misrouted into the Messenger handler and misfiled
+    # under platform="messenger". object_type is read once per payload
+    # (Meta always sends one object type per webhook delivery).
+    object_type = payload.get("object", "")
     for entry in payload.get("entry", []):
-        # ── Facebook Messenger messages ─────────────────────────────────────
+        # ── Facebook Messenger / Instagram DM messages ───────────────────────
         for messaging in entry.get("messaging", []):
-            if "message" in messaging and not messaging["message"].get("is_echo"):
+            if "message" not in messaging or messaging["message"].get("is_echo"):
+                if messaging.get("message", {}).get("is_echo"):
+                    _meta_log_event(
+                        "meta_webhook_echo_ignored",
+                        channel="instagram" if object_type == "instagram" else "messenger",
+                        external_message_id=messaging.get("message", {}).get("mid"),
+                    )
+                continue
+            if object_type == "instagram":
+                await _handle_instagram_message(messaging)
+            else:
                 await _handle_messenger_message(messaging)
 
         # ── WhatsApp Cloud API + Facebook Page feed (comments) ──────────────
@@ -1591,6 +2571,12 @@ async def meta_webhook(request: Request):
             value = change.get("value", {})
 
             if field == "messages":
+                from modules.outbound import record_meta_receipt
+                # Legacy unsigned inbound policy is unchanged. Delivery
+                # confirmation itself requires authenticated provider evidence.
+                if sig and settings.meta_app_secret:
+                    for receipt in value.get("statuses", []):
+                        await record_meta_receipt(receipt)
                 # WhatsApp Cloud API inbound messages
                 for msg in value.get("messages", []):
                     await _handle_meta_message(msg, value)
@@ -1629,10 +2615,24 @@ async def _handle_meta_message(msg: dict, value: dict):
             log.warning("[META] media normalization failed type=%s error=%s", msg_type, media_err)
             text = f"[{msg_type} message]"
 
+    # Meta delivers the sender's WhatsApp profile name in the SAME webhook,
+    # under value.contacts[].profile.name (wa_id matches msg.from). This is
+    # DISPLAY metadata only — never identity authority.
+    meta_profile_name = None
+    try:
+        for c in (value.get("contacts") or []):
+            if isinstance(c, dict):
+                pn = (c.get("profile") or {}).get("name")
+                if pn and isinstance(pn, str):
+                    meta_profile_name = pn.strip() or None
+                    break
+    except Exception:
+        meta_profile_name = None
+
     log.info(f"[META] from={sender} type={msg_type} text={text[:60]!r}")
 
     if not text:
-        return
+        text = f"[media:{msg_type or 'unsupported'}]"
 
     if message_id:
         existing = await fetch_one(
@@ -1645,16 +2645,59 @@ async def _handle_meta_message(msg: dict, value: dict):
             log.info("[META] duplicate webhook safely acknowledged inbound_id=%s", message_id)
             return
 
-    await _save_message(
+    # Phase-2 inbound identity enrichment — flag-gated (default OFF), Meta
+    # inbound only. When OFF, behaviour is exactly as before.
+    _p2 = {}
+    try:
+        from modules.identity_resolver import is_phase2_identity_enabled, resolve_inbound_identity, SOURCE_UNKNOWN
+        if is_phase2_identity_enabled():
+            _ident = await resolve_inbound_identity(
+                platform="meta",
+                sender_number=sender,
+                canonical_phone=sender,
+                source_message_ref=message_id or None,
+                message_type=msg_type or "text",
+                meta_profile_name=meta_profile_name,
+            )
+            _src = _ident.get("sender_name_source")
+            _p2 = {
+                "sender_name_snapshot": _ident.get("sender_name_snapshot"),
+                "sender_name_source": _src if _src not in (None, SOURCE_UNKNOWN) else None,
+                "sender_name_confidence": int(_ident.get("sender_name_confidence") or 0) or None,
+                "canonical_message_key": _ident.get("canonical_message_key"),
+            }
+    except Exception as _p2_exc:
+        log.debug("[META] Phase-2 identity enrichment skipped (non-fatal): %s", _p2_exc)
+
+    core_message_id = await _save_message(
         "meta",
         sender,
         text,
         direction="inbound",
         msg_type=msg_type or "text",
         extracted_text=extracted_text,
+        actor_type="external_user",
         source_message_ref=message_id,
-        metadata={"delivery_state": "received", "meta_message_id": message_id},
+        metadata={"processing_state": "received", "meta_message_id": message_id},
+        return_message_id=True,
+        **_p2,
     )
+
+    if core_message_id is None:
+        return
+    from modules.message_router import inbound_execution, record_inbound_action
+    async with inbound_execution(core_message_id, "meta", message_id) as execution:
+        if execution is None:
+            return
+        if msg_type != "text" and not extracted_text:
+            execution["processing_outcome"] = "skipped"
+            record_inbound_action("suppression", reason="unsupported_media")
+            return
+        await _finish_meta_inbound(msg, sender, text, message_id, queue_key, msg_type)
+
+
+async def _finish_meta_inbound(msg, sender, text, message_id, queue_key, msg_type):
+    """Existing Meta policy cascade, inside the shared provenance scope."""
 
     try:
         await record_heartbeat(
@@ -1668,8 +2711,13 @@ async def _handle_meta_message(msg: dict, value: dict):
     # 2026-07-21: identity-first routing — social_auto_reply retired for
     # WhatsApp DM traffic (bridge1/bridge2/meta share one routing path now;
     # see modules.bridge_poller.process_bridge_inbound / modules.route_b).
-    # Sync-only: Meta is not in auto_reply_sources — save message, skip reply/draft.
+    # If 'meta' is absent from AUTO_REPLY_SOURCES the row is still persisted
+    # above; only reply/draft generation is skipped. (As of 2026-08 'meta'
+    # IS in the live list, so this guard normally passes through.)
     if "meta" not in settings.auto_reply_source_list:
+        from modules.message_router import record_inbound_action, set_inbound_outcome
+        set_inbound_outcome("skipped", "sync_only")
+        record_inbound_action("suppression", reason="sync_only")
         log.debug(f"[META] sync-only, skipping reply/draft for {sender}")
         return
 
@@ -1704,7 +2752,7 @@ async def _handle_meta_message(msg: dict, value: dict):
                     await _save_draft("meta", sender, reply, "recruitment")
                     return
                 if qid:
-                    await _save_message("meta", sender, reply, direction="outbound")
+                    await _save_message("meta", sender, reply, direction="outbound", actor_type="automation")
                     await _record_meta_delivery_state(message_id, "queued")
                     log.info("[META] queued recruitment reply sender=%s qid=%s", sender, qid)
                 else:
@@ -1737,15 +2785,157 @@ async def _handle_meta_message(msg: dict, value: dict):
         await _notify_admin(send_to_admin)
 
 
+async def _meta_channel_duplicate_delivery(channel: str, external_message_id: str | None) -> bool:
+    """Durable, DB-level dedup for a Meta DM channel's inbound message
+    delivery (Owner directive, 2026-08-27) — Meta retries webhook
+    deliveries on any non-2xx response or timeout; a retry must not
+    reprocess the same message or cause a second Hermes reply. Mirrors
+    _handle_meta_message()'s own existing source_message_ref check
+    (WhatsApp-via-meta), generalized for any Meta channel. Never relies on
+    in-memory-only state. Fails open (returns False) on any DB error —
+    matches every other best-effort dedup check in this file."""
+    if not external_message_id:
+        return False
+    try:
+        existing = await fetch_one(
+            """SELECT 1 FROM wbom_whatsapp_messages
+               WHERE platform=$1 AND direction='inbound' AND source_message_ref=$2
+               LIMIT 1""",
+            channel, external_message_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail open, never block on this
+        log.warning(f"[{channel.upper()}] duplicate-delivery check failed: {exc}")
+        return False
+    if existing:
+        _meta_log_event("meta_webhook_duplicate", channel=channel, external_message_id=external_message_id)
+    return bool(existing)
+
+
+async def _dispatch_meta_channel_message(
+    *, channel: str, sender_id: str, text: str,
+    external_message_id: str | None, live_send_flag: str,
+) -> None:
+    """Shared unified-path dispatch for any Meta DM channel (messenger,
+    instagram) once its own *_inbound feature flag is ON. Owner directive
+    (2026-08-27, "Messenger and Instagram should become transports, not
+    separate brains"): reuses the EXACT SAME process_message()/Hermes
+    pipeline WhatsApp-via-bridge1/bridge2/bridge3/meta already uses — no
+    new routing/reply logic here. Never calls the Meta Send API inline —
+    routes through the existing fazle_outbound_queue (source_bridge
+    already supports "messenger"; see modules.outbound._send_with_channel)
+    exactly like every other channel, so idempotency/retry/DLQ are
+    inherited for free. While the live-send flag is off, the reply is
+    drafted for admin review instead of sent — "receive/test webhook
+    traffic safely before enabling Hermes live replies" (Owner Phase 18)."""
+    _meta_log_event("meta_inbound_dispatched", channel=channel, external_message_id=external_message_id)
+    reply, send_to_admin = await _process_message(sender_id, text, channel)
+
+    if reply:
+        _meta_log_event("meta_hermes_reply_generated", channel=channel, external_message_id=external_message_id)
+        from modules.preflight_guard import is_feature_active
+        if is_feature_active(live_send_flag, default=False):
+            key = (
+                f"{channel}:{hashlib.sha256(f'{sender_id}|{external_message_id}'.encode()).hexdigest()[:40]}"
+                if external_message_id else None
+            )
+            qid = await outbound_queue.enqueue(
+                sender_id, reply, source_bridge=channel,
+                purpose=f"customer-reply:{channel}", idempotency_key=key,
+                meta={"customer_reply": True, "channel": channel},
+            )
+            if qid:
+                await _save_message(channel, sender_id, reply, direction="outbound", actor_type="automation")
+                _meta_log_event("meta_outbound_queued", channel=channel, queue_id=qid)
+            else:
+                log.info(f"[{channel.upper()}] reply enqueue deduplicated for {sender_id}")
+        else:
+            log.info(f"[{channel.upper()}] inbound-only staging (live-send flag off) — drafting for {sender_id}")
+            _meta_log_event("meta_fallback_used", channel=channel, reason="live_send_flag_off_drafted")
+            await _save_draft(channel, sender_id, reply, f"{channel}_dm", sender_message=text)
+
+    if send_to_admin:
+        if send_to_admin.get("purpose") == "draft-only-contact-review":
+            await _save_draft(
+                channel, sender_id, send_to_admin.get("text") or text,
+                classify(text) or "draft_only_contact",
+            )
+        await _notify_admin(send_to_admin)
+
+
+async def _dispatch_meta_channel_message_background(
+    *, channel: str, sender_id: str, text: str,
+    external_message_id: str | None, live_send_flag: str,
+) -> None:
+    """Fire-and-forget wrapper for _dispatch_meta_channel_message() (Owner
+    directive, 2026-08-27, Meta reconfiguration Phase 10: "Do not make
+    Hermes latency delay Meta webhook acknowledgement" -- confirmed in
+    production logs, hermes_dispatch calls routinely take 15-30s;
+    meta_webhook() must not hold Meta's webhook connection open that long).
+
+    The caller (_handle_messenger_message/_handle_instagram_message) still
+    runs the durable dedup check and inbound _save_message() synchronously,
+    BEFORE scheduling this -- only the slow, Hermes-routed reply generation
+    and outbound enqueue happen in the background, after the webhook has
+    already returned {"status": "ok"}. Unlike a bare asyncio.create_task()
+    of _dispatch_meta_channel_message directly, this wrapper catches and
+    logs any exception itself -- an uncaught exception in a fire-and-forget
+    task would otherwise vanish as a silent 'Task exception was never
+    retrieved' warning at garbage-collection time instead of a real log
+    line (this codebase already has one such existing fire-and-forget
+    pattern, modules.message_router._hk_fire(), used as the template)."""
+    try:
+        await _dispatch_meta_channel_message(
+            channel=channel, sender_id=sender_id, text=text,
+            external_message_id=external_message_id, live_send_flag=live_send_flag,
+        )
+    except Exception as exc:  # noqa: BLE001 — fire-and-forget must never crash the event loop
+        log.exception(f"[{channel.upper()}] background dispatch failed sender={sender_id}: {exc}")
+
+
 async def _handle_messenger_message(messaging: dict):
-    """Handle Facebook Messenger inbound message — save + recruitment autoreply."""
+    """Handle Facebook Messenger inbound message.
+
+    Owner directive (2026-08-27, Meta Messenger/Instagram integration):
+    routing authority is now the meta_messenger_inbound / meta_messenger_
+    live_send feature flags (assistant_feature_flags via preflight_guard),
+    not just the blanket SOCIAL_AUTO_REPLY_SINGLE_ENGINE env toggle — when
+    meta_messenger_inbound is ON, this message goes through the unified
+    process_message()/Hermes pipeline (see _dispatch_meta_channel_message)
+    instead of modules.social_auto_reply's own separate reply brain,
+    matching the 2026-07-21 precedent that already did this same
+    migration for WhatsApp DM traffic. Defaults OFF — zero behavior
+    change until explicitly activated; while OFF this function is
+    byte-identical to before this change.
+
+    ingest_social_event() (the legacy social_auto_reply raw-event/
+    classification store) is deliberately NOT called once meta_messenger_
+    inbound is ON: modules.social_auto_reply.planner_worker.
+    process_due_threads() reads social_inbox_events for ANY pending row
+    regardless of platform and would independently plan+send its OWN
+    reply for the same event — a genuine double-reply. Once migrated,
+    Messenger bypasses that table entirely, the same way WhatsApp-via-meta
+    already does (wbom_whatsapp_messages only)."""
     sender_id = messaging.get("sender", {}).get("id", "")
     text = messaging.get("message", {}).get("text", "").strip()
     if not sender_id or not text:
         return
 
+    message_id = messaging.get("message", {}).get("mid")
+    _meta_log_event("meta_messenger_normalized", channel="messenger", external_message_id=message_id)
+    if await _meta_channel_duplicate_delivery("messenger", message_id):
+        log.info(f"[MESSENGER] duplicate webhook delivery ignored message_id={message_id}")
+        return
+
     log.info(f"[MESSENGER] from={sender_id} text={text[:60]!r}")
-    await _save_message("messenger", sender_id, text, direction="inbound")
+    await _save_message("messenger", sender_id, text, direction="inbound", source_message_ref=message_id or "", actor_type="external_user")
+
+    from modules.preflight_guard import is_feature_active
+    if is_feature_active("meta_messenger_inbound", default=False):
+        asyncio.create_task(_dispatch_meta_channel_message_background(
+            channel="messenger", sender_id=sender_id, text=text,
+            external_message_id=message_id, live_send_flag="meta_messenger_live_send",
+        ))
+        return
 
     try:
         await ingest_social_event(
@@ -1754,7 +2944,7 @@ async def _handle_messenger_message(messaging: dict):
             sender_id=sender_id,
             text=text,
             conversation_id=messaging.get("conversation", {}).get("id"),
-            message_id=messaging.get("message", {}).get("mid"),
+            message_id=message_id,
             media_flag=bool(messaging.get("message", {}).get("attachments")),
             raw_payload=messaging,
         )
@@ -1762,6 +2952,7 @@ async def _handle_messenger_message(messaging: dict):
         log.warning(f"[social] messenger ingest failed for {sender_id}: {e}")
     if _social_auto_reply_single_engine():
         log.debug(f"[MESSENGER] social daemon is single reply engine, legacy reply path skipped for {sender_id}")
+        _meta_log_event("meta_fallback_used", channel="messenger", reason="legacy_social_auto_reply_single_engine")
         return
 
     if "messenger" not in settings.auto_reply_source_list:
@@ -1778,9 +2969,57 @@ async def _handle_messenger_message(messaging: dict):
                 log.info(f"[RECRUIT-AUTOREPLY] sending Messenger reply to {sender_id} (SAFE MODE bypass)")
             ok = await _send_messenger(sender_id, reply)
             if ok:
-                await _save_message("messenger", sender_id, reply, direction="outbound")
+                await _save_message("messenger", sender_id, reply, direction="outbound", actor_type="automation")
         else:
             log.info(f"[MESSENGER] SAFE MODE: reply suppressed for {sender_id}")
+
+
+async def _handle_instagram_message(messaging: dict):
+    """Handle Instagram DM inbound message.
+
+    Owner directive (2026-08-27): built directly on the unified
+    process_message()/Hermes pipeline from day one — Instagram never had
+    a modules.social_auto_reply integration to migrate away from (unlike
+    Messenger), so there is no legacy fallback path here. Gated behind
+    meta_instagram_inbound (default OFF, same staged-activation pattern
+    as Messenger's migration). While OFF, the message is still saved
+    (wbom_whatsapp_messages, platform="instagram") for history/audit but
+    never reaches Hermes or gets a reply — "receive/test webhook traffic
+    safely before enabling Hermes live replies" (Owner Phase 18).
+
+    Payload shape is field-compatible with Messenger's messaging[] entry
+    (sender.id / recipient.id / message.mid / message.text / is_echo) —
+    confirmed against Meta's current Instagram Messaging Platform docs
+    (2026-08-27), not assumed from stale examples. What actually
+    distinguishes Instagram from Messenger is payload["object"] ==
+    "instagram" vs "page" at the webhook top level — see meta_webhook's
+    own dispatch, NOT this function, which is why a shared per-message
+    parser would have been the wrong abstraction (Owner Phase 12: "Do not
+    assume Instagram and Messenger payload structures are identical")."""
+    sender_id = messaging.get("sender", {}).get("id", "")
+    text = messaging.get("message", {}).get("text", "").strip()
+    if not sender_id or not text:
+        return
+
+    message_id = messaging.get("message", {}).get("mid")
+    _meta_log_event("meta_instagram_normalized", channel="instagram", external_message_id=message_id)
+    if await _meta_channel_duplicate_delivery("instagram", message_id):
+        log.info(f"[INSTAGRAM] duplicate webhook delivery ignored message_id={message_id}")
+        return
+
+    log.info(f"[INSTAGRAM] from={sender_id} text={text[:60]!r}")
+    await _save_message("instagram", sender_id, text, direction="inbound", source_message_ref=message_id or "", actor_type="external_user")
+
+    from modules.preflight_guard import is_feature_active
+    if not is_feature_active("meta_instagram_inbound", default=False):
+        log.debug(f"[INSTAGRAM] meta_instagram_inbound flag off, sync-only for {sender_id}")
+        _meta_log_event("meta_fallback_used", channel="instagram", reason="inbound_flag_off_sync_only")
+        return
+
+    asyncio.create_task(_dispatch_meta_channel_message_background(
+        channel="instagram", sender_id=sender_id, text=text,
+        external_message_id=message_id, live_send_flag="meta_instagram_live_send",
+    ))
 
 
 async def _handle_fb_comment(value: dict):
@@ -1792,8 +3031,23 @@ async def _handle_fb_comment(value: dict):
     if not comment_id or not text:
         return
 
+    # Owner directive (2026-08-27, Meta reconfiguration Phase 5): the Page's
+    # OWN reply to a comment is itself a new comment on the same post, and
+    # Meta's "feed"/comment webhook fires for it exactly like any customer
+    # comment. Before this fix, _handle_fb_comment had no identity check at
+    # all -- unlike modules.social_auto_reply.backlog_processor.scan_recent()
+    # (a periodic scan, not this real-time webhook path), which already
+    # compares sender.id against settings.fb_page_id for /conversations. This
+    # mirrors that same, reliable ID-based check (not the fragile "Al Aqsa"
+    # display-name check used elsewhere for nested reply threads) for the
+    # live webhook path, so a Page-authored reply can never be re-ingested
+    # as a new customer comment and drive a self-reply loop.
+    if settings.fb_page_id and sender_id == settings.fb_page_id:
+        log.debug(f"[FB-COMMENT] ignoring Page's own comment/reply comment_id={comment_id}")
+        return
+
     log.info(f"[FB-COMMENT] from={sender_name}({sender_id}) comment_id={comment_id} text={text[:60]!r}")
-    await _save_message("fb_comment", sender_id or comment_id, text, direction="inbound")
+    await _save_message("fb_comment", sender_id or comment_id, text, direction="inbound", actor_type="external_user")
 
     try:
         await ingest_social_event(
@@ -1828,7 +3082,7 @@ async def _handle_fb_comment(value: dict):
     )
     ok = await _send_fb_comment_reply(comment_id, recruit_reply)
     if ok:
-        await _save_message("fb_comment", sender_id or comment_id, recruit_reply, direction="outbound")
+        await _save_message("fb_comment", sender_id or comment_id, recruit_reply, direction="outbound", actor_type="automation")
 
 
 # ── Bridge 1 Webhook ───────────────────────────────────────────────────────────
@@ -1966,12 +3220,56 @@ async def _handle_bridge_event(payload: dict, source: str):
             log.debug(f"[{source.upper()}] identity detection failed: {_id_err}")
             _id_role, _id_conf, _id_name = "unknown", 0, ""
 
+        # Phase-2 inbound identity enrichment — flag-gated (default OFF).
+        # NO-CLOBBER: only fills identity_role when identity_brain returned
+        # "unknown"; a meaningful role (admin/accountant/employee/escort_*/
+        # candidate/…) from detect_identity is never overwritten.
+        _p2_kw: dict = {}
         try:
-            await _save_message(
+            from modules.identity_resolver import (
+                is_phase2_identity_enabled, resolve_inbound_identity, SOURCE_UNKNOWN,
+            )
+            if is_phase2_identity_enabled():
+                _is_lid = str(sender_clean).startswith("unresolved:")
+                _ri = await resolve_inbound_identity(
+                    platform=source,
+                    sender_number=sender_clean,
+                    canonical_phone=sender_clean if not _is_lid else None,
+                    sender_lid=sender_clean if _is_lid else None,
+                    chat_jid=event.get("chat_jid") or None,
+                    source_message_ref=(msg_id or None),
+                    message_type=media_type or "text",
+                    bridge_full_name=event.get("full_name"),
+                    bridge_push_name=event.get("push_name"),
+                    bridge_business_name=event.get("business_name"),
+                )
+                _src = _ri.get("sender_name_source")
+                _p2_kw = {
+                    "sender_name_snapshot": _ri.get("sender_name_snapshot"),
+                    "sender_name_source": _src if _src not in (None, SOURCE_UNKNOWN) else None,
+                    "sender_name_confidence": int(_ri.get("sender_name_confidence") or 0) or None,
+                    "canonical_message_key": _ri.get("canonical_message_key"),
+                }
+                if (not _id_role or _id_role == "unknown") and _ri.get("identity_role") not in (None, "unknown"):
+                    _rc = int(_ri.get("identity_confidence") or 0)
+                    if _rc >= 80:
+                        _id_role = _ri["identity_role"]
+                        _id_conf = _rc
+        except Exception as _p2_exc:
+            log.debug(f"[{source.upper()}] Phase-2 identity enrichment skipped (non-fatal): {_p2_exc}")
+
+        try:
+            core_message_id = await _save_message(
                 source, sender_clean, text, direction="inbound",
                 identity_role=_id_role, identity_confidence=_id_conf,
                 msg_type=media_type if media_type else "text",
+                actor_type="external_user",
+                source_message_ref=dedup_id,
+                return_message_id=True,
+                **_p2_kw,
             )
+            if core_message_id is None:
+                continue
         except Exception as _save_err:
             if dedup_id and pre_marked:
                 try:
@@ -1987,8 +3285,6 @@ async def _handle_bridge_event(payload: dict, source: str):
             log.error(f"[{source.upper()}] inbound save failed for {sender_clean}: {_save_err}")
             continue
 
-        _forward_to_agent_if_admin(sender_clean, text, source)
-
         # 2026-07-21: identity-first routing — social_auto_reply's keyword
         # gate is retired here too (mirrors the same change in
         # modules.bridge_poller._poll_bridge). Every inbound mcp1/mcp2
@@ -1998,15 +3294,44 @@ async def _handle_bridge_event(payload: dict, source: str):
 
         # Sync-only sources: message is saved, no reply, no draft, no admin notify.
         if source not in settings.auto_reply_source_list:
+            from modules.bridge_poller import _mark_core_queue_status
+            await _mark_core_queue_status(source, {"id": dedup_id}, "skipped", "sync_only")
             log.debug(f"[{source.upper()}] sync-only, skipping reply/draft for {sender_clean}")
             continue
+
+        # An unresolved LID is NOT a phone number and must never enter routing
+        # (mirrors the SQLite poller's own `unresolved:` skip). The row is
+        # already persisted above; we only skip reply/draft generation.
+        if str(sender_clean).startswith("unresolved:"):
+            from modules.bridge_poller import _mark_core_queue_status
+            await _mark_core_queue_status(source, {"id": dedup_id}, "skipped", "unresolved_identity")
+            log.info(f"[{source.upper()}] unresolved LID — row saved, routing skipped: {sender_clean}")
+            continue
+
+        from modules.bridge_poller import _mark_core_queue_status, is_media_placeholder
+        from modules.outbound import _pairing_held
+        from shared.system_message import is_automated_system_message
+        chat_jid = str(event.get("chat_jid") or event.get("chatId") or sender)
+        held, _ = await _pairing_held(source)
+        suppressed = (
+            "group_read_index_only" if chat_jid.endswith("@g.us") else
+            "pairing_hold" if held else
+            "automated_system_message" if is_automated_system_message(text) else
+            "unsupported_media" if is_media_placeholder(text) else ""
+        )
+        if suppressed:
+            await _mark_core_queue_status(source, {"id": dedup_id}, "skipped", suppressed)
+            continue
+        _forward_to_agent_if_admin(sender_clean, text, source)
 
         # Full production pipeline — identical to bridge_poller path
         from modules.bridge_poller import process_bridge_inbound
         await process_bridge_inbound(
             source, sender_clean, text,
             id_role=_id_role, id_conf=_id_conf, id_name=_id_name,
-            message_id=msg_id,
+            message_id=dedup_id,
+            core_message_id=core_message_id,
+            chat_jid=chat_jid,
         )
 
         # Background: extract structured facts from inbound message
@@ -2052,6 +3377,10 @@ def _forward_to_agent_if_admin(sender_clean: str, text: str, source: str) -> Non
 
 
 async def _process_message(sender: str, text: str, source: str) -> tuple[str, dict | None]:
+    from modules.message_router import inbound_reference
+    reference = inbound_reference()
+    if reference:
+        return await process_message(sender, text, source, message_id=reference["source_message_ref"])
     return await process_message(sender, text, source)
 
 
@@ -2225,6 +3554,12 @@ async def kb_spa():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "kb.html"))
 
 
+@app.get("/admin/knowledge/recruitment", response_class=HTMLResponse)
+async def recruitment_authority_spa():
+    """Step 4 Recruitment latest-approved authority control-plane page."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "recruitment-knowledge.html"))
+
+
 @app.get("/chat-lab", response_class=HTMLResponse)
 @app.get("/open-chat", response_class=HTMLResponse)
 async def chat_lab_spa():
@@ -2265,7 +3600,7 @@ async def wbom_link_review_spa():
 @app.get("/dashboard/legacy", response_class=HTMLResponse)
 async def dashboard_legacy():
     try:
-        emp_count     = await fetch_one("SELECT COUNT(*) as n FROM wbom_employees WHERE status='active'")
+        emp_count     = await fetch_one("SELECT COUNT(*) as n FROM wbom_employees WHERE LOWER(status)='active'")
         contact_count = await fetch_one("SELECT COUNT(*) as n FROM wbom_contacts")
         msg_count     = await fetch_one("SELECT COUNT(*) as n FROM wbom_whatsapp_messages")
         escort_count  = await fetch_one("SELECT COUNT(*) as n FROM wbom_escort_programs")
@@ -2333,7 +3668,10 @@ h1{{color:#1a472a;font-size:24px}}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-async def _send_meta(to: str, text: str) -> bool:
+async def _send_meta(to: str, text: str, *, authorization=None) -> bool:
+    if not is_transport_authorized(authorization):
+        log.warning("[META] send blocked: authorization_required")
+        return False
     url = f"{settings.meta_api_url}/{settings.meta_phone_number_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
@@ -2355,7 +3693,10 @@ async def _send_meta(to: str, text: str) -> bool:
         return False
 
 
-async def _send_messenger(recipient_id: str, text: str) -> bool:
+async def _send_messenger(recipient_id: str, text: str, *, authorization=None) -> bool:
+    if not is_transport_authorized(authorization):
+        log.warning("[MESSENGER] send blocked: authorization_required")
+        return False
     """Send a Facebook Messenger reply via Page Access Token."""
     if not settings.fb_page_access_token:
         log.error("[MESSENGER] fb_page_access_token not configured")
@@ -2371,7 +3712,7 @@ async def _send_messenger(recipient_id: str, text: str) -> bool:
             r = await client.post(
                 url,
                 json=payload,
-                params={"access_token": settings.fb_page_access_token},
+                headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
             )
             if r.status_code != 200:
                 log.error(f"[MESSENGER] send failed {r.status_code}: {r.text[:200]}")
@@ -2381,7 +3722,10 @@ async def _send_messenger(recipient_id: str, text: str) -> bool:
         return False
 
 
-async def _send_fb_comment_reply(comment_id: str, text: str) -> bool:
+async def _send_fb_comment_reply(comment_id: str, text: str, *, authorization=None) -> bool:
+    if not is_transport_authorized(authorization):
+        log.warning("[FB-COMMENT] send blocked: authorization_required")
+        return False
     """Reply to a Facebook Page comment via Page Access Token."""
     if not settings.fb_page_access_token:
         log.error("[FB-COMMENT] fb_page_access_token not configured")
@@ -2391,7 +3735,7 @@ async def _send_fb_comment_reply(comment_id: str, text: str) -> bool:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 url,
-                params={"access_token": settings.fb_page_access_token},
+                headers={"Authorization": f"Bearer {settings.fb_page_access_token}"},
                 json={"message": text},
             )
             if r.status_code != 200:
@@ -2415,9 +3759,44 @@ async def _save_message(
     msg_type: str = "text",
     source_message_ref: str = "",
     metadata: Optional[dict] = None,
+    actor_type: str = "",
+    actor_id: str = "",
+    # 2026-09-01: additive, all optional. `canonical_phone`/`phone_last10`
+    # default from `sender` for WhatsApp platforms (previously never written on
+    # this path — Meta rows had canonical_phone=NULL). The Phase-2 identity
+    # columns are only ever passed by a caller that has the flag enabled and
+    # has already run the resolver; they land only if migration 078 is applied.
+    canonical_phone: str = "",
+    phone_last10: str = "",
+    sender_name_snapshot: Optional[str] = None,
+    sender_name_source: Optional[str] = None,
+    sender_name_confidence: Optional[int] = None,
+    canonical_message_key: Optional[str] = None,
+    resolved_phone: Optional[str] = None,
+    return_message_id: bool = False,
 ):
+    """actor_type/actor_id (2026-08-28, Stage B1/B4): same attribution
+    concept as modules.bridge_poller._save_message's own actor_type/
+    actor_id -- who/what produced this row, never identity_role (the
+    counterparty). Every existing caller here is either genuine inbound
+    (external_user) or fazle-core's own Meta auto-reply cascade
+    (automation) -- passed explicitly at each call site below, never
+    inferred from message text. Optional/blank keeps this backward
+    compatible with any caller that doesn't pass it."""
     _receiver = receiver_number or _source_to_receiver(source)
     _conv_key = f"{sender}:{source}" if sender else None
+    # canonical_phone / phone_last10 — normalize the counterparty number for
+    # any WhatsApp-family platform when the caller didn't supply them.
+    _WHATSAPP_PLATFORMS = {"bridge1", "bridge2", "bridge3", "meta", "whatsapp"}
+    _canon = canonical_phone or None
+    _last10 = phone_last10 or None
+    if _canon is None and source in _WHATSAPP_PLATFORMS:
+        try:
+            from modules.phone_normalizer import storage_canonical_phone, storage_phone_last10
+            _canon = storage_canonical_phone(sender)
+            _last10 = _last10 or storage_phone_last10(sender)
+        except Exception:
+            _canon = None
     try:
         table = "wbom_whatsapp_messages"
         candidate_columns = (
@@ -2436,6 +3815,15 @@ async def _save_message(
             "extracted_text",
             "source_message_ref",
             "metadata_json",
+            "actor_type",
+            "actor_id",
+            "canonical_phone",
+            "phone_last10",
+            "sender_name_snapshot",
+            "sender_name_source",
+            "sender_name_confidence",
+            "canonical_message_key",
+            "resolved_phone",
         )
         present_columns = await _existing_columns(table, candidate_columns)
 
@@ -2446,7 +3834,7 @@ async def _save_message(
             "message_type": msg_type,
             "direction": direction,
             "platform": source,
-            "is_processed": True,
+            "is_processed": direction != "inbound" if return_message_id else True,
             "contact_identifier": sender,
             "identity_role": identity_role or None,
             "identity_confidence": identity_confidence or None,
@@ -2456,6 +3844,15 @@ async def _save_message(
             "extracted_text": extracted_text or None,
             "source_message_ref": source_message_ref or None,
             "metadata_json": json.dumps(metadata or {}),
+            "actor_type": actor_type or None,
+            "actor_id": actor_id or None,
+            "canonical_phone": _canon,
+            "phone_last10": _last10,
+            "sender_name_snapshot": sender_name_snapshot,
+            "sender_name_source": sender_name_source,
+            "sender_name_confidence": sender_name_confidence,
+            "canonical_message_key": canonical_message_key,
+            "resolved_phone": resolved_phone,
         }
 
         core_columns = ["sender_number", "message_body", "direction", "platform"]
@@ -2472,6 +3869,15 @@ async def _save_message(
             "extracted_text",
             "source_message_ref",
             "metadata_json",
+            "actor_type",
+            "actor_id",
+            "canonical_phone",
+            "phone_last10",
+            "sender_name_snapshot",
+            "sender_name_source",
+            "sender_name_confidence",
+            "canonical_message_key",
+            "resolved_phone",
         ]
         columns.extend(c for c in optional_columns if c in present_columns)
 
@@ -2485,6 +3891,19 @@ async def _save_message(
             for i in range(1, len(values) + 1)
         )
 
+        if return_message_id:
+            if not source_message_ref or "metadata_json" not in present_columns:
+                raise RuntimeError("Inbound provenance requires source ID and metadata_json")
+            from modules.bridge_poller import _core_message_hash
+            columns.append("message_hash")
+            values.append(_core_message_hash(source, source_message_ref))
+            row = await fetch_one(
+                f"INSERT INTO {table} ({', '.join(columns)}) "
+                f"VALUES ({placeholders}, ${len(values)}) "
+                "ON CONFLICT (message_hash) DO NOTHING RETURNING message_id",
+                *values,
+            )
+            return row["message_id"] if row else None
         await execute(
             f"""
             INSERT INTO {table} ({insert_columns})
@@ -2494,6 +3913,8 @@ async def _save_message(
         )
     except Exception as e:
         log.warning(f"Message save error: {e}")
+        if return_message_id:
+            raise
 
 
 def _fallback_webhook_dedup_key(source: str, sender: str, text: str, media_type: str) -> str:
@@ -2508,7 +3929,7 @@ async def _record_meta_delivery_state(message_id: str, state: str, error: str = 
         await execute(
             """UPDATE wbom_whatsapp_messages
                SET metadata_json=COALESCE(metadata_json, '{}'::jsonb) ||
-                   jsonb_build_object('delivery_state', $2::text, 'delivery_error', $3::text)
+                   jsonb_build_object('processing_state', $2::text, 'processing_error', $3::text)
                WHERE platform='meta' AND direction='inbound' AND source_message_ref=$1""",
             message_id, state, error[:500],
         )
@@ -2533,6 +3954,8 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
         log.debug(f"[draft] creation disabled, skipping source={source} recipient={recipient}")
         return
     reply_body = reply_text or ""
+    from modules.message_router import inbound_reference, record_inbound_action
+    reference = inbound_reference()
     # Suppress tight-loop duplicates for the same source+recipient+reply text.
     try:
         dup = await fetch_one(
@@ -2564,29 +3987,36 @@ async def _save_draft(source: str, recipient: str, reply_text: str, intent: str)
         _obs.inc("drafts_rejected_total", labels={"reason": reason or "unknown", "source": source})
         log.warning(f"[draft_quality] rejected source={source} recipient={recipient} reason={reason}")
         try:
-            await execute(
+            draft = await fetch_one(
                 """
                 INSERT INTO fazle_draft_replies
                     (source, recipient, reply_text, intent, draft_only, status, created_at, meta)
                 VALUES ($1, $2, $3, $4, true, $5, NOW(),
-                        jsonb_build_object('quality_reason', $6, 'gate', 'b25'))
+                        jsonb_build_object('quality_reason', $6::text, 'gate', 'b25') || $7::jsonb)
+                RETURNING id
                 """,
                 source, recipient, reply_body, intent,
                 "rejected_fallback" if reason == "llm_fallback" else "rejected_quality",
                 reason or "unknown",
+                json.dumps(reference),
             )
+            if draft:
+                record_inbound_action("draft", draft_id=draft["id"], outcome="rejected_quality")
         except Exception as e:
             log.warning(f"Draft save (rejected) error: {e}")
         return
     try:
-        await execute(
+        draft = await fetch_one(
             """
             INSERT INTO fazle_draft_replies
-                (source, recipient, reply_text, intent, draft_only, status, created_at)
-            VALUES ($1, $2, $3, $4, true, 'pending', NOW())
+                (source, recipient, reply_text, intent, draft_only, status, created_at, meta)
+            VALUES ($1, $2, $3, $4, true, 'pending', NOW(), $5::jsonb)
+            RETURNING id
             """,
-            source, recipient, reply_body, intent,
+            source, recipient, reply_body, intent, json.dumps(reference),
         )
+        if draft:
+            record_inbound_action("draft", draft_id=draft["id"], outcome="created")
     except Exception as e:
         log.warning(f"Draft save error: {e}")
 
@@ -3314,16 +4744,48 @@ async def create_admin_directive(payload: dict, key: str = Depends(require_api_k
     directive_text = (payload or {}).get("directive_text")
     if not directive_text:
         raise HTTPException(400, "directive_text required")
+    subject_type = (payload or {}).get("subject_type")
+    subject_key = (payload or {}).get("subject_key")
+    # Phase 3, 2026-08-25 recovery pass (general Owner business-rule
+    # mutation architecture): conflict check before writing. A caller
+    # (typically Earth via remember_business_rule) that hits this without
+    # `supersede: true` gets the existing conflicting directive back
+    # instead of silently creating a second, contradictory active row on
+    # the same subject -- the caller (or the Owner, via Earth relaying
+    # the conflict) then decides whether to supersede it explicitly.
+    # `supersede` defaults False, so every pre-existing caller (REMEMBER/
+    # FORGET WhatsApp path, any earlier script) that never sends this
+    # field is completely unaffected in the no-conflict case, and gets a
+    # clear 409 instead of silent duplication in the conflict case (a
+    # strict improvement, not a behavior regression for a legitimate use).
+    conflict = await admin_directives.find_conflicting_directive(
+        subject_type, subject_key, directive_text,
+    )
+    if conflict and not (payload or {}).get("supersede"):
+        raise HTTPException(
+            409,
+            {
+                "error": "conflicting_active_directive",
+                "existing_directive": {
+                    "id": conflict["id"],
+                    "directive_text": conflict["directive_text"],
+                    "created_at": conflict["created_at"].isoformat() if conflict.get("created_at") else None,
+                },
+                "hint": "Pass supersede=true to revoke the existing directive and write this one instead.",
+            },
+        )
     actor = await _rbac_actor_from_key(key)
+    if conflict and (payload or {}).get("supersede"):
+        await admin_directives.revoke_directive(conflict["id"], revoked_by_phone=actor.get("phone") or "")
     directive_id = await admin_directives.save_directive(
         directive_text,
         created_by_phone=actor.get("phone") or "",
         created_by_channel="web",
         category=(payload or {}).get("category") or "general",
-        subject_type=(payload or {}).get("subject_type"),
-        subject_key=(payload or {}).get("subject_key"),
+        subject_type=subject_type,
+        subject_key=subject_key,
     )
-    return {"id": directive_id}
+    return {"id": directive_id, "superseded_id": conflict["id"] if conflict else None}
 
 
 @app.post("/admin/directives/{directive_id}/revoke", dependencies=[Depends(require_command("admin_directive_write"))])
@@ -3346,7 +4808,7 @@ async def revoke_admin_directive(directive_id: int, key: str = Depends(require_a
 # was actually sent, so a mistake is traceable after the fact even though
 # there's no separate approval-click step (deliberate design choice -- see
 # project_hermes_unification_20260810.md, Capability Expansion Plan, Level 2).
-_VALID_SOURCE_BRIDGES = {"bridge1", "bridge2", "bridge3", "meta", "meta_whatsapp", "messenger", "facebook_comment"}
+_VALID_SOURCE_BRIDGES = {"bridge1", "bridge2", "bridge3", "meta", "meta_whatsapp", "messenger", "instagram", "facebook_comment"}
 
 
 @app.post("/admin/send-whatsapp", dependencies=[Depends(require_command("send_whatsapp_message"))])
@@ -3396,6 +4858,19 @@ async def send_whatsapp_message(payload: dict, key: str = Depends(require_api_ke
         idempotency_key=idempotency_key,
     )
     deduped = idempotency_key is not None and queue_id is None
+    # Owner directive (2026-08-27, recovery-sweep safety-review pass): this
+    # endpoint used to write straight into wbom_whatsapp_messages here,
+    # immediately after enqueue() returned a queue_id -- but enqueue()
+    # only guarantees the row was ACCEPTED, not that transport delivery
+    # ever succeeds (fazle_outbound_queue retries up to max_attempts=3
+    # with exponential backoff before landing in 'dlq'). Writing at
+    # enqueue time would have permanently marked a candidate/employee as
+    # "already answered" even for a message that never actually reached
+    # them. modules.recruitment_recovery_sweep._reconcile_confirmed_sends()
+    # now performs this write for BOTH this route's "hermes_admin_send"
+    # purpose and the sweep's own "recovery_sweep_reply" purpose, but only
+    # once fazle_outbound_queue confirms status='sent' -- see that
+    # function's own docstring for the full rationale. Nothing to do here.
     await rbac.record_audit(
         channel="http",
         command="send_whatsapp_message",
@@ -3443,7 +4918,7 @@ async def b20_overview():
             return int(r["n"]) if r and r.get("n") is not None else 0
         msg_time_expr, msg_time_column = await _whatsapp_message_time_expr()
         out["counts"] = {
-            "active_employees": await _n("SELECT COUNT(*) AS n FROM wbom_employees WHERE status='active'"),
+            "active_employees": await _n("SELECT COUNT(*) AS n FROM wbom_employees WHERE LOWER(status)='active'"),
             "contacts": await _n("SELECT COUNT(*) AS n FROM wbom_contacts"),
             "messages": await _n("SELECT COUNT(*) AS n FROM wbom_whatsapp_messages"),
             "messages_last_24h": await _n(
