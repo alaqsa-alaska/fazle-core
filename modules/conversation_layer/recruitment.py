@@ -1,17 +1,19 @@
-"""Shadow-only unified recruitment/general inquiry reply layer."""
+"""Authority-safe unified Recruitment fallback reply layer."""
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import httpx
 
 from modules.intent import classify
 from modules.knowledge_base import get_reply as kb_get_reply, get_recruitment_reply
+from modules.recruitment_authority import FactAuthority, facts_for_recruitment_question
 from modules.recruitment_flow import STEP_QUESTIONS, get_active_session, is_recruitment_trigger
 from modules.reply_templates import get_template
 
-from .playbooks import analyze_recruitment_signals, build_rule_reply, classify_reply_safety
+from .playbooks import analyze_recruitment_signals, classify_reply_safety
 from .prompting import build_recruitment_prompt_context
 
 
@@ -63,6 +65,63 @@ async def _generate_shadow_llm_reply(text: str, prompt_context: str, timeout_sec
     except (RuntimeError, OSError, ValueError, ImportError, httpx.HTTPError):
         return None
     return None
+
+
+def _numeric_tokens(text: str) -> set[str]:
+    """Normalize numeric tokens for the fallback's fail-closed check."""
+    translation = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+    return set(re.findall(r"\d+", (text or "").translate(translation)))
+
+
+def _authority_reply_is_safe(
+    reply: str,
+    *,
+    message: str,
+    history: str | None,
+    contact_context: str | None,
+    authority_facts: tuple[FactAuthority, ...],
+) -> bool:
+    """Reject newly invented numbers outside user/context/approved facts."""
+    allowed = _numeric_tokens(message)
+    # History is continuity context, never authority. In particular, an old
+    # assistant answer must not whitelist a retired salary/fee/contact value.
+    allowed.update(_numeric_tokens(contact_context or ""))
+    for fact in authority_facts:
+        if fact.answerable:
+            allowed.update(_numeric_tokens(fact.value or ""))
+    return _numeric_tokens(reply).issubset(allowed)
+
+
+def _safe_authority_fallback(
+    text: str,
+    authority_facts: tuple[FactAuthority, ...],
+) -> str:
+    """Natural fallback unless the register has a current approved value."""
+    has_bangla = bool(re.search(r"[\u0980-\u09ff]", text or ""))
+    unresolved = [fact for fact in authority_facts if not fact.answerable]
+    approved = [fact for fact in authority_facts if fact.answerable]
+    if unresolved:
+        if has_bangla:
+            return (
+                "এই তথ্যের নির্দিষ্ট বর্তমান মান এখনো নিশ্চিত করা হয়নি। "
+                "আপনি চাইলে আপনার প্রশ্ন বা আবেদন-সংক্রান্ত বিস্তারিত বলুন; "
+                "সর্বশেষ তথ্য অফিসে যাচাই করে জানানো হবে।"
+            )
+        return (
+            "That detail is not currently confirmed. Tell me a little more about "
+            "your application, or verify the latest information with the office."
+        )
+    if approved:
+        if has_bangla:
+            return "বর্তমান নিশ্চিত তথ্য:\n" + "\n".join(
+                fact.value for fact in approved if fact.value
+            )
+        return "Current verified information:\n" + "\n".join(
+            fact.value for fact in approved if fact.value
+        )
+    if has_bangla:
+        return "এই প্রশ্নের জন্য বর্তমানে নিশ্চিত তথ্য নেই। অফিসে যাচাই করে জানানো হবে।"
+    return "I do not have a currently verified answer for that. Please verify it with the office."
 
 
 async def simulate_current_core_reply(sender: str, text: str, source: str = "shadow") -> dict[str, Any]:
@@ -129,29 +188,34 @@ async def generate_recruitment_reply(
     text: str,
     source: str = "shadow",
     history: str | None = None,
+    contact_context: str | None = None,
     use_llm: bool = True,
     llm_timeout_seconds: float = 90.0,
 ) -> dict[str, Any]:
-    """Generate a simulated unified recruitment/general inquiry reply.
+    """Generate an authority-safe Recruitment fallback reply.
 
     This function is deliberately read-only: no sends, no DB schema changes, no
-    recruitment session mutations, and no operational workflow calls.
+    recruitment session mutations, and no operational workflow calls. Business
+    facts come only from the Recruitment authority register.
     """
     intent = classify(text)
     signals = analyze_recruitment_signals(text)
+    authority_facts = facts_for_recruitment_question(text, focus=signals.focus)
     kb_reply = await _safe_kb_reply(text, "recruitment")
     rag_context, citations = await _safe_rag_context(text)
-    rule_reply = build_rule_reply(signals)
 
-    reply = rule_reply
-    path = "rule_playbook"
-    if use_llm:
+    if any(not fact.answerable for fact in authority_facts):
+        reply = _safe_authority_fallback(text, authority_facts)
+        path = "authority_safe_unresolved_fact"
+    elif use_llm:
         prompt_context = build_recruitment_prompt_context(
             message=text,
             signals=signals,
-            kb_reply=kb_reply,
-            rag_context=rag_context,
+            kb_reply=None,
+            rag_context=None,
             history=history,
+            contact_context=contact_context,
+            authority_facts=authority_facts,
         )
         try:
             llm_reply = await asyncio.wait_for(
@@ -161,16 +225,31 @@ async def generate_recruitment_reply(
         except TimeoutError:
             llm_reply = None
         if llm_reply:
-            reply = llm_reply.strip()
-            path = "ollama_shadow_direct_playbook_context"
+            candidate_reply = llm_reply.strip()
+            if _authority_reply_is_safe(
+                candidate_reply,
+                message=text,
+                history=history,
+                contact_context=contact_context,
+                authority_facts=authority_facts,
+            ):
+                reply = candidate_reply
+                path = "ollama_shadow_authority_context"
+            else:
+                reply = _safe_authority_fallback(text, authority_facts)
+                path = "ollama_reply_rejected_authority_numeric_check"
         else:
-            path = "rule_playbook_llm_unavailable"
+            reply = _safe_authority_fallback(text, authority_facts)
+            path = "authority_safe_llm_unavailable"
+    else:
+        reply = _safe_authority_fallback(text, authority_facts)
+        path = "authority_safe_llm_disabled"
 
     safety = classify_reply_safety(reply)
     if safety == "restricted":
-        reply = rule_reply
+        reply = _safe_authority_fallback(text, authority_facts)
         safety = classify_reply_safety(reply)
-        path = f"{path}_restricted_replaced_by_rule"
+        path = f"{path}_restricted_replaced_by_authority_safe"
 
     return {
         "mode": "unified_recruitment_layer_shadow",
@@ -201,6 +280,7 @@ async def generate_recruitment_reply_shadow(
     text: str,
     source: str = "shadow",
     history: str | None = None,
+    contact_context: str | None = None,
     use_llm: bool = True,
     llm_timeout_seconds: float = 90.0,
 ) -> dict[str, Any]:
@@ -210,6 +290,7 @@ async def generate_recruitment_reply_shadow(
         text=text,
         source=source,
         history=history,
+        contact_context=contact_context,
         use_llm=use_llm,
         llm_timeout_seconds=llm_timeout_seconds,
     )

@@ -26,9 +26,10 @@ from typing import Optional
 
 from app.database import execute, fetch_all, fetch_val
 from modules import observability as obs
+from shared.sqlite_compat import processed_text_column
 
 from .historical_sync import (
-    _BRIDGE_CONFIGS,
+    _bridge_configs,
     _get_target_jids,
     _load_lid_map_sync,
     _parse_sqlite_ts,
@@ -52,7 +53,7 @@ async def run_gap_scan_once(chat_jids: Optional[list[str]] = None) -> list[dict]
         return []
 
     runs: list[dict] = []
-    for bridge in _BRIDGE_CONFIGS:
+    for bridge in _bridge_configs():
         for jid in target_jids:
             run = await _scan_bridge_chat(bridge, jid)
             runs.append(run)
@@ -237,11 +238,15 @@ def _fetch_sqlite_rows_for_diff(
             f"file:{messages_db}?mode=ro", uri=True, check_same_thread=False
         )
         con.row_factory = sqlite3.Row
+        # `processed_text` is a legacy in-house column absent from the stock
+        # bridge schema — degrade to NULL for stores that lack it (see
+        # shared.sqlite_compat). Read-only.
+        _pt = processed_text_column(con)
         # Newest-first, bounded — we only diff a recent window per pass.
         raw = con.execute(
-            """
+            f"""
             SELECT id, chat_jid, sender, content, timestamp,
-                   is_from_me, media_type, processed_text
+                   is_from_me, media_type, {_pt}
             FROM messages
             WHERE chat_jid = ?
             ORDER BY datetime(timestamp) DESC

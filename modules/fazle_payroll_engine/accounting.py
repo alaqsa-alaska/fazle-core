@@ -12,6 +12,7 @@ floating-point drift.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -24,10 +25,20 @@ from .models import TransactionCreateRequest, TransactionRow, TxnCategory
 
 log = logging.getLogger("fazle.fpe.accounting")
 
+# Categories that represent money actually moving TO the worker. A successful
+# final transaction in one of these activates an inactive employee (Owner
+# business rule 2026-08-30: "If money was successfully sent/authorized through
+# the accountant payment flow, that worker is active."). deduction / correction
+# and reversals never activate.
+_ACTIVATING_CATEGORIES = {TxnCategory.salary, TxnCategory.advance, TxnCategory.bonus}
+
 
 # ── Transaction creation ──────────────────────────────────────────────────────
 
-async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
+async def create_transaction(
+    req: TransactionCreateRequest,
+    conn: Optional[Any] = None,
+) -> TransactionRow:
     """
     Insert one immutable cash transaction and update the employee ledger.
     Returns the created TransactionRow.
@@ -35,22 +46,42 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
     Idempotency is enforced by txn_ref = sha256 of
     (source_message_id + fpe_wa_message_id + employee_id + amount + period + method + source).
     For manual entries, source_message_id falls back to source_message_text.
+
+    conn (2026-08-30): optional caller-supplied connection. When provided,
+    EVERY DB statement here (idempotency check, INSERT, audit, employee
+    activation, ledger upsert, re-fetch) runs on that connection, so the
+    caller can wrap the whole thing in one `async with conn.transaction():`
+    and get transaction + ledger + activation committed atomically. When
+    None (every pre-existing call site, e.g. the FPE accounting worker) the
+    behavior is byte-identical to before — opens its own db_conn() for the
+    INSERT+audit block, ledger upsert on its own connection.
+
+    Employee activation (Owner business rule 2026-08-30): a successful
+    `final` transaction in an activating category (salary/advance/bonus,
+    positive amount, not a reversal) flips an inactive matched employee to
+    'active'. Runs in the same connection/transaction as the INSERT.
     """
     period = req.accounting_period or _period_from_date(req.txn_date)
     txn_ref = _build_txn_ref(req, period)
 
     # Idempotency check
     existing = await fetch_one(
-        "SELECT id, txn_ref, employee_id, amount, payout_method, txn_date, "
-        "txn_category, accounting_period, is_reversal, created_at, source, source_message_id "
+        "SELECT id, txn_ref, employee_id, employee_name_raw, employee_id_phone, employee_phone, "
+        "amount, payout_phone, payout_method, txn_date, txn_category, accounting_period, "
+        "is_reversal, source, source_channel, source_message_id, transaction_status, "
+        "approval_status, approved_by, approved_at, review_status, submitted_by, submitted_at, "
+        "program_id, legacy_wbom_transaction_id, original_payload, metadata, created_at "
         "FROM fpe_cash_transactions WHERE txn_ref = $1",
         txn_ref,
+        conn=conn,
     )
     if existing:
         log.info("[fpe.acct] idempotent hit txn_ref=%s", txn_ref)
         return _row_to_model(existing)
 
-    async with db_conn() as conn:
+    _own_conn = conn is None
+    _cm = db_conn() if _own_conn else contextlib.nullcontext(conn)
+    async with _cm as conn:
         new_id: int = await conn.fetchval(
             """
             INSERT INTO fpe_cash_transactions
@@ -106,14 +137,50 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
             req.created_by,
         )
 
+        # Employee activation on a successful payment (Owner business rule
+        # 2026-08-30). Same connection/transaction as the INSERT above, so
+        # "transaction created but employee left inactive" cannot happen.
+        if (
+            req.employee_id
+            and req.transaction_status.value == "final"
+            and req.txn_category in _ACTIVATING_CATEGORIES
+            and req.amount is not None
+            and req.amount > 0
+        ):
+            _act = await conn.execute(
+                "UPDATE fpe_employees SET status = 'active', updated_at = NOW() "
+                "WHERE id = $1 AND status <> 'active'",
+                req.employee_id,
+            )
+            if isinstance(_act, str) and _act.rsplit(" ", 1)[-1].isdigit() and int(_act.rsplit(" ", 1)[-1]) > 0:
+                await conn.execute(
+                    """
+                    INSERT INTO fpe_accounting_audit_logs
+                        (entity_type, entity_id, action, after_state, performed_by, reason)
+                    VALUES ('employee', $1, 'activate_on_payment', $2, $3, $4)
+                    """,
+                    req.employee_id,
+                    json.dumps({"status": "active", "txn_ref": txn_ref, "amount": str(req.amount)}),
+                    req.created_by,
+                    "successful payment via " + (req.source_channel or req.source.value),
+                )
+                log.info(
+                    "[fpe.acct] activated employee id=%d on successful payment txn_ref=%s",
+                    req.employee_id, txn_ref[:12],
+                )
+
     log.info(
         "[fpe.acct] created txn id=%d ref=%s emp=%s amount=%s method=%s source=%s",
         new_id, txn_ref[:12], req.employee_id, req.amount, req.payout_method, req.source.value,
     )
 
-    # Update ledger only for final (approved) transactions
+    # Update ledger only for final (approved) transactions. Passes `conn`
+    # through so it joins the caller's transaction when one was supplied.
     if req.employee_id and req.transaction_status.value == "final":
-        await _upsert_ledger(req.employee_id, period, req.amount, req.txn_category)
+        await _upsert_ledger(
+            req.employee_id, period, req.amount, req.txn_category,
+            conn=(None if _own_conn else conn),
+        )
 
     row = await fetch_one(
         "SELECT id, txn_ref, employee_id, employee_name_raw, employee_id_phone, employee_phone, "
@@ -123,6 +190,7 @@ async def create_transaction(req: TransactionCreateRequest) -> TransactionRow:
         "program_id, legacy_wbom_transaction_id, original_payload, metadata, created_at "
         "FROM fpe_cash_transactions WHERE id = $1",
         new_id,
+        conn=(None if _own_conn else conn),
     )
     return _row_to_model(row)
 

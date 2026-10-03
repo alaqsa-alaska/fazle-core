@@ -70,6 +70,53 @@ WhatsApp (Meta)
                     ├── DRAFT_CREATION_ENABLED = true
                     ├── OUTBOUND_ENABLED = false (SAFE MODE)
                     └── queue + retry + DLQ
+
+### RBAC Role Hierarchy
+
+Source of truth is the live `fazle_roles` table, not a hardcoded Python dict:
+
+| Level | Role | Scope |
+|---|---|---|
+| 10 | `viewer` | Read-only: status/list/report/backup-status |
+| 20 | `office_assistant` | View attendance list/own records; create attendance draft entries only — no review/approve/edit/salary |
+| 30 | `operator` | Approve/reject drafts, escort confirm, mark paid |
+| 50 | `accountant` | Payroll + payment ingest + cash reconciliation |
+| 70 | `admin` | Backup now, scheduler run, user management |
+| 100 | `superadmin` | Full control including role assignment + delete |
+
+All 48 `fazle_payroll_engine` API endpoints are individually tiered by this hierarchy (audited 2026-07-11), not gated by a blanket "any admin key" check.
+
+### Auth Mechanism
+
+- **Header:** `X-Internal-Key: <key>` on every admin/mutation endpoint — either the master `INTERNAL_API_KEY` (`.env`, rotated 2026-07-12) or an active admin's individually-issued key (`fazle_admins`, checked via `modules.rbac.get_admin_by_api_key()`).
+- **Frontend storage:** each dashboard page stores its key in `localStorage` under its own key name — **4 different names across 7 pages, not unified**: `fazle_api_key` (`dashboard.html`, `open-chat.html`, `wa_chat.html`), `fpe_api_key` (`payroll.html`, `escort-roster.html`), `drafts_api_key` (`drafts.html`), `kb_api_key` (`kb.html`). See `app/static/shared-auth-fetch.js` (added 2026-07-13) for the one page (`escort-roster.html`) migrated to a shared fetch helper so far — it kept its own `fpe_api_key` name/variable, only the header-building/error-parsing logic moved.
+- There is no separate username/password login — API key only.
+
+## Operating Mode
+
+The live `.env` controls whether Fazle Core sends automatically, drafts for
+review, or only records inbound messages. Do not infer safety from code alone;
+always check `.env` before changing reply behavior.
+
+Important current flags:
+
+| Setting | Purpose |
+|---|---|
+| `AUTO_REPLY_ENABLED` | Master switch for normal customer auto-replies |
+| `RECRUITMENT_AUTOREPLY_ENABLED` | Allows recruitment candidate replies through the restricted recruitment flow |
+| `AUTO_REPLY_SOURCES` | Source allow-list for reply/draft processing, usually bridge1, bridge2, and meta |
+| `DRAFT_CREATION_ENABLED` | Stores unsafe or suppressed replies for admin review |
+| `INTERNAL_NOTIFICATIONS_ENABLED` | Allows internal/admin notifications independently from customer auto-reply |
+| `OUTBOUND_ENABLED` | Enables the outbound worker to deliver queued messages |
+| `USE_OUTBOUND_QUEUE` | Sends through the durable outbound queue where supported |
+| `SOCIAL_AUTO_REPLY_SINGLE_ENGINE` | Lets the social reply daemon own supported reply paths and avoid duplicate legacy processing |
+| `OLLAMA_REPLY_DISABLED` | Removes Ollama from customer-facing reply generation when true |
+
+Effective provider chain for generated replies:
+
+```text
+OmniRoute -> Ollama/Hermes -> safe fallback
+
 ```
 
 ### Production safety status

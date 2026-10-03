@@ -1,0 +1,128 @@
+[
+  {
+    "case": "cf_R001_question_misclassified_mixed;_intake_advanced;_que",
+    "case_id": "cf_R001",
+    "expected_turn_type": "pure_question",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R002_question_misclassified_mixed_(job_duties_ask,_name",
+    "case_id": "cf_R002",
+    "expected_turn_type": "pure_question",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R003_question_misclassified_mixed_(cross_border_ask_at_",
+    "case_id": "cf_R003",
+    "expected_turn_type": "pure_question",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R004_conditional_preference_update_at_age_step",
+    "case_id": "cf_R004",
+    "expected_turn_type": "mixed",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R005_recommendation_request_classified_mixed_at_job_pre",
+    "case_id": "cf_R005",
+    "expected_turn_type": "pure_question",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R006_final_acknowledgement_mis_acknowledged_at_done_ste",
+    "case_id": "cf_R006",
+    "expected_turn_type": "acknowledgement",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R007_meta_facebook_ad_opener_at_name_step",
+    "case_id": "cf_R007",
+    "expected_turn_type": "pure_question",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R008_bengali_multi_digit_age_parser_fails",
+    "case_id": "cf_R008",
+    "expected_turn_type": "pure_intake",
+    "phase": "B",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R009_dob_string_mistakenly_parsed_as_age_31",
+    "case_id": "cf_R009",
+    "expected_turn_type": "pure_question (DOB is not a free-form age; clarify)",
+    "phase": "B",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R010_frustration_marker__classified_as_question",
+    "case_id": "cf_R010",
+    "expected_turn_type": "frustration",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R011_banglish_frustration_marker_treated_as_pure_intake",
+    "case_id": "cf_R011",
+    "expected_turn_type": "frustration",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R012_alternative_job_preference_at_phone_confirm_step_i",
+    "case_id": "cf_R012",
+    "expected_turn_type": "mixed",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_R013_repeated_age_value_not_recognized_as_field_locked;",
+    "case_id": "cf_R013",
+    "expected_turn_type": "pure_intake",
+    "phase": "C",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  },
+  {
+    "case": "cf_W001_recruitment_domain_ocrd_text_misrouted_to_operatio",
+    "case_id": "cf_W001",
+    "expected_turn_type": "unrelated / multi_domain (architecture content, not a candidate application)",
+    "phase": "D",
+    "deterministic_legs_pass": true,
+    "llm_legs_status": "NOT_VERIFIED_OFFLINE",
+    "findings": []
+  }
+]

@@ -238,7 +238,8 @@ async def _lookup_contact(phone: str):
                FROM wbom_contacts c
                LEFT JOIN wbom_relation_types rt
                       ON rt.relation_type_id = c.relation_type_id
-               WHERE c.whatsapp_number = $1 AND c.is_active = true""",
+               WHERE c.whatsapp_number = $1 AND c.is_active = true
+                 AND COALESCE(c.platform, 'whatsapp') = 'whatsapp'""",
             v,
         )
         if row:

@@ -13,10 +13,9 @@ order): OmniRoute -> Groq -> local Ollama/Hermes -> Kimi.
     hermes3:3b, hermes3, hermes3:latest, hermes, hermes:latest -- "hermes3"
     is the real Ollama-library family name, "hermes"/"hermes:latest" kept
     as aliases in case a model is ever tagged that way manually), otherwise
-    settings.ollama_model unchanged (currently qwen3:8b). Skipped entirely
-    if OLLAMA_REPLY_DISABLED=true, same as before. 2026-08-05 server check:
-    no Hermes-family model is provisioned yet -- see the Owner-facing report
-    for the exact `ollama pull hermes3:3b` command, not run automatically.
+    settings.ollama_model unchanged (currently hermes3:3b). Skipped entirely
+    if OLLAMA_REPLY_DISABLED=true, same as before. current local inspection confirms `hermes3:3b` is provisioned; no model
+    pull is performed by this resolver.
   - Kimi: reached through the SAME local Ollama client, using
     settings.kimi_model_name (default kimi-k2.6:cloud, Ollama's own
     cloud-model proxy -- confirmed already provisioned on this server).
@@ -165,10 +164,32 @@ async def classify_intent_llm(text: str) -> str:
 
     2026-08-05: intent classification is out of scope for the reply-
     generation/polish chain change — left untouched deliberately, still
-    references github_models (which itself still functions if reached;
-    only its health-check ping was disabled, see app/github_models.py).
+    references github_models.
+    2026-08-23: the GitHub Models leg now skips its live network call
+    entirely when github_models.is_endpoint_confirmed_dead() is True
+    (currently: yes, models.github.ai/inference confirmed retired) and
+    falls straight through to "unknown" instead of waiting out a
+    guaranteed-failing 15s-timeout request. Groq's classification model
+    was also updated the same day (see app/config.py's groq_model_name)
+    after llama-3.1-8b-instant was confirmed retired by Groq.
     """
     settings = get_settings()
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "simple_intent_classification"):
+        request = unified_routing.make_request(
+            "simple_intent_classification", {"text": text}
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            return routed.content
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return "unknown"
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request("simple_intent_classification", {"text": text}), settings
+        )
 
     try:
         from app import ollama
@@ -188,13 +209,22 @@ async def classify_intent_llm(text: str) -> str:
             log.warning("[llm] groq classify failed, falling back to github_models: %s", e)
 
     if settings.github_token:
-        try:
-            from app import github_models
-            result = await github_models.classify_intent_llm(text)
-            if result != "unknown":
-                return result
-        except Exception as e:
-            log.warning("[llm] github_models classify failed: %s", e)
+        from app import github_models
+        if github_models.is_endpoint_confirmed_dead():
+            # 2026-08-23: models.github.ai/inference is confirmed retired
+            # (410 Gone on every request -- see github_models.py's own
+            # _ENDPOINT_CONFIRMED_DEAD note). Skip the guaranteed-failing
+            # live call (and its 15s timeout budget) and fall through to
+            # the same "unknown" result a failed call would have produced
+            # anyway -- return shape/behavior for callers is unchanged.
+            log.debug("[llm] github_models classify skipped -- endpoint confirmed dead")
+        else:
+            try:
+                result = await github_models.classify_intent_llm(text)
+                if result != "unknown":
+                    return result
+            except Exception as e:
+                log.warning("[llm] github_models classify failed: %s", e)
 
     return "unknown"
 
@@ -214,6 +244,46 @@ async def generate_reply(
     """
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "conversational_reply"):
+        request = unified_routing.make_request(
+            "conversational_reply",
+            {
+                "user_message": user_message,
+                "intent": intent,
+                "db_context": db_context,
+                "history": history,
+                "role": role,
+                "source": source,
+            },
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            asyncio.create_task(_save_to_memory(
+                provider=routed.final_provider,
+                model=routed.final_model,
+                trigger_text=user_message,
+                reply_text=routed.content,
+                intent=intent,
+                role=role,
+                source=source,
+                context_used=db_context,
+                is_fallback=routed.final_route_ordinal > 0,
+            ))
+            return routed.content
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return _FALLBACK_REPLY
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request(
+                "conversational_reply",
+                {"user_message": user_message, "intent": intent, "db_context": db_context,
+                 "history": history, "role": role, "source": source},
+            ),
+            settings,
+        )
 
     if settings.omniroute_api_key:
         try:
@@ -355,6 +425,22 @@ async def generate_reply(
     return _FALLBACK_REPLY
 
 
+def _recruitment_reply_is_authority_safe(
+    user_message: str,
+    kb_context: str,
+    reply: str,
+) -> bool:
+    """Apply the same authority boundary to every provider-chain leg."""
+    from modules.recruitment_authority import facts_for_recruitment_question
+    facts = facts_for_recruitment_question(user_message)
+    if any(not fact.answerable for fact in facts):
+        return False
+    if not reply or not kb_context:
+        return bool(reply)
+    from modules.hermes_dispatch import _recruitment_reply_matches_source
+    return _recruitment_reply_matches_source(reply, kb_context)
+
+
 async def generate_recruitment_reply(
     user_message: str,
     kb_context: str,
@@ -365,6 +451,47 @@ async def generate_recruitment_reply(
     """Recruitment-specific reply. OmniRoute → Groq → local Ollama/Hermes → Kimi → safe fallback."""
     settings = get_settings()
     _LAST_ATTEMPTS.set([])
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "recruitment_reply"):
+        request = unified_routing.make_request(
+            "recruitment_reply",
+            {
+                "user_message": user_message,
+                "kb_context": kb_context,
+                "history": history,
+                "contact_context": contact_context,
+                "source": source,
+            },
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            asyncio.create_task(_save_to_memory(
+                provider=routed.final_provider,
+                model=routed.final_model,
+                trigger_text=user_message,
+                reply_text=routed.content,
+                intent="recruitment",
+                source=source,
+                context_used=kb_context,
+                is_fallback=routed.final_route_ordinal > 0,
+            ))
+            if _recruitment_reply_is_authority_safe(user_message, kb_context, routed.content):
+                return routed.content
+            _record_attempt(routed.final_provider, routed.final_model, "authority_rejected")
+            return "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request(
+                "recruitment_reply",
+                {"user_message": user_message, "kb_context": kb_context, "history": history,
+                 "contact_context": contact_context, "source": source},
+            ),
+            settings,
+        )
 
     if settings.omniroute_api_key:
         try:
@@ -376,7 +503,7 @@ async def generate_recruitment_reply(
                 contact_context=contact_context,
                 source=source,
             )
-            if reply:
+            if reply and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
                 _record_attempt("omniroute", settings.omniroute_model_name, "success")
                 asyncio.create_task(_save_to_memory(
                     provider="omniroute",
@@ -407,7 +534,7 @@ async def generate_recruitment_reply(
                 contact_context=contact_context,
                 source=source,
             )
-            if reply:
+            if reply and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
                 _record_attempt("groq", settings.groq_model_name, "success")
                 asyncio.create_task(_save_to_memory(
                     provider="groq",
@@ -440,7 +567,7 @@ async def generate_recruitment_reply(
                 source=source,
                 model=local_model,
             )
-            if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT:
+            if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
                 _record_attempt("ollama", local_model, "success")
                 asyncio.create_task(_save_to_memory(
                     provider="ollama",
@@ -471,7 +598,7 @@ async def generate_recruitment_reply(
             source=source,
             model=settings.kimi_model_name,
         )
-        if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT:
+        if reply and reply != ollama.RECRUITMENT_FALLBACK_TEXT and _recruitment_reply_is_authority_safe(user_message, kb_context, reply):
             _record_attempt("kimi", settings.kimi_model_name, "success")
             asyncio.create_task(_save_to_memory(
                 provider="kimi",
@@ -570,6 +697,162 @@ async def generate_rag_answer(
     """Pass-through so callers using `llm as ai` still work."""
     from app import ollama
     return await ollama.generate_rag_answer(question=question, context=context, model=model)
+
+
+# ── Decision-call orchestrator (2026-08-25, WS1 of the Hermes Owner-Authority
+# recovery pass) ──────────────────────────────────────────────────────
+# Walks the SAME provider chain as generate_reply() / generate_recruitment_
+# reply() (OmniRoute -> Groq -> local Ollama/Hermes -> Kimi), but with a
+# raw system+user prompt shape so the caller (modules.recruitment_turn_
+# decision.decide, via llm_bridge.make_decision_llm_call) supplies its own
+# structured-decision instructions instead of having shared.reply_policy
+# build a free-form customer-reply prompt. Returns raw model text or None;
+# the caller owns JSON parsing, validation, and the fail-closed AMBIGUOUS
+# fallback.
+#
+# Per-call attempt trace is recorded via the same _record_attempt()/
+# get_last_attempts() mechanism generate_reply() uses, so shadow-mode
+# observers can inspect decision-attempt history via get_last_attempts()
+# the same way they currently inspect reply-attempt history.
+async def decision_call(
+    *,
+    system_prompt: str,
+    user_payload: str,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
+    timeout: float = 12.0,
+) -> Optional[str]:
+    """Walk OmniRoute -> Groq -> local Ollama/Hermes -> Kimi with a raw
+    (system, user) prompt pair, returning the first non-empty raw model
+    text. None if every provider returned empty/errored. Never raises.
+
+    Bounded client-side: max_tokens and temperature are clamped to a
+    safe range inside each provider's own decision_call wrapper, so this
+    orchestrator simply forwards callers' intent. Timeout is per-provider
+    call, ALSO bounded to <=25s inside each provider's decision_call.
+    """
+    settings = get_settings()
+    _LAST_ATTEMPTS.set([])
+    from app import unified_routing
+    if unified_routing.workload_enabled(settings, "recruitment_decision"):
+        request = unified_routing.make_request(
+            "recruitment_decision",
+            {
+                "system_prompt": system_prompt,
+                "user_payload": user_payload,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "timeout": timeout,
+            },
+            structured=True,
+        )
+        try:
+            routed = await unified_routing.route_core_workload(request, settings=settings)
+            _LAST_ATTEMPTS.set(list(routed.attempts))
+            return routed.content
+        except unified_routing.RoutingExhausted as exc:
+            _LAST_ATTEMPTS.set(list(exc.attempts))
+            return None
+    elif getattr(settings, "unified_ai_routing_shadow_mode", False):
+        unified_routing.record_shadow_decision(
+            unified_routing.make_request(
+                "recruitment_decision",
+                {"system_prompt": system_prompt, "user_payload": user_payload,
+                 "max_tokens": max_tokens, "temperature": temperature, "timeout": timeout},
+                structured=True,
+            ),
+            settings,
+        )
+
+    # 1. OmniRoute
+    if settings.omniroute_api_key:
+        try:
+            from app import omniroute_provider
+            text = await omniroute_provider.decision_call(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+            )
+            if text:
+                _record_attempt("omniroute", settings.omniroute_model_name, "success")
+                return text
+            _record_attempt("omniroute", settings.omniroute_model_name, "empty_reply")
+            log.warning("[llm] decision_call omniroute returned empty, falling back")
+        except Exception as e:
+            _record_attempt("omniroute", settings.omniroute_model_name, "error", str(e))
+            log.warning("[llm] decision_call omniroute error, falling back: %s: %s", type(e).__name__, e)
+    else:
+        _record_attempt("omniroute", settings.omniroute_model_name, "skipped_not_configured")
+
+    # 2. Groq
+    if settings.groq_api_key:
+        try:
+            from app import groq_provider
+            text = await groq_provider.decision_call(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+            )
+            if text:
+                _record_attempt("groq", settings.groq_model_name, "success")
+                return text
+            _record_attempt("groq", settings.groq_model_name, "empty_reply")
+            log.warning("[llm] decision_call groq returned empty, falling back")
+        except Exception as e:
+            _record_attempt("groq", settings.groq_model_name, "error", str(e))
+            log.warning("[llm] decision_call groq error, falling back: %s", e)
+    else:
+        _record_attempt("groq", settings.groq_model_name, "skipped_not_configured")
+
+    # 3. local Ollama / Hermes — same model-resolution rule as generate_reply
+    if not settings.ollama_reply_disabled:
+        try:
+            from app import ollama
+            local_model = await _resolve_local_ollama_model()
+            text = await ollama.decision_call(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+                model=local_model,
+            )
+            if text:
+                _record_attempt("ollama", local_model, "success")
+                return text
+            _record_attempt("ollama", local_model, "empty_reply")
+            log.warning("[llm] decision_call ollama returned empty, falling back to kimi")
+        except Exception as e:
+            _record_attempt("ollama", settings.ollama_model, "error", str(e))
+            log.warning("[llm] decision_call ollama error, falling back to kimi: %s", e)
+    else:
+        _record_attempt("ollama", settings.ollama_model, "skipped_disabled")
+
+    # 4. Kimi (same local Ollama client, different model tag)
+    try:
+        from app import ollama
+        text = await ollama.decision_call(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            model=settings.kimi_model_name,
+        )
+        if text:
+            _record_attempt("kimi", settings.kimi_model_name, "success")
+            return text
+        _record_attempt("kimi", settings.kimi_model_name, "empty_reply")
+        log.warning("[llm] decision_call kimi returned empty — all providers exhausted")
+    except Exception as e:
+        _record_attempt("kimi", settings.kimi_model_name, "error", str(e))
+        log.error("[llm] decision_call kimi failed — all providers exhausted: %s", e)
+
+    return None
 
 
 

@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from app.config import get_settings
 from app.database import execute, fetch_val
@@ -414,13 +414,26 @@ async def record_ollama_failure(
 
 # ── Entry point ──────────────────────────────────────────────────────────────────
 
+_CENTRAL_DECISION_CONFIDENCE_THRESHOLD = 0.6  # matches validate_semantic_decision()'s own gate
+
+
 async def evaluate_handoff(
     *, sender: str, text: str, source: str, identity: dict, intent: str,
     history: str, message_id: Optional[str],
+    central_semantic_decision: Optional[Any] = None,
 ) -> Optional[HandoffResult]:
     """Single entry point called from modules.route_b.handle_route_b_message()
     after Ollama's own reply has been generated. Returns None if no handoff
-    applies (Route B's own Ollama reply stands unchanged)."""
+    applies (Route B's own Ollama reply stands unchanged).
+
+    central_semantic_decision (2026-08-22, Task-14B, keyword-only,
+    optional): message_router's own already-computed SemanticDecision for
+    this exact turn, when the shadow semantic_gate() call succeeded. Used
+    ONLY to dedup this function's own recruitment-domain use of
+    classify_route_b_category() -- see the dedup block below for the exact
+    condition. Never used for anything else here (Stage 2 employee-claim
+    detection, active-session continuation, and every other Route-B
+    handoff behavior are completely unaffected by this parameter)."""
     settings = get_settings()
     if not settings.route_b_handoff_enabled:
         return None  # master switch off -- zero behavior change from baseline
@@ -438,12 +451,44 @@ async def evaluate_handoff(
         )
         return session_result
 
+    # Task-14B (2026-08-22) dedup: if message_router's central semantic_gate()
+    # already produced a validated, positive recruitment_conversation
+    # decision for THIS turn (same >=0.6 confidence threshold
+    # validate_semantic_decision() itself enforces), reuse it as the
+    # recruitment-domain signal instead of making a SECOND, independent LLM
+    # call via classify_route_b_category() -- max one domain-classification
+    # LLM call per normal turn. Deliberately narrow, per the smallest-safe-
+    # dedup principle: only the recruitment-relevant use of
+    # classify_route_b_category() is deduped this way. A no_match /
+    # employee_conversation / absent / failed central decision falls
+    # through to the existing, completely unchanged classify_route_b_
+    # category() call below -- so Stage 2's employee-claim detection (a
+    # category classify_route_b_category() alone can produce; the central
+    # gate's domain enum has no equivalent for it) is never affected, and
+    # "classification returned no_match" for the central decision still
+    # lets the existing Route-B fallback classifier run, exactly as the
+    # Phase spec requires.
     ollama_category = "none"
-    try:
-        ollama_category = await ollama_mod.classify_route_b_category(text, history=history)
-    except Exception as e:  # classify_route_b_category itself never raises; belt-and-suspenders
-        log.warning("[route_b_handoff] unexpected classify error phone=%s: %s", sender, e)
-        ollama_category = "none"
+    _central_domain = getattr(central_semantic_decision, "domain", None)
+    _central_confidence = getattr(central_semantic_decision, "confidence", 0.0) or 0.0
+    if (
+        central_semantic_decision is not None
+        and _central_domain == "recruitment_conversation"
+        and _central_confidence >= _CENTRAL_DECISION_CONFIDENCE_THRESHOLD
+    ):
+        ollama_category = "recruitment"
+        log.info(
+            "[route_b_handoff] reusing central semantic_gate decision "
+            "(domain=recruitment_conversation, confidence=%.2f) -- skipping "
+            "classify_route_b_category() for phone=%s",
+            _central_confidence, sender,
+        )
+    else:
+        try:
+            ollama_category = await ollama_mod.classify_route_b_category(text, history=history)
+        except Exception as e:  # classify_route_b_category itself never raises; belt-and-suspenders
+            log.warning("[route_b_handoff] unexpected classify error phone=%s: %s", sender, e)
+            ollama_category = "none"
 
     rec_result = await _check_recruitment_handoff(
         sender, text, source, role, intent, history, ollama_category, message_id,

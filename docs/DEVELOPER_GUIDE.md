@@ -42,7 +42,7 @@
 | `open-webui`, `prometheus`, `node-exporter`, `cadvisor`, `promtail`, `loki`, `grafana`, `minio`, `code-server` | various | No / indirect — general VPS observability/tooling, not app dependencies (minio's app usage **not verified**) |
 
 **External services (`app/config.py`):**
-- **Ollama** — default model `phi4-mini:latest`, with tiered overrides (`ollama_business_model=qwen3:8b`, etc.)
+- **Ollama** — default and tiered local model `hermes3:3b` (verified installed); `phi4-mini:latest` is installed but not activated as a fallback.
 - **Groq** (fallback) — `llama-3.1-8b-instant`
 - **GitHub Models** (2nd fallback) — `openai/gpt-4o-mini` via `models.github.ai/inference`, up to 3 rotating tokens
 - **Meta Graph API** — WhatsApp Cloud API, Messenger, Facebook Page comments, all via one webhook

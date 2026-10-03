@@ -71,7 +71,14 @@ async def test_t020_safeops_killswitch_does_not_block_legacy_approve_flow(test_d
             "SELECT status FROM fazle_draft_replies WHERE id=$1",
             draft["id"],
         )
-    assert row["status"] == "sent"
+    assert row["status"] == "approved"
+    async with test_db_pool.acquire() as conn:
+        queue = await conn.fetchrow(
+            "SELECT status FROM fazle_outbound_queue WHERE purpose=\x27admin_approve\x27 "
+            "AND meta_json->>\x27draft_id\x27=$1 ORDER BY id DESC LIMIT 1",
+            str(draft["id"]),
+        )
+    assert queue["status"] == "pending"
 
 
 async def test_t020_safeops_killswitch_does_not_block_legacy_reject_flow(test_db_pool):

@@ -221,10 +221,9 @@ def test_recruitment_policy_fallback_when_kb_empty():
         user_message="job?",
         kb_context="",
     )
-    # NFKC normalisation handles decomposed/precomposed Bengali char variants
-    needle = unicodedata.normalize("NFKC", "অনুমোদিত recruitment source পাওয়া যায়নি")
-    haystack = unicodedata.normalize("NFKC", prompt)
-    assert needle in haystack
+    # Empty external context still uses the two canonical Recruitment documents.
+    assert "[FAZLE_CANONICAL_RECRUITMENT_CONTEXT]" in prompt
+    assert "knowledge_base/01_employee_knowledge/recruitment_policy.md" in prompt
 def test_recruitment_policy_fallback_when_history_empty():
     prompt = build_whatsapp_recruitment_policy(
         source="bridge2",
@@ -238,4 +237,7 @@ def test_recruitment_policy_fallback_when_history_empty():
 # ── Policy version stability ───────────────────────────────────────────────────
 
 def test_policy_version_is_defined():
-    assert POLICY_VERSION == "structured_v2"
+    # structured_v3 (2026-08-29): recruitment personality layer — warm human
+    # recruitment-officer tone, history-aware anti-repetition rules, humor
+    # safety boundary. Business Rules / fact-grounding unchanged.
+    assert POLICY_VERSION == "structured_v4"

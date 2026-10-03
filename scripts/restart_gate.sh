@@ -20,8 +20,25 @@ ENV_FILE=".env"
 BACKUP_DIR="/home/azim/backups/fazle"
 SERVICE="fazle-core.service"
 HEALTH_URL="http://127.0.0.1:$(grep -oP '(?<=^APP_PORT=)\d+' "$ENV_FILE" 2>/dev/null || echo 8200)/health"
+ERROR_LOG="logs/fazle-core-error.log"
 
-CRITICAL_FLAGS=(AUTO_REPLY_ENABLED RECRUITMENT_AUTOREPLY_ENABLED SOCIAL_AUTO_REPLY_SINGLE_ENGINE AI_SAFE_MODE INTERNAL_NOTIFICATIONS_ENABLED)
+# Check 9 (post-restart) bounded-window tuning — see docs/DEPLOYMENT_RESTART_GATE.md
+# "Check 9" for the evidence these are based on. Both are env-overridable for the
+# same reason CRITICAL_FLAGS-adjacent thresholds elsewhere in this script are.
+#   RESTART_GATE_MAX_STARTUP_WAIT_S: bounded wait for uvicorn's own
+#     "Application startup complete." signal (StandardError log) after
+#     `systemctl restart`. Observed lifespan-startup duration across 4
+#     historical restarts (2026-08-25 10:21, 2026-08-27 08:22, 11:02, 17:54):
+#     9-15s consistently, even under real host load — 60s gives ~4-6x margin.
+#   RESTART_GATE_MAX_CORE_SETTLE_S: additional bounded wait ONLY if a CORE
+#     application probe (db/bridges/outbound/ollama/qdrant — excludes the
+#     host-ambient cpu/disk/mem probes) is still degraded/critical once the
+#     app has confirmed it started; 30s covers a slow DB-pool warmup without
+#     turning into an unbounded sleep.
+RESTART_GATE_MAX_STARTUP_WAIT_S="${RESTART_GATE_MAX_STARTUP_WAIT_S:-60}"
+RESTART_GATE_MAX_CORE_SETTLE_S="${RESTART_GATE_MAX_CORE_SETTLE_S:-30}"
+
+CRITICAL_FLAGS=(OUTBOUND_ENABLED AUTO_REPLY_ENABLED RECRUITMENT_AUTOREPLY_ENABLED SOCIAL_AUTO_REPLY_SINGLE_ENGINE AI_SAFE_MODE INTERNAL_NOTIFICATIONS_ENABLED)
 
 BLOCKED=0
 WARNED=0
@@ -92,17 +109,66 @@ check4() {
     [[ -x "$py" ]] || py="python3"
     local suites=(tests/unit/test_admin_commands.py tests/unit/test_drafts_router_mounted.py)
     [[ -f tests/unit/test_rbac.py ]] && suites+=(tests/unit/test_rbac.py)
-    # The test DB shares the `postgres` role/password with production today
-    # (tests/conftest.py's TEST_DB_PASSWORD env var, documented as
-    # "CI-friendly" there) — resolve it from the same .env template so this
-    # check doesn't silently break every time the shared password rotates.
+    # Use only the existing disposable test container; never derive test credentials from production.
     local tdp
-    tdp=$(grep -oP '(?<=^DATABASE_URL_TEMPLATE=postgresql://postgres:)[^@]+' "$ENV_FILE" 2>/dev/null)
-    if TEST_DB_PASSWORD="$tdp" "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4.log 2>&1; then
+    tdp=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' fazle-test-postgres 2>/dev/null | sed -n 's/^POSTGRES_PASSWORD=//p')
+    if [[ -z "$tdp" ]]; then
+        block "4. Targeted tests ............. isolated fazle-test-postgres credential unavailable"
+        return
+    fi
+    if TEST_DATABASE_URL="postgresql://postgres:${tdp}@127.0.0.1:5433/fazle_test" PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4.log 2>&1; then
         summary=$(tail -1 /tmp/restart_gate_check4.log)
         pass "4. Targeted tests ............. ${summary}"
     else
         block "4. Targeted tests ............. FAILED, see /tmp/restart_gate_check4.log"
+    fi
+}
+
+# ── Check 4b: Bridge3 Recruitment Golden Regression ─────────────────────────
+# 2026-08-25 P0 closure (commit b7a302d — cooldown silently dropped
+# active-session recruitment answers, live-confirmed against 38 real
+# candidates). This is the permanent deployment gate for the Owner
+# directive "future behavior may improve, but must not regress below the
+# currently proven production capability." Scoped to the golden suite
+# itself plus the existing suites that already exercise the same call
+# path (bridge_poller cooldown gate, recruitment_flow intake/answer-first,
+# Phase C decision contract) — not the entire test tree, so an unrelated
+# change elsewhere in the repo doesn't pay this cost. A change that
+# genuinely touches any of these files/behaviors must pass this check;
+# nothing here should ever be weakened to make a failure go away — see
+# tests/unit/test_bridge3_recruitment_golden_baseline.py's own docstring.
+check4b() {
+    local py="venv/bin/python"
+    [[ -x "$py" ]] || py="python3"
+    local suites=(
+        tests/unit/test_bridge3_recruitment_golden_baseline.py
+        tests/unit/test_recruitment_cooldown_lead_creation_fix.py
+        tests/unit/test_recruitment_answer_first.py
+        tests/unit/test_recruitment_salary_context_routing_fix.py
+        tests/unit/test_recruitment_age_override.py
+        tests/unit/test_recruitment_phone_confirm_bengali_digits.py
+    )
+    local tdp
+    tdp=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' fazle-test-postgres 2>/dev/null | sed -n 's/^POSTGRES_PASSWORD=//p')
+    if [[ -z "$tdp" ]]; then
+        block "4b. Bridge3 recruitment golden . isolated fazle-test-postgres credential unavailable"
+        return
+    fi
+    if TEST_DATABASE_URL="postgresql://postgres:${tdp}@127.0.0.1:5433/fazle_test" PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest "${suites[@]}" -q >/tmp/restart_gate_check4b.log 2>&1; then
+        summary=$(tail -1 /tmp/restart_gate_check4b.log)
+        pass "4b. Bridge3 recruitment golden . ${summary}"
+    else
+        block "4b. Bridge3 recruitment golden . FAILED, see /tmp/restart_gate_check4b.log"
+    fi
+    # Deterministic 14-case Phase C corpus — same "known-good baseline
+    # must not regress" principle, offline/no-LLM-required.
+    if [[ -f tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py ]]; then
+        if "$py" tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py >/tmp/restart_gate_check4b_corpus.log 2>&1 \
+            && grep -q "deterministic_legs_pass: 14/14" /tmp/restart_gate_check4b_corpus.log; then
+            pass "4c. Phase C regression corpus . 14/14 deterministic legs pass"
+        else
+            block "4c. Phase C regression corpus . did not confirm 14/14, see /tmp/restart_gate_check4b_corpus.log"
+        fi
     fi
 }
 
@@ -130,6 +196,50 @@ check5() {
     else
         [[ "${#missing[@]}" -gt 0 ]] && block "5. Migration inventory ........ ${#missing[@]} file(s) not in $MIGRATION_INVENTORY: ${missing[*]}"
         [[ "${#unexpected[@]}" -gt 0 ]] && block "5. Migration path enforcement . ${#unexpected[@]} unexpected .sql location(s): ${unexpected[*]}"
+    fi
+}
+
+# ── Check 5b: migrations actually applied to the live DB (read-only) ────────
+# 2026-09-01: Check 5 only proves every migration FILE is documented — it
+# does NOT prove those migrations have run against the DB the service will
+# load. Deploying code that assumes a not-yet-applied column is a real
+# failure mode (Phase-2 identity work depends on migration 078). This check
+# is strictly read-only: one `SELECT name FROM schema_migrations`, no DDL,
+# no apply. It never applies anything — a BLOCK here means "run
+# `DATABASE_URL=... python db/migrate.py` first".
+check5b() {
+    local py="venv/bin/python"
+    [[ -x "$py" ]] || py="python3"
+    local dburl
+    dburl=$(grep -oP '(?<=^DATABASE_URL=).*' /home/azim/secure-env-backup/runtime-services.env 2>/dev/null || true)
+    [[ -z "${dburl:-}" ]] && dburl=$(grep -oP '(?<=^DATABASE_URL=).*' "$ENV_FILE" 2>/dev/null || true)
+    if [[ -z "${dburl:-}" ]]; then
+        warn "5b. Migrations applied ........ DATABASE_URL not found — verify schema_migrations manually"
+        return
+    fi
+    local pending rc
+    pending=$(DATABASE_URL="$dburl" "$py" - <<'PYEOF' 2>/dev/null
+import asyncio, os, glob, asyncpg
+async def main():
+    files = {os.path.basename(p) for p in glob.glob("db/migrations/*.sql")}
+    con = await asyncpg.connect(os.environ["DATABASE_URL"], timeout=10)
+    try:
+        applied = {r["name"] for r in await con.fetch("SELECT name FROM schema_migrations")}
+    finally:
+        await con.close()
+    print(" ".join(sorted(files - applied)))
+asyncio.run(main())
+PYEOF
+)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warn "5b. Migrations applied ........ could not query schema_migrations (read-only check skipped)"
+        return
+    fi
+    if [[ -z "$pending" ]]; then
+        pass "5b. Migrations applied ........ every db/migrations/*.sql is recorded in schema_migrations"
+    else
+        block "5b. Migrations applied ........ NOT applied to the live DB: ${pending}  (run: DATABASE_URL=... $py db/migrate.py)"
     fi
 }
 
@@ -169,9 +279,24 @@ check7() {
     fi
 }
 
+# ── Check 7a: writable Recruitment authority backup ─────────────────────────
+check7a() {
+    local py="/home/azim/.venv/bin/python"
+    [[ -x "$py" ]] || py="python3"
+    if "$py" -c 'from modules.backup import backup_authority_register; result = backup_authority_register(); print(result["sha256"])' >/tmp/restart_gate_authority_backup.log 2>&1; then
+        pass "7a. Authority backup .......... validated atomic backup created"
+    else
+        block "7a. Authority backup .......... FAILED, see /tmp/restart_gate_authority_backup.log"
+    fi
+}
+
 echo "Restart Gate — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "──────────────────────────────────────────────────────────"
-check1; check2; check3; check4; check5; check6; check7
+check1; check2; check3; check4; check4b; check5; check5b; check6; check7
+# check-only is explicitly checks 1-7. check7a writes recovery material and is a prerequisite for an actual restart.
+if [[ "${1:-}" == "--restart" ]]; then
+    check7a
+fi
 for r in "${RESULTS[@]}"; do echo "$r"; done
 echo "──────────────────────────────────────────────────────────"
 if [[ "$BLOCKED" -gt 0 ]]; then
@@ -204,30 +329,41 @@ try:
 except Exception:
     print("unreachable")' 2>/dev/null)"
 
+# Baseline captured BEFORE the restart, for Check 9's crash-loop and
+# new-lines-only detection below.
+pre_nrestarts=$(systemctl show "$SERVICE" -p NRestarts --value 2>/dev/null || echo 0)
+pre_errlog_bytes=$( [[ -f "$ERROR_LOG" ]] && wc -c < "$ERROR_LOG" || echo 0)
+
 echo
 echo "Restarting $SERVICE ..."
+t0=$(date +%s)
 sudo systemctl restart "$SERVICE"
 
-# ── Check 9: post-restart health poll with backoff, up to 30s ──────────────
-echo "Check 9: post-restart health poll"
-ok=0
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    sleep 2
-    if code=$(curl -s -o /tmp/restart_gate_health.json -w "%{http_code}" --max-time 3 "$HEALTH_URL" 2>/dev/null); then
-        if [[ "$code" == "200" ]]; then
-            ok=1
-            break
-        fi
-    fi
-done
-
-if [[ "$ok" -eq 1 ]]; then
-    status=$(python3 -c 'import json; print(json.load(open("/tmp/restart_gate_health.json")).get("status","?"))' 2>/dev/null)
-    echo "  after: $status (took up to $((i*2))s)"
-    echo "RESTART: SUCCESS"
-    exit 0
-else
-    echo "  after: unreachable after 30s"
-    echo "RESTART: FAILED — service did not become healthy. See RECOVERY.md for rollback procedure." >&2
-    exit 1
-fi
+# ── Check 9: post-restart readiness poll ────────────────────────────────────
+# Owner directive (2026-08-27, restart-gate false-negative investigation):
+# distinguishes 5 states instead of the old binary "curl returns exactly
+# 200, or FAIL" check, which conflated a fully-started process reporting
+# its OWN documented degraded/critical /health status (a real, valid signal
+# -- see app/main.py's health() route: status=="critical" -> HTTP 503,
+# everything else -> 200) with genuine unreachability. Evidence: the
+# 2026-08-27 17:54 Stage-A restart logged valid 503 access-log lines
+# ("GET /health ... 503") the ENTIRE 30s the old check polled -- the app
+# was reachable and answering the whole time; only ambient host cpu load
+# (unrelated to this deploy) pushed the aggregate status to "critical".
+#
+# The actual state machine lives in scripts/restart_gate_readiness.py
+# (extracted so it's independently unit-testable with fixtures -- see
+# tests/unit/test_restart_gate_readiness.py -- rather than embedded
+# untestably in this bash loop). No production (app/, modules/) code was
+# touched for this; no new HTTP endpoint was added -- the readiness signal
+# is uvicorn's own pre-existing "Application startup complete." line.
+echo "Check 9: post-restart readiness poll"
+python3 scripts/restart_gate_readiness.py poll \
+    --service "$SERVICE" \
+    --health-url "$HEALTH_URL" \
+    --error-log "$ERROR_LOG" \
+    --pre-nrestarts "$pre_nrestarts" \
+    --pre-errlog-bytes "$pre_errlog_bytes" \
+    --max-startup-wait-s "$RESTART_GATE_MAX_STARTUP_WAIT_S" \
+    --max-core-settle-s "$RESTART_GATE_MAX_CORE_SETTLE_S"
+exit $?

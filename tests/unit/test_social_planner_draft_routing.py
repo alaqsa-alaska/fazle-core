@@ -541,3 +541,83 @@ class TestGetEffectiveOfficeNumbers:
         monkeypatch.setattr(admin_directives, "list_directives", AsyncMock(side_effect=RuntimeError("db down")))
         result = await reply_rules.get_effective_office_numbers()
         assert result == reply_rules.OFFICE_NUMBERS
+
+
+class TestSocialAuthorizationGate:
+    @pytest.mark.asyncio
+    async def test_social_sweep_honors_global_outbound_gate(self, monkeypatch):
+        from types import SimpleNamespace
+        import modules.social_auto_reply.send_queue as queue
+
+        monkeypatch.setattr(queue, "get_settings", lambda: SimpleNamespace(auto_reply_enabled=True))
+        monkeypatch.setenv("OUTBOUND_ENABLED", "false")
+        monkeypatch.setattr(queue, "get_pool", lambda: (_ for _ in ()).throw(AssertionError("transport must not be reached")))
+        result = await queue.sweep_once()
+        assert result == {"picked": 0, "sent": 0, "failed": 0, "blocked": 0}
+
+    @pytest.mark.asyncio
+    async def test_social_sweep_honors_auto_reply_gate(self, monkeypatch):
+        from types import SimpleNamespace
+        import modules.social_auto_reply.send_queue as queue
+
+        monkeypatch.setattr(queue, "get_settings", lambda: SimpleNamespace(auto_reply_enabled=False))
+        monkeypatch.setenv("OUTBOUND_ENABLED", "true")
+        monkeypatch.setattr(queue, "get_pool", lambda: (_ for _ in ()).throw(AssertionError("transport must not be reached")))
+        result = await queue.sweep_once()
+        assert result == {"picked": 0, "sent": 0, "failed": 0, "blocked": 0}
+
+    @pytest.mark.asyncio
+    async def test_social_unknown_identity_is_denied_by_canonical_authorization(self, monkeypatch):
+        from types import SimpleNamespace
+        from modules.identity_role_authorization_adapter import AuthorizationEvidence
+        from modules.social_auto_reply import send_queue as queue
+
+        monkeypatch.setattr(queue, "get_settings", lambda: SimpleNamespace(auto_reply_enabled=True))
+        monkeypatch.setenv("OUTBOUND_ENABLED", "true")
+        evidence = AuthorizationEvidence(
+            identity=None, channel_identifier="meta_whatsapp",
+            conversation_key="meta_whatsapp:synthetic", domain="recruitment",
+            authorization_state_available=False, global_outbound_enabled=True,
+        )
+        monkeypatch.setattr(queue, "load_current_authorization_evidence",
+                            AsyncMock(return_value=evidence))
+        row = {
+            "platform": "meta_whatsapp", "target_id": "synthetic",
+            "meta": {"authorization_context": {
+                "present": True, "identity_id": 1, "authorization_version": 1,
+                "conversation_key": "meta_whatsapp:synthetic", "domain": "recruitment",
+                "scope_type": "global", "scope_key": None, "role_names": ["candidate"],
+            }},
+        }
+        with pytest.raises(PermissionError, match="authorization denied"):
+            await queue._authorize_social_row(object(), row)
+
+    @pytest.mark.asyncio
+    async def test_social_authorized_identity_receives_transport_capability(self, monkeypatch):
+        from types import SimpleNamespace
+        from modules.identity_role_authorization import IdentityEvidence, RoleGrant
+        from modules.identity_role_authorization_adapter import AuthorizationEvidence
+        from modules.social_auto_reply import send_queue as queue
+        from modules.outbound_authorization import is_transport_authorized
+
+        monkeypatch.setattr(queue, "get_settings", lambda: SimpleNamespace(auto_reply_enabled=True))
+        monkeypatch.setenv("OUTBOUND_ENABLED", "true")
+        evidence = AuthorizationEvidence(
+            identity=IdentityEvidence("1", "verified"), channel_identifier="meta_whatsapp",
+            conversation_key="meta_whatsapp:synthetic", domain="recruitment",
+            current_roles=(RoleGrant("candidate", frozenset({"recruitment"}), "global", None),),
+            authorization_version=1, global_outbound_enabled=True,
+            domain_auto_reply_enabled=True, authorization_state_available=True,
+        )
+        monkeypatch.setattr(queue, "load_current_authorization_evidence",
+                            AsyncMock(return_value=evidence))
+        row = {
+            "platform": "meta_whatsapp", "target_id": "synthetic",
+            "meta": {"authorization_context": {
+                "present": True, "identity_id": 1, "authorization_version": 1,
+                "conversation_key": "meta_whatsapp:synthetic", "domain": "recruitment",
+                "scope_type": "global", "scope_key": None, "role_names": ["candidate"],
+            }},
+        }
+        capability = await queue._authorize_social_row(object(), row)
+        assert is_transport_authorized(capability)

@@ -1,0 +1,15 @@
+{
+  "_schema": "recruitment-regression-case-input/v1",
+  "case_id": "cf_R011",
+  "thread_phone_masked": "88013899d3c",
+  "inbound_step_at_turn": "experience",
+  "session_fields_at_turn": {
+    "name": null,
+    "age": 24,
+    "area": "Mymensingh",
+    "job_preference": null,
+    "experience": null,
+    "phone_confirm": null
+  },
+  "inbound_message": "Koibar bolsi"
+}

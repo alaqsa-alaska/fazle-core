@@ -114,9 +114,11 @@ async def fetch_one(sql: str, *args, conn: Optional[asyncpg.Connection] = None) 
     _check_shadow_write_guard(sql)
     if conn is not None:
         row = await conn.fetchrow(sql, *args)
+        _observe_inbound_write(sql, dict(row) if row else None)
         return dict(row) if row else None
     async with db_conn() as conn:
         row = await conn.fetchrow(sql, *args)
+        _observe_inbound_write(sql, dict(row) if row else None)
         return dict(row) if row else None
 
 
@@ -133,14 +135,53 @@ async def fetch_all(sql: str, *args, conn: Optional[asyncpg.Connection] = None) 
 async def execute(sql: str, *args, conn: Optional[asyncpg.Connection] = None) -> str:
     _check_shadow_write_guard(sql)
     if conn is not None:
-        return await conn.execute(sql, *args)
+        result = await conn.execute(sql, *args)
+        _observe_inbound_write(sql, result)
+        return result
     async with db_conn() as conn:
-        return await conn.execute(sql, *args)
+        result = await conn.execute(sql, *args)
+        _observe_inbound_write(sql, result)
+        return result
 
 
 async def fetch_val(sql: str, *args, conn: Optional[asyncpg.Connection] = None) -> Any:
     _check_shadow_write_guard(sql)
     if conn is not None:
-        return await conn.fetchval(sql, *args)
+        result = await conn.fetchval(sql, *args)
+        _observe_inbound_write(sql, result)
+        return result
     async with db_conn() as conn:
-        return await conn.fetchval(sql, *args)
+        result = await conn.fetchval(sql, *args)
+        _observe_inbound_write(sql, result)
+        return result
+
+
+def _observe_inbound_write(sql: str, result) -> None:
+    """Attach existing domain write results to the active inbound audit.
+
+    No SQL or argument values are stored. IDs are only recorded when the
+    statement actually returns them; affected-row counts are not IDs.
+    This observer does not execute queries or affect transaction semantics.
+    """
+    import sys
+    router = sys.modules.get("modules.message_router")
+    if router is None or not getattr(router, "inbound_reference", lambda: {})():
+        return
+    match = _WRITE_STMT_RE.match(sql)
+    if not match:
+        return
+    table = match.group(1).lower()
+    if table in {"wbom_whatsapp_messages", "fazle_outbound_queue", "fazle_draft_replies"}:
+        return  # these have explicit, durable relationships
+    fields = {}
+    if isinstance(result, dict):
+        fields["returned_identifiers"] = {
+            k: str(v) for k, v in result.items()
+            if (k == "id" or k.endswith("_id")) and v is not None
+        }
+    elif re.search(r"\bRETURNING\s+[\w\"]+", sql, re.I) and result is not None:
+        fields["returned_identifier"] = str(result)
+    else:
+        fields["result"] = str(result)
+    router.record_inbound_action("business_write", table=table, evidence="statement_result",
+                                operation=sql.lstrip().split()[0].upper(), **fields)

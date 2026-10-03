@@ -431,72 +431,53 @@ async def resolve_or_create_employee(
     """
     Return an fpe_employees row, creating one if needed.
 
-    Rule A: employee_id_phone exact match  → use that employee (even if name differs)
-    Rule B: payout_phone exact match       → use that employee
-    Rule C: name fuzzy match >0.95         → use that employee (no phones given)
-    Rule D: nothing found                  → auto-create with name + phone
+    2026-08-30 (Owner Phase 1 — employee identity authority): this now
+    delegates to the ONE canonical FPE resolver,
+    fazle_payroll_engine.employee.match_or_create_employee(), so the admin
+    `/transactions` API resolves employees by exactly the same rules as the
+    WhatsApp payment-relay accounting path:
+
+      * an explicit employee-ID phone is the sole identity key — a payout
+        phone never resolves to, or creates, a different employee;
+      * a phone match wins over any name match;
+      * existing rows match regardless of active/inactive status (no
+        idx_fpe_emp_phone_unique duplicate-key crash);
+      * a previously unseen identity phone is a new person even when the name
+        matches an existing employee.
+
+    The former local Rules A–D (active-only lookups, no ON CONFLICT on
+    create) are removed. `_create_admin_employee` is retained only as the
+    explicit no-phone fallback below.
     """
+    from modules.fazle_payroll_engine.employee import match_or_create_employee
+
     norm_id_phone = normalize_bd_phone(employee_id_phone) if employee_id_phone else None
     norm_payout   = normalize_bd_phone(payout_phone)       if payout_phone       else None
 
-    # Rule A — employee_id_phone is the strongest identity anchor
-    if norm_id_phone:
+    res = await match_or_create_employee(name, norm_payout, norm_id_phone)
+    if res is not None:
         row = await fetch_one(
             "SELECT id, employee_code, full_name, primary_phone, employee_id_phone "
-            "FROM fpe_employees WHERE employee_id_phone = $1 AND status = 'active'",
-            norm_id_phone,
+            "FROM fpe_employees WHERE id = $1",
+            res.employee_id,
         )
         if row:
-            log.info("[admin_txn] Rule A match id_phone=%s emp_id=%d", norm_id_phone, row["id"])
+            log.info(
+                "[admin_txn] canonical resolver match_type=%s emp_id=%d",
+                res.match_type, res.employee_id,
+            )
             return dict(row)
 
-    # Rule B — payout phone matches primary_phone
-    if norm_payout:
-        row = await fetch_one(
-            "SELECT id, employee_code, full_name, primary_phone, employee_id_phone "
-            "FROM fpe_employees WHERE primary_phone = $1 AND status = 'active'",
-            norm_payout,
-        )
-        if row:
-            log.info("[admin_txn] Rule B match payout_phone=%s emp_id=%d", norm_payout, row["id"])
-            return dict(row)
+    # Canonical resolver declined — only possible with NO phone evidence and
+    # no confident name match. The admin API still allows an explicit create
+    # in that case (authenticated request, human in the loop).
+    if not norm_id_phone and not norm_payout:
+        log.info("[admin_txn] no phone evidence — explicit admin create for name=%r", name)
+        return await _create_admin_employee(name, norm_id_phone, norm_payout)
 
-    # Rule C — no phones provided; try fuzzy name match
-    if not norm_id_phone and not norm_payout and name:
-        from modules.fazle_payroll_engine.employee import normalize_name
-        name_norm = normalize_name(name)
-        if name_norm:
-            # Exact normalized name match
-            row = await fetch_one(
-                "SELECT id, employee_code, full_name, primary_phone, employee_id_phone "
-                "FROM fpe_employees WHERE name_normalized = $1 AND status = 'active'",
-                name_norm,
-            )
-            if row:
-                log.info("[admin_txn] Rule C exact-name match emp_id=%d", row["id"])
-                return dict(row)
-
-            # Fuzzy name — use pg_trgm similarity (>= 0.95)
-            row = await fetch_one(
-                """
-                SELECT id, employee_code, full_name, primary_phone, employee_id_phone,
-                       similarity(name_normalized, $1) AS sim
-                FROM fpe_employees
-                WHERE name_normalized IS NOT NULL
-                  AND status = 'active'
-                  AND similarity(name_normalized, $1) >= 0.95
-                ORDER BY similarity(name_normalized, $1) DESC
-                LIMIT 1
-                """,
-                name_norm,
-            )
-            if row:
-                log.info("[admin_txn] Rule C fuzzy-name match emp_id=%d sim=%.3f",
-                         row["id"], row["sim"])
-                return dict(row)
-
-    # Rule D — create a new employee
-    return await _create_admin_employee(name, norm_id_phone, norm_payout)
+    # Phone evidence was present but the resolver returned None — should not
+    # happen (a phone always yields a match-or-create). Surface loudly.
+    raise ValueError(f"employee could not be resolved for name={name!r}")
 
 
 async def _create_admin_employee(

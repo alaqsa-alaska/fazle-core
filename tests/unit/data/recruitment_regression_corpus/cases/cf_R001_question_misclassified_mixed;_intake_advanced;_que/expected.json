@@ -1,0 +1,42 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R001",
+  "source_case_type": "C",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "pure_question",
+  "expected_intake_step_before": "name",
+  "expected_intake_fields_proposed": {
+    "name": null,
+    "age": null,
+    "dob": null,
+    "phone": null,
+    "job_preference": null,
+    "question_markers": [
+      "কি হবে",
+      "?"
+    ],
+    "fee_markers": []
+  },
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {
+    "name": "question text matched name regex but _looks_like_name returned False"
+  },
+  "expected_should_advance_intake": false,
+  "expected_intake_step_after": "name",
+  "expected_questions": [
+    {
+      "topic": "available_posts_or_job_nature",
+      "must_answer_from_source_of_truth": true,
+      "evidence": "candidate explicitly asks 'চাকরি কি হবে??' = what job will it be?"
+    }
+  ],
+  "expected_should_answer_question": true,
+  "expected_needs_clarification": false,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 1,
+  "expected_factcheck_required": true,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "do NOT silent-route to other workflows; do NOT fabricate a specific post or salary",
+  "phase_that_must_close_this": "C",
+  "reason_evidence": "ACTUAL replay: AI replied with post-list prompt. EXPECTED: answer the question with the source-of-truth available-post section; do NOT advance intake (name already supplied)."
+}

@@ -1,0 +1,689 @@
+"""Responsible/supervisory-role experience verification — unit tests
+(Owner directive, 2026-08-27).
+
+Covers:
+  - modules.recruitment_flow._parse_experience() — Bengali digit/word
+    parsing, never silently converts an unparseable claim to 0
+  - modules.recruitment_flow._is_responsible_role()
+  - modules.recruitment_flow._format_experience_claim_block() /
+    _parse_experience_claim_block() round trip
+  - modules.recruitment_flow._experience_claim_resolved()
+  - modules.recruitment_flow._upsert_experience_claim() — merge
+    semantics, never writes verification_status="verified"/"rejected"
+  - modules.recruitment_flow._route_post_intake_message() — extraction
+    gating, admin-notification trigger only once sufficient detail exists
+    (never on a partial answer), no_relevant_experience path
+  - modules.hermes_dispatch._build_post_intake_state_block() — role-
+    specific question triggered for responsible roles with generic-only
+    experience, training-path guidance for confirmed no-relevant-
+    experience, awaiting-admin-review guidance, non-supervisory roles
+    unaffected
+  - modules.admin_directives.router.trigger_candidate_reference_review()
+
+Each DB/LLM boundary is mocked at the same seam the rest of this test
+suite already mocks (modules.recruitment_flow.fetch_one/execute,
+modules.hermes_dispatch.call_decision_llm, app.database.fetch_one) — no
+real DB or network call.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from modules import hermes_dispatch
+from modules import recruitment_flow as rf
+from modules.admin_directives import router as admin_router
+
+
+# ── _parse_experience ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text,expected", [
+    ("5", 5),
+    ("০", 0),
+    ("৪", 4),
+    ("১০", 10),
+    ("10+ বছর", 10),
+    ("১০+ বছর", 10),
+    ("0", 0),
+    ("নতুন", 0),
+    ("কোনো অভিজ্ঞতা নেই", 0),
+])
+def test_parse_experience_digit_and_zero_forms(text, expected):
+    assert rf._parse_experience(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "দশ বছরের ও বেশি",   # real candidate case, 8801718415009 — word form
+    "দশ বছর প্লাস অভিজ্ঞতা",
+    "অনেক বছর",  # genuinely unparseable — no safe number
+])
+def test_parse_experience_word_forms_do_not_silently_become_zero(text):
+    """Owner directive: 'দশ বছর' etc. must not silently become 0."""
+    result = rf._parse_experience(text)
+    assert result != 0 or "দশ" in text  # "দশ" word-form cases resolve to 10, not 0
+    if "দশ" in text:
+        assert result == 10
+
+
+def test_parse_experience_truly_unparsable_returns_none_not_zero():
+    """Owner directive: if the exact duration can't be safely normalized,
+    preserve as unverified text rather than converting to 0 — signalled
+    by returning None (distinct from a confirmed 0)."""
+    assert rf._parse_experience("অনেক দিন ধরে কাজ করছি") is None
+    assert rf._parse_experience("") is None
+    assert rf._parse_experience("   ") is None
+
+
+def test_parse_experience_never_invents_a_duration():
+    # A word never in the small table and no digits at all -> None, not a guess.
+    assert rf._parse_experience("অনেক") is None
+
+
+# ── intake step preserves raw unparsed claim as unverified text ────────────
+
+@pytest.mark.asyncio
+async def test_intake_experience_step_preserves_raw_claim_when_unparsable():
+    session = {
+        "id": 1, "phone": "8801000000020", "collection_step": "experience",
+        "full_name": "X", "age": 30, "area": "Dhaka",
+        "job_preference": "Security Supervisor", "experience_years": None,
+        "confirmed_phone": None,
+    }
+    upsert_mock = AsyncMock(return_value={"claimed_duration": "দশ বছরের ও বেশি"})
+    with patch("modules.recruitment_flow._get_session", new=AsyncMock(return_value=session)), \
+         patch("modules.recruitment_flow._ensure_candidate_for_session", new=AsyncMock(return_value=42)), \
+         patch("modules.recruitment_flow._update_session", new=AsyncMock()), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._apply_audited_transition", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._upsert_experience_claim", new=upsert_mock):
+        await rf.intake_message("8801000000020", "অনেক দিন ধরে কাজ করছি, নির্দিষ্ট বছর মনে নেই", source="bridge1")
+    upsert_mock.assert_awaited_once()
+    kwargs = upsert_mock.call_args.kwargs
+    assert kwargs["claimed_role"] == "Security Supervisor"
+    assert "অনেক দিন" in kwargs["claimed_duration"]
+
+
+# ── _is_responsible_role ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("role,expected", [
+    ("Security Supervisor", True),
+    ("Assistant Supervisor", True),
+    ("Ghat Supervisor", True),
+    ("Ghat In-Charge", True),
+    ("Operation Officer", True),
+    ("Security In-Charge", True),
+    ("Supervisor", True),
+    ("Escort", False),
+    ("Survey Scout", False),
+    ("Security Guard", False),
+    ("Marketing Officer", False),
+    (None, False),
+    ("", False),
+])
+def test_is_responsible_role(role, expected):
+    assert rf._is_responsible_role(role) is expected
+
+
+# ── experience-claim block format / parse round trip ────────────────────────
+
+def test_experience_claim_block_round_trip():
+    block = rf._format_experience_claim_block(
+        claimed_role="Security Supervisor", claimed_company="ABC Security",
+        claimed_duration="৩ বছর", reference_name="Karim",
+        reference_phone="01711111111", verification_status="unverified",
+    )
+    parsed = rf._parse_experience_claim_block(block)
+    assert parsed["claimed_role"] == "Security Supervisor"
+    assert parsed["claimed_company"] == "ABC Security"
+    assert parsed["claimed_duration"] == "৩ বছর"
+    assert parsed["reference_name"] == "Karim"
+    assert parsed["reference_phone"] == "01711111111"
+    assert parsed["verification_status"] == "unverified"
+
+
+def test_experience_claim_block_parse_none_when_absent():
+    assert rf._parse_experience_claim_block(None) is None
+    assert rf._parse_experience_claim_block("") is None
+    assert rf._parse_experience_claim_block("some unrelated note text") is None
+
+
+def test_experience_claim_block_preserves_unrelated_notes_content():
+    block = rf._format_experience_claim_block(claimed_role="Escort")
+    notes_with_prior_content = f"office visit scheduled 2026-08-20\n\n{block}"
+    parsed = rf._parse_experience_claim_block(notes_with_prior_content)
+    assert parsed["claimed_role"] == "Escort"
+
+
+# ── _experience_claim_resolved ───────────────────────────────────────────────
+
+def test_experience_claim_resolved_false_when_none():
+    assert rf._experience_claim_resolved(None) is False
+
+
+def test_experience_claim_resolved_false_when_partial_detail_only():
+    assert rf._experience_claim_resolved({"claimed_company": "ABC Security"}) is False
+
+
+def test_experience_claim_resolved_true_when_company_and_duration_present():
+    assert rf._experience_claim_resolved(
+        {"claimed_company": "ABC Security", "claimed_duration": "৩ বছর"}
+    ) is True
+
+
+def test_experience_claim_resolved_true_for_no_relevant_experience_sentinel():
+    assert rf._experience_claim_resolved(
+        {"claimed_company": rf._NO_RELEVANT_EXPERIENCE_SENTINEL}
+    ) is True
+
+
+def test_experience_claim_resolved_true_when_awaiting_admin_review():
+    assert rf._experience_claim_resolved({"verification_status": "awaiting_admin_review"}) is True
+
+
+# ── _upsert_experience_claim ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_upsert_experience_claim_merges_across_turns_without_overwriting():
+    """Owner directive: candidate answers across several messages —
+    a later call with only reference_name must not blank out an
+    already-known claimed_company from an earlier call."""
+    existing_block = rf._format_experience_claim_block(
+        claimed_role="Security Supervisor", claimed_company="ABC Security",
+    )
+    fetch_mock = AsyncMock(return_value={"notes": existing_block})
+    execute_mock = AsyncMock()
+    with patch("modules.recruitment_flow.fetch_one", new=fetch_mock), \
+         patch("modules.recruitment_flow.execute", new=execute_mock):
+        merged = await rf._upsert_experience_claim(42, reference_name="Karim")
+    assert merged["claimed_company"] == "ABC Security"  # preserved, not blanked
+    assert merged["reference_name"] == "Karim"
+    execute_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upsert_experience_claim_never_writes_verified_or_rejected():
+    """Owner directive: do not mark any external experience claim
+    verified automatically — automated code only ever writes
+    'unverified' or 'awaiting_admin_review'."""
+    fetch_mock = AsyncMock(return_value={"notes": None})
+    execute_mock = AsyncMock()
+    with patch("modules.recruitment_flow.fetch_one", new=fetch_mock), \
+         patch("modules.recruitment_flow.execute", new=execute_mock):
+        merged = await rf._upsert_experience_claim(
+            42, claimed_role="Security Supervisor", claimed_company="ABC Security",
+            claimed_duration="৫ বছর",
+        )
+    assert merged["verification_status"] == "unverified"
+    written_notes = execute_mock.call_args.args[1]
+    assert "verified" not in written_notes.replace("unverified", "").replace("awaiting_admin_review", "")
+
+
+@pytest.mark.asyncio
+async def test_upsert_experience_claim_returns_none_on_db_error():
+    with patch("modules.recruitment_flow.fetch_one", new=AsyncMock(side_effect=RuntimeError("boom"))):
+        merged = await rf._upsert_experience_claim(42, claimed_role="Escort")
+    assert merged is None
+
+
+# ── _route_post_intake_message: admin-review trigger gating ────────────────
+
+def _post_intake_session(job_preference="Security Supervisor"):
+    return {
+        "id": 1, "candidate_id": 42, "funnel_stage": "scored",
+        "post_intake_active": True, "post_intake_status": "awaiting_agreement",
+        "job_preference": job_preference,
+    }
+
+
+@pytest.mark.asyncio
+async def test_route_post_intake_no_admin_notification_on_partial_detail():
+    """Owner directive: do NOT notify Admin on every partial answer —
+    company only, no duration yet, must not trigger."""
+    trigger_mock = AsyncMock()
+    classify_result = {
+        "post_intake_status": None,
+        "experience": {"claimed_company": "ABC Security"},  # no duration yet
+    }
+    with patch("modules.recruitment_flow.fetch_one", new=AsyncMock(return_value={"notes": None})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=classify_result)), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._upsert_experience_claim",
+               new=AsyncMock(return_value={"claimed_company": "ABC Security", "verification_status": "unverified"})), \
+         patch("modules.admin_directives.router.trigger_candidate_reference_review", new=trigger_mock), \
+         patch("modules.preflight_guard.is_feature_active", return_value=False), \
+         patch("modules.conversation_layer.generate_recruitment_reply", new=AsyncMock(return_value="ঠিক আছে")):
+        await rf._route_post_intake_message(
+            "8801000000021", "ABC Security-তে কাজ করেছি", source="bridge1", message_id=None,
+            active_session=_post_intake_session(), contact_context="", history="",
+            decision={"autosend": False},
+        )
+    trigger_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_route_post_intake_admin_notification_once_sufficient_detail():
+    """Owner directive: trigger review once company + duration (+
+    reference where available) are known."""
+    trigger_mock = AsyncMock()
+    classify_result = {
+        "post_intake_status": None,
+        "experience": {
+            "claimed_company": "ABC Security", "claimed_duration": "৫ বছর",
+            "reference_name": "Karim", "reference_phone": "01711111111",
+        },
+    }
+    sufficient_claim = {
+        "claimed_role": "Security Supervisor", "claimed_company": "ABC Security",
+        "claimed_duration": "৫ বছর", "reference_name": "Karim",
+        "reference_phone": "01711111111", "verification_status": "unverified",
+    }
+    upsert_mock = AsyncMock(side_effect=[
+        sufficient_claim,
+        {**sufficient_claim, "verification_status": "awaiting_admin_review"},
+    ])
+    with patch("modules.recruitment_flow.fetch_one", new=AsyncMock(return_value={"notes": None})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=classify_result)), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._upsert_experience_claim", new=upsert_mock), \
+         patch("modules.admin_directives.router.trigger_candidate_reference_review", new=trigger_mock), \
+         patch("modules.preflight_guard.is_feature_active", return_value=False), \
+         patch("modules.conversation_layer.generate_recruitment_reply", new=AsyncMock(return_value="ঠিক আছে")):
+        await rf._route_post_intake_message(
+            "8801000000022", "ABC Security-তে ৫ বছর, reference Karim 01711111111", source="bridge1",
+            message_id=None, active_session=_post_intake_session(), contact_context="", history="",
+            decision={"autosend": False},
+        )
+    trigger_mock.assert_awaited_once()
+    kwargs = trigger_mock.call_args.kwargs
+    assert kwargs["candidate_id"] == 42
+    assert kwargs["claim"]["claimed_company"] == "ABC Security"
+
+
+@pytest.mark.asyncio
+async def test_route_post_intake_no_relevant_experience_skips_admin_notification():
+    trigger_mock = AsyncMock()
+    classify_result = {"post_intake_status": None, "experience": {"no_relevant_experience": True}}
+    upsert_mock = AsyncMock(return_value={
+        "claimed_company": rf._NO_RELEVANT_EXPERIENCE_SENTINEL, "verification_status": "unverified",
+    })
+    with patch("modules.recruitment_flow.fetch_one", new=AsyncMock(return_value={"notes": None})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=classify_result)), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._upsert_experience_claim", new=upsert_mock), \
+         patch("modules.admin_directives.router.trigger_candidate_reference_review", new=trigger_mock), \
+         patch("modules.preflight_guard.is_feature_active", return_value=False), \
+         patch("modules.conversation_layer.generate_recruitment_reply", new=AsyncMock(return_value="ঠিক আছে")):
+        await rf._route_post_intake_message(
+            "8801000000023", "না এই কাজে অভিজ্ঞতা নেই", source="bridge1", message_id=None,
+            active_session=_post_intake_session(), contact_context="", history="",
+            decision={"autosend": False},
+        )
+    trigger_mock.assert_not_called()
+    upsert_mock.assert_awaited_once()
+    assert upsert_mock.call_args.kwargs["claimed_company"] == rf._NO_RELEVANT_EXPERIENCE_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_route_post_intake_extraction_not_requested_for_non_supervisory_role():
+    """Owner directive: non-supervisory roles unaffected — no extraction
+    instructions, no notes lookup at all."""
+    classify_mock = AsyncMock(return_value={"post_intake_status": None, "experience": None})
+    fetch_mock = AsyncMock(return_value={"notes": None})
+    with patch("modules.recruitment_flow.fetch_one", new=fetch_mock), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=classify_mock), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.preflight_guard.is_feature_active", return_value=False), \
+         patch("modules.conversation_layer.generate_recruitment_reply", new=AsyncMock(return_value="ঠিক আছে")):
+        await rf._route_post_intake_message(
+            "8801000000024", "নতুন", source="bridge1", message_id=None,
+            active_session=_post_intake_session(job_preference="Escort"), contact_context="", history="",
+            decision={"autosend": False},
+        )
+    fetch_mock.assert_not_called()  # no pre-check notes lookup for a non-responsible role
+    classify_mock.assert_awaited_once()
+    assert classify_mock.call_args.kwargs["extract_experience_role"] is None
+
+
+@pytest.mark.asyncio
+async def test_route_post_intake_extraction_skipped_once_already_resolved():
+    """Once a claim is already sufficient (or no_relevant_experience),
+    stop asking — no repeated extraction calls."""
+    resolved_claim_notes = rf._format_experience_claim_block(
+        claimed_company=rf._NO_RELEVANT_EXPERIENCE_SENTINEL,
+    )
+    classify_mock = AsyncMock(return_value={"post_intake_status": None, "experience": None})
+    with patch("modules.recruitment_flow.fetch_one", new=AsyncMock(return_value={"notes": resolved_claim_notes})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=classify_mock), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.preflight_guard.is_feature_active", return_value=False), \
+         patch("modules.conversation_layer.generate_recruitment_reply", new=AsyncMock(return_value="ঠিক আছে")):
+        await rf._route_post_intake_message(
+            "8801000000025", "ধন্যবাদ", source="bridge1", message_id=None,
+            active_session=_post_intake_session(), contact_context="", history="",
+            decision={"autosend": False},
+        )
+    assert classify_mock.call_args.kwargs["extract_experience_role"] is None
+
+
+# ── hermes_dispatch._build_post_intake_state_block: responsible-role rules ──
+
+@pytest.mark.asyncio
+async def test_state_block_asks_role_specific_question_when_generic_only():
+    session_row = {
+        "candidate_id": 42, "full_name": "Nazmul", "age": 27, "area": "Tangail",
+        "job_preference": "Security Supervisor", "experience_years": 4,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "কোন কোম্পানিতে" in block
+    assert "reference" in block.lower() or "contact" in block.lower()
+    assert "যথেষ্ট নয়" in block
+
+
+@pytest.mark.asyncio
+async def test_state_block_training_path_when_no_relevant_experience_confirmed():
+    session_row = {
+        "candidate_id": 42, "full_name": "Shuvo", "age": 20, "area": "Nilphamari",
+        "job_preference": "Assistant Supervisor", "experience_years": 0,
+    }
+    claim_notes = rf._format_experience_claim_block(claimed_company=rf._NO_RELEVANT_EXPERIENCE_SENTINEL)
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": claim_notes})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "practical learning" in block or "training" in block
+    assert "প্রত্যাখ্যান কোরো না" in block
+
+
+@pytest.mark.asyncio
+async def test_state_block_awaiting_admin_review_does_not_ask_again():
+    session_row = {
+        "candidate_id": 42, "full_name": "Karim", "age": 30, "area": "Chattogram",
+        "job_preference": "Ghat Supervisor", "experience_years": 5,
+    }
+    claim_notes = rf._format_experience_claim_block(
+        claimed_company="ABC Ghat", claimed_duration="৫ বছর", verification_status="awaiting_admin_review",
+    )
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": claim_notes})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "verified" in block.lower() or "যাচাই হয়ে গেছে" in block
+    assert "আবার চাইবে না" in block
+
+
+@pytest.mark.asyncio
+async def test_state_block_non_supervisory_role_unaffected():
+    session_row = {
+        "candidate_id": 42, "full_name": "Karim", "age": 25, "area": "Cox's Bazar",
+        "job_preference": "Escort", "experience_years": 0,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    # No role-specific verification rule injected for a non-supervisory role.
+    assert "কোন কোম্পানিতে, কত বছর কাজ করেছেন" not in block
+
+
+@pytest.mark.asyncio
+async def test_state_block_renders_generic_experience_years_fact():
+    """Fixes a pre-existing omission: experience_years was fetched into
+    session_row but never rendered into the facts block."""
+    session_row = {
+        "candidate_id": 42, "full_name": "Karim", "age": 30, "area": "Dhaka",
+        "job_preference": "Escort", "experience_years": 3,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "সাধারণ অভিজ্ঞতা" in block
+
+
+# ── admin_directives.router.trigger_candidate_reference_review ─────────────
+
+@pytest.mark.asyncio
+async def test_trigger_candidate_reference_review_sends_with_stable_idempotency_key():
+    enqueue_mock = AsyncMock(return_value=101)
+    claim = {
+        "claimed_role": "Security Supervisor", "claimed_company": "ABC Security",
+        "claimed_duration": "৫ বছর", "reference_name": "Karim", "reference_phone": "01711111111",
+    }
+    with patch("modules.admin_directives.router.get_settings",
+               return_value=type("S", (), {"admin_bridge2_number": "8801900000000"})()), \
+         patch("modules.admin_directives.router.outbound.enqueue", new=enqueue_mock):
+        await admin_router.trigger_candidate_reference_review(candidate_id=42, phone="8801000000022", claim=claim)
+    enqueue_mock.assert_awaited_once()
+    kwargs = enqueue_mock.call_args.kwargs
+    assert kwargs["idempotency_key"] == "candref-42"
+    assert kwargs["purpose"] == "candidate_reference_review"
+    assert "ABC Security" in enqueue_mock.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_trigger_candidate_reference_review_skips_when_bridge2_not_configured():
+    enqueue_mock = AsyncMock()
+    with patch("modules.admin_directives.router.get_settings",
+               return_value=type("S", (), {"admin_bridge2_number": ""})()), \
+         patch("modules.admin_directives.router.outbound.enqueue", new=enqueue_mock):
+        await admin_router.trigger_candidate_reference_review(candidate_id=42, phone="8801000000022", claim={})
+    enqueue_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trigger_candidate_reference_review_never_raises_on_enqueue_failure():
+    with patch("modules.admin_directives.router.get_settings",
+               return_value=type("S", (), {"admin_bridge2_number": "8801900000000"})()), \
+         patch("modules.admin_directives.router.outbound.enqueue",
+               new=AsyncMock(side_effect=RuntimeError("boom"))):
+        await admin_router.trigger_candidate_reference_review(candidate_id=42, phone="8801000000022", claim={})
+
+
+# ── Defect-1 diagnosis (Owner report, 2026-08-27): does the write-before-
+# generate sequence inside _route_post_intake_message() already resolve
+# no_relevant_experience WITHIN the same turn, so the reply skips the
+# verification question and gives training-path guidance instead? These
+# are true end-to-end tests (classify+extract -> notes write -> fresh
+# session-state read -> reply) with every DB/LLM boundary mocked, proving
+# the real orchestration's behavior rather than a single function in
+# isolation. Confirmed: this already worked correctly in committed code
+# (2b2e3e3) — the apparent "re-asks after 0" defect reported live was an
+# artifact of a dry-run script that called generate_recruitment_reply()
+# directly, bypassing the write step, to avoid live side effects. No
+# production code change was needed for this half of the report — these
+# tests exist so that invariant has a permanent regression guard.
+
+def _fake_db_fetch_one_factory(*, job_preference, experience_years, notes_holder):
+    """Builds an app.database.fetch_one stand-in that answers BOTH real
+    queries _build_recruitment_session_state_block()'s call chain makes:
+    the fazle_recruitment_sessions row, and (once routed to the post-
+    intake branch) the wbom_candidates notes lookup — reading notes_holder
+    live, so a write during the same call is visible to the next read."""
+    async def _fake(sql, *args):
+        if "wbom_candidates" in sql and "notes" in sql:
+            return {"post_intake_status": "awaiting_agreement", "notes": notes_holder["value"]}
+        if "fazle_recruitment_sessions" in sql:
+            return {
+                "full_name": "Candidate", "age": 25, "area": "Dhaka",
+                "job_preference": job_preference, "experience_years": experience_years,
+                "confirmed_phone": None, "collection_step": "complete",
+                "funnel_stage": "scored", "candidate_id": 42,
+            }
+        return None
+    return _fake
+
+
+def _fake_upsert_factory(notes_holder):
+    async def _fake_upsert(candidate_id, **fields):
+        merged = dict(rf._parse_experience_claim_block(notes_holder["value"]) or {})
+        for k, v in fields.items():
+            if v:
+                merged[k] = v
+        merged.setdefault("verification_status", "unverified")
+        block = rf._format_experience_claim_block(**{
+            k: merged.get(k) for k in
+            ("claimed_role", "claimed_company", "claimed_duration",
+             "reference_name", "reference_phone", "verification_status")
+        })
+        notes_holder["value"] = block
+        return merged
+    return _fake_upsert
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,duration_claim", [
+    ("0", "0"),
+    ("নতুন", "নতুন"),
+])
+async def test_no_relevant_experience_resolves_within_same_turn_no_duplicate_question(text, duration_claim):
+    """Owner requirement: 0 / নতুন / a confidently-established no-
+    relevant-experience answer must move straight to training-path
+    guidance in THIS turn's reply — not repeat the verification
+    question. Proven end-to-end through the real orchestration."""
+    notes_holder = {"value": None}
+    active_session = {
+        "id": 1, "candidate_id": 42, "funnel_stage": "scored",
+        "post_intake_active": True, "post_intake_status": "awaiting_agreement",
+        "job_preference": "Security Supervisor",
+    }
+    classify_result = {
+        "post_intake_status": None,
+        "experience": {"claimed_duration": duration_claim, "no_relevant_experience": True},
+    }
+    captured_state_block = {}
+
+    async def fake_generate_reply(**kw):
+        block = await hermes_dispatch._build_recruitment_session_state_block(kw["phone"])
+        captured_state_block["value"] = block
+        return block or "fallback"
+
+    with patch("modules.recruitment_flow.fetch_one",
+               new=AsyncMock(side_effect=lambda sql, *a: {"notes": notes_holder["value"]})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=classify_result)), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._upsert_experience_claim",
+               new=_fake_upsert_factory(notes_holder)), \
+         patch("modules.admin_directives.router.trigger_candidate_reference_review", new=AsyncMock()), \
+         patch("app.database.fetch_one",
+               new=AsyncMock(side_effect=_fake_db_fetch_one_factory(
+                   job_preference="Security Supervisor", experience_years=0, notes_holder=notes_holder))), \
+         patch("modules.preflight_guard.is_feature_active", return_value=True), \
+         patch("modules.hermes_dispatch.generate_recruitment_reply", new=fake_generate_reply):
+        await rf._route_post_intake_message(
+            "8801000000030", text, source="bridge3", message_id=None,
+            active_session=active_session, contact_context="", history=f"Them: {text}",
+            decision={"autosend": False},
+        )
+
+    state_block = captured_state_block["value"]
+    assert "practical learning" in state_block or "training" in state_block
+    assert "প্রত্যাখ্যান কোরো না" in state_block
+    # The re-ask rule (asks for company/duration/reference) must NOT be
+    # present alongside the training-path rule — that would mean both
+    # branches fired, i.e. a duplicate question.
+    assert "contact person" not in state_block
+
+
+@pytest.mark.asyncio
+async def test_generic_positive_years_still_asks_via_full_orchestration():
+    """Owner requirement: a generic POSITIVE years answer (e.g. 4) is
+    NOT sufficient — must still ask for role/company/reference, proven
+    end-to-end (not just at the state-block-unit level)."""
+    notes_holder = {"value": None}
+    active_session = {
+        "id": 1, "candidate_id": 42, "funnel_stage": "scored",
+        "post_intake_active": True, "post_intake_status": "awaiting_agreement",
+        "job_preference": "Security Supervisor",
+    }
+    classify_result = {"post_intake_status": None, "experience": None}  # nothing confidently extracted from "4" alone
+    captured_state_block = {}
+
+    async def fake_generate_reply(**kw):
+        block = await hermes_dispatch._build_recruitment_session_state_block(kw["phone"])
+        captured_state_block["value"] = block
+        return block or "fallback"
+
+    with patch("modules.recruitment_flow.fetch_one",
+               new=AsyncMock(side_effect=lambda sql, *a: {"notes": notes_holder["value"]})), \
+         patch("modules.recruitment_flow._classify_post_intake_turn", new=AsyncMock(return_value=classify_result)), \
+         patch("modules.recruitment_flow._audit_candidate_conversation", new=AsyncMock(return_value=True)), \
+         patch("modules.recruitment_flow._resolve_fee_policy_reply", new=AsyncMock(return_value=None)), \
+         patch("modules.recruitment_flow._upsert_experience_claim", new=AsyncMock()), \
+         patch("modules.admin_directives.router.trigger_candidate_reference_review", new=AsyncMock()), \
+         patch("app.database.fetch_one",
+               new=AsyncMock(side_effect=_fake_db_fetch_one_factory(
+                   job_preference="Security Supervisor", experience_years=4, notes_holder=notes_holder))), \
+         patch("modules.preflight_guard.is_feature_active", return_value=True), \
+         patch("modules.hermes_dispatch.generate_recruitment_reply", new=fake_generate_reply):
+        await rf._route_post_intake_message(
+            "8801000000031", "4", source="bridge3", message_id=None,
+            active_session=active_session, contact_context="", history="Them: 4",
+            decision={"autosend": False},
+        )
+
+    state_block = captured_state_block["value"]
+    assert "কোন কোম্পানিতে" in state_block
+    assert "যথেষ্ট নয়" in state_block
+
+
+# ── Defect-2 fix (Owner report, 2026-08-27): canonical stored job_
+# preference must outrank a stray role mention elsewhere in history/
+# conversation content. Real case: candidate 8801***043's canonical role
+# is Escort, but the generated reply cited Security Guard's salary/terms
+# because the candidate's own OLD intake answer contained the substring
+# "Security Guard". Fix lives in _build_post_intake_state_block() (an
+# unconditional rule, not inside the responsible-role branch — this
+# candidate is Escort, a non-responsible role).
+
+@pytest.mark.asyncio
+async def test_canonical_role_authority_rule_present_for_escort_with_stray_role_history():
+    session_row = {
+        "candidate_id": 42, "full_name": "Karim", "age": 25, "area": "Cox's Bazar",
+        "job_preference": "Escort", "experience_years": 0,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "canonical role authority" in block
+    assert '"Escort"' in block
+    # Explicitly forbids leaking another role's terms.
+    assert "বেতন/শর্ত/সুবিধা কখনো ব্যবহার কোরো না" in block
+    # Names the exact stray-mention scenario from the real incident.
+    assert "Security Guard" in block
+
+
+@pytest.mark.asyncio
+async def test_canonical_role_authority_rule_present_for_responsible_role_too():
+    """Unconditional — not just for non-supervisory roles."""
+    session_row = {
+        "candidate_id": 42, "full_name": "Nazmul", "age": 27, "area": "Tangail",
+        "job_preference": "Security Supervisor", "experience_years": 4,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "canonical role authority" in block
+    assert '"Security Supervisor"' in block
+
+
+@pytest.mark.asyncio
+async def test_canonical_role_authority_rule_allows_explicit_role_change_override():
+    """The rule must explicitly carve out the one legitimate exception:
+    the candidate explicitly asking about / switching to another role in
+    THIS conversation — never a silent, permanent lock to the stored
+    value."""
+    session_row = {
+        "candidate_id": 42, "full_name": "Karim", "age": 25, "area": "Dhaka",
+        "job_preference": "Escort", "experience_years": 0,
+    }
+    with patch("app.database.fetch_one",
+               new=AsyncMock(return_value={"post_intake_status": "awaiting_agreement", "notes": None})):
+        block = await hermes_dispatch._build_post_intake_state_block(session_row)
+    assert "পদ পরিবর্তনের অনুরোধ করে" in block
+    assert "তখনই নতুন পদ অনুযায়ী উত্তর দাও" in block

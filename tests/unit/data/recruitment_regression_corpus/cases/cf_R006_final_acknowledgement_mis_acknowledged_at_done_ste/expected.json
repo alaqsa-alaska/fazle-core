@@ -1,0 +1,23 @@
+{
+  "_schema": "recruitment-regression-case-expected/v1",
+  "case_id": "cf_R006",
+  "source_case_type": "C",
+  "expected_domain": "recruitment",
+  "expected_turn_type": "acknowledgement",
+  "expected_intake_step_before": "done",
+  "expected_intake_fields_proposed": {},
+  "expected_intake_fields_accepted": {},
+  "expected_intake_fields_rejected": {},
+  "expected_should_advance_intake": false,
+  "expected_intake_step_after": "done",
+  "expected_questions": [],
+  "expected_should_answer_question": false,
+  "expected_needs_clarification": false,
+  "expected_changes_or_corrections": {},
+  "expected_outbound_count": 0,
+  "expected_factcheck_required": false,
+  "expected_no_fabricated_fact": true,
+  "expected_protected_domain_behavior": "do NOT re-send post-list prompt after closure; no outbound at all",
+  "phase_that_must_close_this": "C",
+  "reason_evidence": "EXPECTED: silent acknowledgement (no outbound). Legacy sent an unwanted post-list re-prompt."
+}

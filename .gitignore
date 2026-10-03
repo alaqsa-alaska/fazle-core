@@ -9,6 +9,7 @@ __pycache__/
 
 # Virtual environment
 venv/
+venv
 env/
 .venv/
 .env/
@@ -82,4 +83,8 @@ RECRUITMENT_BOT_COORDINATION.md
 backups/
 cleanup-log*.txt
 cleanup-post-state.json
+
+# Runtime lock for the canonical Recruitment authority register. Keep this
+# exact-path rule narrow: other lock/runtime artifacts must remain visible.
+/knowledge_base/00_governance/recruitment_fact_authority.json.lock
 moonshot_test.py

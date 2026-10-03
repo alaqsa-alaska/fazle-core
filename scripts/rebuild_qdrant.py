@@ -59,7 +59,12 @@ async def main() -> None:
     log.info("  docs      = %s", result.get("docs"))
     log.info("  vocab     = %s", result.get("vocab"))
     log.info("  build_ms  = %s", result.get("build_ms"))
-    log.info("  qdrant    = %s", result.get("qdrant_points"))
+    log.info("  qdrant    = %s", result.get("qdrant"))
+    qdrant_result = result.get("qdrant")
+    if qdrant_result and qdrant_result.get("status") == "error":
+        log.error("Qdrant reconciliation failed; BM25 remains available and retry is required.")
+        await close_db()
+        raise SystemExit(1)
 
     await close_db()
     log.info("Done.")

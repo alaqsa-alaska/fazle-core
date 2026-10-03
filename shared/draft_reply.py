@@ -30,6 +30,47 @@ from shared.locks import locked
 log = logging.getLogger("fazle.shared.draft_reply")
 
 
+async def submit_approved_draft(draft: dict, *, source_bridge: str, body: str, purpose: str):
+    """One durable submission per draft across existing approval surfaces.
+
+    Caller retains its authorization, attendance handling and source policy.
+    Approval is not sending; the queue worker owns transport acceptance.
+    """
+    from modules.outbound import enqueue
+    from app.database import fetch_one
+    meta = draft.get("meta") or {}
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    if draft.get("status") == "approved" and meta.get("submission_protocol") != 1:
+        # Older approved rows may already have been sent without a queue
+        # reference. Unknown provenance is not permission to send again.
+        return None
+    reference = {k: meta[k] for k in ("core_message_id", "source", "source_message_ref") if k in meta}
+    key = f"draft-approve-{draft['id']}"
+    existing = await fetch_one(
+        "SELECT id FROM fazle_outbound_queue WHERE idempotency_key=$1", key,
+    )
+    if existing:
+        return existing["id"]
+    qid = await enqueue(
+        recipient=draft["recipient"], body=body, source_bridge=source_bridge,
+        purpose=purpose, idempotency_key=key,
+        meta={**reference, "draft_id": draft["id"]},
+    )
+    if qid is None:
+        existing = await fetch_one(
+            "SELECT id FROM fazle_outbound_queue WHERE idempotency_key=$1", key,
+        )
+        qid = existing["id"] if existing else None
+    if qid is not None:
+        await execute(
+            """UPDATE fazle_draft_replies SET meta=COALESCE(meta, '{}'::jsonb) ||
+               jsonb_build_object('outbound_queue_id', $2::bigint) WHERE id=$1""",
+            draft["id"], qid,
+        )
+    return qid
+
+
 async def create_draft_reply(
     *,
     sender: str,
@@ -71,6 +112,8 @@ async def create_draft_reply(
     # ── 1. Normalise inputs ───────────────────────────────────────────────────
     sender = (sender or "").strip()
     bridge = (bridge or "").strip()
+    from modules.message_router import inbound_reference, record_inbound_action
+    provenance = inbound_reference()
 
     if not sender:
         log.warning(
@@ -93,6 +136,19 @@ async def create_draft_reply(
                 return None
 
             # ── 3. Collision check (inside lock — now truly atomic) ───────────
+            if provenance:
+                # Exact replay guard survives approval and the old five-minute
+                # collision window. Different actions keep separate identities.
+                existing = await fetch_val(
+                    """SELECT id FROM fazle_draft_replies
+                       WHERE meta->>'core_message_id'=$1 AND source=$2
+                         AND meta->>'source_module'=$3 AND intent=$4
+                       LIMIT 1""",
+                    str(provenance["core_message_id"]), bridge, source_module, intent,
+                )
+                if existing is not None:
+                    record_inbound_action("draft", draft_id=int(existing), outcome="existing")
+                    return None
             try:
                 existing_id = await fetch_val(
                     """
@@ -124,6 +180,7 @@ async def create_draft_reply(
             # ── 4. INSERT ─────────────────────────────────────────────────────
             expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
             meta = json.dumps({
+                **provenance,
                 "role": role,
                 "context": context,
                 "source_module": source_module,
@@ -153,6 +210,9 @@ async def create_draft_reply(
                 "[draft_reply] CREATED id=%s sender=%s bridge=%s intent=%s module=%s",
                 new_id, sender, bridge, intent, source_module,
             )
+            if new_id is not None:
+                record_inbound_action("draft", draft_id=int(new_id), intent=intent,
+                                      outcome="created")
             return int(new_id) if new_id is not None else None
 
     except Exception as exc:

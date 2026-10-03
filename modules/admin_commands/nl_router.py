@@ -82,9 +82,29 @@ _LAST_CONTACT_KEYWORDS = re.compile(
 )
 
 
+# Lifecycle-closure GAP 3 (2026-08-29): read-only recruitment shortlist.
+# "যারা চাকরি করতে রাজি তাদের দেখাও" / "রেডি লোকদের list দাও" —
+# willingness-supported candidates only (never merely 'scored'). A separate
+# phrase asks for the softer "interested but not yet agreed" set.
+_WILLING_KEYWORDS = re.compile(
+    r"(যারা.*(রাজি|রেডি)|রাজি.*(দেখা|list|তালিকা|কারা)|রেডি.*(লোক|candidate|প্রার্থী)|"
+    r"(ready|willing)\s+candidates?|who\s+(is|are)\s+ready|shortlist)",
+    re.IGNORECASE,
+)
+_INTERESTED_ONLY_KEYWORDS = re.compile(
+    r"(আগ্রহী.*(কিন্তু|তবে).*(রাজি|হয়নি)|interested\s+but\s+not|আগ্রহী.*দেখা)",
+    re.IGNORECASE,
+)
+
+
 def classify_nl_intent(text: str) -> Optional[str]:
-    """Return intent name or None. Phone presence is required for both intents."""
+    """Return intent name or None."""
     t = text.strip()
+    if _INTERESTED_ONLY_KEYWORDS.search(t):
+        return "willing_candidates_interested"
+    if _WILLING_KEYWORDS.search(t):
+        return "willing_candidates"
+    # The two chat intents below additionally require a phone number.
     if not extract_phone(t):
         return None
     if _LAST_CONTACT_KEYWORDS.search(t):
@@ -160,9 +180,34 @@ async def _intent_last_contact(_text: str, phone: str) -> str:
     )
 
 
+async def _intent_willing_candidates(text: str, _phone: str, *, include_interested: bool = False) -> str:
+    from modules.recruitment_flow import get_willing_candidates
+    rows = await get_willing_candidates(include_interested=include_interested, limit=50)
+    if not rows:
+        label = "আগ্রহী কিন্তু এখনো রাজি হয়নি" if include_interested else "রাজি/রেডি"
+        return f"❌ {label} অবস্থায় কোনো candidate পাওয়া যায়নি।"
+    head = "আগ্রহী / রাজি candidate তালিকা" if include_interested else "রাজি/রেডি candidate তালিকা"
+    lines = [f"📋 {head} ({len(rows)}):\n"]
+    for r in rows:
+        ts = r.get("ready_since")
+        when = ts.strftime("%d %b") if hasattr(ts, "strftime") else "—"
+        unresolved = f" · {r['unresolved_requirement']}" if r.get("unresolved_requirement") else ""
+        lines.append(
+            f"#{r['candidate_id']} {r.get('name') or '—'} ({r.get('mobile')}) "
+            f"[{r.get('readiness')}] {r.get('interested_role') or '—'} · {when}{unresolved}"
+        )
+    return "\n".join(lines)
+
+
+async def _intent_willing_candidates_interested(text: str, phone: str) -> str:
+    return await _intent_willing_candidates(text, phone, include_interested=True)
+
+
 _HANDLERS = {
     "chat_history": _intent_chat_history,
     "last_contact": _intent_last_contact,
+    "willing_candidates": _intent_willing_candidates,
+    "willing_candidates_interested": _intent_willing_candidates_interested,
 }
 
 
@@ -196,8 +241,11 @@ async def process_nl_admin_query(text: str, admin_phone: str) -> str:
     if not intent:
         return ""
     phone = extract_phone(text)
-    if not phone:
+    # The recruitment shortlist intents are not phone-scoped.
+    _phoneless = {"willing_candidates", "willing_candidates_interested"}
+    if not phone and intent not in _phoneless:
         return "❌ ফোন নম্বর পাইনি। উদাহরণ: show last 10 chats of 01836743754"
+    phone = phone or ""
 
     try:
         from modules import observability as _obs

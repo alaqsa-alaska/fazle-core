@@ -56,6 +56,14 @@ class CreateDraftRequest(BaseModel):
     role: str = "unknown"
     intent: str = "hermes_suggested"
     context: str = ""
+    # Which authorized conversation proposed this draft, if any. 2026-09-30:
+    # supplied from the hermes-runner subprocess environment (the MCP server
+    # inherits it), NOT by the model. It is what keeps the Admin<->Hermes
+    # relay and the customer/employee conversation from ever being one
+    # authority -- an Admin "yes" can only reach a draft that was proposed in
+    # the Admin's own control conversation. Empty for a customer conversation,
+    # and such a draft is never grantable.
+    relay_conversation_key: str = ""
 
 
 # ── GET /api/drafts/stats ───────────────────────────────────────────────────
@@ -159,6 +167,23 @@ async def create_draft(
         context=body.context,
         source_module="hermes_admin",
     )
+    if draft_id is not None and body.relay_conversation_key:
+        # Stamp the originating conversation onto the draft so a later Admin
+        # authorization can be scoped to it. Best-effort: a failure here means
+        # the draft simply stays un-grantable, which is the safe direction.
+        try:
+            await execute(
+                """
+                UPDATE fazle_draft_replies
+                   SET meta = COALESCE(meta, '{}'::jsonb)
+                                 || jsonb_build_object('hermes_conversation_key', $2::text)
+                 WHERE id = $1
+                """,
+                draft_id,
+                body.relay_conversation_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("draft %d conversation stamp failed: %s", draft_id, exc)
     if draft_id is None:
         return {
             "ok": False,
@@ -185,11 +210,33 @@ async def approve_draft(
     Every other intent keeps this endpoint's original behavior unchanged.
     """
     draft = await fetch_one(
-        "SELECT id, status, recipient, reply_text, source, intent FROM fazle_draft_replies WHERE id = $1",
+        "SELECT id, status, recipient, reply_text, source, intent, meta FROM fazle_draft_replies WHERE id = $1",
         draft_id,
     )
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+
+    # 2026-09-30 (Owner: Bridge2 is the trusted Admin<->Hermes conversation).
+    # A draft that HERMES proposed may only be approved on the strength of an
+    # authenticated Admin authorization for that specific draft, recorded by
+    # modules.admin_hermes_action_grant when the Admin's message arrived.
+    # This is what stops Hermes approving the draft it just proposed: the
+    # grant lives in a column Hermes has no tool to write, and it expires and
+    # is single-use. Drafts that Hermes did not propose are unaffected, so
+    # every human/dashboard flow keeps working exactly as before.
+    from modules.admin_hermes_action_grant import verify_draft_grant
+
+    grant_ok, grant_reason = verify_draft_grant(draft)
+    if not grant_ok:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Hermes-proposed draft requires an authenticated Admin "
+                f"authorization that is not present ({grant_reason}). "
+                f"Ask the Admin to confirm this specific action in the "
+                f"Bridge2 control conversation, then retry."
+            ),
+        )
 
     if draft["intent"] == "attendance":
         from modules.attendance import finalize_attendance_draft
@@ -205,7 +252,7 @@ async def approve_draft(
             "employee_id": result.get("employee_id"),
         }
 
-    if draft["status"] not in ("pending", "pending_selfie", "edited"):
+    if draft["status"] not in ("pending", "pending_selfie", "edited", "approved"):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot approve draft with status: {draft['status']}",
@@ -215,11 +262,24 @@ async def approve_draft(
         UPDATE fazle_draft_replies
         SET status      = 'approved',
             approved_at = NOW(),
-            reviewed    = true
-        WHERE id = $1
+            reviewed    = true,
+            meta = COALESCE(meta, '{}'::jsonb) || '{"submission_protocol": 1}'::jsonb
+        WHERE id = $1 AND status IN ('pending','pending_selfie','edited')
         """,
         draft_id,
     )
+    # Single-use: the grant is spent in the same breath as the approval, so
+    # an approved Hermes draft cannot be approved a second time by replaying
+    # the same Admin "yes".
+    from modules.admin_hermes_action_grant import consume_draft_grant
+    from app.database import db_conn
+
+    try:
+        async with db_conn() as conn:
+            await consume_draft_grant(conn, draft_id)
+    except Exception as exc:  # noqa: BLE001 -- never fail an approved send
+        log.error("Draft %d grant consume failed: %s", draft_id, exc)
+
     log.info("Draft %d approved for %s", draft_id, draft["recipient"])
 
     # Enqueue for sending — admin approval overrides AUTO_REPLY_ENABLED
@@ -227,31 +287,26 @@ async def approve_draft(
     source_bridge = "bridge1" if source in ("bridge1", "meta") else "bridge2"
     queued = False
     try:
-        from modules.outbound import enqueue as _enqueue
-        qid = await _enqueue(
-            recipient=draft["recipient"],
+        from shared.draft_reply import submit_approved_draft
+        qid = await submit_approved_draft(
+            draft,
             body=draft["reply_text"],
             source_bridge=source_bridge,
             purpose="admin_approve",
-            idempotency_key=f"draft-approve-{draft_id}",
         )
         if qid:
-            await execute(
-                "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                draft_id,
-            )
             queued = True
             log.info("Draft %d queued (outbound id=%s) for %s", draft_id, qid, draft["recipient"])
         else:
             log.warning("Draft %d enqueue dedup'd — already queued", draft_id)
-            queued = True
+            queued = False
     except Exception as _err:
         log.error("Draft %d enqueue failed: %s", draft_id, _err)
 
     return {
         "ok": True,
         "draft_id": draft_id,
-        "status": "sent" if queued else "approved",
+        "status": "approved",
         "queued": queued,
         "recipient": draft["recipient"],
     }
@@ -270,11 +325,13 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
     if not req.new_body or len(req.new_body.strip()) < 2:
         raise HTTPException(status_code=400, detail="new_body too short")
     draft = await fetch_one(
-        "SELECT id, status, recipient, source FROM fazle_draft_replies WHERE id = $1",
+        "SELECT id, status, recipient, source, meta FROM fazle_draft_replies WHERE id = $1",
         draft_id,
     )
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+    if draft["status"] not in ("pending", "pending_selfie", "edited"):
+        raise HTTPException(status_code=409, detail="Draft already reviewed")
     note_suffix = f" | admin_edit: {req.admin_note}" if req.admin_note else ""
     await execute(
         """
@@ -283,8 +340,10 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
             status     = 'edited',
             edited_at  = NOW(),
             reviewed   = true,
+            meta = COALESCE(meta, '{}'::jsonb) || '{"submission_protocol": 1}'::jsonb,
             error_text = COALESCE(error_text, '') || $2
-        WHERE id = $3
+        WHERE id = $3 AND status IN ('pending','pending_selfie','edited')
+          AND NOT (COALESCE(meta, '{}'::jsonb) ? 'outbound_queue_id')
         """,
         req.new_body.strip(),
         note_suffix,
@@ -297,34 +356,48 @@ async def edit_draft(draft_id: int, req: EditRequest, _: None = Depends(_require
     source_bridge = "bridge1" if source in ("bridge1", "meta") else "bridge2"
     queued = False
     try:
-        from modules.outbound import enqueue as _enqueue
-        qid = await _enqueue(
-            recipient=draft["recipient"],
+        from shared.draft_reply import submit_approved_draft
+        qid = await submit_approved_draft(
+            draft,
             body=req.new_body.strip(),
             source_bridge=source_bridge,
             purpose="admin_edit",
-            idempotency_key=f"draft-edit-{draft_id}",
         )
         if qid:
-            await execute(
-                "UPDATE fazle_draft_replies SET status='sent', sent_at=NOW() WHERE id=$1",
-                draft_id,
-            )
             queued = True
             log.info("Edited draft %d queued (outbound id=%s) for %s", draft_id, qid, draft["recipient"])
         else:
             log.warning("Edited draft %d enqueue dedup'd — already queued", draft_id)
-            queued = True
+            queued = False
     except Exception as _err:
         log.error("Edited draft %d enqueue failed: %s", draft_id, _err)
 
     return {
         "ok": True,
         "draft_id": draft_id,
-        "status": "sent" if queued else "edited",
+        "status": "edited",
         "queued": queued,
         "recipient": draft["recipient"],
     }
+
+
+# ── POST /api/drafts/{id}/notify-admin ─────────────────────────────────────
+@router.post("/api/drafts/{draft_id}/notify-admin")
+async def notify_admin_of_draft_route(
+    draft_id: int, category: str = "", _: None = Depends(_require_api_key),
+):
+    """Stage G5/G6/G7 (2026-08-28): actively push the (category-aware)
+    admin review card for an existing pending draft -- the missing piece
+    between draft creation (create_draft above / draft_whatsapp_reply)
+    and the existing APPROVE/EDIT/REJECT command path. Sends nothing to
+    the original sender; only notifies the admin. category: e.g.
+    'Client', 'Office/Internal' -- optional, rendered as an extra line on
+    the card when given."""
+    from modules.supervised_draft import notify_admin_of_pending_draft
+    result = await notify_admin_of_pending_draft(draft_id, category)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "notify failed")
+    return result
 
 
 # ── POST /api/drafts/{id}/delete ───────────────────────────────────────────

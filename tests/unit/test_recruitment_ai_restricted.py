@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from modules.recruitment_ai import (
     _RECRUITMENT_SOURCE,
+    _SAFE_FALLBACK,
     build_recruitment_source_context,
     enforce_recruitment_reply_policy,
 )
@@ -61,20 +62,46 @@ def test_recruitment_source_has_no_retired_conflicting_facts():
 
 
 def test_fee_policy_is_only_loaded_for_fee_questions():
-    context = build_recruitment_source_context("জয়েনিং ফি কত?")
-    assert "জয়েনিং ফি ৳৩,৫০০" in context
+    # 2026-08-21 (recruitment fee/source-of-truth conflict closure): the
+    # fee section no longer states a specific figure at all -- it was
+    # rewritten to the same canonical, no-specific-numbers policy text
+    # already live in fazle_knowledge_base row b11_no_fee /
+    # recruitment_business_rules.md's "Approved Deposit/Fee canonical
+    # text" (2026-07-21 Owner decision) / modules.conversation_layer.
+    # playbooks.CANONICAL_FACTS["fee"] -- the old "জয়েনিং ফি ৳৩,৫০০" figure
+    # this test used to assert was present had already been superseded
+    # elsewhere and was simply never propagated to this file. See
+    # test_recruitment_fee_canonical_text.py for dedicated coverage.
+    context = build_recruitment_source_context("জয়েনিং ফি কত?")
+    assert "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না" in context
+    assert "৳৩,৫০০" not in context
     non_fee_context = build_recruitment_source_context("অফিস কখন খোলা?")
-    assert "জয়েনিং ফি ৳৩,৫০০" not in non_fee_context
+    assert "ঘুষ বা অবৈধ জামানত" not in non_fee_context
 
 
-def test_fee_question_allows_only_source_supported_amounts():
-    context = build_recruitment_source_context("জয়েনিং ফি কত?")
+def test_fee_question_reply_with_unsupported_number_is_blocked():
+    # 2026-08-21: the canonical fee policy states no specific figure, so
+    # ANY numeric fee reply is now unsupported by the source context and
+    # must fail closed -- a strengthening of the old behavior (which
+    # allowed the taka-3,500 figure specifically only because that stale
+    # figure used to be present in the source file).
+    context = build_recruitment_source_context("জয়েনিং ফি কত?")
     reply = enforce_recruitment_reply_policy(
-        "জয়েনিং ফি কত টাকা?",
+        "জয়েনিং ফি কত টাকা?",
         "জয়েনিং ফি ৳৩,৫০০।",
         context,
     )
-    assert reply == "জয়েনিং ফি ৳৩,৫০০।"
+    assert reply == _SAFE_FALLBACK
+
+
+def test_fee_question_reply_matching_canonical_policy_is_allowed():
+    context = build_recruitment_source_context("জয়েনিং ফি কত?")
+    reply = enforce_recruitment_reply_policy(
+        "জয়েনিং ফি কত টাকা?",
+        "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না, বেতন থেকে কিস্তিতে কাটা হয়।",
+        context,
+    )
+    assert reply == "কোনো ঘুষ বা অবৈধ জামানত নেওয়া হয় না, বেতন থেকে কিস্তিতে কাটা হয়।"
 
 
 def test_non_fee_reply_is_cleaned_normally():
@@ -262,3 +289,114 @@ async def test_common_outbound_meta_alias_dispatches_to_meta_whatsapp():
 
     assert result == "meta-message-id"
     sender.assert_awaited_once_with("8801999999999", "reply")
+
+
+# ===========================================================================
+# K3.1 — legacy Recruitment FAQ/fallback leakage
+# ===========================================================================
+
+def _k31_stale_rows():
+    return [{
+        "key": "legacy-recruitment",
+        "category": "recruitment",
+        "trigger_keywords": ["অফিস", "salary", "vacancy", "documents"],
+        "reply_text": "LEGACY 10:00-17:00 01958-122322 BDT 12,000-17,000",
+    }]
+
+
+async def test_k31_approved_policy_facts_bypass_stale_fallback(monkeypatch):
+    import modules.knowledge_base as kb
+
+    monkeypatch.setattr(kb, "fetch_all", AsyncMock(return_value=_k31_stale_rows()))
+
+    office = await kb.get_reply("office hours and contact number", "unknown")
+    eligibility = await kb.get_reply("age and education eligibility", "unknown")
+    documents = await kb.get_reply("required documents", "unknown")
+    training = await kb.get_reply("training কতদিন?", "unknown")
+    probation = await kb.get_reply("probation কত মাস?", "unknown")
+    duty = await kb.get_reply("Guard day shift duty hours", "unknown")
+    fees = await kb.get_reply("form fee and joining fee কত?", "unknown")
+
+    assert "09:00-17:00" in office
+    assert "01958-122300" in office
+    assert "10:00-17:00" not in office
+    assert "01958-122322" not in office
+    assert "18-55" in eligibility
+    assert "NID or birth registration" in documents
+    assert "15 days" in training
+    assert "3 months" in probation
+    assert "08:00-20:00" in duty
+    assert "BDT 330" in fees
+    assert "BDT 3,500" in fees
+    assert "LEGACY" not in office + eligibility + documents + training + probation + duty + fees
+
+
+async def test_k31_role_specific_approved_salary_survives_narrow_conflict(monkeypatch):
+    import modules.knowledge_base as kb
+
+    monkeypatch.setattr(kb, "fetch_all", AsyncMock(return_value=_k31_stale_rows()))
+
+    reply = await kb.get_reply("Operation Officer salary কত?", "salary_query")
+
+    assert "BDT 12,000-18,000" in reply
+    assert "LEGACY" not in reply
+    assert "10:00-17:00" not in reply
+
+
+async def test_k31_conflicting_salary_fee_schedule_and_vacancy_fail_closed(monkeypatch):
+    import modules.knowledge_base as kb
+
+    monkeypatch.setattr(kb, "fetch_all", AsyncMock(return_value=_k31_stale_rows()))
+
+    salary = await kb.get_reply("Escort salary কত?", "salary_query")
+    fee_schedule = await kb.get_reply("ফি ফেরত কবে?", "unknown")
+    vacancies = await kb.get_reply("এখন কয়টি vacancy আছে?", "unknown")
+
+    assert salary == "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+    assert fee_schedule == "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+    assert vacancies == "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+
+
+async def test_k31_generic_or_misclassified_recruitment_path_never_returns_legacy(monkeypatch):
+    import modules.knowledge_base as kb
+
+    monkeypatch.setattr(kb, "fetch_all", AsyncMock(return_value=_k31_stale_rows()))
+
+    reply = await kb.get_reply("office hours", "unknown")
+
+    assert "09:00-17:00" in reply
+    assert "10:00-17:00" not in reply
+    assert "01958-122322" not in reply
+
+
+async def test_k31_non_recruitment_faq_still_uses_existing_lookup(monkeypatch):
+    import modules.knowledge_base as kb
+
+    monkeypatch.setattr(
+        kb,
+        "fetch_all",
+        AsyncMock(return_value=[{
+            "key": "greeting",
+            "category": "general",
+            "trigger_keywords": ["hello"],
+            "reply_text": "GENERAL_GREETING",
+        }]),
+    )
+
+    assert await kb.get_reply("hello", "greeting") == "GENERAL_GREETING"
+
+
+async def test_k31_restricted_information_fails_closed_before_legacy_lookup(monkeypatch):
+    import modules.knowledge_base as kb
+
+    monkeypatch.setattr(kb, "fetch_all", AsyncMock(return_value=[{
+        "key": "restricted",
+        "category": "general",
+        "trigger_keywords": ["employee salary", "bank account"],
+        "reply_text": "RESTRICTED_LEGACY_DATA",
+    }]))
+
+    reply = await kb.get_reply("employee salary and bank account", "unknown")
+
+    assert reply == "এই বিষয়ে নিশ্চিত তথ্যের জন্য অফিসে যোগাযোগ করুন।"
+    assert "RESTRICTED_LEGACY_DATA" not in reply

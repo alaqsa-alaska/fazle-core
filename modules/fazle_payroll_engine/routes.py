@@ -51,6 +51,7 @@ from .models import (
     ReviewStatus,
 )
 from .payment_event import payment_event_from_operator, payment_event_to_request
+from .bridge_alias import bridge_alias_for_phone
 
 log = logging.getLogger("fazle.fpe.routes")
 
@@ -448,6 +449,14 @@ async def list_transactions(
     page_size_resp = limit
     page_resp = (offset // limit) + 1 if limit else 1
     pages_resp = (total + limit - 1) // limit if (total and limit) else 1
+    transactions = []
+    for row in rows:
+        item = dict(row)
+        alias = bridge_alias_for_phone(item.get("payout_phone"))
+        if alias:
+            item["employee_display_name"] = alias
+            item["actor_alias"] = alias
+        transactions.append(item)
     return {
         "total": total,
         "page": page_resp,
@@ -459,7 +468,7 @@ async def list_transactions(
             "first_txn": summary["first_txn"].isoformat() if summary["first_txn"] else None,
             "last_txn": summary["last_txn"].isoformat() if summary["last_txn"] else None,
         },
-        "transactions": [dict(r) for r in rows],
+        "transactions": transactions,
     }
 
 
@@ -487,7 +496,12 @@ async def get_transaction(txn_id: int):
     )
     if not row:
         raise HTTPException(404, "Transaction not found")
-    return dict(row)
+    result = dict(row)
+    alias = bridge_alias_for_phone(result.get("payout_phone"))
+    if alias:
+        result["employee_display_name"] = alias
+        result["actor_alias"] = alias
+    return result
 
 
 @router.post("/transactions/{txn_id}/reverse", dependencies=[Depends(_require_admin_role)])
@@ -1588,7 +1602,8 @@ async def employee_transaction_history(
             "amount": float(r["amount"]) if r["amount"] is not None else 0.0,
             "payment_method": r["payout_method"],
             "payout_phone": r["payout_phone"],
-            "employee_name": r["employee_display_name"],
+            "employee_name": bridge_alias_for_phone(r["payout_phone"]) or r["employee_display_name"],
+            "actor_alias": bridge_alias_for_phone(r["payout_phone"]),
             "employee_id_phone": r["employee_display_id_phone"],
             "comment": None,  # reserved for future remarks column
             "source_message": r["source_message_text"],
@@ -2521,13 +2536,21 @@ async def list_cash_transactions(
     )
 
     pages = (total + ps - 1) // ps if ps else 1
+    transactions = []
+    for row in rows:
+        item = dict(row)
+        alias = bridge_alias_for_phone(item.get("sender_phone"))
+        if alias:
+            item["employee_name"] = alias
+            item["actor_alias"] = alias
+        transactions.append(item)
     return {
         "total": int(total),
         "page": page,
         "page_size": ps,
         "pages": pages,
         "summary": {"total_amount": total_amount, "count": int(total)},
-        "transactions": [dict(r) for r in rows],
+        "transactions": transactions,
     }
 
 
@@ -2548,7 +2571,12 @@ async def get_cash_transaction(txn_id: int):
     )
     if not row:
         raise HTTPException(404, "Cash transaction not found")
-    return dict(row)
+    result = dict(row)
+    alias = bridge_alias_for_phone(result.get("payout_phone"))
+    if alias:
+        result["employee_name"] = alias
+        result["actor_alias"] = alias
+    return result
 
 
 # ── Shorthand / Staging Payments ─────────────────────────────────────────────
@@ -2935,6 +2963,35 @@ async def operator_submit(req: OperatorSubmitRequest):
     AND a pending fpe_cash_transactions row (transaction_status='pending').
     Ledger is NOT touched until admin approval.
     """
+    # Stage I (I3, 2026-08-29): a real finding -- 4 REGTEST_-tagged
+    # synthetic transactions reached this exact route in production
+    # (2026-07-02, since soft-deleted by an admin -- see modules.
+    # fazle_payroll_engine.review_linkage_repair's own docstring for the
+    # full RCA). Root cause: scripts/payroll_regression_suite.py is a
+    # manual test utility whose --base-url defaults to 127.0.0.1:8200,
+    # which on this VPS IS the live production service (there is no
+    # separate staging environment) -- with --write and a real
+    # INTERNAL_API_KEY it has full authoritative write access here. This
+    # guard is the narrow, explicit "destructive-production-test guard"
+    # I3 asks for: any REGTEST_-tagged submission is refused unless the
+    # operator explicitly opts in via ALLOW_TEST_ARTIFACT_WRITES=true
+    # (absent/false in the real .env, confirmed) -- never silently
+    # dropped, always a clear 403 so the regression suite's own output
+    # says exactly why it failed. A genuine operator's notes/employee
+    # name would never naturally contain this exact marker.
+    _test_marker_text = f"{req.notes or ''} {req.employee_name_raw or ''}"
+    if "REGTEST_" in _test_marker_text:
+        import os as _os
+        if _os.getenv("ALLOW_TEST_ARTIFACT_WRITES", "").lower() != "true":
+            raise HTTPException(
+                403,
+                "Refused: this submission is tagged REGTEST_ (a regression-test marker) and "
+                "ALLOW_TEST_ARTIFACT_WRITES is not set -- this route is production by default "
+                "on this deployment (no separate staging environment). Set "
+                "ALLOW_TEST_ARTIFACT_WRITES=true in the environment actually running this "
+                "request if this is a deliberate, reviewed test run.",
+            )
+
     # Validate employee exists
     emp = await fetch_one(
         "SELECT id, full_name, status FROM fpe_employees WHERE id = $1",

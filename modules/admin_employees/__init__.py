@@ -193,8 +193,24 @@ async def create_employee(body: EmployeeCreate):
 
     await _seed_fpe(body.employee_name, norm_mobile, wbom_employee_id=emp_id)
 
-    log.info("[admin_employees] created employee_id=%d mobile=%s", emp_id, norm_mobile)
-    return {"employee": _row_to_dict(row), "fpe_seeded": True}
+    # Lifecycle-closure GAP 1 (2026-08-29): if this person first reached us
+    # as a recruitment candidate, link the candidate row to this employee
+    # exactly once and record the 'joined' lifecycle event. Best-effort —
+    # never fails employee creation. Fail-closed inside the helper (never
+    # silently repoints an already-linked candidate).
+    candidate_link = {"linked": False, "reason": "not_attempted"}
+    try:
+        from modules.recruitment_flow import link_candidate_to_employee
+        candidate_link = await link_candidate_to_employee(
+            norm_mobile, emp_id, employee_name=body.employee_name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[admin_employees] candidate link failed employee_id=%d: %s", emp_id, exc)
+        candidate_link = {"linked": False, "reason": f"error:{exc}"}
+
+    log.info("[admin_employees] created employee_id=%d mobile=%s candidate_link=%s",
+             emp_id, norm_mobile, candidate_link.get("reason"))
+    return {"employee": _row_to_dict(row), "fpe_seeded": True, "candidate_link": candidate_link}
 
 
 # ── GET /api/admin/employees ──────────────────────────────────────────────────
@@ -612,13 +628,23 @@ async def create_and_link_wbom(body: CreateAndLinkRequest):
         new_wbom_id, body.fpe_id,
     )
 
+    # Lifecycle-closure GAP 1 (2026-08-29): best-effort candidate->employee link.
+    candidate_link = {"linked": False, "reason": "not_attempted"}
+    try:
+        from modules.recruitment_flow import link_candidate_to_employee
+        candidate_link = await link_candidate_to_employee(mobile, new_wbom_id, employee_name=body.full_name)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[admin_employees] candidate link failed wbom_id=%d: %s", new_wbom_id, exc)
+        candidate_link = {"linked": False, "reason": f"error:{exc}"}
+
     log.info(
-        "[admin_employees] created+linked wbom_id=%d (%s, %s) <- fpe_id=%d",
-        new_wbom_id, body.full_name, body.designation, body.fpe_id,
+        "[admin_employees] created+linked wbom_id=%d (%s, %s) <- fpe_id=%d candidate_link=%s",
+        new_wbom_id, body.full_name, body.designation, body.fpe_id, candidate_link.get("reason"),
     )
     return {
         "ok": True,
         "wbom_employee_id": new_wbom_id,
+        "candidate_link": candidate_link,
         "message": f"Created WBOM #{new_wbom_id} ({body.full_name}, {body.designation}) and linked to FPE #{body.fpe_id}",
     }
 

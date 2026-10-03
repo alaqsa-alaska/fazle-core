@@ -1,0 +1,14 @@
+{
+  "_schema": "recruitment-regression-case-meta/v1",
+  "case_id": "cf_R003",
+  "thread_phone_masked": "8801cc40a7d",
+  "is_admin_thread": false,
+  "actual_outcome_notes": {
+    "domain": "recruitment",
+    "turn_type": "mixed",
+    "should_advance_intake": "True (legacy asked for full name via payment_due workflow)",
+    "outbound_text_seen": "দুঃখিত, বুঝতে পারিনি। দয়া করে শুধু আপনার পুরো নাম লিখুন (যেমনঃ Md Karim)।",
+    "rule_that_failed": "Question matched 'কি'; name regex matched; legacy treated as name step"
+  },
+  "privacy_notes": "Real candidate phone numbers are salted-hash masked (see _meta/corpus_meta.json#mask_algorithm). Admin phone numbers are prefixed 'admin_' and salted-hash masked. Inbound message text and AI outbound message text are PRESERVED VERBATIM because typos, bilingual mixing, and punctuation are part of the failure-bearing signal."
+}

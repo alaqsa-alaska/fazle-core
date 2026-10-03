@@ -1,0 +1,14 @@
+{
+  "_schema": "recruitment-regression-case-meta/v1",
+  "case_id": "cf_R001",
+  "thread_phone_masked": "8801393d879",
+  "is_admin_thread": false,
+  "actual_outcome_notes": {
+    "domain": "recruitment",
+    "turn_type": "mixed (legacy classify_turn_intent classified as mixed: question regex matched 'কি কাজ' AND name regex matched)",
+    "should_advance_intake": "True (legacy intake_message ran; no value extracted)",
+    "outbound_text_seen": "দয়া করে ১ থেকে ৮ নম্বর বা পদের নাম লিখুন। আপনি কোন পদে কাজ করতে চান?",
+    "rule_that_failed": "Legacy dispatch cannot produce SAVE VALID FIELD + ANSWER + ADVANCE simultaneously; here, no field was supplied, but intake stepped anyway"
+  },
+  "privacy_notes": "Real candidate phone numbers are salted-hash masked (see _meta/corpus_meta.json#mask_algorithm). Admin phone numbers are prefixed 'admin_' and salted-hash masked. Inbound message text and AI outbound message text are PRESERVED VERBATIM because typos, bilingual mixing, and punctuation are part of the failure-bearing signal."
+}

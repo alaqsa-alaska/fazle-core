@@ -1,0 +1,15 @@
+{
+  "_schema": "recruitment-regression-case-input/v1",
+  "case_id": "cf_R004",
+  "thread_phone_masked": "8801cc40a7d",
+  "inbound_step_at_turn": "age",
+  "session_fields_at_turn": {
+    "name": "Syed Mustafa musabbir",
+    "age": null,
+    "area": null,
+    "job_preference": null,
+    "experience": null,
+    "phone_confirm": null
+  },
+  "inbound_message": "সিকিওরিটি হলে করবো"
+}

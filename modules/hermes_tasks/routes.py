@@ -121,6 +121,15 @@ class AuthorizeActionBody(BaseModel):
 
 class ExecutionResultBody(BaseModel):
     result: dict
+
+
+class ProposeBusinessActionBody(BaseModel):
+    domain: str
+    business_reference: str
+    proposed_action_type: str
+    reason: str
+    evidence_refs: list[dict]
+    source_event_ref: str
     verification: Optional[dict] = None
 
 
@@ -217,6 +226,27 @@ async def propose_action_route(body: ProposeActionBody):
     return {"ok": True, "action_id": action_id}
 
 
+@router.post("/api/business-actions", dependencies=[Depends(_require_command("task_write"))])
+async def propose_business_action_route(body: ProposeBusinessActionBody, key: str = Depends(_API_KEY_HEADER)):
+    """Stage F2/F6 (2026-08-28): Business Inbox attention item ->
+    structured proposed action. Same task_write tier as
+    propose_action_route -- proposing costs nothing (Class B, no
+    mutation); the separate task_approve tier on /api/actions/{id}/approve
+    below still gates whether it may proceed toward being sent. Thin
+    pass-through over modules.business_actions.propose_business_action(),
+    same discipline as every other route in this file."""
+    from modules.business_actions import propose_business_action, BusinessActionError
+    actor = await _resolve_admin_identity(key)
+    try:
+        return await propose_business_action(
+            body.domain, body.business_reference, body.proposed_action_type,
+            body.reason, body.evidence_refs, body.source_event_ref,
+            requested_by=actor if actor != "unknown-frontend-admin" else "hermes",
+        )
+    except BusinessActionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/api/actions/authorize", dependencies=[Depends(_require_command("task_approve"))])
 async def authorize_action_route(body: AuthorizeActionBody, key: str = Depends(_API_KEY_HEADER)):
     """Fused propose+approve -- task_approve (superadmin) tier since this IS
@@ -238,9 +268,33 @@ async def authorize_action_route(body: AuthorizeActionBody, key: str = Depends(_
 @router.get("/api/actions", dependencies=[Depends(_require_command("task_read"))])
 async def list_actions_route(
     task_id: Optional[int] = None, status: Optional[str] = "pending", action_type: Optional[str] = None,
+    domain: Optional[str] = None,
 ):
     from modules.hermes_tasks import list_actions
-    return {"actions": await list_actions(status, task_id, action_type)}
+    return {"actions": await list_actions(status, task_id, action_type, domain=domain)}
+
+
+@router.get("/api/actions/authorization-state", dependencies=[Depends(_require_command("task_read"))])
+async def action_authorization_state_route(action_type: str):
+    """Read-only, EXPIRY-AWARE authorization check for one action type.
+
+    2026-09-29 (Admin Canary capability-boundary audit). The CLI plugin's
+    SERVICE_MUTATION / DATABASE_MUTATION / DEPLOYMENT gate used
+    ``/api/actions?status=approved`` -- a discovery listing that explicitly
+    does not filter expired rows -- so any expired approval ever left in the
+    table authorized the action forever. This endpoint answers the actual
+    authorization question by delegating to the existing, expiry-enforcing
+    ``is_action_approved`` for every candidate.
+
+    Registered BEFORE ``/api/actions/{action_id}`` (int-typed) so this fixed
+    path is never shadowed, matching the /api/tasks/authorizing-path
+    convention in this same file.
+    """
+    from modules.hermes_tasks import is_action_type_authorized, TaskError
+    try:
+        return await is_action_type_authorized(action_type)
+    except TaskError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/api/actions/{action_id}", dependencies=[Depends(_require_command("task_read"))])

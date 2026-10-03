@@ -40,7 +40,9 @@ async def test_audit_insert_preserves_candidate_step_and_message():
     sql, *args = fetch_val_mock.await_args.args
     assert "INSERT INTO wbom_candidate_conversations" in sql
     assert "ON CONFLICT (source_bridge, message_id)" in sql
-    assert args == [17, "age", "25", "bridge1", "msg-100"]
+    # 2026-08-29: _audit_candidate_conversation gained a `direction` param
+    # (default 'inbound'); it is positional arg 5, message_id stays last.
+    assert args == [17, "age", "25", "bridge1", "inbound", "msg-100"]
 
 
 async def test_intake_audits_pre_transition_step():

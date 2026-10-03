@@ -89,6 +89,14 @@ async def _heartbeat_scheduler() -> None:
         log.warning(f"[scheduler] heartbeat failed: {e}")
 
 
+async def _write_startup_heartbeat(scheduler: AsyncIOScheduler) -> None:
+    """Record readiness only after APScheduler has successfully started."""
+    await asyncio.sleep(0)
+    if scheduler is not _scheduler or not scheduler.running:
+        return
+    await _heartbeat_scheduler()
+
+
 def _next_run_for(name: str) -> Optional[datetime]:
     if _scheduler is None:
         return None
@@ -410,6 +418,19 @@ async def job_backup_staleness() -> dict:
     return {"status": "ok", "newest_age_h": newest_age_h, "alerted": True}
 
 
+async def job_recruitment_recovery_sweep() -> dict:
+    """Phase 7, 2026-08-25 recovery pass: periodic unanswered Recruitment/
+    Employee conversation recovery. Thin wrapper -- all real logic lives
+    in modules.recruitment_recovery_sweep (lazy import here for the same
+    reason every other job module is lazily imported in this file:
+    avoids a top-level import cycle, since that module imports several
+    things -- identity_brain, recruitment_flow, hermes_dispatch,
+    bridge_poller -- that themselves import modules.scheduler indirectly
+    via modules.admin_directives.router's trigger_admin_investigation)."""
+    from modules.recruitment_recovery_sweep import run_recovery_sweep
+    return await run_recovery_sweep()
+
+
 async def job_combined_draft_cleanup() -> dict:
     """P15-01/P15-02 — hourly: clean draft entries older than 24h."""
     results: dict = {"status": "ok"}
@@ -579,6 +600,7 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     register_job("payment_reconciliation", job_payment_reconciliation)
     register_job("backup_staleness_alert", job_backup_staleness)
     register_job("combined_draft_cleanup", job_combined_draft_cleanup)
+    register_job("recruitment_recovery_sweep", job_recruitment_recovery_sweep)
     register_job("daily_memory_review", job_daily_memory_review)
     register_job("rag_rebuild", job_rag_rebuild)
 
@@ -588,6 +610,20 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
         register_job("daily_admin_digest", job_daily_admin_digest)
     except Exception as e:
         log.warning(f"[scheduler] reports module unavailable: {e}")
+
+    # Stage G18/G21/G24 (2026-08-28) — twice-daily Business Communication
+    # Summary + System Observation Report, both routine (see modules.reports'
+    # own docstrings for why these are separate from the existing urgent-alert
+    # jobs, none of which are touched here). Reuses the exact existing
+    # scheduler registration pattern above -- register_job() + add_job() --
+    # with two CronTrigger entries each for the twice-daily cadence, rather
+    # than a new scheduling mechanism.
+    try:
+        from modules.reports import job_business_summary_report, job_system_observation_report
+        register_job("business_summary_report", job_business_summary_report)
+        register_job("system_observation_report", job_system_observation_report)
+    except Exception as e:
+        log.warning(f"[scheduler] Stage G report jobs unavailable: {e}")
 
     # 2026-07-22 — daily phone-contact-book <-> wbom_contacts sync
     try:
@@ -603,6 +639,21 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     except Exception as e:
         log.warning(f"[scheduler] backup module unavailable: {e}")
 
+    # 2026-08-30 — payment-driven employee inactivity sweep (Owner rule): an
+    # employee whose LATEST successful qualifying FPE cash transaction is older
+    # than 3 months becomes inactive; a later successful payment reactivates
+    # immediately (handled in accounting.create_transaction). The job body is
+    # itself flag-gated by FPE_PAYMENT_INACTIVITY_SWEEP_ENABLED (default off),
+    # so registering it here is inert until the Owner enables the flag. Not a
+    # competing scheduler — the repo has no other employee-inactivity sweep.
+    try:
+        from modules.payment_relay_accounting import run_payment_inactivity_sweep
+        async def job_payment_inactivity_sweep() -> dict:
+            return await run_payment_inactivity_sweep()
+        register_job("payment_inactivity_sweep", job_payment_inactivity_sweep)
+    except Exception as e:
+        log.warning(f"[scheduler] payment_relay_accounting sweep unavailable: {e}")
+
     _scheduler = AsyncIOScheduler(timezone=_tz())
 
     def _wrap(name: str, fn: Callable[[], Awaitable[dict]]):
@@ -615,8 +666,15 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     payroll_hour = int(os.getenv("PAYROLL_AUTO_COMPUTE_HOUR", "2"))
     dlq_min = int(os.getenv("DLQ_ALERT_INTERVAL_MIN", "15"))
 
+    # Stage G6.10 (2026-08-28): timezone=_tz() added -- see the Stage G5.13
+    # comment below (business_summary_report) for the full root-cause
+    # explanation. This module's own header docstring explicitly documents
+    # "daily_payroll_compute (02:00 Asia/Dhaka)" -- confirmed live before
+    # this fix that it was actually firing at 02:00 server-local
+    # (Europe/Berlin/CEST) instead, a real 4-hour discrepancy from its own
+    # documented intent.
     _scheduler.add_job(_wrap("daily_payroll_compute", job_daily_payroll),
-                       CronTrigger(hour=payroll_hour, minute=0),
+                       CronTrigger(hour=payroll_hour, minute=0, timezone=_tz()),
                        id="daily_payroll_compute", replace_existing=True)
     _scheduler.add_job(_wrap("dlq_alert", job_dlq_alert),
                        IntervalTrigger(minutes=dlq_min),
@@ -627,28 +685,53 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
     _scheduler.add_job(_wrap("agent_incident_summary", job_agent_incident_summary),
                        IntervalTrigger(hours=6),
                        id="agent_incident_summary", replace_existing=True)
+    # Stage G6.10: timezone=_tz() -- business-hours (9am) reminder, same
+    # Asia/Dhaka business-day intent as every other cron job in this file.
     _scheduler.add_job(_wrap("stale_escort_reminder", job_stale_escort_reminder),
-                       CronTrigger(hour=9, minute=0),
+                       CronTrigger(hour=9, minute=0, timezone=_tz()),
                        id="stale_escort_reminder", replace_existing=True)
     _scheduler.add_job(_wrap("payment_reconciliation", job_payment_reconciliation),
                        IntervalTrigger(hours=1),
                        id="payment_reconciliation", replace_existing=True)
+    # Stage G6.10: timezone=_tz() -- same scheduler-wide Asia/Dhaka default.
     _scheduler.add_job(_wrap("backup_staleness_alert", job_backup_staleness),
-                       CronTrigger(hour=3, minute=0),
+                       CronTrigger(hour=3, minute=0, timezone=_tz()),
                        id="backup_staleness_alert", replace_existing=True)
     _scheduler.add_job(_wrap("combined_draft_cleanup", job_combined_draft_cleanup),
                        IntervalTrigger(hours=1),
                        id="combined_draft_cleanup", replace_existing=True)
 
+    # Phase 7, 2026-08-25 recovery pass: periodic unanswered Recruitment/
+    # Employee conversation recovery, ~30 min per the Owner's own stated
+    # requirement. See modules.recruitment_recovery_sweep's module
+    # docstring -- guarded behind recruitment_recovery_sweep_live_send
+    # (DB feature flag, default False); runs full dry-run analysis +
+    # admin digest either way, only gates the actual outbound send.
+    recovery_sweep_min = int(os.getenv("RECRUITMENT_RECOVERY_SWEEP_INTERVAL_MIN", "30"))
+    _scheduler.add_job(_wrap("recruitment_recovery_sweep", job_recruitment_recovery_sweep),
+                       IntervalTrigger(minutes=recovery_sweep_min),
+                       id="recruitment_recovery_sweep", replace_existing=True)
+
     # Phase 6 — Continuous Learning Loop
     memory_review_hour = int(os.getenv("MEMORY_REVIEW_HOUR", "9"))
     rag_rebuild_hour   = int(os.getenv("RAG_REBUILD_HOUR", "18"))
+    # Stage G6.10: timezone=_tz() -- this module's own header docstring
+    # explicitly documents "daily_memory_review (09:00 Asia/Dhaka)" and
+    # "rag_rebuild (18:00 Asia/Dhaka)".
     _scheduler.add_job(_wrap("daily_memory_review", job_daily_memory_review),
-                       CronTrigger(hour=memory_review_hour, minute=0),
+                       CronTrigger(hour=memory_review_hour, minute=0, timezone=_tz()),
                        id="daily_memory_review", replace_existing=True)
     _scheduler.add_job(_wrap("rag_rebuild", job_rag_rebuild),
-                       CronTrigger(hour=rag_rebuild_hour, minute=0),
+                       CronTrigger(hour=rag_rebuild_hour, minute=0, timezone=_tz()),
                        id="rag_rebuild", replace_existing=True)
+
+    # 2026-08-30 — payment-inactivity sweep, once daily at 04:00 Asia/Dhaka
+    # (after payroll compute at 02:00, before the 09:00 business-hours jobs).
+    # Inert until FPE_PAYMENT_INACTIVITY_SWEEP_ENABLED is set.
+    if "payment_inactivity_sweep" in _job_registry:
+        _scheduler.add_job(_wrap("payment_inactivity_sweep", _job_registry["payment_inactivity_sweep"]),
+                           CronTrigger(hour=4, minute=0, timezone=_tz()),
+                           id="payment_inactivity_sweep", replace_existing=True)
 
     # DEPRECATED 2026-08-04 (Owner decision): the daily bridge-phone-book ->
     # wbom_contacts sync is disabled. The uploaded CSV is now the authoritative
@@ -748,22 +831,80 @@ def start_scheduler() -> Optional[AsyncIOScheduler]:
 
     if "daily_admin_digest" in _job_registry:
         digest_hour = int(os.getenv("DAILY_DIGEST_HOUR", "8"))
+        # Stage G6.10: timezone=_tz() -- job_daily_admin_digest's own
+        # docstring explicitly claims "runs at 08:00 Asia/Dhaka"; confirmed
+        # live before this fix it was actually firing at 08:00 server-local
+        # (Europe/Berlin/CEST) = 12:00 Dhaka, a real 4-hour discrepancy.
         _scheduler.add_job(
             _wrap("daily_admin_digest", _job_registry["daily_admin_digest"]),
-            CronTrigger(hour=digest_hour, minute=0),
+            CronTrigger(hour=digest_hour, minute=0, timezone=_tz()),
             id="daily_admin_digest", replace_existing=True,
+        )
+
+    # Stage G18/G24 — twice daily, default 09:00 and 21:00 Asia/Dhaka
+    # (same TZ as every other cron job in this function, see _tz() above),
+    # independently configurable via env so this doesn't collide with
+    # daily_admin_digest's own hour without an explicit change.
+    #
+    # A single add_job() call with a comma-separated CronTrigger hour
+    # string (APScheduler's own supported cron syntax) rather than two
+    # separate add_job() calls with "_am"/"_pm"-suffixed ids -- the
+    # latter was tried first and found live-broken during this stage's
+    # own verification: _next_run_for(name) (used by GET /scheduler/status)
+    # looks up _scheduler.get_job(name) by the bare registry name, so a
+    # job registered only under suffixed ids always reports
+    # next_run_at=null on that status endpoint even though it was still
+    # genuinely scheduled to fire. One job, one id, matching every other
+    # job in this file, fixes the status reporting without changing the
+    # actual twice-daily firing behavior at all.
+    # Stage G5.13 (2026-08-28) real bug found and fixed: CronTrigger(...)
+    # constructed WITHOUT an explicit timezone= kwarg defaults to the
+    # SERVER's own local system timezone (confirmed live: Europe/Berlin/
+    # CEST, +02:00) at construction time -- it does NOT inherit
+    # AsyncIOScheduler(timezone=_tz())'s "Asia/Dhaka" setting just because
+    # the trigger is later passed to that scheduler's add_job(). This is a
+    # PRE-EXISTING pattern affecting every other CronTrigger(...) call in
+    # this file too (payroll_hour, digest_hour, memory_review_hour,
+    # rag_rebuild_hour, backup hours, stale_escort_reminder) -- daily_admin_
+    # digest's own docstring claims "runs at 08:00 Asia/Dhaka" but was
+    # actually firing at 08:00 server-local time, a 4-hour real-world
+    # discrepancy. Fixed HERE ONLY (the two Stage G jobs this stage is
+    # responsible for) -- deliberately not touched for every other
+    # pre-existing job, which is a separate, wider, disclosed-not-fixed
+    # finding (see the Stage G5 final report's G5.13 section) outside this
+    # stage's scope.
+    if "business_summary_report" in _job_registry:
+        bs_hour1 = int(os.getenv("BUSINESS_SUMMARY_HOUR_1", "9"))
+        bs_hour2 = int(os.getenv("BUSINESS_SUMMARY_HOUR_2", "21"))
+        _scheduler.add_job(
+            _wrap("business_summary_report", _job_registry["business_summary_report"]),
+            CronTrigger(hour=f"{bs_hour1},{bs_hour2}", minute=0, timezone=_tz()),
+            id="business_summary_report", replace_existing=True,
+        )
+
+    if "system_observation_report" in _job_registry:
+        so_hour1 = int(os.getenv("SYSTEM_OBSERVATION_HOUR_1", "9"))
+        so_hour2 = int(os.getenv("SYSTEM_OBSERVATION_HOUR_2", "21"))
+        _scheduler.add_job(
+            _wrap("system_observation_report", _job_registry["system_observation_report"]),
+            CronTrigger(hour=f"{so_hour1},{so_hour2}", minute=15, timezone=_tz()),
+            id="system_observation_report", replace_existing=True,
         )
 
     if "daily_db_backup" in _job_registry:
         b_hour = int(os.getenv("DAILY_BACKUP_HOUR", "2"))
         b_min = int(os.getenv("DAILY_BACKUP_MIN", "30"))
+        # Stage G6.10: timezone=_tz() -- same scheduler-wide Asia/Dhaka
+        # default (AsyncIOScheduler(timezone=_tz()) above), consistent with
+        # every other daily job in this file.
         _scheduler.add_job(
             _wrap("daily_db_backup", _job_registry["daily_db_backup"]),
-            CronTrigger(hour=b_hour, minute=b_min),
+            CronTrigger(hour=b_hour, minute=b_min, timezone=_tz()),
             id="daily_db_backup", replace_existing=True,
         )
 
     _scheduler.start()
+    asyncio.create_task(_write_startup_heartbeat(_scheduler), name="scheduler-startup-heartbeat")
     log.info(f"[scheduler] started tz={_tz()} jobs={len(_scheduler.get_jobs())}")
     return _scheduler
 

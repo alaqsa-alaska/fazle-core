@@ -31,6 +31,8 @@ Critical keys:
 | `OCR_CONCURRENCY` | OCR semaphore (default 2) |
 | `PAYROLL_BULK_CONCURRENCY` | Payroll semaphore (default 1) |
 | `USE_OUTBOUND_QUEUE` | `true` recommended (B15.9) |
+| `BRIDGE_MEDIA_ACQUISITION_ENABLED` | `false` (default) = inbound bridge media stays `media_unprocessed` (no OCR/STT). `true` = the poller fetches the file from the bridge's `/api/download` and runs the existing image/audio/document extraction. Global (all 3 bridges). See `docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md`. |
+| `BRIDGE_MEDIA_DOWNLOAD_TIMEOUT_S` | Per-file `/api/download` timeout, seconds (default `45`). Only used when `BRIDGE_MEDIA_ACQUISITION_ENABLED=true`. |
 
 Backups of `.env` live in `/home/azim/secure-env-backup/`.
 

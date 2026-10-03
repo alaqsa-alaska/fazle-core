@@ -23,6 +23,50 @@
 # rejected -> delete the draft file and this entry).
 db/migrations_drafts/
 
+# 2026-09-24: accumulated Step 1-4 Hermes, Recruitment authority, local-model
+# selection, and Admin control-plane candidate. Reviewed for restart preflight;
+# keep the root ARCHITECTURE.md worktree change explicitly outside this set.
+README.md
+app/llm.py
+app/static/dashboard.html
+docs/ARCHITECTURE.md
+docs/DEVELOPER_GUIDE.md
+modules/ai_console/model_router.py
+modules/knowledge_base/__init__.py
+modules/rag/__init__.py
+shared/reply_policy.py
+app/static/recruitment-knowledge.html
+knowledge_base/00_governance/recruitment_fact_authority.json
+knowledge_base/04_business_rules/recruitment_lifecycle_authority.md
+modules/recruitment_authority.py
+modules/recruitment_authority_admin.py
+tests/unit/test_hermes_intelligence_foundation.py
+tests/unit/test_recruitment_authority_admin.py
+
+# 2026-09-25: reviewed Recruitment fallback authority-boundary correction.
+# Hermes remains first; only the existing failure fallback prompt/source and
+# its focused offline regression tests are approved here. Exact paths only.
+modules/conversation_layer/prompting.py
+modules/conversation_layer/recruitment.py
+tests/unit/test_recruitment_fallback_authority_boundary.py
+
+# 2026-09-24: restart-gate blocker resolution for authority backup coverage.
+# The manifest and backup implementation remain reviewable candidate changes;
+# no new self-whitelist entry is added by this blocker-resolution change.
+modules/backup/__init__.py
+scripts/restart_gate.sh
+
+# 2026-09-24: runtime mutation-boundary correction. Startup passes the
+# explicit RAG Qdrant-sync control; BM25/retrieval and the scheduled job keep
+# their existing paths. The authority lock is intentionally ignored by the
+# exact .gitignore rule and is not a manifest candidate.
+.gitignore
+app/config.py
+app/main.py
+modules/rag/__init__.py
+tests/unit/test_rag_startup_sync_boundary.py
+tests/unit/test_authority_backup.py
+
 # 2026-08-01: moonshot_test.py — found untracked and dirty (dated 2026-07-31)
 # while deploying an unrelated FPE payroll-parser fix; not created or
 # reviewed by this session, not part of the app module tree (no import
@@ -223,3 +267,272 @@ tests/unit/test_hermes_channel_keyword_bypass.py
 # committed alongside this fix's own changes, to keep that unrelated
 # task's commit as a separate, deliberate action for whoever picks it up.
 HERMES_PAYROLL_WORKFLOW_GAP_AUDIT_2026-08-18.md
+
+# 2026-08-23: pre-existing audit/report artifacts unrelated to deployment
+# 7e0c260. Two recruitment-conversation audit notes left untracked by their
+# author, intentionally preserved untracked; not part of this restart's
+# commit and not to be committed, deleted, or moved in this session.
+RECRUITMENT_CONVERSATION_AUDIT_2026-08-22_TO_2026-08-23.md
+RECRUITMENT_CONVERSATION_AUDIT_VERIFIED_2026-08-22_TO_2026-08-23.md
+
+# 2026-08-23: deployment-gate fix — Block #4 resolution only. Symlink at
+# /home/azim/core/venv -> /home/azim/.venv so scripts/restart_gate.sh's
+# first-choice interpreter (venv/bin/python) resolves to the same venv
+# the running fazle-core.service uses. Python's venv auto-detection
+# requires the binary to live inside a directory with pyvenv.cfg; a
+# stand-alone symlink to the binary doesn't satisfy that, so the whole
+# venv directory had to be symlinked. Resolves the missing-apscheduler
+# "wrong interpreter" symptom without modifying requirements.txt or the
+# gate script. Pre-existing `venv/bin/` was empty before this session.
+# No code committed. Remove this entry once the gate dependency-declaration
+# gap (apscheduler not in requirements.txt even though
+# modules/scheduler/__init__.py imports it) is properly fixed and the
+# gate's interpreter path is solidified.
+venv
+
+# 2026-08-23 (Phase A of Semantic Recruitment Turn Understanding rollout):
+# Owner-authorized evidence-only regression corpus + Phase-A test harness.
+# 14 real Recruitment failure cases (cf_R001..cf_R013 + cf_W001), each with
+# input.json, _meta.json, conversation.jsonl, expected.json. Phase-A tests
+# validate the DATASET and EXPECTED CONTRACT only -- production behavior
+# is NOT modified by Phase A. Real candidate phone numbers are salted-hash
+# masked in case files; the offline generator (_tools/_author_corpus_DO_NOT_COMMIT.py)
+# contains the raw real-phone-to-case mapping and must NEVER be committed.
+# Synthetic cases (recruitment_synthetic_corpus/) are deferred to Phase C.
+tests/unit/test_phase_a_corpus.py
+tests/unit/data/
+
+# 2026-08-23 (Phase B of Semantic Recruitment Turn Understanding rollout):
+# Owner-authorized deterministic parser/intake corrections in
+# modules/recruitment_flow/__init__.py only. The production file diff is
+# +184/-11 lines and contains exactly three localized changes: (a) age
+# parser now accepts Bengali multi-digit runs via pre-transliteration, (b)
+# a deterministic _looks_like_dob gate blocks age extraction from a
+# date-of-birth pattern, (c) a field-locking rule in intake_message
+# silently advances when the candidate re-sends the same already-locked
+# value. NO semantic layer, NO canonical history, NO actor provenance,
+# NO multi-signal domain routing, NO recruitment_operational_rescue, NO
+# active-session override. Phase B deterministic coverage is asserted by
+# the test file; expected.json across the 14-case Phase-A corpus is
+# unmodified.
+modules/recruitment_flow/__init__.py
+tests/unit/test_phase_b_deterministic.py
+
+# Diagnostic tool used to produce the Phase B 14-case comparison table. Does
+# NOT touch production; reads the Phase A corpus and exercises the Phase B
+# parser helpers in a sandboxed subprocess (does not call intake_message).
+tests/unit/data/recruitment_regression_corpus/_tools/run_phase_b_diagnostic.py
+
+# 2026-08-23 (Phase C of Semantic Recruitment Turn Understanding rollout):
+# Owner-authorized semantic turn-understanding implementation. Surface:
+#   NEW MODULES:
+#     modules/recruitment_turn_decision/ -- RecruitmentTurnDecision contract,
+#         Tier A extract (Phase B parsers re-used, NO new keywords), Tier B
+#         decide(), state_rules.py with correction 2/3/4/7/8 invariants.
+#     modules/conversation_canonical/    -- canonical_history.py (read layer
+#         over existing wbom_whatsapp_messages; NO parallel DB) and
+#         actor_provenance.py with provenance_confidence per row.
+#   MODIFIED FILES (targeted):
+#     modules/recruitment_flow/__init__.py  -- +_maybe_decide_v2 helper +
+#         shadow-log block ONLY when recruitment_turn_decision_v2_enabled=True.
+#         Legacy classify_turn_intent path is byte-identical when OFF.
+#     modules/hermes_dispatch.py            -- +build_decision_context helper
+#         (augments, does NOT replace _looks_like_fee_question /
+#         build_recruitment_context).
+#     modules/conversation_layer/__init__.py-- +decision_context kwarg on
+#         generate_recruitment_reply (backward-compatible default '').
+#     modules/message_router/__init__.py    -- +_v2_cross_ref_enabled() +
+#         shadow-only V2 cross-reference log line in Task-13 block.
+#     app/config.py                         -- +3 flags, all default OFF:
+#         recruitment_turn_decision_v2_enabled,
+#         recruitment_respect_manual_reply,
+#         recruitment_actor_provenance_writeback.
+#   TESTS:
+#     tests/unit/test_phase_c_decision.py
+#     tests/unit/test_phase_c_extract.py
+#     tests/unit/test_phase_c_provenance.py
+#     tests/unit/test_phase_c_wireins.py
+#     tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py
+# Phase A 14-case corpus expected.json is UNCHANGED. Phase B +184/-11
+# production file diff is UNCHANGED. No .env, no DB migration, no service
+# restart, no live WhatsApp message, no commit. CORRECTIVE_REPLIES_SENT=0
+# (historical outreach remains FROZEN). Phase F live shadow requires
+# separate Owner authorization; this implementation is DORMANT when
+# recruitment_turn_decision_v2_enabled=False (default).
+modules/recruitment_turn_decision/
+modules/conversation_canonical/
+modules/hermes_dispatch.py
+modules/conversation_layer/__init__.py
+modules/message_router/__init__.py
+app/config.py
+tests/unit/test_phase_c_decision.py
+tests/unit/test_phase_c_extract.py
+tests/unit/test_phase_c_provenance.py
+tests/unit/test_phase_c_wireins.py
+tests/unit/test_minimax_provider.py
+tests/unit/data/recruitment_regression_corpus/_tools/phase_c_replay.py
+
+# 2026-08-24: Owner directive "ESTABLISH SINGLE AUTHORITATIVE NO-AUTO-REPLY
+# CONTACT GROUP" -- added central reusable is_owner_managed_contact(phone)
+# function in new module modules/owner_contact_registry/__init__.py.
+# The CSV /home/azim/core/resources/ops/selected_contacts_normalized_unique.csv
+# is authoritative; legacy contact groups ignored. No protected operational
+# flow touched. Restricted surface = new module + new test + 8 lines added
+# in bridge_poller._is_draft_always() (CSV gate inserted as step 0.5 between
+# step 0 live phone_block flag and step 1 hardcoded phone set; all other
+# safety layers POISON/AI_SAFE_MODE/DRAFT_ALWAYS/contact-risk/loop detection/
+# financial-intent draft gate unchanged). Test_owner_contact_registry.py:
+# 15/15 pass covering tests A-L. Existing protected business workflows
+# (Escort, Accountant, Employee, Client, Program) all still import cleanly.
+# No DB migration, no .env change, no flag change.
+modules/owner_contact_registry/
+tests/unit/test_owner_contact_registry.py
+
+# 2026-08-24: Owner directive "Master Information for Recruitment and
+# Employee" -- Owner uploaded the master information document. This file
+# is the authoritative Recruitment + Employee knowledge reference for live
+# conversational handling, used together with recruitment_source_of_truth.txt.
+# Read-only at runtime by the live Hermes conversational path. Not committed
+# per Owner "no commit" instruction in same task; held in working tree so
+# the live service can read it.
+resources/ops/master_recruitment_employee_information.txt
+
+# 2026-08-24: Owner directive "ESTABLISH SINGLE AUTHORITATIVE NO-AUTO-REPLY
+# CONTACT GROUP" -- Owner uploaded the Owner-managed contact group CSV.
+# This is the SOLE authoritative contact-group source for the live conversational
+# auto-reply suppression gate. Read-only at runtime by
+# modules/owner_contact_registry/is_owner_managed_contact. Not committed
+# per Owner "no commit" instruction; held in working tree so the live service
+# can read it.
+resources/ops/selected_contacts_normalized_unique.csv
+
+# 2026-08-24: Owner directive "ESTABLISH SINGLE AUTHORITATIVE NO-AUTO-REPLY
+# CONTACT GROUP" + earlier "STRUCT blocker fix" -- added test that proves
+# the narrow STRUCT guard bypass for recruitment/employee intents in
+# modules/bridge_poller/__init__.py works correctly and that all other
+# safety layers remain intact. 10/10 pass. No production code change
+# beyond the targeted bridge_poller guard patch.
+tests/unit/test_bridge_poller_struct_bypass.py
+
+# 2026-08-27 / RESOLVED 2026-09-01: six ad-hoc scripts/phase7_*.py DB-check/
+# live-test scripts and scripts/restart_fazle7.sh were found untracked ahead
+# of the 19bbed1 restart (from the prior Phase 7 no-duplicate-invariant
+# session, commit d8b1ff1). Three of them hardcoded the live META_APP_SECRET
+# in plaintext and posted HMAC-signed forged webhooks at the live service;
+# restart_fazle7.sh was a bare `sudo systemctl restart` bypassing this gate.
+# Per the Owner-recorded resolution ("delete these files + the restart
+# script"), all seven were removed from the working tree on 2026-09-01 by the
+# Phase-2 autonomous remediation session after independent verification that
+# none were imported by any app module, test, Makefile, or CI. The exposed
+# META_APP_SECRET still requires Owner rotation (recorded in
+# OWNER_ACTION_REQUIRED / docs/CLAUDE_PHASE2_AUTONOMOUS_FINAL_2026-09-01.md).
+# Manifest entries removed now that the files no longer exist.
+
+# 2026-08-30: docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md --
+# a modified planning doc belonging to the separate Bridge Media Acquisition
+# task (last touched 2026-08-29, unrelated to the owner->accountant payment
+# relay + cross-bridge system-echo guard this restart deploys). The Owner has
+# explicitly and repeatedly acknowledged this file as known and unrelated and
+# directed that it remain untouched (not reset, stashed, discarded, or
+# committed) while using the established restart-gate cleanliness-exception
+# procedure -- this entry. Remove once the Bridge Media Acquisition task
+# commits or reverts it. (2026-09-01: the Phase-2 session masked 3 phone/LID
+# values in it -- still not committed, per the same Owner directive.)
+docs/BRIDGE_MEDIA_ACQUISITION_INTEGRATION_PLAN_2026-08-29.md
+
+# 2026-09-01: the Phase-2 deployment session's live evidence log. It is
+# committed to the branch but is edited continuously during the restart
+# itself (Stage-7/8 evidence lands after the gate's Check-1 snapshot), so it
+# is expected to be dirty across a `--restart` run. Remove this entry once the
+# Phase-2 observation window closes and the doc is final.
+docs/CLAUDE_PHASE2_DEPLOYMENT_CHECKPOINT_2026-09-01.md
+# 2026-09-25: Phase 3 candidate-manifest reconciliation. These exact paths are the reviewed provenance, approval/queue, fixture, and regression-test changes already present in the Phase 1/2 candidate. Runtime paths are covered by DB-backed provenance/admin/webhook qualification; test paths are covered by focused and offline qualification. No wildcard authorization.
+app/database.py
+modules/admin_commands/__init__.py
+modules/wa_chat_frontend/__init__.py
+modules/drafts/routes.py
+shared/draft_reply.py
+tests/conftest.py
+tests/integration/test_webhooks.py
+tests/unit/test_admin_commands.py
+tests/unit/test_admin_draft_review_workflow.py
+tests/unit/test_draft_approval_idempotency_stage_g.py
+tests/unit/test_outbound_status_route.py
+tests/unit/test_phase5_t020_legacy_control_isolation.py
+tests/unit/test_recruitment_salary_context_routing_fix.py
+tests/unit/test_task14b_candidate_recruitment_authority.py
+tests/unit/test_whatsapp_messages_lookup_route.py
+tests/unit/test_whatsapp_messages_query_and_conversation_routes.py
+# 2026-09-29: preserved pre-existing identity-role agent documentation.
+# Documentation-only; intentionally excluded from the runtime candidate and
+# retained uncommitted for separate owner review.
+knowledge_base/06_developer_system/identity_role_agent/
+
+# 2026-09-29: Bridge2 canonical identity enrollment reconciliation and
+# display-only bridge aliases for the existing FPE cash-ledger response paths.
+# Payment relay fixture correction is test-only; no ledger values or schema
+# migration are part of this candidate. The pre-existing identity-role-agent
+# knowledge-base work is explicitly preserved, not bundled into this candidate.
+modules/fazle_payroll_engine/bridge_alias.py
+modules/fazle_payroll_engine/routes.py
+tests/unit/test_fpe_bridge_alias.py
+tests/unit/test_payment_relay.py
+tests/unit/test_bridge_poller_payment_relay_gate.py
+knowledge_base/06_developer_system/identity_role_agent/
+
+# 2026-09-29: Admin Canary qualification -- canonical Identity-Role
+# authorization for the Admin -> Hermes relay, plus canonical Fazle-Core
+# knowledge grounding of that relay's inference. modules/admin_directives/
+# router.py gains one ADDITIVE gate (the three pre-existing RBAC / phone /
+# control-channel gates are untouched and still run first) and routes the
+# relay's inference through the EXISTING BUS-008 knowledge adapter and the
+# existing modules.rag index. No new authorization system, no new RAG
+# implementation, no schema migration, no .env flag change, no credential
+# change, and no change to the global outbound gate (which keeps its
+# existing downstream position). modules/admin_hermes_authorization.py is
+# the evidence-reading bridge only; it delegates every decision to the
+# existing capture_authorization_snapshot/evaluate path and cannot write.
+# The two test files are focused regression coverage for that gate and for
+# the knowledge wiring; they cannot send anything (asserted).
+modules/admin_hermes_authorization.py
+modules/admin_directives/router.py
+tests/db/test_admin_hermes_canonical_authorization.py
+tests/unit/test_admin_ai_router.py
+db/.restart_gate_manifest
+
+# 2026-09-29: Hermes capability-boundary enforcement (Admin Canary audit,
+# follow-on pass). EXPIRY FIX ONLY -- the 2026-08-20 RUN-capable Admin relay
+# architecture is deliberately preserved; no toolset, mode or key changed.
+# modules/hermes_tasks gains is_action_type_authorized(), a thin read-only
+# wrapper that delegates to the pre-existing is_action_approved() so the
+# expiry decision stays in exactly one place, plus its route
+# /api/actions/authorization-state. The Hermes task_action_policy plugin
+# previously called list_actions(status='approved') -- a discovery helper
+# that documents it does NOT filter expired rows -- and treated non-emptiness
+# as authorization, so 9 approvals left over from Aug 2026 permanently
+# authorized systemctl restart / git push / psql writes. No schema migration,
+# no .env change, no credential change, and no production approval record was
+# modified.
+#
+# NOT COVERED BY THIS GATE: the enforcement plugin itself lives outside this
+# repository, at ~/.hermes/plugins/task_action_policy/ (__init__.py,
+# action_policy.py, test_plugin.py), and its action_policy.py has a second
+# copy in the fazle-mcp repo. tests/unit/test_hermes_capability_boundary.py
+# asserts the copies are byte-identical and pins the plugin's wiring, but the
+# plugin's own execution is not restart-gated. See the audit report.
+modules/hermes_tasks/__init__.py
+modules/hermes_tasks/routes.py
+tests/unit/test_hermes_capability_boundary.py
+db/.restart_gate_manifest
+# 2026-09-30 (scoped Admin authorization for Hermes-originated outbound).
+# The relay stamps a scoped, expiring, single-use grant onto Hermes-proposed
+# drafts once resolve_relay_authorization has allowed the Admin; the approve
+# endpoint refuses a Hermes draft without it and spends it on use. This
+# IS restart-gated: modules/drafts/routes.py changes take effect with the
+# fazle-core service, which is what this gate governs.
+modules/admin_hermes_action_grant.py
+tests/db/test_admin_hermes_action_grant.py
+# Composite gate wrapper + the plugin integrity test. Neither is served by
+# fazle-core, but both are qualification inputs.
+scripts/composite_security_gate.sh
+tests/test_hermes_task_action_policy_plugin_integrity.py

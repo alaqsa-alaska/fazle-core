@@ -7,7 +7,9 @@ knowledge_base/00_governance/management_decisions.md "Universal AI
 Responder — Phase 2"."""
 from __future__ import annotations
 
-from .playbooks import CANONICAL_FACTS, APPLICATION_FIELDS, RecruitmentSignals
+from modules.recruitment_authority import FactAuthority, facts_for_recruitment_question
+
+from .playbooks import APPLICATION_FIELDS, RecruitmentSignals
 
 
 def build_recruitment_prompt_context(
@@ -16,6 +18,8 @@ def build_recruitment_prompt_context(
     kb_reply: str | None = None,
     rag_context: str | None = None,
     history: str | None = None,
+    contact_context: str | None = None,
+    authority_facts: tuple[FactAuthority, ...] | None = None,
 ) -> str:
     """Return context text passed to the existing Ollama client as DB context.
 
@@ -28,7 +32,8 @@ def build_recruitment_prompt_context(
         "- Answer all recruitment/general inquiry questions in one reply when possible.",
         "- Ask only one next-step question or request one compact set of applicant details.",
         "- Do not discuss payroll, roster, escort program operations, vessel names, private employee data, or internal finance.",
-        "- Do not promise an exact salary; say it depends on duty, experience, and office verification.",
+        "- Use only APPROVED CURRENT FACT values below for business policy.",
+        "- For UNRESOLVED facts, do not state a value; acknowledge that it is not currently confirmed and suggest office verification.",
         "- If user is suspicious, address trust first and invite office verification.",
         f"- Application fields to collect: {APPLICATION_FIELDS}.",
         "",
@@ -36,16 +41,35 @@ def build_recruitment_prompt_context(
         f"Candidate temperature: {signals.temperature}",
         f"Risk mode: {signals.risk}",
         "",
-        "Canonical public facts:",
+        "Recruitment authority register (the only business-fact source):",
     ]
-    for key in (signals.focus, "salary", "training", "ship_duty", "documents", "office_location", "trust"):
-        if key in CANONICAL_FACTS:
-            facts.append(f"- {key}: {CANONICAL_FACTS[key]}")
+    if authority_facts is None:
+        authority_facts = facts_for_recruitment_question(message, focus=signals.focus)
+    if authority_facts:
+        for authority_fact in authority_facts:
+            if authority_fact.answerable:
+                facts.append(
+                    f"- APPROVED CURRENT FACT {authority_fact.key}: {authority_fact.value}"
+                )
+            else:
+                facts.append(
+                    f"- UNRESOLVED FACT {authority_fact.key} status={authority_fact.status}: "
+                    "no approved candidate-facing value; do not state a value; "
+                    f"safe action={authority_fact.safe_action}"
+                )
+    else:
+        facts.append("- No relevant approved current fact is available for this question.")
 
-    if kb_reply:
-        facts.extend(["", "Current fazle-core KB reply for reference:", kb_reply])
-    if rag_context:
-        facts.extend(["", "Safe RAG context:", rag_context[:1500]])
+    # KB/RAG text is deliberately not copied into this live fallback prompt:
+    # those sources may contain evidence-only, historical, or conflicting
+    # business facts. Their metadata remains available to the caller for
+    # observability, while the register above is the sole policy source.
+    if contact_context:
+        facts.extend([
+            "",
+            "Candidate/contact context (continuity only; not business policy):",
+            contact_context[:1200],
+        ])
     if history:
         facts.extend(["", "Recent conversation history:", history[:1200]])
 

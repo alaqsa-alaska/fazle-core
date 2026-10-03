@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
+import json
 import os
+import tempfile
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -76,6 +78,119 @@ def _sha256_of(path: Path, chunk: int = 1 << 20) -> str:
                 break
             h.update(b)
     return h.hexdigest()
+
+
+def _authority_source() -> Path:
+    return Path(__file__).resolve().parents[1] / ".." / "knowledge_base" / "00_governance" / "recruitment_fact_authority.json"
+
+
+def _validate_authority_bytes(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("authority backup is not valid UTF-8 JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("facts"), list):
+        raise ValueError("authority backup has invalid schema")
+    valid = {"current_approved", "historical", "unverified", "conflicting", "superseded"}
+    keys: set[str] = set()
+    for fact in payload["facts"]:
+        if not isinstance(fact, dict) or not fact.get("key") or fact["key"] in keys:
+            raise ValueError("authority backup has duplicate or invalid fact keys")
+        keys.add(fact["key"])
+        if fact.get("status") not in valid:
+            raise ValueError("authority backup has invalid fact status")
+    return payload
+
+
+def _authority_backup_dir() -> Path:
+    path = _backup_dir() / "authority"
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+def backup_authority_register(source: Path | None = None, backup_dir: Path | None = None) -> dict[str, Any]:
+    """Atomically back up the validated authority register.
+
+    The backup is recovery material only; it is stored outside the repository's
+    knowledge tree and is never read by RAG or authority resolution.
+    """
+    source = Path(source or _authority_source())
+    if source.is_symlink() or not source.is_file():
+        raise FileNotFoundError(f"authority source is not a regular file: {source}")
+    raw = source.read_bytes()
+    _validate_authority_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    out_dir = Path(backup_dir) if backup_dir else _authority_backup_dir()
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(out_dir, 0o700)
+    target = out_dir / f"recruitment_fact_authority_{digest[:16]}.json"
+    fd, temp_name = tempfile.mkstemp(prefix=".authority.", suffix=".tmp", dir=out_dir)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, target)
+        os.chmod(target, 0o600)
+        dir_fd = os.open(out_dir, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    if _sha256_of(target) != digest:
+        raise IOError("authority backup hash mismatch")
+    return {"status": "ok", "source": str(source), "backup": str(target), "sha256": digest}
+
+
+def validate_authority_backup(backup: Path, source: Path | None = None) -> dict[str, Any]:
+    """Validate a backup and, when supplied, prove it matches the source."""
+    backup = Path(backup)
+    if backup.is_symlink() or not backup.is_file():
+        raise FileNotFoundError(f"authority backup is not a regular file: {backup}")
+    raw = backup.read_bytes()
+    _validate_authority_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    if source is not None:
+        source = Path(source)
+        if _sha256_of(source) != digest:
+            raise ValueError("authority backup does not match source")
+    return {"status": "ok", "backup": str(backup), "sha256": digest}
+
+
+def restore_authority_register(backup: Path, target: Path | None = None) -> dict[str, Any]:
+    """Atomically restore a validated backup to a test or explicit target.
+
+    Callers must explicitly choose the target; no restart path invokes restore.
+    """
+    backup = Path(backup)
+    validate_authority_backup(backup)
+    target = Path(target or _authority_source())
+    if target.is_symlink():
+        raise ValueError("authority target must not be a symlink")
+    raw = backup.read_bytes()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".authority-restore.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, target)
+        os.chmod(target, 0o664)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    validate_authority_backup(target)
+    return {"status": "ok", "backup": str(backup), "target": str(target), "sha256": _sha256_of(target)}
 
 
 # ── core ──────────────────────────────────────────────────────────────────────

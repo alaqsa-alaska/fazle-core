@@ -41,19 +41,34 @@ from app.database import fetch_one
 log = logging.getLogger("fazle.identity_brain")
 
 # ── Role priority table ────────────────────────────────────────────────────────
+# Owner directive v4.1 (2026-08-24): the CSV roles below are ADDITIVE only.
+# Existing keys (admin, family, accountant, etc.) are untouched. New CSV
+# roles live BELOW existing seed priorities so an existing DB seed always
+# wins over a CSV-pattern match (Step 4.5 runs AFTER seed lookup, so a
+# CSV contact that ALSO has a fazle_contact_roles entry returns the seed
+# role; CSV-pattern is the fallback for the "unknown" gap only).
 _ROLE_PRIORITY: dict[str, int] = {
     "admin":               200,
     "family":              100,
+    "family_ceo":           98,  # Alim — Owner sibling + company CEO (DB seed still wins if set)
     "accountant":           95,
+    "friend_relative":      95,  # CSV-pattern default for personal contacts
     "internal_coordinator": 93,  # dispatch/payroll/paperwork coordinator — Route A, seed_rule sourced
+    "internal_operation":   92,  # Al-Aqsa offices, I S A T L, Office X
     "vip_client":           92,
+    "security_service_client": 90,  # Client X in CSV (complaint pipeline already handles; Hermes skips)
     "client_escort_buyer":  90,
-    "repeat_client":        75,
-    "vendor":               70,
+    "escort_client":        90,  # Escort X in CSV (escort-roster module handles; Hermes skips)
     "employee":             88,
     "escort":               88,  # same tier as employee — a wbom_employees row with an escort designation
     "security_guard":       88,  # same tier as employee — a wbom_employees row with a guard designation
     "supervisor":           80,
+    "employee_internal":    75,  # Operation X, Office/Officer X in CSV
+    "repeat_client":        75,
+    "vendor":               70,
+    "political_contact":    65,
+    "government_contact":   65,
+    "personal_business":    60,  # bkash agents, gas/etc. with personal-payment link
     "candidate":            30,
     "unknown":               0,
 }
@@ -80,6 +95,95 @@ def _designation_to_role(designation: Optional[str]) -> str:
     if _GUARD_DESIGNATION_RE.search(d):
         return "security_guard"
     return "employee"
+
+
+# ── v4.1 (2026-08-24) CSV-pattern role categorizer ──────────────────────────────
+# Used by detect_identity() Step 4.5 to give every CSV contact a meaningful role
+# instead of returning 'unknown'. Pure name-pattern heuristics; intentionally
+# broad-brush (Owner clarification: "Role misclassification WITHIN known
+# categories is acceptable"). All paths return one of the ADDITIVE roles
+# added to _ROLE_PRIORITY — never 'unknown', never an existing seed role
+# (those are reserved for the DB-seeded lookup, which always wins).
+def _categorize_csv_contact(name: str) -> str:
+    """Pattern-based role for a CSV owner-managed contact.
+
+    Returns one of: family, family_ceo, internal_operation,
+    security_service_client, escort_client, employee_internal,
+    political_contact, government_contact, vendor,
+    personal_business, friend_relative. Never returns 'unknown'.
+
+    Tries DB-known special-case names FIRST so they map consistently
+    with their existing identity_brain seed roles (e.g. Alim →
+    family_ceo, since Owner clarified he is Owner's brother AND
+    Company CEO). The CSV check runs AFTER seed lookup so this only
+    fires for contacts that have no DB seed entry.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return "friend_relative"
+    n = raw.lower()
+
+    # ── Known special-cases by exact name (Owner directive v4.1 Section 2.3) ──
+    if raw == "Alim":
+        return "family_ceo"
+    if raw == "Baba":
+        return "family"
+    if "Ashik Siddiquee" in raw:
+        return "family"  # Owner-confirmed cousin
+    if "Shilpi Apa" in raw:
+        return "family"  # Owner-confirmed cousin (Apa = elder sister)
+    # 'A' and 'Aa' are bare-symbol entries for Owner-managed contacts —
+    # Owner clarification: never 'unknown'; default to friend_relative.
+    if raw in ("A", "Aa"):
+        return "friend_relative"
+
+    # ── Prefix patterns (most specific first) ────────────────────────────────
+    # Internal establishment offices
+    if n.startswith("al-aqsa") or n.startswith("i s a t l"):
+        return "internal_operation"
+    # Security-service Clients (handled by existing complaint pipeline)
+    if n.startswith("client"):
+        return "security_service_client"
+    # Escort Clients (handled by existing escort-roster module)
+    if n.startswith("escort"):
+        return "escort_client"
+    # Internal Operation team and Office/Officer staff
+    if n.startswith("operation"):
+        return "employee_internal"
+    if n.startswith("office") or n.startswith("officer"):
+        return "employee_internal"
+    # Family / relatives
+    if (n.startswith("baba") or n.startswith("aunty") or n.startswith("mami")
+            or n.startswith("munni") or n.startswith("abu mama") or " mama" in n
+            or n == "chorpara raju majhe"):
+        return "family"
+    # Political contacts
+    if "bnp" in n:
+        return "political_contact"
+    # Government contacts
+    if n.startswith("bd "):
+        return "government_contact"
+    # Vendors (explicit prefix list + business-name substrings).
+    # "bkash"/"nagod" must be checked BEFORE "bkash"-alone-vendor because
+    # bkash-agent/personal-payment contacts are personal_business, not vendor.
+    if "nagod" in n:
+        return "personal_business"
+    if "bkash" in n:
+        return "personal_business"
+    if (n.startswith("bike") or n.startswith("banglalink") or n.startswith("bbc")
+            or n.startswith("modern") or n.startswith("touch") or n.startswith("dalal")
+            or " gas" in n or "travels" in n or n.endswith(" bar")
+            or n.startswith("tcis") or n.startswith("ts ")):
+        return "vendor"
+    # Personal-business contacts (bkash agents, payment handlers) — secondary
+    # defense; the bkash/nagod branches above already handled the known
+    # bkash/payment names so this branch is mostly a safety net.
+
+    # ── Safe default — never 'unknown' for a CSV contact ──────────────────────
+    # Per Owner v4.1 Section 2.3: "DEFAULT → friend_relative (NEVER 'unknown'
+    # for CSV)". Catches bare personal names like "Alamgir Arafat", "Hannan Vai",
+    # "Mamun Vai", "Masud Mama" (already caught above), "Sunny", "Samir", etc.
+    return "friend_relative"
 
 # ── Candidate keyword triggers ─────────────────────────────────────────────────
 _CANDIDATE_KEYWORDS = [
@@ -177,6 +281,22 @@ async def detect_identity(phone: str, text: str = "") -> dict:
             return _build(
                 _phone=norm, role="admin", confidence=100, source="settings",
                 priority=200, emp=emp,
+            )
+
+        # ── Step 1b: accountant check from settings ───────────────────────────
+        # 2026-09-01: the configured ACCOUNTANT_PHONE is a protected runtime
+        # identity and must resolve deterministically to role="accountant",
+        # not depend on a fazle_contact_roles seed row that could be
+        # deactivated (which would silently downgrade the accountant to
+        # role="employee" via Step 3, since the accountant is also an active
+        # employee). Same highest-authority "from settings" tier as admin,
+        # priority just below admin. Routing order in message_router is
+        # unchanged — this only fixes WHICH role the accountant is given.
+        if _check_accountant_settings(norm):
+            emp = await _lookup_employee(norm)
+            return _build(
+                _phone=norm, role="accountant", confidence=100, source="settings",
+                priority=190, emp=emp,
             )
 
         # ── Step 2: seed rule lookup (fazle_contact_roles) ────────────────────
@@ -292,6 +412,63 @@ async def detect_identity(phone: str, text: str = "") -> dict:
             return _build_contact(_phone=norm, role=role, confidence=80, source="db_contact",
                                   priority=pri, contact=contact)
 
+        # ── Step 4.5 (Owner directive v4.1, 2026-08-24): CSV owner-managed ────
+        # If the phone is in the Owner-managed contact CSV but no DB seed or
+        # db_contact lookup matched above, classify by name pattern instead of
+        # returning 'unknown'. Fail-safe: any error here returns silently and
+        # the existing flow (Step 5 text-hint, Step 6 escort-content, or the
+        # bottom 'unknown' return) takes over unchanged. CSV-pattern NEVER
+        # overrides an existing seed — the seed lookups above (Steps 2, 3,
+        # 3.5, 3.7, 4) all run BEFORE this and short-circuit if matched.
+        try:
+            from modules.owner_contact_registry import is_owner_managed_contact
+            if is_owner_managed_contact(norm):
+                from modules.contact_sync import get_display_name
+                csv_name = await get_display_name(norm)
+                csv_role = _categorize_csv_contact(csv_name)
+
+                # Owner Phase 2 (2026-08-30) — escort-name disambiguation.
+                # A contact name starting with "Escort" must NOT by itself
+                # imply escort_client. If there is real employee evidence for
+                # this name (a wbom_employees / fpe_employees row, active or
+                # inactive), this is our escort WORKER, not a client.
+                if csv_role == "escort_client":
+                    _emp_evidence = await _lookup_employee_by_name(csv_name)
+                    if _emp_evidence:
+                        _wrole = _designation_to_role(_emp_evidence.get("designation"))
+                        log.info(
+                            "[identity] %s → %s (csv_pattern+employee_evidence, name=%r, "
+                            "emp_id=%s) — escort-name resolved to WORKER not client",
+                            norm, _wrole, csv_name, _emp_evidence.get("employee_id"),
+                        )
+                        return _build(
+                            _phone=norm, role=_wrole, confidence=88,
+                            source="csv_pattern_employee_evidence",
+                            priority=_ROLE_PRIORITY.get(_wrole, _ROLE_PRIORITY["employee"]),
+                        )
+                    # No employee evidence AND no client/order record matched
+                    # in Steps 3.5–3.7 above → do not guess escort_client from
+                    # the name prefix alone. Fall through to text-hint / the
+                    # bottom 'unknown' return.
+                    log.info(
+                        "[identity] %s csv_name=%r starts with 'escort' but has no "
+                        "employee or client-record evidence — NOT classifying from "
+                        "prefix alone",
+                        norm, csv_name,
+                    )
+                else:
+                    csv_pri = _ROLE_PRIORITY.get(csv_role, 70)
+                    log.info(
+                        "[identity] %s → %s (csv_pattern, name=%r)",
+                        norm, csv_role, csv_name,
+                    )
+                    return _build(
+                        _phone=norm, role=csv_role, confidence=95,
+                        source="csv_pattern", priority=csv_pri,
+                    )
+        except Exception as _csv_exc:  # noqa: BLE001
+            log.warning("[identity] Step 4.5 CSV check failed for %s: %s", norm, _csv_exc)
+
         # ── Step 5: text-hint candidate detection ─────────────────────────────
         if text and _is_candidate_text(text):
             log.info("[identity] %s → candidate (text_hint)", norm)
@@ -343,6 +520,22 @@ def _check_admin_settings(phone: str) -> bool:
         return False
 
 
+def _check_accountant_settings(phone: str) -> bool:
+    """True when `phone` (already canonical 8801XXXXXXXXX) matches the
+    configured ACCOUNTANT_PHONE. Both sides are run through the canonical
+    normalizer so a settings value entered in 01XXXXXXXXX / +8801 form still
+    matches. Never returns or logs the configured number."""
+    try:
+        from app.config import get_settings
+        s = get_settings()
+        acct = getattr(s, "accountant_phone", "") or ""
+        if not acct:
+            return False
+        return bool(phone) and phone == (_normalize_phone(acct) or acct.strip())
+    except (AttributeError, LookupError, TypeError, ValueError):
+        return False
+
+
 async def _lookup_seed(phone: str) -> Optional[dict]:
     """Lookup highest-priority seed rule for this phone.
     Matches against all phone variants (01XXXXXXXXX, 8801XXXXXXXXX,
@@ -357,6 +550,7 @@ async def _lookup_seed(phone: str) -> Optional[dict]:
         """SELECT role, confidence, source, priority, notes
            FROM fazle_contact_roles
            WHERE phone = ANY($1)
+             AND COALESCE((to_jsonb(fazle_contact_roles)->>'platform'), 'whatsapp') = 'whatsapp'
              AND COALESCE((to_jsonb(fazle_contact_roles)->>'is_active')::boolean, true) = true
              AND LOWER(COALESCE(to_jsonb(fazle_contact_roles)->>'status', 'active')) = 'active'
            ORDER BY priority DESC
@@ -383,6 +577,12 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
         return dict(row)
 
     # Fallback to FPE-linked employees created through payroll/admin/escort flows.
+    # 2026-09-01: no longer filtered to e.status='active' — an INACTIVE employee
+    # must still be resolvable by phone for identity purposes (a unique existing
+    # employee must not disappear from identity resolution just because they were
+    # marked inactive; this is identity existence, not current-role authority).
+    # An active row still wins the tie-break. The result's `status` column
+    # continues to carry the real active/inactive lifecycle for downstream use.
     row = await fetch_one(
         """SELECT w.employee_id,
                   COALESCE(NULLIF(w.employee_name, ''), NULLIF(e.full_name, '')) AS employee_name,
@@ -392,13 +592,53 @@ async def _lookup_employee(phone: str) -> Optional[dict]:
                   COALESCE(w.status, CASE WHEN e.status = 'active' THEN 'Active' ELSE 'Inactive' END) AS status
            FROM fpe_employees e
            LEFT JOIN wbom_employees w ON w.employee_id = e.wbom_employee_id
-           WHERE e.status = 'active'
-             AND (e.primary_phone = ANY($1) OR e.employee_id_phone = ANY($1))
-           ORDER BY e.id DESC
+           WHERE (e.primary_phone = ANY($1) OR e.employee_id_phone = ANY($1))
+           ORDER BY (e.status = 'active') DESC, e.id DESC
            LIMIT 1""",
         variants,
     )
     return dict(row) if row and row.get("employee_id") else None
+
+
+async def _lookup_employee_by_name(name: str) -> Optional[dict]:
+    """Employee-evidence lookup by NAME (active OR inactive) — used only to
+    disambiguate a contact-name "Escort X" that could be either our escort
+    worker or an escort-service client (Owner Phase 2, 2026-08-30). A real
+    wbom_employees / fpe_employees row for this name is decisive worker
+    evidence; a contact-name prefix on its own is not.
+
+    Strips a leading "escort"/"guard" token before matching so "Escort
+    Saimun" matches the employee "Saimun". Case-insensitive, trimmed."""
+    raw = (name or "").strip()
+    if len(raw) < 3:
+        return None
+    core = re.sub(r"^(escort|guard|security)\s+", "", raw, flags=re.IGNORECASE).strip()
+    core = re.sub(r"\s+(wa|w/a|whatsapp)$", "", core, flags=re.IGNORECASE).strip()
+    if len(core) < 3:
+        return None
+    row = await fetch_one(
+        """SELECT employee_id, employee_name, designation, status
+           FROM wbom_employees
+           WHERE LOWER(TRIM(employee_name)) = LOWER($1)
+           ORDER BY (LOWER(COALESCE(status,'')) = 'active') DESC, employee_id DESC
+           LIMIT 1""",
+        core,
+    )
+    if row:
+        return dict(row)
+    row = await fetch_one(
+        """SELECT w.employee_id,
+                  COALESCE(NULLIF(e.full_name,''), NULLIF(w.employee_name,'')) AS employee_name,
+                  COALESCE(NULLIF(w.designation,''), 'Staff') AS designation,
+                  COALESCE(w.status, CASE WHEN e.status='active' THEN 'Active' ELSE 'Inactive' END) AS status
+           FROM fpe_employees e
+           LEFT JOIN wbom_employees w ON w.employee_id = e.wbom_employee_id
+           WHERE LOWER(TRIM(e.full_name)) = LOWER($1)
+           ORDER BY (e.status='active') DESC, e.id DESC
+           LIMIT 1""",
+        core,
+    )
+    return dict(row) if row else None
 
 
 async def is_registered_employee_phone(phone: str) -> bool:
@@ -531,6 +771,7 @@ async def _lookup_contact(phone: str) -> Optional[dict]:
                   COALESCE(c.relation, 'repeat_client') AS relation_name
               FROM wbom_contacts c
               WHERE c.whatsapp_number = ANY($1)
+                AND COALESCE(c.platform, 'whatsapp') = 'whatsapp'
            ORDER BY c.contact_id DESC
            LIMIT 1""",
         variants,

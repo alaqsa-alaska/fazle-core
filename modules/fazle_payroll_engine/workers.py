@@ -334,10 +334,23 @@ async def accounting_worker() -> None:
     Poll for 'parsed' messages, run employee match, create transactions + ledger.
     """
     log.info("[fpe.worker.accounting] started")
+    _relay_reconcile_tick = 0
     while True:
         try:
             await _process_parsed_batch()
             await _tick_zero_loss_gauges()
+            # Safety net for the owner→accountant payment-relay direct
+            # accounting path: catch any relay send that reached
+            # OUTBOUND_SEND_SUCCESS but whose FPE booking was interrupted
+            # (process crash between status='sent' and the accounting hook).
+            # Idempotent. Every ~5th tick (~25s) to keep it cheap.
+            _relay_reconcile_tick = (_relay_reconcile_tick + 1) % 5
+            if _relay_reconcile_tick == 0:
+                try:
+                    from modules.payment_relay_accounting import reconcile_pending_relay_accounting
+                    await reconcile_pending_relay_accounting()
+                except Exception as _rec_exc:  # noqa: BLE001
+                    log.debug("[fpe.worker.accounting] relay reconcile skipped: %s", _rec_exc)
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -378,7 +391,8 @@ async def _process_parsed_batch() -> None:
         """
         SELECT mps.fpe_wa_message_id,
                pr.message_type, pr.parsed_data, pr.confidence,
-               m.raw_content, m.is_from_me, m.source, m.chat_jid, m.sender_phone
+               m.raw_content, m.is_from_me, m.source, m.chat_jid, m.sender_phone,
+               m.timestamp_wa, m.wa_message_id
         FROM fpe_message_processing_state mps
         JOIN fpe_parser_results pr ON pr.fpe_wa_message_id = mps.fpe_wa_message_id
         JOIN fpe_wa_messages m ON m.id = mps.fpe_wa_message_id
@@ -533,6 +547,30 @@ async def _process_parsed_batch() -> None:
                 await mark_processing_status(msg_id, "skipped")
                 _diag_status, _diag_reason = "skipped", "not_from_owner"
                 continue
+
+            # Owner→accountant payment-relay echo dedup (2026-08-30, Blocker A —
+            # Python exact-ID fix): suppress this message ONLY when its exact
+            # WhatsApp stanza id (fpe_wa_messages.wa_message_id) equals a BOOKED
+            # relay transaction's relay_inbound_message_ref (or, once the bridge
+            # is upgraded, relay_send_stanza_id). Body/timestamp/queue-row
+            # correlation is a diagnostic only and can NEVER suppress — a genuine
+            # identical-text payment with a different stanza id is always booked.
+            try:
+                from modules.payment_relay_accounting import is_relay_payment_already_accounted
+                if await is_relay_payment_already_accounted(
+                    row["raw_content"],
+                    message_ts=row.get("timestamp_wa"),
+                    stanza_id=row.get("wa_message_id"),
+                ):
+                    await mark_processing_status(msg_id, "done")
+                    log.info(
+                        "[fpe.worker.acct] msg=%d already accounted via payment-relay "
+                        "direct handler (echo) — not re-booked", msg_id,
+                    )
+                    _diag_status, _diag_reason = "done", "payment_relay_already_accounted"
+                    continue
+            except Exception as _echo_exc:  # noqa: BLE001
+                log.debug("[fpe.worker.acct] relay echo-dedup check skipped: %s", _echo_exc)
 
             # Employee matching / auto-create
             emp = await match_or_create_employee(name_raw, payout_phone, id_phone)

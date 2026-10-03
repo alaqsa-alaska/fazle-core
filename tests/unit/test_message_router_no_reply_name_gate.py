@@ -101,6 +101,20 @@ class TestShouldSilentSkipNameMatch:
         assert "escort" in reason.lower()
 
     @pytest.mark.asyncio
+    async def test_owner_managed_phone_uses_same_gate_even_without_saved_contact(self, monkeypatch):
+        import modules.message_router as router
+
+        monkeypatch.setattr(router, "is_registered_employee_phone", AsyncMock(return_value=False))
+        monkeypatch.setattr(router, "fetch_one", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "modules.owner_contact_registry.is_owner_managed_contact",
+            lambda phone: phone == "8801700000008",
+        )
+        skip, reason = await router._should_silent_skip("8801700000008")
+        assert skip is True
+        assert "owner-managed contact" in reason
+
+    @pytest.mark.asyncio
     async def test_unmatched_name_not_skipped(self, monkeypatch):
         import modules.message_router as router
 
